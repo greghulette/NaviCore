@@ -311,6 +311,16 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.8 (2026-07-01):** **Import Maestro settings → real endpoints + names** (config-tool only). The Maestro's
+  serial protocol can't report a channel's Min/Max, so instead the tool parses the Maestro Control Center *Save
+  settings file* export (XML; `<Channel>` entries are positional, min/max in ¼µs, with names). Per-slot Import
+  button in the Maestro Locations tab (`_importMaestroFile`/`_parseMaestroSettings`; Input/Output channels skipped,
+  indices preserved). Stored browser-side (`_maestroCh`, localStorage — reference-only, never sent to firmware). Wired
+  into all three: (1) **passthrough** — on import, pushes each channel's min/max onto matching knob outputs
+  (`_applyMaestroRangesToKnobs`, all 3 mode arrays) + a per-output name/limit hint in the knob editor; (2)
+  **timeline** — `_tlChannelRange`/`_tlClampUs` set the track's display scale to the servo limits, draw dashed
+  min/max guide-lines, and clamp keyframe add/drag to the band; (3) **names** — timeline track labels become
+  `M1 Ch1 · dome`. Auto-applied ranges need a config Save to persist on the board (they're just Pos min/max values).
 - **v3.7 (2026-07-01):** **Record trigger always saves on stop** (firmware, needs reflash). `pollControl()`
   CTL_REC_TOGGLE stop branch now ALWAYS `saveClip()`s: to the action's configured name (overwrites that slot) or,
   when blank, an auto-generated `rec_N` (`_autoClipName` = lowest unused) — previously a blank name stopped WITHOUT

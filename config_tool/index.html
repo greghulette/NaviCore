@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">011832QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">011924QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4902,11 +4902,27 @@ function _tlYToValue(y, lo, hi, rowTop) {
   return lo + frac * (hi - lo);
 }
 
+// Imported Maestro range/name for a maestro timeline track (µs), or null.
+function _tlChannelRange(track) {
+  if (!track || track.kind !== 'maestro') return null;
+  const [slot, ch] = track.key.split('-');
+  const r = _maestroChInfo(slot, ch);
+  if (!r) return null;
+  return { minUs: r.min / 4, maxUs: r.max / 4, name: r.name || '' };
+}
+// Clamp a µs value to a maestro channel's imported endpoints (or just ≥0).
+function _tlClampUs(track, us) {
+  const cr = _tlChannelRange(track);
+  return cr ? Math.max(cr.minUs, Math.min(cr.maxUs, us)) : Math.max(0, us);
+}
+
 function _tlTrackList() {
   const tracks = [];
   Object.keys(_tlClip.maestro).sort().forEach(key => {
     const [slot, ch] = key.split('-');
-    tracks.push({ kind: 'maestro', key, label: `M${slot} Ch${ch}` });
+    const info = _maestroChInfo(slot, ch);
+    const label = `M${slot} Ch${ch}` + (info && info.name ? ` · ${info.name}` : '');
+    tracks.push({ kind: 'maestro', key, label });
   });
   Object.keys(_tlClip.hcr).sort().forEach(chan => {
     const label = ['V', 'A', 'B'][+chan] || ('Ch' + chan);
@@ -4924,6 +4940,11 @@ function _tlTrackRange(track) {
   if (_tlFrozenRange && _tlFrozenRange.kind === track.kind && _tlFrozenRange.key === track.key)
     return [_tlFrozenRange.lo, _tlFrozenRange.hi];
   if (track.kind === 'hcr') return [0, 99];
+  // Imported Maestro endpoints → fixed scale (with a little headroom so the
+  // min/max guide-lines sit inside the row), so the whole track reads against
+  // the servo's real travel rather than auto-scaling to the current data.
+  const cr = _tlChannelRange(track);
+  if (cr) { const pad = Math.max(20, (cr.maxUs - cr.minUs) * 0.12); return [Math.max(0, cr.minUs - pad), cr.maxUs + pad]; }
   const kfs = _tlClip.maestro[track.key] || [];
   if (!kfs.length) return [1000, 2000];
   const vals = kfs.map(k => k.pos / 4);
@@ -4981,8 +5002,19 @@ function _tlRender() {
     bg.style.cursor = 'copy';
     bg.addEventListener('click', ev => _tlOnTrackClick(ev, track, rowTop, lo, hi));
     svg.appendChild(bg);
-    const rangeLbl = _tlSvgEl('text', { x: width - 6, y: rowTop + 12, 'font-size': 9, fill: 'var(--muted)', 'text-anchor': 'end' });
-    rangeLbl.textContent = track.kind === 'hcr' ? '0–99' : `${Math.round(lo)}–${Math.round(hi)}µs`;
+    // Imported Maestro endpoints → dashed min/max guide-lines (keyframes are
+    // clamped to this band on add/drag).
+    const cr = _tlChannelRange(track);
+    if (cr) {
+      [cr.minUs, cr.maxUs].forEach(us => {
+        const gy = _tlValueToY(us, lo, hi, rowTop);
+        svg.appendChild(_tlSvgEl('line', { x1: TL_LEFT, y1: gy, x2: width, y2: gy, stroke: 'var(--yellow)', 'stroke-width': 0.75, 'stroke-dasharray': '4 3', opacity: 0.6 }));
+      });
+    }
+    const rangeLbl = _tlSvgEl('text', { x: width - 6, y: rowTop + 12, 'font-size': 9, fill: cr ? 'var(--yellow)' : 'var(--muted)', 'text-anchor': 'end' });
+    rangeLbl.textContent = track.kind === 'hcr' ? '0–99'
+                         : cr ? `limit ${Math.round(cr.minUs)}–${Math.round(cr.maxUs)}µs`
+                         : `${Math.round(lo)}–${Math.round(hi)}µs`;
     svg.appendChild(rangeLbl);
 
     const kfs = track.kind === 'maestro' ? (clip.maestro[track.key] || []) : (clip.hcr[track.key] || []);
@@ -5066,7 +5098,7 @@ function _tlOnTrackClick(ev, track, rowTop, lo, hi) {
     if (lineV != null && Math.abs(clickY - _tlValueToY(lineV, lo, hi, rowTop)) <= 8) v = lineV;   // "aimed at the line" → snap on
   }
   const kf = { id: _tlId(), t: Math.max(0, t) };
-  if (track.kind === 'maestro') kf.pos = Math.max(0, Math.round(v * 4));
+  if (track.kind === 'maestro') kf.pos = Math.round(_tlClampUs(track, v) * 4);   // clamp to imported endpoints if any
   else kf.vol = Math.max(0, Math.min(99, Math.round(v)));
   arr.push(kf);
   arr.sort((a, b) => a.t - b.t);
@@ -5116,7 +5148,7 @@ function _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop) {
   const isMaestro = track.kind === 'maestro';
   const arr = isMaestro ? _tlClip.maestro[track.key] : _tlClip.hcr[track.key];
   const valOf = k => isMaestro ? k.pos / 4 : k.vol;          // work in DISPLAY units (µs / 0-99)
-  const setVal = (k, v) => { if (isMaestro) k.pos = Math.max(0, Math.round(v * 4)); else k.vol = Math.max(0, Math.min(99, Math.round(v))); };
+  const setVal = (k, v) => { if (isMaestro) k.pos = Math.round(_tlClampUs(track, v) * 4); else k.vol = Math.max(0, Math.min(99, Math.round(v))); };
   // Freeze this track's value range for the whole gesture, then snapshot every
   // keyframe's ORIGINAL time+value so each move recomputes from a stable
   // baseline (proportional deltas never accumulate drift, and re-sorting the
@@ -6068,6 +6100,90 @@ function applyBindingsUI() {
   }
 }
 
+// ── Imported Maestro channel info (from a Control Center settings file) ─────
+// Per-slot per-channel { min, max (¼µs), name }, imported from the Maestro's
+// exported settings XML so the tool knows each servo's real endpoints + names.
+// Reference-only (the Maestro clamps regardless), used by the passthrough
+// ranges, the timeline (guide-lines/clamp/labels), and the knob editor.
+// Browser-stored (localStorage) — it's per-Maestro hardware config, independent
+// of which board/config you're connected to and NOT sent to the firmware.
+let _maestroCh = {};   // { "<slot 1-8>": { "<ch 0-31>": {min,max,name,mode} } }
+(function () { try { _maestroCh = JSON.parse(localStorage.getItem('rc_maestro_channels') || '{}') || {}; } catch (_) { _maestroCh = {}; } })();
+function _saveMaestroCh() { try { localStorage.setItem('rc_maestro_channels', JSON.stringify(_maestroCh)); } catch (_) {} }
+
+// Parse a Pololu Maestro "Save settings file" export (XML). Channels are
+// positional inside <Channels> (first <Channel> = channel 0). min/max are ¼µs.
+function _parseMaestroSettings(xmlText) {
+  const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('not valid XML');
+  const els = doc.getElementsByTagName('Channel');
+  if (!els.length) throw new Error('no <Channel> entries (not a Maestro settings file?)');
+  const out = {};
+  for (let i = 0; i < els.length; i++) {   // i = channel index (Channels are positional)
+    const el = els[i];
+    const mode = el.getAttribute('mode') || '';
+    if (mode && mode !== 'Servo' && mode !== 'ServoMultiplied') continue;   // skip Input/Output channels
+    const min = parseInt(el.getAttribute('min'), 10);
+    const max = parseInt(el.getAttribute('max'), 10);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) continue;   // disabled / no range
+    out[String(i)] = { min, max, name: (el.getAttribute('name') || '').trim(), mode };
+  }
+  if (!Object.keys(out).length) throw new Error('no servo channels with a min/max range');
+  return out;
+}
+
+// Look up imported range/name for a logical Maestro slot (1-8) + channel (0-31).
+function _maestroChInfo(slot, ch) {
+  const s = _maestroCh[String(slot)];
+  return (s && s[String(ch)]) || null;
+}
+
+// #1 — push the imported endpoints onto every passthrough knob output that
+// targets this Maestro (all three mode arrays), so the stick maps to the servo's
+// real travel. Overwrites the Pos min/max (that's the point of importing).
+function _applyMaestroRangesToKnobs(slot) {
+  if (!config.knobs) return 0;
+  let n = 0;
+  const applyOuts = outs => { if (Array.isArray(outs)) outs.forEach(o => {
+    if (+o.target !== +slot) return;
+    const r = _maestroChInfo(slot, o.maestroCh);
+    if (r) { o.posMin = r.min; o.posMax = r.max; n++; }
+  }); };
+  for (const name in config.knobs) {
+    const k = config.knobs[name];
+    if (!k || +k.function !== KF_MAESTRO_PASSTHROUGH) continue;
+    applyOuts(k.outputs);
+    if (Array.isArray(k.outputs2)) { applyOuts(k.outputs2[0]); applyOuts(k.outputs2[1]); }
+  }
+  return n;
+}
+
+async function _importMaestroFile(slot, file) {
+  let parsed;
+  try { parsed = _parseMaestroSettings(await file.text()); }
+  catch (e) {
+    alert('Could not read that file: ' + e.message +
+          '\n\nExport it from Maestro Control Center via File → Save settings file…');
+    return;
+  }
+  _maestroCh[String(slot)] = parsed;
+  _saveMaestroCh();
+  const applied = _applyMaestroRangesToKnobs(slot);
+  renderMaestroLocations();                                   // refresh the per-slot badge
+  try { if (typeof renderKnobHighlights === 'function') renderKnobHighlights(); } catch (_) {}
+  const nCh = Object.keys(parsed).length;
+  alert(`Imported ${nCh} servo channel(s) for Maestro ${slot}.` +
+        (applied ? `\nSet the range on ${applied} passthrough output(s) — click Save to store the config.` : '') +
+        `\nTimeline tracks for this Maestro now show its limits + channel names.`);
+}
+function _clearMaestroImport(slot) {
+  if (!_maestroCh[String(slot)]) return;
+  if (!confirm(`Forget the imported settings for Maestro ${slot}? (Passthrough ranges you already set are kept.)`)) return;
+  delete _maestroCh[String(slot)];
+  _saveMaestroCh();
+  renderMaestroLocations();
+}
+
 // ── Maestro Locations sidebar UI ──────────────────────────────────────────
 // Renders 8 rows describing where each logical Maestro is wired. Edits flow
 // directly into config.maestros[] on every input change. The displayed
@@ -6084,9 +6200,11 @@ function renderMaestroLocations() {
   wrap.innerHTML = '';
   for (let i = 0; i < NUM_MAESTRO_SLOTS; i++) {
     const slot = config.maestros[i];
+    const imported = _maestroCh[String(i + 1)];
+    const impN = imported ? Object.keys(imported).length : 0;
     const row = document.createElement('div');
     row.style.display = 'grid';
-    row.style.gridTemplateColumns = 'auto auto 1fr auto';
+    row.style.gridTemplateColumns = 'auto auto auto auto 1fr auto';
     row.style.alignItems = 'center';
     row.style.gap = '6px';
     row.style.fontSize = '12px';
@@ -6102,6 +6220,12 @@ function renderMaestroLocations() {
              data-mae-idx="${i}" data-mae-field="device"
              style="font-size:11px;padding:2px 4px;width:60px"
              title="Pololu protocol device # (0-127). Must match the device number set on the physical Maestro in Maestro Control Center.">
+      <span style="font-size:10px;color:${impN?'var(--accent2)':'var(--muted)'};text-align:right">${impN?impN+' ch imported':''}</span>
+      <span style="display:flex;gap:4px;justify-content:flex-end">
+        <button type="button" class="btn btn-ghost" data-mae-import="${i+1}" style="font-size:11px;padding:2px 8px"
+                title="Import this Maestro's settings file (Control Center → File → Save settings file…) to pull in its per-channel min/max endpoints and names.">📁 Import</button>
+        ${impN?`<button type="button" class="btn btn-ghost" data-mae-clearimp="${i+1}" style="font-size:11px;padding:2px 6px" title="Forget the imported settings for this Maestro.">✕</button>`:''}
+      </span>
     `;
     wrap.appendChild(row);
   }
@@ -6120,6 +6244,21 @@ function renderMaestroLocations() {
         renderKnobOutputs();
       }
     });
+  });
+  // Import a Maestro settings file for a slot (one hidden <input> reused per click).
+  wrap.querySelectorAll('[data-mae-import]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const slot = +btn.dataset.maeImport;
+      const fi = document.createElement('input');
+      fi.type = 'file'; fi.accept = '.txt,.xml,text/xml,application/xml';
+      fi.style.display = 'none';
+      fi.addEventListener('change', () => { if (fi.files && fi.files[0]) _importMaestroFile(slot, fi.files[0]); fi.remove(); });
+      document.body.appendChild(fi);
+      fi.click();
+    });
+  });
+  wrap.querySelectorAll('[data-mae-clearimp]').forEach(btn => {
+    btn.addEventListener('click', () => _clearMaestroImport(+btn.dataset.maeClearimp));
   });
 }
 
@@ -8019,6 +8158,11 @@ function renderKnobOutputFields(idx, o, fn) {
     `;
   }
   // KF_MAESTRO_PASSTHROUGH
+  const maeInfo = _maestroChInfo(+o.target || 1, o.maestroCh ?? 0);   // imported channel range/name, if any
+  const maeHint = maeInfo
+    ? `<div class="field-group"><label>&nbsp;</label><span style="font-size:10px;color:var(--accent2);align-self:center"
+             title="From the imported Maestro settings for this channel.">${escH(maeInfo.name || 'servo')} · limit ${Math.round(maeInfo.min / 4)}–${Math.round(maeInfo.max / 4)}µs</span></div>`
+    : '';
   return `
     <div class="field-group">
       <label>Target Maestro</label>
@@ -8036,6 +8180,7 @@ function renderKnobOutputFields(idx, o, fn) {
       <label>Pos max (µs)</label>
       <input type="number" id="kn-out-${idx}-max" min="500" max="2500" step="1" value="${Math.round((o.posMax ?? 8000) / 4)}" style="width:75px">
     </div>
+    ${maeHint}
   `;
 }
 // Servo endpoints are entered in microseconds (standard 1000–2000, 1500 = centre)
