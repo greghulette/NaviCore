@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">011924QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">011955QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2741,6 +2741,9 @@
               "Maestro 1-8" and don't care about the wiring. Every physical Maestro
               must have a unique Pololu device # (0-127) set in Maestro Control Center —
               the value here must match it so only the addressed Maestro responds.
+              <br><b>Import</b> a Maestro's saved settings file (📁 button <i>or drag-and-drop
+              the file onto a row</i>) to pull in that Maestro's real per-channel endpoints
+              and names — they drive the passthrough ranges and the timeline editor.
             </div>
           </div>
         </section>
@@ -6110,6 +6113,12 @@ function applyBindingsUI() {
 let _maestroCh = {};   // { "<slot 1-8>": { "<ch 0-31>": {min,max,name,mode} } }
 (function () { try { _maestroCh = JSON.parse(localStorage.getItem('rc_maestro_channels') || '{}') || {}; } catch (_) { _maestroCh = {}; } })();
 function _saveMaestroCh() { try { localStorage.setItem('rc_maestro_channels', JSON.stringify(_maestroCh)); } catch (_) {} }
+// Stray file dropped OUTSIDE a drop target → swallow it so the browser doesn't
+// navigate away from the tool (which would lose unsaved config). The per-row
+// drop handlers still run first and do the actual import.
+['dragover', 'drop'].forEach(evt => window.addEventListener(evt, e => {
+  if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) e.preventDefault();
+}));
 
 // Parse a Pololu Maestro "Save settings file" export (XML). Channels are
 // positional inside <Channels> (first <Channel> = channel 0). min/max are ¼µs.
@@ -6227,6 +6236,16 @@ function renderMaestroLocations() {
         ${impN?`<button type="button" class="btn btn-ghost" data-mae-clearimp="${i+1}" style="font-size:11px;padding:2px 6px" title="Forget the imported settings for this Maestro.">✕</button>`:''}
       </span>
     `;
+    // Drag-and-drop: drop a settings file onto this row to import it to this slot.
+    const slotNum = i + 1;
+    const setDrop = on => { row.style.outline = on ? '2px dashed var(--accent2)' : ''; row.style.outlineOffset = on ? '2px' : ''; };
+    row.addEventListener('dragover', ev => { if ([...ev.dataTransfer.types].includes('Files')) { ev.preventDefault(); setDrop(true); } });
+    row.addEventListener('dragleave', ev => { if (!row.contains(ev.relatedTarget)) setDrop(false); });
+    row.addEventListener('drop', ev => {
+      ev.preventDefault(); setDrop(false);
+      const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if (f) _importMaestroFile(slotNum, f);
+    });
     wrap.appendChild(row);
   }
   // Wire change handlers — mutate config.maestros[i] directly, then refresh

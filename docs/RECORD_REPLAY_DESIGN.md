@@ -314,8 +314,9 @@ as edited.
 - **v3.8 (2026-07-01):** **Import Maestro settings → real endpoints + names** (config-tool only). The Maestro's
   serial protocol can't report a channel's Min/Max, so instead the tool parses the Maestro Control Center *Save
   settings file* export (XML; `<Channel>` entries are positional, min/max in ¼µs, with names). Per-slot Import
-  button in the Maestro Locations tab (`_importMaestroFile`/`_parseMaestroSettings`; Input/Output channels skipped,
-  indices preserved). Stored browser-side (`_maestroCh`, localStorage — reference-only, never sent to firmware). Wired
+  button **or drag-and-drop** the file onto a Maestro row in the Maestro Locations tab (`_importMaestroFile`/
+  `_parseMaestroSettings`; per-row `drop`/`dragover` handlers + a window-level guard that swallows stray file drops
+  so they can't navigate the page away; Input/Output channels skipped, indices preserved). Stored browser-side (`_maestroCh`, localStorage — reference-only, never sent to firmware). Wired
   into all three: (1) **passthrough** — on import, pushes each channel's min/max onto matching knob outputs
   (`_applyMaestroRangesToKnobs`, all 3 mode arrays) + a per-output name/limit hint in the knob editor; (2)
   **timeline** — `_tlChannelRange`/`_tlClampUs` set the track's display scale to the servo limits, draw dashed
