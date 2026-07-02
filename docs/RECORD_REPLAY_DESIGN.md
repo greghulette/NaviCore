@@ -324,7 +324,9 @@ as edited.
   right-click delete all unchanged. Easing-pair "adjacent" is now CP-aware on clean-line tracks (raw samples
   between two picks don't block; easing replaces that stretch — "smooth this span"). New "All points" toolbar
   toggle reveals raw sample dots (small/dim, draggable) for surgical edits. Handles/cp flags are stripped by the
-  explicit field mapping in `_tlFlattenEvents` (verified no leak).
+  explicit field mapping in `_tlFlattenEvents` (verified no leak). **"Curve detail" toolbar knob** (`_tlCurveSteps`,
+  default 16, range 2–128): how many linear setpoints a handle-bent span is baked into — higher = smoother motion +
+  a few more events, floored at one point per 20 ms (`_tlEnsureSpanDensity` step = `max(20, span/steps)`).
 - **v3.13 (2026-07-02):** Overnight adversarial review sweep (30 findings raised, ~17 confirmed, all fixed;
   firmware + tool ship together — reflash required).
   **Protocol change — indexed idempotent EDITEV:** `?REC,EDITEV,<idx>,<json>`; the board writes AT the index

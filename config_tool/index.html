@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">021141QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">021347QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2408,6 +2408,12 @@
                title="Show every raw captured sample as a small dot (normally a recorded servo track draws as a clean line and only your control points show as dots).">
           <input type="checkbox" id="tl-show-points">
           All points
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
+               title="How many linear setpoints a curved (handle-bent) span is baked into. The board only moves in straight lines between points, so higher = smoother motion and a few more events per bend. Floored at one point per 20 ms.">
+          Curve detail
+          <input type="number" id="tl-curve-steps" min="2" max="128" step="1" value="16" style="width:56px">
+          pts
         </label>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <div id="tl-easing-toolbar" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--muted)"></div>
@@ -4777,6 +4783,12 @@ let _tlSoftRadius = 150;
 // points (the pre-curve behavior). "All points" toolbar toggle reveals raw dots.
 const TL_CP_SPARSE_MAX = 24;
 let _tlShowAllPoints = false;
+// Curve "resolution": how many linear setpoints a handle-bent span is baked
+// into (the firmware only interpolates straight lines between keyframes, so a
+// curve = this many short segments). Higher = smoother motion + a few more
+// events; floored at one point per 20 ms (the Maestro servo frame) so tiny
+// spans don't over-subdivide. User-adjustable via the "Curve detail" field.
+let _tlCurveSteps = 16;
 // While a keyframe drag is in flight we FREEZE the dragged track's value range
 // so the y-axis (and thus the cursor→value mapping) can't rescale mid-drag as
 // values change — otherwise the grabbed dot drifts out from under the cursor.
@@ -5326,7 +5338,7 @@ function _tlRenderHandles(svg, track, kfs, kf, lo, hi, rowTop) {
 function _tlEnsureSpanDensity(arr, tFrom, tTo) {
   const span = tTo - tFrom;
   if (span <= 0) return;
-  const STEP = Math.max(20, Math.round(span / 16));
+  const STEP = Math.max(20, Math.round(span / Math.max(2, _tlCurveSteps)));
   const base = arr.slice();                       // sample against a stable copy
   const inserts = [];
   for (let t = tFrom + STEP; t <= tTo - STEP / 2; t += STEP) {
@@ -5932,6 +5944,9 @@ document.getElementById('tl-soft-radius').addEventListener('input', e => {
 document.getElementById('tl-show-points').addEventListener('change', e => {
   _tlShowAllPoints = !!e.target.checked;
   if (_tlClip) _tlRender();
+});
+document.getElementById('tl-curve-steps').addEventListener('input', e => {
+  _tlCurveSteps = Math.max(2, Math.min(128, Math.round(+e.target.value || 16)));
 });
 document.getElementById('tl-zoom-in').addEventListener('click', () => _tlZoomAt(1.4, null));
 document.getElementById('tl-zoom-out').addEventListener('click', () => _tlZoomAt(1 / 1.4, null));
