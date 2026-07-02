@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">021543QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">021636QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2391,12 +2391,15 @@
         <button class="btn btn-ghost" id="tl-zoom-in"  type="button" title="Zoom in (keeps the view centred). Ctrl+scroll over the timeline to zoom at the pointer." style="padding:3px 10px">+</button>
         <button class="btn btn-ghost" id="tl-zoom-fit" type="button" title="Fit the whole clip in the view" style="padding:3px 10px">⤢ Fit</button>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
+        <button class="btn btn-ghost" id="tl-undo" type="button" title="Undo the last edit (up to 50 steps). Ctrl+Z." style="padding:3px 10px" disabled>↶ Undo</button>
+        <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <button class="btn btn-ghost" id="tl-live-btn" type="button" title="Live preview: drive the real servos to the cursor position as you scrub. Requires a connected board." style="padding:3px 10px">⏻ Live</button>
         <button class="btn btn-ghost" id="tl-play-btn" type="button" title="Play the cursor through the clip on the real servos (arms Live)." style="padding:3px 10px">▶ Preview</button>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <button class="btn btn-ghost" id="tl-add-maestro" type="button" style="padding:3px 10px">+ Maestro track</button>
         <button class="btn btn-ghost" id="tl-add-hcr"     type="button" style="padding:3px 10px">+ HCR track</button>
         <button class="btn btn-ghost" id="tl-trim-start"  type="button" title="Shift everything left so the first event starts at 0 — removes empty space at the start of the clip" style="padding:3px 10px">✂ Trim start</button>
+        <button class="btn btn-ghost" id="tl-smooth" type="button" title="Lightly smooth the FOCUSED channel's curve — click again for more. Focus a track (click its name in Overlay) or select a dot on it first." style="padding:3px 10px">〰 Smooth</button>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
                title="Dragging a servo keyframe also pulls its neighbours within this many ms, with a smooth falloff, so the motion stays smooth. Set 0 to move just the one point.">
@@ -2410,9 +2413,14 @@
           All points
         </label>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
-               title="Overlay all tracks into one lane, each a different color on a shared µs scale, so you can line servo curves up against each other. Dots, handles and add/drag all still work per-track.">
+               title="Overlay all tracks into one lane, each a different color, so you can line servo curves up against each other. Dots, handles and add/drag all still work per-track.">
           <input type="checkbox" id="tl-overlay">
           Overlay
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
+               title="Normalize (default): scale each track to its OWN travel (0–100%) so channels driven by the same joystick line up even with different min/max. Uncheck to show actual µs on one shared scale.">
+          <input type="checkbox" id="tl-normalize" checked>
+          Normalize
         </label>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
                title="How many linear setpoints a curved (handle-bent) span is baked into. The board only moves in straight lines between points, so higher = smoother motion and a few more events per bend. Floored at one point per 20 ms.">
@@ -2439,9 +2447,12 @@
         diamond to move it in time, click to edit, right-click to delete · Shift-click two control points (no
         other control point between) for an easing pair · drag the yellow handle to scrub · red ✕ deletes a whole
         track · Ctrl+scroll zooms at the pointer, ⤢ Fit fits · <b>Overlay</b> stacks every track into one lane in
-        different colors on a shared µs scale to line curves up (dots/handles/add all still work) — <b>click a track
-        name on the left to focus it</b>: it's highlighted, the rest fade, and new points go to it (great when
-        tracks overlap); click it again to unfocus.
+        different colors to line curves up (dots/handles/add all still work); <b>Normalize</b> (on by default) scales
+        each track to its own travel so same-joystick channels sit on top of each other — uncheck it for actual µs on
+        one shared scale · <b>click a track name on the left to focus it</b>: it's highlighted, the rest fade, and
+        new points go to it (great when tracks overlap); click it again to unfocus · <b>↶ Undo</b> (Ctrl+Z) reverts
+        the last edits (up to 50) · <b>〰 Smooth</b> lightly smooths the FOCUSED channel's curve — click again for
+        more (focus a track or select a dot on it first).
       </div>
     </div>
   </div>
@@ -4801,6 +4812,11 @@ let _tlCurveSteps = 16;
 // color on a SHARED µs scale, so servo curves can be lined up against each
 // other. Off = the normal one-lane-per-track view. Toggled from the toolbar.
 let _tlOverlay = false;
+// Overlay "Normalize" (default ON): draw each maestro track scaled to ITS OWN
+// travel range (0–100%) instead of a shared absolute-µs scale, so channels
+// driven by the SAME joystick line up on top of each other (different configured
+// min/max no longer spreads them apart). Off = actual shared µs.
+let _tlNormalize = true;
 const TL_OVERLAY_H = 260;
 const TL_TRACK_COLORS = ['#4da3ff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8', '#ff922b', '#22b8cf', '#f783ac', '#a9e34b', '#ffa94d'];
 // While a keyframe drag is in flight we FREEZE the dragged track's value range
@@ -5121,7 +5137,10 @@ function _tlRender() {
     tracks.forEach(t => { if (t.kind === 'maestro') { const [l, h] = _tlTrackRange(t); uLo = Math.min(uLo, l); uHi = Math.max(uHi, h); } });
     if (!(uHi > uLo)) { uLo = 1000; uHi = 2000; }
   }
-  const trackLoHi = track => overlay ? (track.kind === 'maestro' ? [uLo, uHi] : [0, 99]) : _tlTrackRange(track);
+  // Overlay + Normalize (default) OR the normal per-lane view → each track by its
+  // OWN range (`_tlTrackRange`: imported endpoints if any, else the recorded
+  // travel). Overlay + actual-µs → the shared absolute scale so equal µs align.
+  const trackLoHi = track => (overlay && !_tlNormalize) ? (track.kind === 'maestro' ? [uLo, uHi] : [0, 99]) : _tlTrackRange(track);
 
   // Draw one track's interactive foreground (curve line, control-point dots +
   // hit targets, tangent handles). `color` tints the line/dots — each overlaid
@@ -5170,7 +5189,8 @@ function _tlRender() {
     bg.addEventListener('click', ev => _tlOnOverlayBgClick(ev, tracks, trackLoHi, rowTop));
     svg.appendChild(bg);
     const rangeLbl = _tlSvgEl('text', { x: width - 6, y: rowTop + 12, 'font-size': 9, fill: 'var(--muted)', 'text-anchor': 'end' });
-    rangeLbl.textContent = `shared ${Math.round(uLo)}–${Math.round(uHi)}µs`;
+    rangeLbl.textContent = _tlNormalize ? 'normalized · each track by its own travel'
+                                        : `actual · shared ${Math.round(uLo)}–${Math.round(uHi)}µs`;
     svg.appendChild(rangeLbl);
     // Legend: colored swatch + name + ✕ for each track, stacked in the gutter.
     // Click an entry to FOCUS that track — it's emphasized, the others fade, and
@@ -5358,6 +5378,7 @@ function _tlOnOverlayBgClick(ev, tracks, trackLoHi, rowTop) {
   _tlOnTrackClick(ev, best, rowTop, lo, hi);
 }
 function _tlOnTrackClick(ev, track, rowTop, lo, hi) {
+  _tlPushHistory();
   const rect = document.getElementById('tl-svg').getBoundingClientRect();
   const t = _tlXToTime(ev.clientX - rect.left);
   const clickY = ev.clientY - rect.top;
@@ -5382,6 +5403,7 @@ function _tlOnTrackClick(ev, track, rowTop, lo, hi) {
 
 // Delete a specific keyframe / action (right-click, or select + Delete key).
 function _tlDeleteKeyframe(track, kf) {
+  _tlPushHistory();
   const map = track.kind === 'maestro' ? _tlClip.maestro : _tlClip.hcr;
   map[track.key] = (map[track.key] || []).filter(k => k.id !== kf.id);
   if (!map[track.key].length) delete map[track.key];
@@ -5391,6 +5413,7 @@ function _tlDeleteKeyframe(track, kf) {
   _tlRender();
 }
 function _tlDeleteAction(a) {
+  _tlPushHistory();
   _tlClip.actions = _tlClip.actions.filter(x => x.id !== a.id);
   if (_tlClip.selected && _tlClip.selected.id === a.id) _tlClip.selected = null;
   _tlClip.dirty = true;
@@ -5402,6 +5425,7 @@ function _tlDeleteAction(a) {
 // track can be re-added with "+ Maestro/HCR track".
 function _tlDeleteTrack(track) {
   if (!confirm(`Delete the entire "${track.label}" track and all its keyframes?`)) return;
+  _tlPushHistory();
   const map = track.kind === 'maestro' ? _tlClip.maestro : _tlClip.hcr;
   delete map[track.key];
   if (_tlClip.selected && _tlClip.selected.kind === track.kind && _tlClip.selected.key === track.key) _tlClip.selected = null;
@@ -5486,6 +5510,7 @@ function _tlStartDragHandle(ev, track, kf, side, lo, hi, rowTop) {
   ev.preventDefault(); ev.stopPropagation();
   const arr = _tlClip.maestro[track.key];
   if (!arr) return;
+  _tlPushHistory();   // before the pre-densify mutates arr, so Undo fully reverts the bend
   _tlEnsureHandles(track, arr, kf);
   const sign = side === 'R' ? +1 : -1;
   const i = arr.findIndex(k => k.id === kf.id);
@@ -5597,7 +5622,7 @@ function _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop) {
   const onMove = mv => {
     if (!_tlClip) return finish(false);
     try {
-      if (!moved) _tlClip.selectedPair = null;    // a real drag invalidates a pending easing pair
+      if (!moved) { _tlPushHistory(); _tlClip.selectedPair = null; }   // snapshot once, before the first move
       moved = true;
       const rect = document.getElementById('tl-svg').getBoundingClientRect();
       const dt = _tlXToTime(mv.clientX - rect.left) - self.t0;
@@ -5813,6 +5838,7 @@ function _tlStopPlay() {
 function _tlDeleteSelected() {
   const sel = _tlClip.selected;
   if (!sel) return;
+  _tlPushHistory();
   if (sel.kind === 'action') {
     _tlClip.actions = _tlClip.actions.filter(a => a.id !== sel.id);
   } else {
@@ -5870,6 +5896,7 @@ function _tlTrimStart() {
   if (!allT.length) { _tlSetStatus('Nothing to trim — the clip is empty.'); return; }
   const minT = Math.min(...allT);
   if (minT <= 0) { _tlSetStatus('No empty space at the start to trim.'); return; }
+  _tlPushHistory();
   Object.values(_tlClip.maestro).forEach(track => track.forEach(k => { k.t -= minT; }));
   Object.values(_tlClip.hcr).forEach(track => track.forEach(k => { k.t -= minT; }));
   _tlClip.actions.forEach(a => { a.t -= minT; });
@@ -5887,6 +5914,7 @@ function _tlAddMaestroTrack() {
   const slot = prompt('Maestro slot (1-8):', '1'); if (slot === null) return;
   const ch   = prompt('Maestro channel (0-31):', '0'); if (ch === null) return;
   const key = `${Math.max(1, Math.min(8, +slot || 1))}-${Math.max(0, Math.min(31, +ch || 0))}`;
+  _tlPushHistory();
   _tlClip.maestro[key] = _tlClip.maestro[key] || [];
   _tlRender();
 }
@@ -5894,6 +5922,7 @@ function _tlAddHcrTrack() {
   if (!_tlClip) return;
   const chan = prompt('HCR channel (0=V, 1=A, 2=B):', '0'); if (chan === null) return;
   const key = String(Math.max(0, Math.min(2, +chan || 0)));
+  _tlPushHistory();
   _tlClip.hcr[key] = _tlClip.hcr[key] || [];
   _tlRender();
 }
@@ -5914,6 +5943,8 @@ const TL_EASE_FNS = {
 function _tlUpdateToolbar() {
   const bar = document.getElementById('tl-easing-toolbar');
   const delBtn = document.getElementById('tl-delete-btn');
+  const undoBtn = document.getElementById('tl-undo');
+  if (undoBtn) undoBtn.disabled = !(_tlClip && _tlClip.history && _tlClip.history.length);
   if (!bar || !delBtn) return;
   delBtn.style.display = _tlClip.selected ? '' : 'none';
   if (_tlClip.selectedPair && _tlClip.selectedPair.length === 2) {
@@ -5943,6 +5974,7 @@ function _tlApplyEasing() {
   const arr = a.kind === 'maestro' ? _tlClip.maestro[a.key] : _tlClip.hcr[a.key];
   const kfA = arr.find(k => k.id === a.id), kfB = arr.find(k => k.id === b.id);
   if (!kfA || !kfB) { _tlClip.selectedPair = null; _tlRender(); return; }
+  _tlPushHistory();
   const valA = a.kind === 'maestro' ? kfA.pos : kfA.vol;
   const valB = a.kind === 'maestro' ? kfB.pos : kfB.vol;
   // Drop any keyframes strictly between A and B — a re-apply replaces the
@@ -5961,6 +5993,75 @@ function _tlApplyEasing() {
   const merged = [...filtered, ...inserted].sort((x, y) => x.t - y.t);
   if (a.kind === 'maestro') _tlClip.maestro[a.key] = merged; else _tlClip.hcr[a.key] = merged;
   _tlClip.selectedPair = null;
+  _tlClip.dirty = true;
+  _tlRender();
+}
+
+// ── Undo history ─────────────────────────────────────────────────────────────
+// A bounded stack of JSON snapshots of the editable clip data (curves + actions
+// + duration). Snapshotted as strings — compact, deep-copied, and immune to
+// later mutation. `_tlPushHistory()` is called at the START of every mutating
+// edit (before the change), so one Undo reverts that whole edit (a drag counts
+// once — pushed on its first move). Cap keeps memory bounded even for a dense
+// 500+ event clip (~tens of KB/snapshot × TL_HISTORY_MAX).
+const TL_HISTORY_MAX = 50;
+function _tlSnapshot() {
+  return JSON.stringify({ maestro: _tlClip.maestro, hcr: _tlClip.hcr, actions: _tlClip.actions, durationMs: _tlClip.durationMs });
+}
+function _tlPushHistory() {
+  if (!_tlClip) return;
+  if (!_tlClip.history) _tlClip.history = [];
+  _tlClip.history.push(_tlSnapshot());
+  if (_tlClip.history.length > TL_HISTORY_MAX) _tlClip.history.shift();
+  const b = document.getElementById('tl-undo'); if (b) b.disabled = false;
+}
+function _tlUndo() {
+  if (!_tlClip || !_tlClip.history || !_tlClip.history.length) return;
+  const snap = JSON.parse(_tlClip.history.pop());
+  _tlClip.maestro = snap.maestro; _tlClip.hcr = snap.hcr;
+  _tlClip.actions = snap.actions; _tlClip.durationMs = snap.durationMs;
+  _tlClip.selected = null; _tlClip.selectedPair = null;   // ids may no longer exist
+  _tlClip.dirty = true;
+  const b = document.getElementById('tl-undo'); if (b) b.disabled = _tlClip.history.length === 0;
+  _tlRender();
+}
+
+// ── Smooth (per channel) ─────────────────────────────────────────────────────
+// The channel to act on: the focused track (Overlay legend click / last grabbed
+// dot) else the selected keyframe's track.
+function _tlCurrentTrack() {
+  if (_tlClip && _tlClip.activeTrack) {
+    const i = _tlClip.activeTrack.indexOf(':');
+    if (i > 0) return { kind: _tlClip.activeTrack.slice(0, i), key: _tlClip.activeTrack.slice(i + 1) };
+  }
+  if (_tlClip && _tlClip.selected && _tlClip.selected.kind !== 'action')
+    return { kind: _tlClip.selected.kind, key: _tlClip.selected.key };
+  return null;
+}
+// One LIGHT smoothing pass over a channel's values (times unchanged, ends fixed)
+// with a gentle 3-tap kernel [0.125, 0.75, 0.125] — a small step per click
+// (roughly halves the jitter each time) so it can be tapped repeatedly to dial
+// in exactly how smooth. Clamped to the channel range.
+function _tlSmoothTrack(track) {
+  const arr = (track.kind === 'maestro' ? _tlClip.maestro : _tlClip.hcr)[track.key];
+  if (!arr || arr.length < 3) return false;
+  const isMae = track.kind === 'maestro';
+  const orig = arr.map(k => isMae ? k.pos : k.vol);   // ¼µs / 0-99
+  for (let i = 1; i < arr.length - 1; i++) {
+    const v = 0.125 * orig[i - 1] + 0.75 * orig[i] + 0.125 * orig[i + 1];
+    if (isMae) arr[i].pos = Math.round(_tlClampUs(track, v / 4) * 4);
+    else arr[i].vol = Math.max(0, Math.min(99, Math.round(v)));
+  }
+  return true;
+}
+function _tlSmoothCurrent() {
+  if (!_tlClip) return;
+  const track = _tlCurrentTrack();
+  if (!track) { alert('Smooth works on one channel — focus a track (click its name in Overlay) or select a dot on it first, then Smooth.'); return; }
+  const arr = (track.kind === 'maestro' ? _tlClip.maestro : _tlClip.hcr)[track.key];
+  if (!arr || arr.length < 3) { alert('That channel has too few points to smooth.'); return; }
+  _tlPushHistory();
+  _tlSmoothTrack(track);
   _tlClip.dirty = true;
   _tlRender();
 }
@@ -6038,6 +6139,7 @@ function _tlApplyActionEditor() {
   const extras = { ...(delay ? { delay } : {}), ...(note ? { note } : {}) };
   const action = readActionFromFid('tl-action-fields', type, extras);
   if (!action) { alert('Fill in the required fields (e.g. a command) first.'); return; }
+  _tlPushHistory();
   const t = Math.max(0, +(document.getElementById('tl-action-time').value || 0));
   if (_tlEditingActionId) {
     const entry = _tlClip.actions.find(a => a.id === _tlEditingActionId);
@@ -6077,12 +6179,18 @@ document.getElementById('tl-overlay').addEventListener('change', e => {
   _tlOverlay = !!e.target.checked;
   if (_tlClip) _tlRender();
 });
+document.getElementById('tl-normalize').addEventListener('change', e => {
+  _tlNormalize = !!e.target.checked;
+  if (_tlClip) _tlRender();
+});
 document.getElementById('tl-curve-steps').addEventListener('input', e => {
   _tlCurveSteps = Math.max(2, Math.min(128, Math.round(+e.target.value || 16)));
 });
 document.getElementById('tl-zoom-in').addEventListener('click', () => _tlZoomAt(1.4, null));
 document.getElementById('tl-zoom-out').addEventListener('click', () => _tlZoomAt(1 / 1.4, null));
 document.getElementById('tl-zoom-fit').addEventListener('click', _tlFit);
+document.getElementById('tl-undo').addEventListener('click', _tlUndo);
+document.getElementById('tl-smooth').addEventListener('click', _tlSmoothCurrent);
 document.getElementById('tl-trim-start').addEventListener('click', _tlTrimStart);
 document.getElementById('tl-live-btn').addEventListener('click', _tlToggleLive);
 document.getElementById('tl-play-btn').addEventListener('click', _tlPlayPreview);
@@ -6100,11 +6208,14 @@ document.getElementById('tl-action-modal').addEventListener('click', e => {
   if (e.target === document.getElementById('tl-action-modal')) _tlCloseActionEditor();
 });
 window.addEventListener('keydown', e => {
-  if ((e.key === 'Delete' || e.key === 'Backspace') && _tlClip && _tlClip.selected &&
-      document.getElementById('tl-modal').classList.contains('open') &&
-      !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
+  if (!_tlClip || !document.getElementById('tl-modal').classList.contains('open')) return;
+  const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+  if ((e.key === 'Delete' || e.key === 'Backspace') && _tlClip.selected && !typing) {
     e.preventDefault();
     _tlDeleteSelected();
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey && !typing) {
+    e.preventDefault();
+    _tlUndo();
   }
 });
 

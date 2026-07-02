@@ -311,6 +311,25 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.18 (2026-07-02, config-tool only):** Two editor additions.
+  **Undo** (`↶ Undo` button + Ctrl/Cmd+Z): a bounded stack (`TL_HISTORY_MAX = 50`) of JSON snapshots of the editable
+  clip data (maestro/hcr/actions/durationMs), stored on `_tlClip.history`. `_tlPushHistory()` is called at the START
+  of every mutating edit — add/delete point, delete action/selection/track, both drags (keyframe drag snapshots on
+  its first move; handle drag at pointerdown before the pre-densify), easing apply, trim, add track, action
+  editor apply, smooth — so one Undo reverts that whole edit (a drag counts once). Button auto-disables when empty.
+  **Smooth** (`〰 Smooth`, PER-CHANNEL): light 3-tap `[0.125, 0.75, 0.125]` pass over the FOCUSED channel's values
+  (times fixed, ends fixed, clamped to range) — roughly halves the jitter per click, tap repeatedly to dial it in.
+  Target channel = `_tlCurrentTrack()` (the overlay-focused / last-grabbed track, else the selected keyframe's
+  track); alerts if none. Verified: multi-level undo in order + cap at 50 + no-op past empty + Ctrl+Z; smooth is
+  gradual/monotone (`10348→5299→2730→…`), per-channel (others untouched), undoable, endpoints kept.
+- **v3.17 (2026-07-02, config-tool only):** Overlay **Normalize** toggle (default ON). Scales each maestro track to
+  ITS OWN travel range (`_tlTrackRange`, imported endpoints else recorded travel) instead of the shared absolute-µs
+  scale, so channels driven by the SAME joystick — which have different configured min/max and therefore different
+  absolute µs — line up on top of each other. Uncheck for actual shared µs. One-line change in `trackLoHi`
+  (`overlay && !_tlNormalize ? shared : _tlTrackRange(track)`), a toolbar checkbox, and the range-label text.
+  Editing still works in either mode (drag maps the cursor to the track's own range). Verified: two same-stick
+  channels with different ranges overlap (0px gap) normalized, spread (36px) on actual; editing clamps to the
+  channel's own range; other tracks untouched.
 - **v3.16 (2026-07-02, config-tool only):** Fixed choppy zigzag when MOVING a control point (not just a handle).
   Root cause: the proportional soft-drag moved neighbours in TIME too (`o.k.t = o.t0 + w*dt`); on a dense recorded
   track that slid the raised, time-shifted samples past the un-raised ones and interleaved them into a zigzag. Fix:
