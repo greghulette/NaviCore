@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">020021QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">020106QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7690,11 +7690,15 @@ function buildMaestroHelper(containerId, cmdInputId) {
 // changes. `parts` (the parsed existing command) pre-fills on first render;
 // null on later re-renders (values are read from the current DOM to preserve
 // them across a Maestro switch). readActionFromFid reassembles the cmd string.
-function _renderMaestroActionArgs(fid, parts) {
-  const argWrap = document.getElementById(fid + '-maeargs');
+function _renderMaestroActionArgs(fid, parts, ctx) {
+  // On the INITIAL render the row is still detached from the document (built in
+  // buildActionRow before it's inserted), so document.getElementById can't find
+  // the sub-elements — appendActionFields passes them directly via `ctx`. On
+  // later onchange re-renders the row is live, so getElementById is fine.
+  const argWrap = (ctx && ctx.argWrap) || document.getElementById(fid + '-maeargs');
   if (!argWrap) return;
-  const slot = +(document.getElementById(fid + '-target')?.value || 1);
-  const cmd  = document.getElementById(fid + '-maecmd')?.value || 'setTarget';
+  const slot = +(((ctx && ctx.slotSel) || document.getElementById(fid + '-target'))?.value || 1);
+  const cmd  = ((ctx && ctx.cmdSel) || document.getElementById(fid + '-maecmd'))?.value || 'setTarget';
   const curChSel = document.getElementById(fid + '-maech');
   const ch = parts ? (+parts[1] || 0) : (curChSel ? +curChSel.value : 0);
   const rawArg = parts ? (+parts[2] || 0) : null;    // ¼µs for setTarget; raw for speed/accel
@@ -7895,7 +7899,8 @@ function appendActionFields(container, action) {
     argWrap.id = fid + '-maeargs';
     argWrap.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end';
     container.appendChild(argWrap);
-    _renderMaestroActionArgs(fid, parts);   // initial fill from the existing command
+    // Pass the elements directly — the row may still be detached from the DOM here.
+    _renderMaestroActionArgs(fid, parts, { argWrap, slotSel, cmdSel });   // initial fill from the existing command
   } else if (type === 'serial') {
     const portSel = document.createElement('select');
     portSel.id = fid + '-port';

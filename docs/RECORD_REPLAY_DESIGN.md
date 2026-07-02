@@ -321,6 +321,9 @@ as edited.
   reassembles the exact `setTarget,ch,pos`/`goHome`/… string the firmware parses (µs→¼µs), so no firmware change and
   saved configs are unchanged. `actionSummary` now reads e.g. `Maestro 2: Pie Panel 1 → 1500µs`. Shared by the
   button/switch editor AND the timeline action popover. (`buildMaestroHelper`/`maestroCommands` now unused.)
+  **Fix (same day):** the arg fields were blank on re-open — `buildActionRow` builds the row DETACHED, so
+  `_renderMaestroActionArgs`'s `document.getElementById` found nothing; now appendActionFields passes the
+  argWrap/slot/cmd elements directly (`ctx`), with getElementById kept as the fallback for the in-DOM onchange path.
 - **v3.11 (2026-07-01):** Knob passthrough editor (config-tool only): the **Maestro channel field is now a named
   dropdown** (`_maestroChOptions` → `Ch1 · Dome Panel 1` etc. from the imported settings; plain `Ch0…Ch31` if
   none), and **changing the channel (or target Maestro) auto-updates Pos min/max to that channel's imported
