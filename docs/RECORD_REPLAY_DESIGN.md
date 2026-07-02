@@ -311,6 +311,16 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.12 (2026-07-02):** Two config-tool polish items. (a) **Timeline label overflow** — long servo names ran into
+  the timeline; widened the label gutter (`TL_LEFT` 110→150) and truncate the label with an ellipsis via
+  `getComputedTextLength` measurement + a full-name `<title>` tooltip. (b) **Maestro button action made friendly** —
+  replaced the free-text `setTarget,0,6000` field + builder with a structured editor: a plain-language **Command**
+  dropdown (Move a servo / Send all servos home / Stop the script / Run a script / Set a speed|acceleration limit)
+  → for setTarget a **named Channel dropdown** (`_maestroChOptions`) + **Position in µs** (min/max + name hint from
+  the imported settings); `_renderMaestroActionArgs` rebuilds the args on command/Maestro change. `readActionFromFid`
+  reassembles the exact `setTarget,ch,pos`/`goHome`/… string the firmware parses (µs→¼µs), so no firmware change and
+  saved configs are unchanged. `actionSummary` now reads e.g. `Maestro 2: Pie Panel 1 → 1500µs`. Shared by the
+  button/switch editor AND the timeline action popover. (`buildMaestroHelper`/`maestroCommands` now unused.)
 - **v3.11 (2026-07-01):** Knob passthrough editor (config-tool only): the **Maestro channel field is now a named
   dropdown** (`_maestroChOptions` → `Ch1 · Dome Panel 1` etc. from the imported settings; plain `Ch0…Ch31` if
   none), and **changing the channel (or target Maestro) auto-updates Pos min/max to that channel's imported

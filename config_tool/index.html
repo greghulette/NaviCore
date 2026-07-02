@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">020001QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">020021QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4890,7 +4890,7 @@ async function _tlSave() {
 // and less error-prone than incremental patching, and clip sizes here are
 // hand-edited routines (tens to a few hundred keyframes), not the raw dense
 // captures — cheap enough to redraw wholesale on every interaction.
-const TL_LEFT = 110, TL_RULER_H = 26, TL_ROW_H = 40, TL_ACTION_ROW_H = 50, TL_RIGHT_PAD = 30;
+const TL_LEFT = 150, TL_RULER_H = 26, TL_ROW_H = 40, TL_ACTION_ROW_H = 50, TL_RIGHT_PAD = 30;
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 function _tlSvgEl(tag, attrs) {
@@ -4996,7 +4996,16 @@ function _tlRender() {
     const [lo, hi] = _tlTrackRange(track);
     const lbl = _tlSvgEl('text', { x: 8, y: rowTop + TL_ROW_H / 2 + 4, 'font-size': 11, fill: 'var(--text)' });
     lbl.textContent = track.label;
+    const lblTitle = _tlSvgEl('title'); lblTitle.textContent = track.label;   // full name on hover
+    lbl.appendChild(lblTitle);
     svg.appendChild(lbl);
+    // Truncate the label so a long servo name can't run into the timeline (the
+    // gutter is TL_LEFT wide; leave room for the ✕ delete at TL_LEFT-14).
+    const lblMaxW = TL_LEFT - 8 - 20;
+    if (lbl.getComputedTextLength() > lblMaxW) {
+      let s = track.label;
+      while (s.length > 1 && lbl.getComputedTextLength() > lblMaxW) { s = s.slice(0, -1); lbl.firstChild.textContent = s + '…'; }
+    }
     // Per-track delete (✕) in the label gutter — removes the whole track.
     const trackDel = _tlSvgEl('text', { x: TL_LEFT - 14, y: rowTop + TL_ROW_H / 2 + 4, 'font-size': 13, fill: 'var(--red)', 'text-anchor': 'middle' });
     trackDel.textContent = '✕';
@@ -7301,6 +7310,20 @@ function tierSummary(m, tier) {
   return `<div style="font-size:11px;color:var(--muted);margin-top:2px">${tier}×: ${desc}</div>`;
 }
 
+// Friendly one-liner for a raw Maestro command string (used in the assignment
+// list). Uses imported channel names where available.
+function _maestroCmdSummary(slot, cmd) {
+  const p = String(cmd || '').split(',').map(s => s.trim());
+  const chName = ch => { const i = _maestroChInfo(slot, ch); return i && i.name ? escH(i.name) : ('Ch' + ch); };
+  if (p[0] === 'setTarget')     return `${chName(+p[1] || 0)} → ${Math.round((+p[2] || 0) / 4)}µs`;
+  if (p[0] === 'goHome')        return 'home';
+  if (p[0] === 'stopScript')    return 'stop script';
+  if (p[0] === 'restartScript') return `run script ${p[1] || 0}`;
+  if (p[0] === 'setSpeed')      return `${chName(+p[1] || 0)} speed ${p[2] || 0}`;
+  if (p[0] === 'setAccel')      return `${chName(+p[1] || 0)} accel ${p[2] || 0}`;
+  return escH(cmd || '');
+}
+
 function actionSummary(a) {
   if (!a || !a.type) return '—';
   let core;
@@ -7309,7 +7332,7 @@ function actionSummary(a) {
   else if (a.type === 'maestro' || a.type === 'maestro_remote' || a.type === 'maestro_local') {
     // "maestro_local" (legacy) implicitly targets Maestro 1
     const id = (a.type === 'maestro_local') ? 1 : (a.target || '?');
-    core = `Maestro ${id}: ${escH(a.cmd)}`;
+    core = `Maestro ${id}: ${_maestroCmdSummary(id, a.cmd)}`;
   }
   else if (a.type === 'serial')        core = `${a.port}: ${escH(a.cmd)}`;
   else if (a.type === 'hcr') {
@@ -7662,6 +7685,64 @@ function buildMaestroHelper(containerId, cmdInputId) {
   return wrap;
 }
 
+// Build (or rebuild) the argument fields for a Maestro action, based on the
+// selected command. Called on initial render and when the Maestro/command
+// changes. `parts` (the parsed existing command) pre-fills on first render;
+// null on later re-renders (values are read from the current DOM to preserve
+// them across a Maestro switch). readActionFromFid reassembles the cmd string.
+function _renderMaestroActionArgs(fid, parts) {
+  const argWrap = document.getElementById(fid + '-maeargs');
+  if (!argWrap) return;
+  const slot = +(document.getElementById(fid + '-target')?.value || 1);
+  const cmd  = document.getElementById(fid + '-maecmd')?.value || 'setTarget';
+  const curChSel = document.getElementById(fid + '-maech');
+  const ch = parts ? (+parts[1] || 0) : (curChSel ? +curChSel.value : 0);
+  const rawArg = parts ? (+parts[2] || 0) : null;    // ¼µs for setTarget; raw for speed/accel
+  argWrap.innerHTML = '';
+
+  const addChannel = () => {
+    const chSel = document.createElement('select');
+    chSel.id = fid + '-maech';
+    chSel.style.minWidth = '150px';
+    chSel.innerHTML = _maestroChOptions(slot, ch);
+    chSel.onchange = () => _renderMaestroActionArgs(fid, null);   // refresh the position range/hint
+    argWrap.appendChild(makeFieldGroup('Channel', chSel));
+  };
+  const numField = (label, id, min, max, val) => {
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.id = id; inp.min = min; inp.max = max; inp.step = 1; inp.style.width = '80px';
+    inp.value = val;
+    argWrap.appendChild(makeFieldGroup(label, inp));
+    return inp;
+  };
+
+  if (cmd === 'setTarget') {
+    addChannel();
+    const info = _maestroChInfo(slot, ch);
+    const lo = info ? Math.round(info.min / 4) : 500, hi = info ? Math.round(info.max / 4) : 2500;
+    const posUs = rawArg != null ? Math.round(rawArg / 4) : (info ? Math.round((lo + hi) / 2) : 1500);
+    numField('Position (µs)', fid + '-maeval', lo, hi, Math.max(lo, Math.min(hi, posUs)));
+    if (info) {
+      const hint = document.createElement('span');
+      hint.style.cssText = 'font-size:10px;color:var(--accent2);align-self:center';
+      hint.textContent = `${info.name || 'servo'} · ${lo}–${hi}µs`;
+      argWrap.appendChild(hint);
+    }
+  } else if (cmd === 'setSpeed' || cmd === 'setAccel') {
+    addChannel();
+    const isAccel = cmd === 'setAccel';
+    numField(isAccel ? 'Accel (0 = off)' : 'Speed (0 = off)', fid + '-maeval', 0, isAccel ? 255 : 16383, rawArg != null ? rawArg : 0);
+  } else if (cmd === 'restartScript') {
+    numField('Subroutine #', fid + '-maeval', 0, 127, parts ? (+parts[1] || 0) : (document.getElementById(fid + '-maeval') ? +document.getElementById(fid + '-maeval').value : 0));
+  } else {
+    const note = document.createElement('span');
+    note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
+    note.textContent = cmd === 'goHome' ? 'Sends every servo on this Maestro to its home position — no parameters.'
+                                        : 'Stops the Maestro’s running script — no parameters.';
+    argWrap.appendChild(note);
+  }
+}
+
 // Build (or rebuild) BOTH the "chan" and "track" field groups for an HCR action.
 // The widgets switch per-fn: emotion / audio-channel dropdowns, on/off selects
 // (Override fn10, Auto-muse fn13), min/max gap numbers (Muse-gap fn7), or a plain
@@ -7787,27 +7868,34 @@ function appendActionFields(container, action) {
     cmdInput.value = action.cmd || '';
     container.appendChild(makeFieldGroup('Broadcast cmd', cmdInput));
   } else if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
-    // Unified "Maestro" action — target = Maestro ID 1-8 from Locations panel.
-    // Legacy maestro_local actions migrate to target=1; legacy maestro_remote
-    // already used target=1-8 (well, 1-4) so they map cleanly.
-    let initial = +action.target || (type === 'maestro_local' ? 1 : 1);
+    // Friendly structured Maestro action: pick a Maestro, a plain-language command,
+    // then a named channel + position (µs). We assemble the raw "setTarget,ch,pos"
+    // string the firmware expects on read — see readActionFromFid.
+    let initial = +action.target || 1;
     if (initial < 1 || initial > NUM_MAESTRO_SLOTS) initial = 1;
     const slotSel = document.createElement('select');
     slotSel.id = fid + '-target';
-    slotSel.style.minWidth = '200px';
+    slotSel.style.minWidth = '180px';
     slotSel.innerHTML = maestroIdOptions(initial);
-    slotSel.title = 'Logical Maestro ID — wiring defined in the Maestro Locations panel';
+    slotSel.title = 'Which Maestro — wiring set in the Maestro Locations tab';
+    slotSel.onchange = () => _renderMaestroActionArgs(fid, null);   // channel names/limits depend on the Maestro
 
-    const cmdInput = document.createElement('input');
-    cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-    cmdInput.placeholder = 'setTarget,0,6000';
-    cmdInput.style.width = '220px';
-    cmdInput.maxLength = 95;
-    cmdInput.value = action.cmd || '';
+    const cmdSel = document.createElement('select');
+    cmdSel.id = fid + '-maecmd';
+    cmdSel.style.minWidth = '160px';
+    const parts = (action.cmd || 'setTarget,0,6000').split(',').map(s => s.trim());
+    [['setTarget', 'Move a servo'], ['goHome', 'Send all servos home'], ['stopScript', 'Stop the script'],
+     ['restartScript', 'Run a script'], ['setSpeed', 'Set a speed limit'], ['setAccel', 'Set an acceleration limit']
+    ].forEach(([v, lbl]) => { const o = document.createElement('option'); o.value = v; o.textContent = lbl; if (v === (parts[0] || 'setTarget')) o.selected = true; cmdSel.appendChild(o); });
+    cmdSel.onchange = () => _renderMaestroActionArgs(fid, null);
 
-    container.appendChild(makeFieldGroup('Target Maestro', slotSel));
-    container.appendChild(makeFieldGroup('Maestro cmd', cmdInput));
-    container.appendChild(buildMaestroHelper(fid, fid + '-cmd'));
+    container.appendChild(makeFieldGroup('Maestro', slotSel));
+    container.appendChild(makeFieldGroup('Command', cmdSel));
+    const argWrap = document.createElement('div');
+    argWrap.id = fid + '-maeargs';
+    argWrap.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end';
+    container.appendChild(argWrap);
+    _renderMaestroActionArgs(fid, parts);   // initial fill from the existing command
   } else if (type === 'serial') {
     const portSel = document.createElement('select');
     portSel.id = fid + '-port';
@@ -7944,13 +8032,21 @@ function readActionFromFid(fid, type, extras) {
     return { type, cmd, ...extras };
   }
   if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
-    // Unified Maestro action — target = Maestro ID 1-8. Always emit as
-    // "maestro" so saved configs converge on the new schema. Legacy types
-    // are only accepted as inputs from older configs.
+    // Reassemble the raw "setTarget,ch,pos" / "goHome" / … string the firmware
+    // parses, from the friendly structured fields. Position is entered in µs →
+    // ¼µs on the wire (×4), matching everything else.
     let target = +(document.getElementById(fid + '-target')?.value || 1);
     if (target < 1 || target > NUM_MAESTRO_SLOTS) target = 1;
-    const cmd = document.getElementById(fid + '-cmd')?.value || '';
-    if (!cmd.trim()) return null;
+    const mcmd = document.getElementById(fid + '-maecmd')?.value || 'setTarget';
+    const ch  = +(document.getElementById(fid + '-maech')?.value  || 0);
+    const val = +(document.getElementById(fid + '-maeval')?.value || 0);
+    let cmd;
+    if      (mcmd === 'setTarget')     cmd = `setTarget,${ch},${Math.round(val * 4)}`;
+    else if (mcmd === 'setSpeed')      cmd = `setSpeed,${ch},${val}`;
+    else if (mcmd === 'setAccel')      cmd = `setAccel,${ch},${val}`;
+    else if (mcmd === 'restartScript') cmd = `restartScript,${val}`;
+    else if (mcmd === 'stopScript')    cmd = 'stopScript';
+    else                               cmd = 'goHome';
     return { type: 'maestro', target: String(target), cmd, ...extras };
   }
   if (type === 'serial') {
