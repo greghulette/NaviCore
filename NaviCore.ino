@@ -1614,6 +1614,27 @@ String serialInputBuf;
 bool execCliLine(const String& line) {
   if (line.startsWith("?OTALOCAL,")) { naviota::processOtaLocalCommand(line.substring(10)); return true; }
   if (line.startsWith("?OTA,"))      { naviota::processOtaRelayCommand(line.substring(5));  return true; }
+  // ── Direct Maestro control — drives the config-tool timeline editor's LIVE
+  //    scrub/preview (servos follow the yellow cursor). Fire-and-forget, silent
+  //    (a scrub streams many of these). Runs in loop()/Core-1 like the rest of
+  //    the CLI, so the Maestro serial write is safe.
+  //      ?MAE,<slot>,<ch>,<pos>   set target (¼µs) on logical Maestro slot 1-8, ch 0-31
+  //      ?MAE,FREE,<slot>,<ch>    speed=0/accel=0 so the preview tracks the cursor snappily
+  if (line.length() >= 5 && line.substring(0, 5).equalsIgnoreCase("?MAE,")) {
+    String a = line.substring(5); a.trim();
+    int c1 = a.indexOf(','), c2 = (c1 >= 0) ? a.indexOf(',', c1 + 1) : -1;
+    if (a.substring(0, 4).equalsIgnoreCase("FREE")) {
+      if (c1 > 0 && c2 > c1) {
+        maestroSetSpeed((uint8_t)a.substring(c1 + 1, c2).toInt(), (uint8_t)a.substring(c2 + 1).toInt(), 0);
+        maestroSetAccel((uint8_t)a.substring(c1 + 1, c2).toInt(), (uint8_t)a.substring(c2 + 1).toInt(), 0);
+      }
+    } else if (c1 > 0 && c2 > c1) {
+      maestroSetTarget((uint8_t)a.substring(0, c1).toInt(),
+                       (uint8_t)a.substring(c1 + 1, c2).toInt(),
+                       (uint16_t)a.substring(c2 + 1).toInt());
+    }
+    return true;
+  }
   // ── Record/replay bench control (phase 1) + timeline editor transport (phase 2)
   //   ?REC,START/STOP/PLAY/SAVE/LOAD/LS/RM/RENAME/CLEAR/INFO   (case-insensitive)
   //   ?REC,EDITLOAD,<name>            — dump a clip as [CLIPDL:*] JSON lines

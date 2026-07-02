@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">011955QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">012335QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2390,6 +2390,9 @@
         <button class="btn btn-ghost" id="tl-zoom-out" type="button" title="Zoom out (keeps the view centred)" style="padding:3px 10px">−</button>
         <button class="btn btn-ghost" id="tl-zoom-in"  type="button" title="Zoom in (keeps the view centred). Ctrl+scroll over the timeline to zoom at the pointer." style="padding:3px 10px">+</button>
         <button class="btn btn-ghost" id="tl-zoom-fit" type="button" title="Fit the whole clip in the view" style="padding:3px 10px">⤢ Fit</button>
+        <span style="width:1px;align-self:stretch;background:var(--border)"></span>
+        <button class="btn btn-ghost" id="tl-live-btn" type="button" title="Live preview: drive the real servos to the cursor position as you scrub. Requires a connected board." style="padding:3px 10px">⏻ Live</button>
+        <button class="btn btn-ghost" id="tl-play-btn" type="button" title="Play the cursor through the clip on the real servos (arms Live)." style="padding:3px 10px">▶ Preview</button>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <button class="btn btn-ghost" id="tl-add-maestro" type="button" style="padding:3px 10px">+ Maestro track</button>
         <button class="btn btn-ghost" id="tl-add-hcr"     type="button" style="padding:3px 10px">+ HCR track</button>
@@ -4739,6 +4742,7 @@ function openTimelineEditor(name) {
   document.getElementById('tl-title').textContent = '📈 Timeline — ' + name;
   _tlSetStatus('Loading…');
   _tlClip = null;
+  _tlStopPlay(); _tlLive = false; _tlLiveLast = {}; _tlUpdateLiveBtns();   // fresh session starts disarmed
   const svg = document.getElementById('tl-svg');
   if (svg) svg.innerHTML = '';
   _tlDownload = { name, src: null, header: null, events: [], evBuf: null };
@@ -4759,6 +4763,7 @@ function _tlSetStatus(msg) {
 function closeTimelineEditor() {
   if (_tlClip && _tlClip.dirty && !confirm('Discard unsaved timeline edits?')) return;
   if (_tlClip && _tlClip.uploading) sendRcCli('?REC,EDITCANCEL');   // best-effort abort of a stuck upload
+  _tlStopPlay(); _tlLive = false; _tlUpdateLiveBtns();              // stop streaming to the servos
   _tlClip = null;
   _tlDownload = null;
   document.getElementById('tl-modal').classList.remove('open');
@@ -5072,6 +5077,19 @@ function _tlRender() {
     svg.appendChild(d);
   });
 
+  // Ruler strip — click anywhere on it to jump the cursor there (and pose the
+  // servos, if Live is armed); the yellow handle drags it.
+  const ruler = _tlSvgEl('rect', { x: TL_LEFT, y: 0, width: width - TL_LEFT, height: TL_RULER_H, fill: 'transparent' });
+  ruler.style.cursor = 'text';
+  ruler.addEventListener('pointerdown', ev => {
+    const rect = document.getElementById('tl-svg').getBoundingClientRect();
+    _tlStopPlay();
+    _tlClip.cursorMs = Math.max(0, Math.min(_tlClip.durationMs, _tlXToTime(ev.clientX - rect.left)));
+    _tlRender();
+    _tlSendLiveAt(_tlClip.cursorMs, true);
+    _tlStartDragCursor(ev);        // allow drag-scrub to continue from the click
+  });
+  svg.appendChild(ruler);
   const cx = _tlTimeToX(clip.cursorMs);
   svg.appendChild(_tlSvgEl('line', { x1: cx, y1: 0, x2: cx, y2: height, stroke: 'var(--yellow)', 'stroke-width': 1.5 }));
   const handle = _tlSvgEl('rect', { x: cx - 5, y: 0, width: 10, height: TL_RULER_H, fill: 'var(--yellow)', opacity: 0.4 });
@@ -5271,6 +5289,7 @@ function _tlStartDragAction(ev, a) {
 
 function _tlStartDragCursor(ev) {
   ev.preventDefault();
+  _tlStopPlay();                 // a manual scrub cancels an auto-play
   let ended = false;
   const finish = () => {
     if (ended) return; ended = true;
@@ -5283,11 +5302,104 @@ function _tlStartDragCursor(ev) {
       const rect = document.getElementById('tl-svg').getBoundingClientRect();
       _tlClip.cursorMs = Math.max(0, Math.min(_tlClip.durationMs, _tlXToTime(mv.clientX - rect.left)));
       _tlRender();
+      _tlLiveTick();             // drive the servos to the scrub position (if Live armed)
     } catch (e) { console.error('timeline cursor drag error', e); finish(); }
   };
   const onUp = () => finish();
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+}
+
+// ── Live preview — drive the real servos to the cursor position ──────────────
+// "Live" armed → scrubbing/playing streams the interpolated Maestro position at
+// the cursor to the board (?MAE,slot,ch,pos, ¼µs — the same value replay would
+// emit), throttled + only-on-change. Off by default so scrubbing can't move
+// hardware unexpectedly. Best on Direct USB; over the WCB bridge each channel is
+// a relayed packet, so it's a bit coarser.
+let _tlLive = false;            // armed
+let _tlLivePlaying = false;     // auto-play running
+let _tlLiveTimer = null;        // setInterval id while playing
+let _tlLiveLast = {};           // "slot-ch" → last-sent ¼µs (dedupe)
+let _tlLiveLastSend = 0;
+
+function _tlActiveMaestro() {
+  const out = [];
+  Object.entries(_tlClip.maestro).forEach(([key, kfs]) => {
+    if (!kfs.length) return;
+    const [slot, ch] = key.split('-').map(Number);
+    out.push({ slot, ch, kfs });
+  });
+  return out;
+}
+// Emit the interpolated Maestro positions at time `ms`. `force` bypasses the
+// change-dedupe (used when arming, so the servos snap to the current pose).
+function _tlSendLiveAt(ms, force) {
+  if (!_tlLive || !writer || !_tlClip) return;
+  _tlActiveMaestro().forEach(({ slot, ch, kfs }) => {
+    const q = _tlInterpolateAt(kfs, k => k.pos, ms);   // ¼µs (pos is stored in ¼µs)
+    if (q == null) return;
+    const pos = Math.round(q);
+    const key = slot + '-' + ch;
+    if (!force && _tlLiveLast[key] === pos) return;
+    _tlLiveLast[key] = pos;
+    sendRcCli(`?MAE,${slot},${ch},${pos}`, /*silent=*/true);
+  });
+}
+// Throttled send from a scrub/play loop.
+function _tlLiveTick() {
+  if (!_tlLive) return;
+  const now = Date.now();
+  if (now - _tlLiveLastSend < 50) return;   // ~20 Hz cap
+  _tlLiveLastSend = now;
+  _tlSendLiveAt(_tlClip.cursorMs, false);
+}
+
+function _tlUpdateLiveBtns() {
+  const live = document.getElementById('tl-live-btn');
+  const play = document.getElementById('tl-play-btn');
+  if (live) { live.textContent = _tlLive ? '⏻ Live ON' : '⏻ Live'; live.classList.toggle('btn-danger', _tlLive); live.classList.toggle('btn-ghost', !_tlLive); }
+  if (play) { play.textContent = _tlLivePlaying ? '■ Stop' : '▶ Preview'; play.classList.toggle('btn-danger', _tlLivePlaying); play.classList.toggle('btn-ghost', !_tlLivePlaying); }
+}
+
+function _tlSetLive(on) {
+  if (on && !writer) { alert('Connect to the board first to use live preview.'); return; }
+  _tlLive = on;
+  if (on && _tlClip) {
+    // Zero speed/accel on the active channels so the servos track the cursor
+    // snappily, then snap to the current cursor pose.
+    _tlActiveMaestro().forEach(({ slot, ch }) => sendRcCli(`?MAE,FREE,${slot},${ch}`, true));
+    _tlLiveLast = {};
+    _tlSendLiveAt(_tlClip.cursorMs, true);
+  }
+  if (!on) _tlStopPlay();
+  _tlUpdateLiveBtns();
+}
+function _tlToggleLive() { _tlSetLive(!_tlLive); }
+
+function _tlPlayPreview() {
+  if (!_tlClip) return;
+  if (_tlLivePlaying) { _tlStopPlay(); return; }
+  if (!_tlLive) { _tlSetLive(true); if (!_tlLive) return; }   // playing implies Live; bail if arming failed (not connected)
+  _tlLivePlaying = true;
+  _tlUpdateLiveBtns();
+  const dur = Math.max(1, _tlClip.durationMs);
+  const startCursor = _tlClip.cursorMs >= dur ? 0 : _tlClip.cursorMs;   // restart if parked at the end
+  const startWall = Date.now();
+  // setInterval (not rAF) so playback keeps advancing regardless of tab-visibility
+  // throttling; the actual servo sends are still rate-limited inside _tlLiveTick.
+  _tlLiveTimer = setInterval(() => {
+    if (!_tlLivePlaying || !_tlClip) { _tlStopPlay(); return; }
+    _tlClip.cursorMs = Math.min(dur, startCursor + (Date.now() - startWall));
+    _tlRender();
+    _tlLiveTick();
+    if (_tlClip.cursorMs >= dur) { _tlSendLiveAt(dur, true); _tlStopPlay(); }   // land exactly on the last pose
+  }, 30);
+}
+function _tlStopPlay() {
+  if (!_tlLivePlaying) return;
+  _tlLivePlaying = false;
+  if (_tlLiveTimer) { clearInterval(_tlLiveTimer); _tlLiveTimer = null; }
+  _tlUpdateLiveBtns();
 }
 
 function _tlDeleteSelected() {
@@ -5549,6 +5661,8 @@ document.getElementById('tl-zoom-in').addEventListener('click', () => _tlZoomAt(
 document.getElementById('tl-zoom-out').addEventListener('click', () => _tlZoomAt(1 / 1.4, null));
 document.getElementById('tl-zoom-fit').addEventListener('click', _tlFit);
 document.getElementById('tl-trim-start').addEventListener('click', _tlTrimStart);
+document.getElementById('tl-live-btn').addEventListener('click', _tlToggleLive);
+document.getElementById('tl-play-btn').addEventListener('click', _tlPlayPreview);
 // Ctrl+scroll over the timeline → zoom at the pointer (finer step than the
 // buttons). preventDefault stops the browser's own ctrl-wheel page zoom.
 document.getElementById('tl-scroll').addEventListener('wheel', e => {

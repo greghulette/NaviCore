@@ -311,6 +311,15 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.9 (2026-07-01):** **Timeline live preview — servos follow the cursor** (firmware `?MAE` + config tool).
+  New firmware CLI `?MAE,<slot>,<ch>,<pos>` (set target, ¼µs) and `?MAE,FREE,<slot>,<ch>` (speed=0/accel=0 for
+  snappy tracking) in `execCliLine` → calls `maestroSetTarget`/`maestroSetSpeed`/`maestroSetAccel` directly; silent,
+  fire-and-forget, Core-1 (loop) safe; routes over both USB and the WCB bridge. Config tool: a **⏻ Live** toggle
+  (off by default — arming needs a connected board; sends FREE + the current pose) and a **▶ Preview** play button.
+  Scrubbing the cursor (drag the handle, or click the ruler) and Preview both stream the interpolated Maestro
+  position at the cursor (`_tlSendLiveAt` — same ¼µs value replay emits), throttled ~20 Hz + only-on-change.
+  Preview uses `setInterval`+wall-clock (not rAF, so it doesn't stall when the tab throttles). Auto-disarms on
+  close. Best on Direct USB (each channel is a relayed packet over the WCB bridge). Needs a reflash for `?MAE`.
 - **v3.8 (2026-07-01):** **Import Maestro settings → real endpoints + names** (config-tool only). The Maestro's
   serial protocol can't report a channel's Min/Max, so instead the tool parses the Maestro Control Center *Save
   settings file* export (XML; `<Channel>` entries are positional, min/max in ¼µs, with names). Per-slot Import
