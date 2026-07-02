@@ -311,6 +311,20 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.14 (2026-07-02):** **Photoshop/GIMP-style curve editing on maestro tracks** (config-tool only). A dense
+  RECORDED track now draws as a **clean line** — no dot per raw sample; only **control points** (`kf.cp`,
+  session-only, never uploaded) render as dots. Tracks with ≤24 keyframes on load (hand-built) are all control
+  points, i.e. the old behavior; every user-added point is a control point. Selecting a control point reveals
+  **two tangent-handle arms**; dragging a handle bends the curve on that side via a cubic Hermite from the
+  anchor to the handle's horizontal reach, using the pen-tool tangent relation (tangent = 3 × (handle − anchor))
+  and blending into the untouched capture at the reach edge with the snapshot's own slope (no kink). The shape
+  is BAKED into the underlying keyframes (`_tlEnsureSpanDensity` pre-densifies a sparse span once at pointerdown,
+  sampled on-curve, so moves only rewrite; shrinking the reach mid-drag restores the outer region from the
+  snapshot) — the firmware still just plays linear keyframes. Center-drag (proportional warp), solo double-click,
+  right-click delete all unchanged. Easing-pair "adjacent" is now CP-aware on clean-line tracks (raw samples
+  between two picks don't block; easing replaces that stretch — "smooth this span"). New "All points" toolbar
+  toggle reveals raw sample dots (small/dim, draggable) for surgical edits. Handles/cp flags are stripped by the
+  explicit field mapping in `_tlFlattenEvents` (verified no leak).
 - **v3.13 (2026-07-02):** Overnight adversarial review sweep (30 findings raised, ~17 confirmed, all fixed;
   firmware + tool ship together — reflash required).
   **Protocol change — indexed idempotent EDITEV:** `?REC,EDITEV,<idx>,<json>`; the board writes AT the index

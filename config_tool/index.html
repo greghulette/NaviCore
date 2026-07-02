@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">020141QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">021141QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2404,6 +2404,11 @@
           <input type="number" id="tl-soft-radius" min="0" max="5000" step="50" value="150" style="width:62px">
           ms
         </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
+               title="Show every raw captured sample as a small dot (normally a recorded servo track draws as a clean line and only your control points show as dots).">
+          <input type="checkbox" id="tl-show-points">
+          All points
+        </label>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <div id="tl-easing-toolbar" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--muted)"></div>
         <button class="btn btn-danger" id="tl-delete-btn" type="button" style="display:none;padding:3px 10px">🗑 Delete selected</button>
@@ -2415,13 +2420,14 @@
         <svg id="tl-svg" xmlns="http://www.w3.org/2000/svg"></svg>
       </div>
       <div style="font-size:11px;color:var(--muted)">
-        Click empty track space to add a keyframe (near the line it snaps ON so it stays smooth — then drag to
-        shape) · drag a dot to move it — nearby dots follow smoothly (see “Smooth drag”) · <b>double-click-drag a
-        dot to move just that one</b> (no smooth influence) · <b>right-click a dot to delete it</b> (or select it
-        and press Delete/Backspace, or use 🗑 Delete selected) · drag an action diamond to move it in time, click
-        to edit, right-click to delete · Shift-click two ADJACENT keyframes to pick an easing pair · drag the
-        yellow handle to scrub · the red ✕ by a track name deletes that whole track · Ctrl+scroll to zoom at
-        the pointer, or ⤢ Fit.
+        Recorded servo tracks draw as a <b>clean line</b> — click ON the line to add a control point (it snaps to
+        the curve), then drag it to reshape (nearby motion follows — see “Smooth drag”) · <b>select a control
+        point to reveal its two handle arms; drag a handle to bend the curve</b> on that side (handle height =
+        slope, distance = reach — Photoshop-style) · double-click-drag a dot to move just that one · right-click a
+        dot to delete it (or Delete/Backspace, or 🗑) · “All points” shows the raw captured dots · drag an action
+        diamond to move it in time, click to edit, right-click to delete · Shift-click two control points (no
+        other control point between) for an easing pair · drag the yellow handle to scrub · red ✕ deletes a whole
+        track · Ctrl+scroll zooms at the pointer, ⤢ Fit fits.
       </div>
     </div>
   </div>
@@ -4765,6 +4771,12 @@ let _tlNextId = 1;
 // hump/warp instead of a single sharp spike.  Radius in ms; 0 = classic
 // single-point drag.  User-adjustable via the "Smooth drag" toolbar field.
 let _tlSoftRadius = 150;
+// Curve-editing (Photoshop/GIMP style) on maestro tracks: raw captured samples
+// draw as a clean line; only control points (kf.cp) get dots. A maestro track
+// with ≤ this many keyframes on load is treated as hand-built → all control
+// points (the pre-curve behavior). "All points" toolbar toggle reveals raw dots.
+const TL_CP_SPARSE_MAX = 24;
+let _tlShowAllPoints = false;
 // While a keyframe drag is in flight we FREEZE the dragged track's value range
 // so the y-axis (and thus the cursor→value mapping) can't rescale mid-drag as
 // values change — otherwise the grabbed dot drifts out from under the cursor.
@@ -4844,6 +4856,14 @@ function _tlBuildModelFromEvents(name, header, events) {
   });
   Object.values(clip.maestro).forEach(track => track.sort((a, b) => a.t - b.t));
   Object.values(clip.hcr).forEach(track => track.sort((a, b) => a.t - b.t));
+  // Photoshop/GIMP-style curve editing: a dense RECORDED maestro track renders
+  // as a clean line (no dot per raw sample); only CONTROL POINTS (`cp` flag,
+  // session-only — never sent to the firmware) show as editable dots. A sparse
+  // track (hand-built) is all control points, exactly like before. The flag is
+  // set here on load and on every user-added point (_tlOnTrackClick).
+  Object.values(clip.maestro).forEach(track => {
+    if (track.length <= TL_CP_SPARSE_MAX) track.forEach(k => { k.cp = true; });
+  });
   clip.actions.sort((a, b) => a.t - b.t);
   if (!clip.durationMs) {
     const allT = [
@@ -5106,28 +5126,40 @@ function _tlRender() {
     const valueOf = kf => track.kind === 'maestro' ? kf.pos / 4 : kf.vol;
     if (kfs.length > 1) {
       const pts = kfs.map(kf => `${_tlTimeToX(kf.t)},${_tlValueToY(valueOf(kf), lo, hi, rowTop)}`).join(' ');
-      svg.appendChild(_tlSvgEl('polyline', { points: pts, fill: 'none', stroke: 'var(--accent2)', 'stroke-width': 1.5 }));
+      const line = _tlSvgEl('polyline', { points: pts, fill: 'none', stroke: 'var(--accent2)', 'stroke-width': 1.5 });
+      line.style.pointerEvents = 'none';   // clicks exactly ON the line fall through to the row bg (add-a-point)
+      svg.appendChild(line);
     }
     kfs.forEach(kf => {
+      // Clean-line rendering: on a maestro track only CONTROL POINTS get dots —
+      // the dense raw capture is just the line. ("All points" reveals raw dots.)
+      if (track.kind === 'maestro' && !kf.cp && !_tlShowAllPoints) return;
       const x = _tlTimeToX(kf.t), y = _tlValueToY(valueOf(kf), lo, hi, rowTop);
       const isSel = clip.selected && clip.selected.kind === track.kind && clip.selected.key === track.key && clip.selected.id === kf.id;
       const isPair = clip.selectedPair && clip.selectedPair.some(p => p.kind === track.kind && p.key === track.key && p.id === kf.id);
       // Visible dot is display-only; a larger transparent circle on top carries
       // the pointer events so the dot is easy to grab/select/delete (the small
       // visible radius made it easy to miss and accidentally add a new point).
+      const isRaw = track.kind === 'maestro' && !kf.cp;   // raw sample shown via "All points"
       const dot = _tlSvgEl('circle', {
-        cx: x, cy: y, r: (isSel || isPair) ? 6 : 5,
+        cx: x, cy: y, r: (isSel || isPair) ? 6 : (isRaw ? 2.5 : 5),
         fill: isSel ? 'var(--red)' : isPair ? 'var(--yellow)' : 'var(--accent2)',
-        stroke: '#fff', 'stroke-width': 1,
+        stroke: isRaw ? 'none' : '#fff', 'stroke-width': 1, opacity: isRaw ? 0.55 : 1,
       });
       dot.style.pointerEvents = 'none';
       svg.appendChild(dot);
-      const hit = _tlSvgEl('circle', { cx: x, cy: y, r: 11, fill: 'transparent' });
+      const hit = _tlSvgEl('circle', { cx: x, cy: y, r: isRaw ? 6 : 11, fill: 'transparent' });
       hit.style.cursor = 'grab';
       hit.addEventListener('pointerdown', ev => _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop));
       hit.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); _tlDeleteKeyframe(track, kf); });
       svg.appendChild(hit);
     });
+    // Tangent handles for the selected maestro control point (Photoshop-style:
+    // select a dot → its handle arms appear; drag a handle to bend the curve).
+    if (clip.selected && clip.selected.kind === 'maestro' && clip.selected.key === track.key) {
+      const selKf = kfs.find(k => k.id === clip.selected.id);
+      if (selKf && selKf.cp) _tlRenderHandles(svg, track, kfs, selKf, lo, hi, rowTop);
+    }
   });
 
   const actionsTop = TL_RULER_H + tracks.length * TL_ROW_H;
@@ -5195,7 +5227,7 @@ function _tlOnTrackClick(ev, track, rowTop, lo, hi) {
     const lineV = _tlInterpolateAt(arr, valueOf, t);
     if (lineV != null && Math.abs(clickY - _tlValueToY(lineV, lo, hi, rowTop)) <= 8) v = lineV;   // "aimed at the line" → snap on
   }
-  const kf = { id: _tlId(), t: Math.max(0, t) };
+  const kf = { id: _tlId(), t: Math.max(0, t), cp: true };   // user-added → always a control point
   if (track.kind === 'maestro') kf.pos = Math.round(_tlClampUs(track, v) * 4);   // clamp to imported endpoints if any
   else kf.vol = Math.max(0, Math.min(99, Math.round(v)));
   arr.push(kf);
@@ -5234,6 +5266,157 @@ function _tlDeleteTrack(track) {
   _tlClip.selectedPair = null;
   _tlClip.dirty = true;
   _tlRender();
+}
+
+// ── Photoshop/GIMP-style tangent handles on a selected control point ─────────
+// A selected maestro control point shows two handle dots on arms extending
+// left/right. Dragging a handle reshapes the curve on THAT side with a cubic
+// Hermite: the handle sets the tangent (slope) leaving the control point, and
+// the curve blends back into the untouched capture at the handle's horizontal
+// extent. The shape is BAKED into the underlying keyframes (resampling the span
+// if it's too sparse), because the firmware only replays linear segments —
+// exactly the same "curves are denser keyframes" trick as the easing tool.
+// Handle state lives on the keyframe as session-only {dt, dv} (ms, µs); it is
+// never uploaded (the flatten step maps explicit fields only).
+
+// Default handles lie ON the current curve (zero reshaping until dragged):
+// dt = the smooth-drag radius capped at the neighboring CONTROL point (raw
+// samples don't cap it — they're what gets reshaped), dv = slope × dt.
+function _tlEnsureHandles(track, kfs, kf) {
+  if (kf.hL && kf.hR) return;
+  const valueOf = k => k.pos / 4;
+  const i = kfs.findIndex(k => k.id === kf.id);
+  const prevCp = kfs.slice(0, i).reverse().find(k => k.cp);
+  const nextCp = kfs.slice(i + 1).find(k => k.cp);
+  const prev = i > 0 ? kfs[i - 1] : null;
+  const next = i < kfs.length - 1 ? kfs[i + 1] : null;
+  const base = Math.max(60, _tlSoftRadius || 150);
+  const dtL = Math.max(20, Math.min(base, prevCp ? kf.t - prevCp.t : 2000));
+  const dtR = Math.max(20, Math.min(base, nextCp ? nextCp.t - kf.t : 2000));
+  const mL = prev && (kf.t - prev.t) > 0 ? (valueOf(kf) - valueOf(prev)) / (kf.t - prev.t) : 0;   // µs per ms
+  const mR = next && (next.t - kf.t) > 0 ? (valueOf(next) - valueOf(kf)) / (next.t - kf.t) : 0;
+  if (!kf.hL) kf.hL = { dt: dtL, dv: -mL * dtL };   // handle dot at (t0-dt, v0+dv) → slope = -dv/dt
+  if (!kf.hR) kf.hR = { dt: dtR, dv:  mR * dtR };   // handle dot at (t0+dt, v0+dv) → slope =  dv/dt
+}
+
+function _tlRenderHandles(svg, track, kfs, kf, lo, hi, rowTop) {
+  _tlEnsureHandles(track, kfs, kf);
+  const v0 = kf.pos / 4;
+  const cx = _tlTimeToX(kf.t), cy = _tlValueToY(v0, lo, hi, rowTop);
+  [['L', kf.hL, -1], ['R', kf.hR, +1]].forEach(([side, h, sign]) => {
+    const hx = _tlTimeToX(kf.t + sign * h.dt);
+    const hy = _tlValueToY(v0 + h.dv, lo, hi, rowTop);
+    svg.appendChild(_tlSvgEl('line', { x1: cx, y1: cy, x2: hx, y2: hy, stroke: 'var(--yellow)', 'stroke-width': 1, opacity: 0.9 }));
+    const hd = _tlSvgEl('circle', { cx: hx, cy: hy, r: 4, fill: 'var(--yellow)', stroke: '#000', 'stroke-width': 0.5 });
+    hd.style.pointerEvents = 'none';
+    svg.appendChild(hd);
+    const hit = _tlSvgEl('circle', { cx: hx, cy: hy, r: 10, fill: 'transparent' });
+    hit.style.cursor = 'grab';
+    const hitTitle = _tlSvgEl('title');
+    hitTitle.textContent = 'Drag to bend the curve on this side (handle sets the slope; its distance sets the reach)';
+    hit.appendChild(hitTitle);
+    hit.addEventListener('pointerdown', ev => _tlStartDragHandle(ev, track, kf, side, lo, hi, rowTop));
+    svg.appendChild(hit);
+  });
+}
+
+// Make sure the span [tFrom, tTo] has enough underlying keyframes to HOLD a
+// curve (firmware interpolation is linear between keyframes). Samples the
+// CURRENT curve first so the inserts are invisible until reshaped.
+function _tlEnsureSpanDensity(arr, tFrom, tTo) {
+  const span = tTo - tFrom;
+  if (span <= 0) return;
+  const STEP = Math.max(20, Math.round(span / 16));
+  const base = arr.slice();                       // sample against a stable copy
+  const inserts = [];
+  for (let t = tFrom + STEP; t <= tTo - STEP / 2; t += STEP) {
+    if (base.some(k => Math.abs(k.t - t) < STEP / 2)) continue;   // a close-enough point already exists
+    const q = _tlInterpolateAt(base, k => k.pos, t);
+    if (q != null) inserts.push({ id: _tlId(), t: Math.round(t), pos: Math.round(q) });
+  }
+  if (inserts.length) { arr.push(...inserts); arr.sort((a, b) => a.t - b.t); }
+}
+
+function _tlStartDragHandle(ev, track, kf, side, lo, hi, rowTop) {
+  ev.preventDefault(); ev.stopPropagation();
+  const arr = _tlClip.maestro[track.key];
+  if (!arr) return;
+  _tlEnsureHandles(track, arr, kf);
+  const sign = side === 'R' ? +1 : -1;
+  const i = arr.findIndex(k => k.id === kf.id);
+  // Reach cap: up to the neighboring CONTROL point (or 3000 ms / the track edge).
+  const prevCp = arr.slice(0, i).reverse().find(k => k.cp);
+  const nextCp = arr.slice(i + 1).find(k => k.cp);
+  const maxDt = Math.max(20, Math.min(3000,
+    side === 'R' ? (nextCp ? nextCp.t - kf.t : (arr.length ? Math.max(300, arr[arr.length - 1].t - kf.t) : 3000))
+                 : (prevCp ? kf.t - prevCp.t : Math.max(300, kf.t))));
+  // Pre-densify once over the maximum reach so every later move only REWRITES
+  // positions (no inserts mid-drag → no accumulation, stable origins).
+  if (side === 'R') _tlEnsureSpanDensity(arr, kf.t, kf.t + maxDt);
+  else              _tlEnsureSpanDensity(arr, kf.t - maxDt, kf.t);
+  // Snapshot every keyframe (time+pos) and a sampler over the snapshot — each
+  // move recomputes from this baseline, and shrinking the reach mid-drag
+  // restores the outer region from it.
+  const origins = arr.map(k => ({ k, t0: k.t, p0: k.pos }));
+  const snapArr = origins.map(o => ({ t: o.t0, pos: o.p0 }));   // built ONCE — snapVal runs 3×/move
+  const snapVal = t => {                          // µs at time t on the pre-drag curve
+    const q = _tlInterpolateAt(snapArr, s => s.pos, t);
+    return q == null ? kf.pos / 4 : q / 4;
+  };
+  const v0 = kf.pos / 4;
+  _tlFrozenRange = { kind: track.kind, key: track.key, lo, hi };
+  let ended = false;
+  const finish = () => {
+    if (ended) return; ended = true;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    _tlFrozenRange = null;
+    if (!_tlClip) return;
+    arr.sort((a, b) => a.t - b.t);
+    _tlRender();
+  };
+  const onMove = mv => {
+    if (!_tlClip) return finish();
+    try {
+      const rect = document.getElementById('tl-svg').getBoundingClientRect();
+      const tCur = _tlXToTime(mv.clientX - rect.left);
+      const vCur = _tlYToValue(mv.clientY - rect.top, lo, hi, rowTop);
+      const h = side === 'R' ? kf.hR : kf.hL;
+      h.dt = Math.max(20, Math.min(maxDt, sign * (tCur - kf.t)));   // horizontal reach (this side only)
+      h.dv = Math.max(lo - v0, Math.min(hi - v0, vCur - v0));       // vertical offset (slope)
+      // Cubic Hermite from the control point to the reach edge: slope at the
+      // point comes from the handle, slope at the edge matches the original
+      // curve so the reshape blends in with no kink.
+      const tE = kf.t + sign * h.dt;
+      const vE = snapVal(tE);
+      const mE = (snapVal(tE + 10) - snapVal(tE - 10)) / 20;        // µs/ms on the snapshot
+      // Pen-tool tangent relation: a cubic Bézier's derivative at an anchor is
+      // 3 × (handle − anchor) — the ×3 is what makes pulling a handle visibly
+      // BOW the curve (raw slope alone gives a barely-perceptible bump).
+      const m0 = 3 * sign * h.dv / h.dt;
+      const span = sign * (tE - kf.t);                              // = h.dt (positive)
+      origins.forEach(o => {
+        if (o.k.id === kf.id) return;
+        const d = sign * (o.t0 - kf.t);                             // distance into this side, in ms
+        if (d <= 0) return;                                         // other side — untouched
+        if (d >= span) {
+          if (d <= maxDt) o.k.pos = o.p0;                           // outside current reach — restore
+          return;
+        }
+        const s = d / span;
+        const h00 = 2*s*s*s - 3*s*s + 1, h10 = s*s*s - 2*s*s + s;
+        const h01 = -2*s*s*s + 3*s*s,    h11 = s*s*s - s*s;
+        // Hermite in µs over the [point → edge] direction; time scale = span·sign
+        const val = h00 * v0 + h10 * (span * sign) * m0 + h01 * vE + h11 * (span * sign) * mE;
+        o.k.pos = Math.round(_tlClampUs(track, val) * 4);
+      });
+      _tlClip.dirty = true;
+      _tlRender();
+    } catch (e) { console.error('timeline handle drag error', e); finish(); }
+  };
+  const onUp = () => finish();
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
 }
 
 function _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop) {
@@ -5321,8 +5504,16 @@ function _tlToggleShiftSelect(track, kf) {
   // between two non-adjacent picks.
   const firstIdx = arr.findIndex(k => k.id === first.id);
   if (firstIdx < 0) { _tlClip.selectedPair = [{ kind: track.kind, key: track.key, id: kf.id }]; return; }  // first pick gone — restart here
-  if (Math.abs(idx - firstIdx) !== 1) {
-    alert('Pick two ADJACENT keyframes on the same track for easing.');
+  // "Adjacent" = no CONTROL POINT strictly between the two picks. On a clean-
+  // line maestro track the raw captured samples between two control points
+  // don't count — easing across them REPLACES that stretch of raw capture with
+  // the synthesized curve, which is exactly the "smooth this span" intent.
+  const loI = Math.min(idx, firstIdx), hiI = Math.max(idx, firstIdx);
+  const blocked = (track.kind === 'maestro' && !_tlShowAllPoints)
+    ? arr.slice(loI + 1, hiI).some(k => k.cp)
+    : (hiI - loI !== 1);
+  if (blocked) {
+    alert('Pick two ADJACENT keyframes on the same track for easing (no other control point between them).');
     _tlClip.selectedPair = null;
     return;
   }
@@ -5737,6 +5928,10 @@ document.getElementById('tl-add-maestro').addEventListener('click', _tlAddMaestr
 document.getElementById('tl-add-hcr').addEventListener('click', _tlAddHcrTrack);
 document.getElementById('tl-soft-radius').addEventListener('input', e => {
   _tlSoftRadius = Math.max(0, Math.min(5000, +e.target.value || 0));
+});
+document.getElementById('tl-show-points').addEventListener('change', e => {
+  _tlShowAllPoints = !!e.target.checked;
+  if (_tlClip) _tlRender();
 });
 document.getElementById('tl-zoom-in').addEventListener('click', () => _tlZoomAt(1.4, null));
 document.getElementById('tl-zoom-out').addEventListener('click', () => _tlZoomAt(1 / 1.4, null));
