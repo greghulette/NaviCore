@@ -311,6 +311,12 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.16 (2026-07-02, config-tool only):** Fixed choppy zigzag when MOVING a control point (not just a handle).
+  Root cause: the proportional soft-drag moved neighbours in TIME too (`o.k.t = o.t0 + w*dt`); on a dense recorded
+  track that slid the raised, time-shifted samples past the un-raised ones and interleaved them into a zigzag. Fix:
+  only the GRABBED dot moves in time (follows the cursor); neighbours are pulled in VALUE only, keeping their
+  original times → times stay monotonic, one smooth hump, no interleaving. Verified: after a drag, every non-grabbed
+  keyframe keeps its original time, and the drag adds zero zigzag reversals vs the noisy baseline (slightly smooths).
 - **v3.15 (2026-07-02):** **Maestro channel names + endpoints moved into the DEVICE CONFIG** (firmware + tool;
   reflash). Previously the timeline's channel names / guide-line limits came from `_maestroCh`, which was browser-
   localStorage only and lost on any origin change. Now `config.maestros[i].channels[]` (`{ch,name,min,max}`) round-
