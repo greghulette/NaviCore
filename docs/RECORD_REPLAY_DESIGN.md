@@ -311,6 +311,29 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.13 (2026-07-02):** Overnight adversarial review sweep (30 findings raised, ~17 confirmed, all fixed;
+  firmware + tool ship together — reflash required).
+  **Protocol change — indexed idempotent EDITEV:** `?REC,EDITEV,<idx>,<json>`; the board writes AT the index
+  (`editAddEvent(idx, json)`, gaps refused) and ACKs `[CLIPUL:ACK,<idx>]`. Fixes two real upload corruptions: a
+  timeout-retry whose original WAS processed no longer appends a duplicate event, and a late/stale ACK can no
+  longer satisfy the wrong event's waiter (tool matcher requires the exact index).
+  **Firmware:** `editStream(out, paced)` — full-speed over USB (yield each 16 lines), light pacing when relayed
+  (`rcSerial.captureArmed()`, delay(1)/4 lines — the RTERM sink already retries on real ESP-NOW backpressure);
+  EDITLOAD refuses >3000-event clips over the bridge with `[CLIPDL:ERR]` (was: 48 s loop() stall = SBUS/heartbeat
+  starvation); `?REC,SAVE` with no name auto-names `rec_N`; `RENAME` emits `[CLIPUL:RENAME,OK|ERR]`.
+  **Tool:** `_tlSave` holds the clip reference (close-mid-upload used to null-deref ×3 incl. an unhandled
+  rejection in finally) + aborts cleanly; `_tlAbortWaiters()` on editor close (orphaned marker-waiters could
+  steal the next upload's ACKs or hang an await); Via-WCB EDITEV >180 chars fails fast with guidance (the
+  ESP-NOW hop truncates ~187 usable bytes → malformed JSON → NAK-forever); `_applyMaestroRangesToKnobs` fixed
+  for the tool's FLAT `outputs2`/`outputs3` knob keys (mode-2/3 ranges never applied before); deleting a
+  keyframe clears an armed easing pair that contained it; clip rename/delete linkage now also updates the OPEN
+  timeline's actions and only re-points refs when the board confirms the rename (legacy-firmware timeout
+  fallback); Clips-panel blank-name record now auto-saves (`?REC,SAVE` bare); record/play action clip-name
+  fields capped at 32 + sanitized to the device charset; Maestro action arg clamps (restartScript 0-127,
+  setSpeed 0-16383, setAccel 0-255, setTarget ≤16383 ¼µs) incl. the stale-value-on-command-switch path;
+  `[CLIPDL:ERR]` surfaced in the editor status.
+  **Reviewed-and-kept:** the padded track scale during drags (clamping at the servo limits is intended
+  behavior, not a bug) and the global 20 Hz live-preview throttle (channels stay mutually consistent).
 - **v3.12 (2026-07-02):** Two config-tool polish items. (a) **Timeline label overflow** — long servo names ran into
   the timeline; widened the label gutter (`TL_LEFT` 110→150) and truncate the label with an ellipsis via
   `getComputedTextLength` measurement + a full-name `<title>` tooltip. (b) **Maestro button action made friendly** —

@@ -474,11 +474,17 @@ inline int _cmpEventByTime(const void* a, const void* b) {
 }
 
 // DOWNLOAD: stream the currently-loaded clip (call loadClip() first) as tagged
-// JSON lines. `delay(2)` between lines is cheap insurance against a long burst
-// overrunning the ESP-NOW send queue when relayed Via WCB (same caution as
-// naviota's per-chunk ACK pacing, without needing the CLI layer to know which
-// transport armed the capture sink).
-inline void editStream(Print& out) {
+// JSON lines. This runs in loop() (Core 1), so it BLOCKS everything else the
+// loop services (SBUS, WCB heartbeats) for its duration — pacing matters:
+//  * paced=true (Via-WCB relay): a light delay(1) every 4 lines spaces the
+//    [CLIPDL:EV] RTERM packets; the capture sink ALREADY retries with its own
+//    delay on real ESP-NOW backpressure (navicore_rterm.h flushLine), so
+//    heavier per-line pacing here would only stall loop() (worst case at the
+//    3000-event relay cap: ~0.75 s vs 6 s with per-line delay(2)). The CLI
+//    layer refuses relayed downloads above that cap (EDITLOAD in NaviCore.ino).
+//  * paced=false (direct USB): full speed, with a brief yield every 16 lines so
+//    the RTOS idle/WiFi tasks stay fed during a large clip.
+inline void editStream(Print& out, bool paced = true) {
   out.printf("[CLIPDL:BEGIN]{\"count\":%lu,\"durationMs\":%lu,\"mode\":%u}\n",
              (unsigned long)_count, (unsigned long)clipDurationMs(), (unsigned)_mode);
   for (uint32_t i = 0; i < _count; i++) {
@@ -498,7 +504,8 @@ inline void editStream(Print& out) {
       out.printf("[CLIPDL:EV]{\"t\":%lu,\"k\":%u,\"chan\":%u,\"vol\":%u}\n",
                  (unsigned long)ev.tMs, (unsigned)REC_KF_HCRVOL, ev.u.kv.chan, ev.u.kv.vol);
     }
-    delay(2);
+    if (paced) { if ((i & 3) == 3) delay(1); }
+    else if ((i & 15) == 15) delay(1);
   }
   out.println("[CLIPDL:END]");
 }
@@ -512,11 +519,15 @@ inline bool editBegin() {
   return true;
 }
 
-// UPLOAD step 2: parse+append ONE event. Self-contained (parses its own JSON
-// rather than taking a pre-parsed JsonObject) so the StaticJsonDocument's
-// lifetime never crosses a function boundary.
-inline bool editAddEvent(const char* json) {
-  if (_state != ST_EDITING || !_buf || _count >= _cap) return false;
+// UPLOAD step 2: parse ONE event and write it AT AN INDEX — idempotent, so the
+// tool's timeout-retry can resend the same event without appending a duplicate
+// (the original hazard: the board processes an EDITEV, the ACK is lost, the tool
+// retries, and the clip silently gains a copy). idx must be an overwrite or the
+// next append (no gaps — the tool uploads sequentially). Self-contained (parses
+// its own JSON rather than taking a pre-parsed JsonObject) so the
+// StaticJsonDocument's lifetime never crosses a function boundary.
+inline bool editAddEvent(uint32_t idx, const char* json) {
+  if (_state != ST_EDITING || !_buf || idx >= _cap || idx > _count) return false;
   StaticJsonDocument<384> doc;
   if (deserializeJson(doc, json)) return false;
   JsonObject obj = doc.as<JsonObject>();     // mutable view — actionFromJson's signature requires it
@@ -540,7 +551,8 @@ inline bool editAddEvent(const char* json) {
     ok = true;
   }
   if (!ok) return false;
-  _buf[_count++] = ev;
+  _buf[idx] = ev;
+  if (idx + 1 > _count) _count = idx + 1;
   return true;
 }
 

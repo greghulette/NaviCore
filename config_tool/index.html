@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">020106QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">020141QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2354,7 +2354,7 @@
         </div>
         <div style="margin-top:6px;font-size:12px;color:var(--muted)">
           Start capturing, perform the moves, then Stop &amp; Save under the name above.
-          Leave the name blank to just capture into RAM.
+          Leave the name blank to auto-save the take as rec_1, rec_2, … (never lost).
         </div>
       </div>
 
@@ -4537,11 +4537,19 @@ const _isClipRef = (a, name) => a && (a.type === 'play' || a.type === 'record') 
 function _clipRefsCount(name) {
   let n = 0;
   _forEachClipActionArray(arr => arr.forEach(a => { if (_isClipRef(a, name)) n++; }));
+  // Also count play/record actions inside the OPEN timeline editor (its action
+  // entries wrap the action object as {id, t, action}).
+  if (_tlClip && Array.isArray(_tlClip.actions))
+    _tlClip.actions.forEach(e => { if (_isClipRef(e.action, name)) n++; });
   return n;
 }
 function _renameClipRefs(from, to) {
   let n = 0;
   _forEachClipActionArray(arr => arr.forEach(a => { if (_isClipRef(a, from)) { a.cmd = to; n++; } }));
+  // Keep the open timeline's actions in step too — otherwise a stale clip name
+  // sits in the editor and gets re-uploaded on the next timeline save.
+  if (_tlClip && Array.isArray(_tlClip.actions))
+    _tlClip.actions.forEach(e => { if (_isClipRef(e.action, from)) { e.action.cmd = to; n++; _tlClip.dirty = true; } });
   return n;
 }
 function _removeClipRefs(name) {
@@ -4551,14 +4559,24 @@ function _removeClipRefs(name) {
     n += arr.length - kept.length;
     if (kept.length !== arr.length) setArr(kept);
   });
+  if (_tlClip && Array.isArray(_tlClip.actions)) {
+    const kept = _tlClip.actions.filter(e => !_isClipRef(e.action, name));
+    if (kept.length !== _tlClip.actions.length) {
+      n += _tlClip.actions.length - kept.length;
+      _tlClip.actions = kept;
+      _tlClip.dirty = true;
+    }
+  }
   return n;
 }
 function _refreshActionUI() {
   [ 'renderAssignmentList', 'updateButtonHighlights', 'renderSwitchHighlights', 'renderSwitchesTable' ]
     .forEach(fn => { try { if (typeof window[fn] === 'function') window[fn](); } catch (_) {} });
+  try { if (_tlClip) _tlRender(); } catch (_) {}   // reflect linkage edits in an open timeline
 }
 
 async function clipRename(from) {
+  _ensureClipNamesFresh();                     // narrow the stale-names window for the collision guard
   const to = prompt('Rename clip "' + from + '" to:', from);
   if (to === null) return;                     // cancelled
   const clean = to.trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
@@ -4566,7 +4584,17 @@ async function clipRename(from) {
   // The device refuses to rename onto an existing clip; mirror that guard here so
   // we don't re-point actions at a name that belongs to a DIFFERENT clip.
   if (_knownClipNames.includes(clean)) { alert(`A clip named "${clean}" already exists — choose a different name.`); return; }
+  // Wait for the board's [CLIPUL:RENAME,OK|ERR] marker so trigger-action
+  // references are only re-pointed when the file ACTUALLY renamed. Timeout →
+  // pre-marker firmware: fall back to the legacy assume-ok behavior.
+  const renameP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:RENAME'), 2500).catch(() => null);
   if (!(await sendRcCli('?REC,RENAME,' + from + ',' + clean))) return;   // not connected — nothing changed
+  const r = await renameP;
+  if (r && r.includes('ERR')) {
+    alert(`The board refused the rename (a clip named "${clean}" may already exist there). Nothing was changed.`);
+    setTimeout(clipsRefresh, 400);
+    return;
+  }
   // Point any Play/Record actions at the new name so the buttons keep working.
   const n = _renameClipRefs(from, clean);
   if (n > 0) {
@@ -4589,8 +4617,10 @@ async function clipDelete(name) {
 }
 
 // Record ↔ Stop&Save toggle.  START begins capture into RAM; on stop we STOP
-// then SAVE,<name> (the on-device STOP does NOT auto-persist), so a named clip
-// lands in flash and shows up on the next LS.
+// then ALWAYS SAVE (the on-device ?REC,STOP does NOT auto-persist): to the
+// typed name when given, else a bare ?REC,SAVE so the firmware auto-names it
+// rec_N — a take from the panel is never silently lost, matching the always-
+// save behavior of a blank-named Record trigger.
 async function clipRecordToggle() {
   const btn = document.getElementById('clip-record-btn');
   const nameEl = document.getElementById('clip-record-name');
@@ -4601,10 +4631,10 @@ async function clipRecordToggle() {
   } else {
     await sendRcCli('?REC,STOP');
     const name = (nameEl && nameEl.value || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
-    if (name) await sendRcCli('?REC,SAVE,' + name);
+    await sendRcCli(name ? '?REC,SAVE,' + name : '?REC,SAVE');
     _clipRecording = false;
     if (btn) { btn.textContent = '● Record'; btn.classList.remove('btn-blue'); btn.classList.add('btn-danger'); }
-    if (name) setTimeout(clipsRefresh, 500);
+    setTimeout(clipsRefresh, 500);
   }
 }
 
@@ -4647,6 +4677,11 @@ function _clipDlFeed(src, text) {
     _tlDownload.src = src; _tlDownload.header = header; _tlDownload.events = []; _tlDownload.evBuf = null;
     return true;
   }
+  if (text.startsWith('[CLIPDL:ERR]')) {           // board refused (e.g. clip too large over the WCB bridge)
+    _tlDownload = null;
+    _tlShowLoadError('Board refused: ' + text.slice(12));
+    return true;
+  }
   if (text.startsWith('[CLIPDL:END]')) { _tlDownloadComplete(); return true; }
 
   if (text.startsWith('[CLIPDL:EV]')) {
@@ -4686,7 +4721,7 @@ function _tlDownloadComplete() {
 let _tlWaiters = [];
 function _tlWaitForMarker(matcher, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const entry = { matcher, resolve };
+    const entry = { matcher, resolve, reject };
     entry.timer = setTimeout(() => {
       _tlWaiters = _tlWaiters.filter(w => w !== entry);
       reject(new Error('timeout waiting for board response'));
@@ -4700,6 +4735,19 @@ function _tlFeedMarker(text) {
   clearTimeout(hit.timer);
   _tlWaiters = _tlWaiters.filter(w => w !== hit);
   hit.resolve(text);
+}
+// Reject every pending waiter (editor closed / upload aborted). Without this,
+// orphaned entries linger up to their timeout and can steal the FIRST matching
+// marker from the NEXT upload's waiters (the .find() above takes the oldest),
+// stalling it — and the abandoned await would otherwise hang if its timer were
+// merely cleared.
+function _tlAbortWaiters(reason) {
+  const list = _tlWaiters;
+  _tlWaiters = [];
+  list.forEach(w => {
+    clearTimeout(w.timer);
+    try { w.reject(new Error(reason || 'aborted')); } catch (_) {}
+  });
 }
 
 // ── Editor model ─────────────────────────────────────────────────────────────
@@ -4766,6 +4814,7 @@ function closeTimelineEditor() {
   _tlStopPlay(); _tlLive = false; _tlUpdateLiveBtns();              // stop streaming to the servos
   _tlClip = null;
   _tlDownload = null;
+  _tlAbortWaiters('editor closed');   // orphaned waiters must not steal the next upload's markers
   document.getElementById('tl-modal').classList.remove('open');
 }
 document.getElementById('tl-modal').addEventListener('click', e => {
@@ -4838,9 +4887,14 @@ function _tlFlattenEvents() {
 
 async function _tlSave() {
   if (!_tlClip || _tlClip.uploading) return;
+  // Hold the clip reference for the whole async upload: closeTimelineEditor()
+  // nulls the _tlClip global mid-flight, which used to null-deref in the loop
+  // (name), the success path (dirty) and the finally (uploading). Operating on
+  // the captured object is always safe; the abort check below stops the upload.
+  const clip = _tlClip;
   const events = _tlFlattenEvents();
   if (!events.length) { alert('Nothing to save — the timeline is empty.'); return; }
-  _tlClip.uploading = true;
+  clip.uploading = true;
   const saveBtn = document.getElementById('tl-save-btn');
   if (saveBtn) saveBtn.disabled = true;
   try {
@@ -4851,36 +4905,50 @@ async function _tlSave() {
     if (!begin.includes('OK')) throw new Error('board rejected EDITBEGIN (busy recording/replaying?)');
 
     for (let i = 0; i < events.length; i++) {
-      const json = JSON.stringify(events[i]);
+      if (_tlClip !== clip) throw new Error('editor closed — save aborted');   // close-mid-upload
+      // Indexed EDITEV: the board writes AT this index (idempotent — a timeout
+      // retry that the board actually processed can't append a duplicate), and
+      // the ACK echoes the index so a late/stale ACK from a previous event
+      // can't satisfy this one's waiter.
+      const cmdStr = '?REC,EDITEV,' + i + ',' + JSON.stringify(events[i]);
+      // Via WCB the whole relayed command must fit one ESP-NOW packet (~187
+      // usable bytes with the CRC suffix) — a longer line is silently truncated
+      // to malformed JSON and NAKs forever. Fail fast with a useful message.
+      if (viaWcbActive && cmdStr.length > 180) {
+        throw new Error(`event ${i + 1}/${events.length} is too large to send over the WCB bridge ` +
+                        `(${cmdStr.length} chars) — connect over USB, or shorten that action's command/note`);
+      }
+      const ackMark = '[CLIPUL:ACK,' + i + ']';
       let ok = false;
       for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+        if (_tlClip !== clip) throw new Error('editor closed — save aborted');
         try {
-          const p = _tlWaitForMarker(t => t.startsWith('[CLIPUL:ACK') || t.startsWith('[CLIPUL:NAK'));
-          await sendRcCli('?REC,EDITEV,' + json);
+          const p = _tlWaitForMarker(t => t.startsWith(ackMark) || t.startsWith('[CLIPUL:NAK'));
+          await sendRcCli(cmdStr);
           const resp = await p;
-          ok = resp.startsWith('[CLIPUL:ACK');
-        } catch (_) { /* timeout — retry */ }
+          ok = resp.startsWith(ackMark);
+        } catch (_) { /* timeout / abort — retry (loop top re-checks close) */ }
       }
       if (!ok) throw new Error(`event ${i + 1}/${events.length} rejected after 3 attempts`);
       _tlSetStatus(`Saving ${i + 1}/${events.length}…`);
     }
 
     const endP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:END'));
-    await sendRcCli('?REC,EDITEND,' + _tlClip.name);
+    await sendRcCli('?REC,EDITEND,' + clip.name);
     const end = await endP;
     if (!end.includes('OK')) {
       const m = end.match(/\[CLIPUL:END,ERR,([^\]]*)\]/);   // surface the board's specific reason
       throw new Error('board rejected save' + (m ? ' — ' + m[1] : '') + ' (check the terminal for details)');
     }
 
-    _tlClip.dirty = false;
+    clip.dirty = false;
     _tlSetStatus(`Saved ✓ (${events.length} events)`);
     clipsRefresh();
   } catch (e) {
     _tlSetStatus('Save FAILED: ' + e.message);
     sendRcCli('?REC,EDITCANCEL');
   } finally {
-    _tlClip.uploading = false;
+    clip.uploading = false;
     if (saveBtn) saveBtn.disabled = false;
   }
 }
@@ -5421,6 +5489,10 @@ function _tlDeleteSelected() {
     map[sel.key] = (map[sel.key] || []).filter(k => k.id !== sel.id);
     if (!map[sel.key].length) delete map[sel.key];
   }
+  // If the deleted keyframe was half of an armed easing pair, drop the pair —
+  // otherwise the easing toolbar stays up and Apply silently no-ops on the
+  // missing id.
+  if (_tlClip.selectedPair && _tlClip.selectedPair.some(p => p.id === sel.id)) _tlClip.selectedPair = null;
   _tlClip.selected = null;
   _tlClip.dirty = true;
   _tlRender();
@@ -6284,8 +6356,12 @@ function _applyMaestroRangesToKnobs(slot) {
   for (const name in config.knobs) {
     const k = config.knobs[name];
     if (!k || +k.function !== KF_MAESTRO_PASSTHROUGH) continue;
+    // The tool/JSON knob shape stores the mode arrays as FLAT keys: outputs
+    // (mode 1), outputs2 (mode 2), outputs3 (mode 3) — matching rcConfigToJSON.
+    // (The firmware's in-memory outputs2[2][] nesting does NOT exist here.)
     applyOuts(k.outputs);
-    if (Array.isArray(k.outputs2)) { applyOuts(k.outputs2[0]); applyOuts(k.outputs2[1]); }
+    applyOuts(k.outputs2);
+    applyOuts(k.outputs3);
   }
   return n;
 }
@@ -7737,7 +7813,11 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
     const isAccel = cmd === 'setAccel';
     numField(isAccel ? 'Accel (0 = off)' : 'Speed (0 = off)', fid + '-maeval', 0, isAccel ? 255 : 16383, rawArg != null ? rawArg : 0);
   } else if (cmd === 'restartScript') {
-    numField('Subroutine #', fid + '-maeval', 0, 127, parts ? (+parts[1] || 0) : (document.getElementById(fid + '-maeval') ? +document.getElementById(fid + '-maeval').value : 0));
+    // Clamp the preserved value: on a command SWITCH the old -maeval field may
+    // hold a different-meaning number (e.g. a 1500 µs position), which the
+    // input's max attribute does NOT clamp when set programmatically.
+    const prevSub = parts ? (+parts[1] || 0) : (document.getElementById(fid + '-maeval') ? +document.getElementById(fid + '-maeval').value : 0);
+    numField('Subroutine #', fid + '-maeval', 0, 127, Math.max(0, Math.min(127, prevSub || 0)));
   } else {
     const note = document.createElement('span');
     note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
@@ -7964,7 +8044,7 @@ function appendActionFields(container, action) {
     nameInput.type = 'text'; nameInput.id = fid + '-clip';
     nameInput.setAttribute('list', 'clip-name-options');
     nameInput.placeholder = 'clip name (optional)';
-    nameInput.style.width = '150px'; nameInput.maxLength = 90;
+    nameInput.style.width = '150px'; nameInput.maxLength = 32;   // device clip names cap at 32 sanitized chars
     nameInput.value = action.cmd || '';
     nameInput.title = 'Which clip this records into — pick a name to overwrite that clip each time, or leave blank to auto-save each take as rec_1, rec_2, …';
     container.appendChild(makeFieldGroup('Clip name', nameInput));
@@ -7978,7 +8058,7 @@ function appendActionFields(container, action) {
     nameInput.type = 'text'; nameInput.id = fid + '-clip';
     nameInput.setAttribute('list', 'clip-name-options');
     nameInput.placeholder = 'clip name';
-    nameInput.style.width = '150px'; nameInput.maxLength = 90;
+    nameInput.style.width = '150px'; nameInput.maxLength = 32;   // device clip names cap at 32 sanitized chars
     nameInput.value = action.cmd || '';
     nameInput.title = 'Which clip to play — choose from the dropdown of saved clips, or type a name.';
     container.appendChild(makeFieldGroup('Clip name', nameInput));
@@ -8043,13 +8123,16 @@ function readActionFromFid(fid, type, extras) {
     let target = +(document.getElementById(fid + '-target')?.value || 1);
     if (target < 1 || target > NUM_MAESTRO_SLOTS) target = 1;
     const mcmd = document.getElementById(fid + '-maecmd')?.value || 'setTarget';
-    const ch  = +(document.getElementById(fid + '-maech')?.value  || 0);
+    const ch  = Math.max(0, Math.min(31, +(document.getElementById(fid + '-maech')?.value || 0)));
     const val = +(document.getElementById(fid + '-maeval')?.value || 0);
+    // Clamp per command — input min/max attributes don't constrain
+    // programmatically-set or hand-typed out-of-range values.
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v) || 0));
     let cmd;
-    if      (mcmd === 'setTarget')     cmd = `setTarget,${ch},${Math.round(val * 4)}`;
-    else if (mcmd === 'setSpeed')      cmd = `setSpeed,${ch},${val}`;
-    else if (mcmd === 'setAccel')      cmd = `setAccel,${ch},${val}`;
-    else if (mcmd === 'restartScript') cmd = `restartScript,${val}`;
+    if      (mcmd === 'setTarget')     cmd = `setTarget,${ch},${clamp(val * 4, 0, 16383)}`;   // µs → ¼µs, Maestro 14-bit cap
+    else if (mcmd === 'setSpeed')      cmd = `setSpeed,${ch},${clamp(val, 0, 16383)}`;
+    else if (mcmd === 'setAccel')      cmd = `setAccel,${ch},${clamp(val, 0, 255)}`;
+    else if (mcmd === 'restartScript') cmd = `restartScript,${clamp(val, 0, 127)}`;
     else if (mcmd === 'stopScript')    cmd = 'stopScript';
     else                               cmd = 'goHome';
     return { type: 'maestro', target: String(target), cmd, ...extras };
@@ -8076,11 +8159,14 @@ function readActionFromFid(fid, type, extras) {
     return { type, fn, track, ...extras };
   }
   if (type === 'record') {
-    const clip = (document.getElementById(fid + '-clip')?.value || '').trim();
+    // Sanitize to the device's clip-name charset/length so what the action
+    // stores is exactly the name the firmware will save under (no surprise
+    // collisions from silently-stripped characters).
+    const clip = (document.getElementById(fid + '-clip')?.value || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
     return { type, cmd: clip, ...extras };
   }
   if (type === 'play') {
-    const clip = (document.getElementById(fid + '-clip')?.value || '').trim();
+    const clip = (document.getElementById(fid + '-clip')?.value || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
     const loop = document.getElementById(fid + '-loop')?.checked ? 1 : 0;
     return { type, cmd: clip, fn: loop, ...extras };
   }

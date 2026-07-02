@@ -1658,31 +1658,60 @@ bool execCliLine(const String& line) {
                       (unsigned long)navirec::eventCount(), (unsigned long)navirec::clipDurationMs());
       else Serial.println("[REC] busy / empty");
     }
-    else if (sub.equalsIgnoreCase("SAVE"))  Serial.println(navirec::saveClip(name.c_str()) ? "[REC] saved" : "[REC] save failed (empty clip / bad name / no FS)");
+    else if (sub.equalsIgnoreCase("SAVE")) {
+      // No name → auto-name "rec_N", same as a blank-named Record trigger, so a
+      // take saved from the Clips panel / CLI is never silently lost either.
+      char autoName[16];
+      const char* nm = name.c_str();
+      if (!name.length()) { navirec::_autoClipName(autoName, sizeof(autoName)); nm = autoName; }
+      Serial.println(navirec::saveClip(nm) ? (String("[REC] saved clip '") + nm + "'").c_str()
+                                           : "[REC] save failed (see reason above)");
+    }
     else if (sub.equalsIgnoreCase("LOAD"))  Serial.println(navirec::loadClip(name.c_str()) ? "[REC] loaded" : "[REC] load failed (not found / no FS)");
     else if (sub.equalsIgnoreCase("LS"))    { Serial.println("[REC] clips:"); navirec::listClips(Serial); }
     else if (sub.equalsIgnoreCase("RM"))    Serial.println(navirec::deleteClip(name.c_str()) ? "[REC] deleted" : "[REC] delete failed");
     else if (sub.equalsIgnoreCase("RENAME")) {
       int c2 = name.indexOf(',');
-      if (c2 > 0) Serial.println(navirec::renameClip(name.substring(0, c2).c_str(), name.substring(c2 + 1).c_str())
-                                 ? "[REC] renamed" : "[REC] rename failed (exists / not found)");
+      if (c2 > 0) {
+        bool ok = navirec::renameClip(name.substring(0, c2).c_str(), name.substring(c2 + 1).c_str());
+        Serial.println(ok ? "[REC] renamed" : "[REC] rename failed (exists / not found)");
+        // Machine marker so the config tool only re-points its trigger-action
+        // references when the board ACTUALLY renamed the file.
+        Serial.printf("[CLIPUL:RENAME,%s]\n", ok ? "OK" : "ERR");
+      }
       else Serial.println("[REC] usage: ?REC,RENAME,<from>,<to>");
     }
     // ── Timeline editor transport (config-tool Phase 2) — see navicore_record.h
     //    "Phase 2: timeline editor transport" for the full protocol writeup.
     else if (sub.equalsIgnoreCase("EDITLOAD")) {
       if (!navirec::loadClip(name.c_str())) { Serial.printf("[REC] clip '%s' not found\n", name.c_str()); return true; }
-      navirec::editStream(Serial);
+      // Via-WCB (capture sink armed): every [CLIPDL:EV] line is an RTERM packet
+      // paced at 2 ms, and editStream runs in loop() — a dense capture would
+      // stall SBUS/WCB servicing for tens of seconds. Refuse big clips on the
+      // relayed path with a marker the config tool surfaces; USB streams at
+      // full speed with only a light yield.
+      const bool relayed = rcSerial.captureArmed();
+      if (relayed && navirec::eventCount() > 3000) {
+        Serial.printf("[CLIPDL:ERR]clip too large to edit over the WCB bridge (%lu events) — connect over USB\n",
+                      (unsigned long)navirec::eventCount());
+        return true;
+      }
+      navirec::editStream(Serial, relayed);
     }
     else if (sub.equalsIgnoreCase("EDITBEGIN")) {
       Serial.println(navirec::editBegin() ? "[CLIPUL:BEGIN,OK]" : "[CLIPUL:BEGIN,ERR,busy]");
     }
     else if (sub.equalsIgnoreCase("EDITEV")) {
-      // `name` here is the raw event JSON, not a clip name — the SUB/name comma
-      // split above only splits on the FIRST comma, so the JSON's own internal
-      // commas pass through untouched.
-      if (navirec::editAddEvent(name.c_str())) Serial.printf("[CLIPUL:ACK,%lu]\n", (unsigned long)navirec::eventCount());
-      else                                     Serial.println("[CLIPUL:NAK,bad event or not editing]");
+      // `name` here is "<idx>,<event json>" — the SUB/name comma split above
+      // only splits on the FIRST comma, so the JSON's own internal commas pass
+      // through untouched. The index makes the write IDEMPOTENT (a timeout-
+      // retry resend can't append a duplicate) and the ACK echoes it back so
+      // the tool can correlate a late/stale ACK with the right event.
+      int ci = name.indexOf(',');
+      if (ci > 0 && navirec::editAddEvent((uint32_t)name.substring(0, ci).toInt(), name.substring(ci + 1).c_str()))
+        Serial.printf("[CLIPUL:ACK,%s]\n", name.substring(0, ci).c_str());
+      else
+        Serial.println("[CLIPUL:NAK,bad event / bad index / not editing]");
     }
     else if (sub.equalsIgnoreCase("EDITEND")) {
       const char* err = navirec::editEnd(name.c_str());

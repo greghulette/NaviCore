@@ -67,6 +67,9 @@ class RcSerial : public Stream {
   // ── Capture control (driven by the remote-CLI drain in loop()) ───────────
   void armCapture(Print* sink) { _capCore = xPortGetCoreID(); _cap = sink; }
   void disarmCapture()         { _cap = nullptr; }
+  // True while a remote (WCB-relayed) command is running — lets long CLI output
+  // (e.g. ?REC,EDITLOAD) pick RTERM pacing vs full-speed USB.
+  bool captureArmed() const    { return _cap != nullptr; }
 
  private:
   Print* _cap     = nullptr;
