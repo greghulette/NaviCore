@@ -311,6 +311,18 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.11 (2026-07-01):** Knob passthrough editor (config-tool only): the **Maestro channel field is now a named
+  dropdown** (`_maestroChOptions` → `Ch1 · Dome Panel 1` etc. from the imported settings; plain `Ch0…Ch31` if
+  none), and **changing the channel (or target Maestro) auto-updates Pos min/max to that channel's imported
+  endpoints** (`_onKnobOutMaestroChange`: sync DOM → snap the output's limits → re-render). An unimported channel
+  leaves the limits untouched (no clobber). Fixes the reported issue where switching channels kept the old limits.
+- **v3.10 (2026-07-01):** Record window **30 s → 60 s** (firmware, needs reflash) + timeline smooth-drag default
+  **350 → 150 ms** (config tool). `REC_MAX_MS = 60000` and the PSRAM event buffer `recBegin` cap `8192 → 24000`.
+  `RecEvent = 136 B`, so 24000 ≈ 3.1 MB of the ~8 MB PSRAM (only ~1 MB was used before; ~6.7 MB free) — memory is
+  not the constraint. Hard ceiling is **32767 events** (the `_curveNext` replay index is `int16_t`), ≈ 80 s at a
+  dense ~400 keyframes/s down to several minutes when lighter; going past that just needs `_curveNext` widened to
+  `int32_t`. Bigger clips also mean slower timeline EDITLOAD downloads (one JSON line per event) and larger `.ncr`
+  files (12 MB clips partition ⇒ ~4 max-length clips).
 - **v3.9 (2026-07-01):** **Timeline live preview — servos follow the cursor** (firmware `?MAE` + config tool).
   New firmware CLI `?MAE,<slot>,<ch>,<pos>` (set target, ¼µs) and `?MAE,FREE,<slot>,<ch>` (speed=0/accel=0 for
   snappy tracking) in `execCliLine` → calls `maestroSetTarget`/`maestroSetSpeed`/`maestroSetAccel` directly; silent,

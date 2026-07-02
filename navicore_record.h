@@ -37,7 +37,7 @@ struct RecEvent {
 };
 
 static const uint16_t LASTPOS_NONE   = 0xFFFF;       // never-commanded sentinel
-static const uint32_t REC_MAX_MS     = 30000;        // 30 s capture cap (backstop)
+static const uint32_t REC_MAX_MS     = 60000;        // 60 s capture cap (backstop); buffer sized to match (see recBegin cap)
 
 // Callbacks into NaviCore.ino's (static) dispatch layer.
 typedef void (*DispatchActionFn)(const RcAction&);          // re-dispatch a captured action
@@ -92,7 +92,9 @@ inline EmitHcrVolFn     _cbEmitHcrVol  = nullptr;
 inline ResetChanFn      _cbResetChan   = nullptr;
 
 // ── Init (Core 1, setup() — BEFORE wcb->begin() so the recv callback can't hit
-//    a null queue). cap events ~150 B each → 8192 ≈ 1.2 MB PSRAM. ───────────────
+//    a null queue). RecEvent = 136 B, so cap 24000 ≈ 3.1 MB PSRAM (of ~8 MB;
+//    ~6.7 MB was free). Hard ceiling = 32767 (the _curveNext replay index is
+//    int16_t); beyond that, widen _curveNext to int32_t. ─────────────────────────
 inline void recBegin(uint32_t cap, DispatchActionFn d, EmitMaestroFn m,
                      EmitHcrVolFn v, ResetChanFn r) {
   _cap = cap;

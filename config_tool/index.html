@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">012335QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">020001QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2401,7 +2401,7 @@
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
                title="Dragging a servo keyframe also pulls its neighbours within this many ms, with a smooth falloff, so the motion stays smooth. Set 0 to move just the one point.">
           Smooth drag
-          <input type="number" id="tl-soft-radius" min="0" max="5000" step="50" value="350" style="width:62px">
+          <input type="number" id="tl-soft-radius" min="0" max="5000" step="50" value="150" style="width:62px">
           ms
         </label>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
@@ -4716,7 +4716,7 @@ let _tlNextId = 1;
 // neighbours by a smooth falloff of their time-distance, so you get a smooth
 // hump/warp instead of a single sharp spike.  Radius in ms; 0 = classic
 // single-point drag.  User-adjustable via the "Smooth drag" toolbar field.
-let _tlSoftRadius = 350;
+let _tlSoftRadius = 150;
 // While a keyframe drag is in flight we FREEZE the dragged track's value range
 // so the y-axis (and thus the cursor→value mapping) can't rescale mid-drag as
 // values change — otherwise the grabbed dot drifts out from under the cursor.
@@ -8291,7 +8291,8 @@ function renderKnobOutputFields(idx, o, fn) {
     `;
   }
   // KF_MAESTRO_PASSTHROUGH
-  const maeInfo = _maestroChInfo(+o.target || 1, o.maestroCh ?? 0);   // imported channel range/name, if any
+  const tgt = +o.target || 1;
+  const maeInfo = _maestroChInfo(tgt, o.maestroCh ?? 0);   // imported channel range/name, if any
   const maeHint = maeInfo
     ? `<div class="field-group"><label>&nbsp;</label><span style="font-size:10px;color:var(--accent2);align-self:center"
              title="From the imported Maestro settings for this channel.">${escH(maeInfo.name || 'servo')} · limit ${Math.round(maeInfo.min / 4)}–${Math.round(maeInfo.max / 4)}µs</span></div>`
@@ -8299,11 +8300,11 @@ function renderKnobOutputFields(idx, o, fn) {
   return `
     <div class="field-group">
       <label>Target Maestro</label>
-      <select id="kn-out-${idx}-target" style="min-width:220px">${maestroIdOptions(+o.target || 1)}</select>
+      <select id="kn-out-${idx}-target" style="min-width:220px" onchange="_onKnobOutMaestroChange(${idx})">${maestroIdOptions(tgt)}</select>
     </div>
     <div class="field-group">
       <label>Maestro ch</label>
-      <input type="number" id="kn-out-${idx}-ch" min="0" max="31" value="${o.maestroCh ?? 0}" style="width:60px">
+      <select id="kn-out-${idx}-ch" style="min-width:150px" onchange="_onKnobOutMaestroChange(${idx})">${_maestroChOptions(tgt, o.maestroCh ?? 0)}</select>
     </div>
     <div class="field-group">
       <label>Pos min (µs)</label>
@@ -8315,6 +8316,35 @@ function renderKnobOutputFields(idx, o, fn) {
     </div>
     ${maeHint}
   `;
+}
+
+// Channel dropdown (0-31) for a Maestro output, labelled with imported names
+// where available ("Ch1 · Dome Panel 1"), so you pick by name instead of a
+// numeric spinner.
+function _maestroChOptions(slot, selectedCh) {
+  const sel = +selectedCh || 0;
+  let html = '';
+  for (let ch = 0; ch <= 31; ch++) {
+    const info = _maestroChInfo(slot, ch);
+    const label = info && info.name ? `Ch${ch} · ${escH(info.name)}` : `Ch${ch}`;
+    html += `<option value="${ch}"${ch === sel ? ' selected' : ''}>${label}</option>`;
+  }
+  return html;
+}
+
+// Target-Maestro or channel changed in an output row → follow the imported
+// endpoints: capture the DOM, snap that output's Pos min/max to the new
+// channel's limits (if imported), then re-render (updates the limits, the
+// channel dropdown's names for the new Maestro, and the hint).
+function _onKnobOutMaestroChange(idx) {
+  if (!editingKnobDraft) return;
+  syncKnobOutputsFromDom();
+  const o = editingKnobDraft.outputs[idx];
+  if (o) {
+    const info = _maestroChInfo(o.target, o.maestroCh);
+    if (info) { o.posMin = info.min; o.posMax = info.max; }
+  }
+  renderKnobOutputs();
 }
 // Servo endpoints are entered in microseconds (standard 1000–2000, 1500 = centre)
 // but the Maestro's Set Target command — and therefore the stored config, the

@@ -2287,8 +2287,10 @@ void setup() {
 
   // Record/replay — alloc the PSRAM clip buffer + the cross-core capture queue
   // BEFORE the WCB receive callback (onCommand) is registered, so a remote
-  // ESP-NOW TRIGGER on Core 0 can't hit a null queue. ~8192 events ≈ 1.2 MB PSRAM.
-  navirec::recBegin(8192, recCbDispatch, recCbEmitMaestro, recCbEmitHcrVol, recCbResetChan);
+  // ESP-NOW TRIGGER on Core 0 can't hit a null queue. 24000 events (RecEvent=136 B)
+  // ≈ 3.1 MB PSRAM — sized for the 60 s REC_MAX_MS cap even with a few passthrough
+  // servos moving continuously (~400 keyframes/s worst case). ~6.7 MB PSRAM was free.
+  navirec::recBegin(24000, recCbDispatch, recCbEmitMaestro, recCbEmitHcrVol, recCbResetChan);
 
   // WCB Client — sets STA mode + custom MAC + inits ESP-NOW.
   // No WiFi AP or web server — ESP-NOW only.  Credentials come from NVS
