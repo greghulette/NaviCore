@@ -311,6 +311,15 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.15 (2026-07-02):** **Maestro channel names + endpoints moved into the DEVICE CONFIG** (firmware + tool;
+  reflash). Previously the timeline's channel names / guide-line limits came from `_maestroCh`, which was browser-
+  localStorage only and lost on any origin change. Now `config.maestros[i].channels[]` (`{ch,name,min,max}`) round-
+  trips to the NaviCore (LittleFS `/config.json`) and travels with config import/export; `_maestroCh` is just an
+  in-memory mirror the timeline still reads. Firmware: `RcMaestroChannel channels[32]` on each slot, sparse
+  serialize, full-replace-on-present deserialize (channel # via `containsKey` not `| -1` so channel 0 survives).
+  See the `project-navicore-maestro-channel-config` memory for the full write-up. Timeline behavior is unchanged —
+  it just reads names/limits that now persist on the board.
+
 - **v3.14 (2026-07-02):** **Photoshop/GIMP-style curve editing on maestro tracks** (config-tool only). A dense
   RECORDED track now draws as a **clean line** — no dot per raw sample; only **control points** (`kf.cp`,
   session-only, never uploaded) render as dots. Tracks with ≤24 keyframes on load (hand-built) are all control
@@ -327,6 +336,29 @@ as edited.
   explicit field mapping in `_tlFlattenEvents` (verified no leak). **"Curve detail" toolbar knob** (`_tlCurveSteps`,
   default 16, range 2–128): how many linear setpoints a handle-bent span is baked into — higher = smoother motion +
   a few more events, floored at one point per 20 ms (`_tlEnsureSpanDensity` step = `max(20, span/steps)`).
+  **Curve-editing UX fixes (same day):** (1) clicking a track now ALWAYS drops the new control point ON the line
+  (its interpolated value at that time), never at the clicked height — dots stay on the curve, then you drag them
+  (removed the old 8 px snap threshold). (2) `_tlRender` split into two passes — all row/lane BACKGROUNDS first,
+  then all interactive foreground (curve lines, dots + hit targets, tangent handles, action diamonds) — so a lower
+  lane's background can no longer paint over and swallow the clicks of an upper lane's curve handles (the reported
+  "handles go into another track and I can't grab them" bug). (3) `_tlRenderHandles` clamps each handle dot to its
+  own track's value band so it can't render into an adjacent lane. Actions-lane background stays a click-to-add
+  target, now in the background layer.
+  **Curve spike fix + overlay mode (same day):** (1) the handle-drag reshape no longer uses a cubic Hermite whose
+  edge slope came from a ±10 ms finite difference on the (noisy) captured curve — that overshot into a visible
+  spike near the reach edge. Replaced with: blend a straight tangent line (from the cp, aimed at the handle dot)
+  into each point's OWN original value via a smoothstep weight (1 at the cp → 0 with flat slope at the reach edge).
+  Fades into the original's own value+slope, so it can't kink or overshoot; also O(1) per point (no re-interp). (2)
+  **Overlay mode** (`_tlOverlay`, toolbar "Overlay"): draws all tracks stacked into ONE tall lane (`TL_OVERLAY_H`),
+  each a distinct color (`TL_TRACK_COLORS`) on a SHARED µs scale (union of maestro ranges; HCR keeps 0–99), with a
+  gutter legend (swatch + name + ✕). `_tlValueToY`/`_tlYToValue` read lane height from `_tlLaneH()` so render and
+  the live drag handlers stay consistent. `_tlRender` branches overlay vs the normal per-lane view; the per-track
+  foreground was extracted into a local `drawFg(track,lo,hi,rowTop,color)` shared by both. Clicking the shared lane
+  adds to the nearest curve (`_tlOnOverlayBgClick`). Dots/handles/drag/easing all work per-track in overlay.
+  **Overlay focus (same day):** click a legend entry to FOCUS a track (`_tlClip.activeTrack = "kind:key"`): it's
+  emphasized (thicker line, drawn LAST so its dots stay grabbable), the others fade to 0.3, and new points +
+  interactions route to it (`_tlOnOverlayBgClick` prefers the focused track over nearest) — the fix for editing
+  tracks that trace the same path. Grabbing a dot also focuses its track; click the legend entry again to unfocus.
 - **v3.13 (2026-07-02):** Overnight adversarial review sweep (30 findings raised, ~17 confirmed, all fixed;
   firmware + tool ship together — reflash required).
   **Protocol change — indexed idempotent EDITEV:** `?REC,EDITEV,<idx>,<json>`; the board writes AT the index

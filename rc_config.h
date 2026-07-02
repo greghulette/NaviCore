@@ -332,10 +332,24 @@ struct RcWcbNetwork {
 //  command.
 // ─────────────────────────────────────────────────────────────────────────────
 #define RC_NUM_MAESTROS 8
+#define RC_MAESTRO_CHANNELS 32   // Pololu Maestro max channels (Mini Maestro ≤24, Micro 6)
+
+// Per-channel metadata IMPORTED from a Maestro Control Center settings file
+// (the servo name + its min/max travel endpoints). The firmware does NOT act on
+// this — it's carried in the config purely so the tool's channel names and
+// passthrough limits persist ON the device and ride along with config import/
+// export, instead of living only in browser localStorage. All-zero (name "",
+// endpoints 0/0) = unset, and is skipped when serializing (sparse).
+struct RcMaestroChannel {
+  char     name[24];   // servo name ("" = unset)
+  uint16_t minPos;     // ¼µs endpoint (0 = unset)
+  uint16_t maxPos;     // ¼µs endpoint (0 = unset)
+};
 
 struct RcMaestroSlot {
   uint8_t type;       // 0 disabled · 1 local (Serial2) · 2 remote (broadcast)
   uint8_t device;     // 0-127, Pololu protocol device # (no compact support)
+  RcMaestroChannel channels[RC_MAESTRO_CHANNELS];   // imported per-channel names/endpoints (tool metadata)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -891,6 +905,19 @@ String rcConfigToJSON() {
     JsonObject mObj = maeArr.createNestedObject();
     mObj["type"]   = rcConfig.maestros[i].type;        // 0 disabled / 1 local / 2 remote
     mObj["device"] = rcConfig.maestros[i].device;      // 0-127 protocol, 255 compact
+    // Imported per-channel names/endpoints — SPARSE: only channels the tool
+    // actually set are emitted; an absent "channels" key = none for this slot.
+    JsonArray chArr;
+    for (int c = 0; c < RC_MAESTRO_CHANNELS; c++) {
+      const RcMaestroChannel& mc = rcConfig.maestros[i].channels[c];
+      if (mc.name[0] == '\0' && mc.minPos == 0 && mc.maxPos == 0) continue;
+      if (chArr.isNull()) chArr = mObj.createNestedArray("channels");
+      JsonObject cObj = chArr.createNestedObject();
+      cObj["ch"]   = c;
+      cObj["name"] = mc.name;      // ArduinoJson copies the C-string into the doc
+      cObj["min"]  = mc.minPos;
+      cObj["max"]  = mc.maxPos;
+    }
   }
 
   // WCB network credentials — required for ESP-NOW peer setup.
@@ -1046,6 +1073,23 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       // falsy value, and JSON 0 is falsy — so a legal Pololu device #0 would be
       // silently rewritten to 1+i. Preserve an explicit 0.
       rcConfig.maestros[i].device = mObj.containsKey("device") ? (uint8_t)mObj["device"].as<int>() : (uint8_t)(1 + i);
+      // Per-channel metadata: FULL-REPLACE this slot's channels, but only when
+      // the "channels" key is present — so an older tool that omits the field
+      // can't wipe the names/endpoints already stored on the device.
+      if (mObj.containsKey("channels")) {
+        memset(rcConfig.maestros[i].channels, 0, sizeof(rcConfig.maestros[i].channels));
+        for (JsonObject cObj : mObj["channels"].as<JsonArray>()) {
+          // Presence check, not '|': JSON 0 is falsy to ArduinoJson's '|', which
+          // would drop channel 0 (a legal, common channel — e.g. the first servo).
+          if (!cObj.containsKey("ch")) continue;
+          int c = cObj["ch"].as<int>();
+          if (c < 0 || c >= RC_MAESTRO_CHANNELS) continue;
+          RcMaestroChannel& mc = rcConfig.maestros[i].channels[c];
+          strlcpy(mc.name, cObj["name"] | "", sizeof(mc.name));
+          mc.minPos = (uint16_t)(cObj["min"] | 0);
+          mc.maxPos = (uint16_t)(cObj["max"] | 0);
+        }
+      }
       i++;
     }
   }

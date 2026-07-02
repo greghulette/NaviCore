@@ -2234,7 +2234,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">021401QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">021516QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2410,6 +2410,11 @@
           All points
         </label>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
+               title="Overlay all tracks into one lane, each a different color on a shared µs scale, so you can line servo curves up against each other. Dots, handles and add/drag all still work per-track.">
+          <input type="checkbox" id="tl-overlay">
+          Overlay
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
                title="How many linear setpoints a curved (handle-bent) span is baked into. The board only moves in straight lines between points, so higher = smoother motion and a few more events per bend. Floored at one point per 20 ms.">
           Curve detail
           <input type="number" id="tl-curve-steps" min="2" max="128" step="1" value="16" style="width:56px">
@@ -2433,7 +2438,10 @@
         dot to delete it (or Delete/Backspace, or 🗑) · “All points” shows the raw captured dots · drag an action
         diamond to move it in time, click to edit, right-click to delete · Shift-click two control points (no
         other control point between) for an easing pair · drag the yellow handle to scrub · red ✕ deletes a whole
-        track · Ctrl+scroll zooms at the pointer, ⤢ Fit fits.
+        track · Ctrl+scroll zooms at the pointer, ⤢ Fit fits · <b>Overlay</b> stacks every track into one lane in
+        different colors on a shared µs scale to line curves up (dots/handles/add all still work) — <b>click a track
+        name on the left to focus it</b>: it's highlighted, the rest fade, and new points go to it (great when
+        tracks overlap); click it again to unfocus.
       </div>
     </div>
   </div>
@@ -3318,7 +3326,7 @@ let config = {
   // labels stay easy to remember; the user can change them to match whatever
   // is set in Maestro Control Center.
   maestros:      Array.from({ length: NUM_MAESTRO_SLOTS },
-                            (_, i) => ({ type: 0, device: 1 + i })),
+                            (_, i) => ({ type: 0, device: 1 + i, channels: [] })),
   // WCB network credentials — populated from device's wcb_config.h on first
   // GET_CONFIG; user edits via the WCB Network sidebar section. Changes need
   // a reboot to take effect (WCBClient initialises once in setup()).
@@ -4789,6 +4797,12 @@ let _tlShowAllPoints = false;
 // events; floored at one point per 20 ms (the Maestro servo frame) so tiny
 // spans don't over-subdivide. User-adjustable via the "Curve detail" field.
 let _tlCurveSteps = 16;
+// Overlay mode: draw ALL tracks stacked into ONE tall lane, each a distinct
+// color on a SHARED µs scale, so servo curves can be lined up against each
+// other. Off = the normal one-lane-per-track view. Toggled from the toolbar.
+let _tlOverlay = false;
+const TL_OVERLAY_H = 260;
+const TL_TRACK_COLORS = ['#4da3ff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8', '#ff922b', '#22b8cf', '#f783ac', '#a9e34b', '#ffa94d'];
 // While a keyframe drag is in flight we FREEZE the dragged track's value range
 // so the y-axis (and thus the cursor→value mapping) can't rescale mid-drag as
 // values change — otherwise the grabbed dot drifts out from under the cursor.
@@ -5001,12 +5015,18 @@ function _tlSvgEl(tag, attrs) {
 
 function _tlTimeToX(t) { return TL_LEFT + t * _tlClip.pxPerMs; }
 function _tlXToTime(x) { return Math.max(0, Math.round((x - TL_LEFT) / _tlClip.pxPerMs)); }
+// Lane height is TL_ROW_H per-track normally, or the tall shared lane in overlay
+// mode. Read from the global flag so every value↔Y site (render AND the live
+// drag handlers) stays consistent without threading a height through each call.
+function _tlLaneH() { return _tlOverlay ? TL_OVERLAY_H : TL_ROW_H; }
 function _tlValueToY(v, lo, hi, rowTop) {
+  const H = _tlLaneH();
   const frac = hi > lo ? (v - lo) / (hi - lo) : 0.5;
-  return rowTop + TL_ROW_H - 6 - frac * (TL_ROW_H - 12);
+  return rowTop + H - 6 - frac * (H - 12);
 }
 function _tlYToValue(y, lo, hi, rowTop) {
-  const frac = (rowTop + TL_ROW_H - 6 - y) / (TL_ROW_H - 12);
+  const H = _tlLaneH();
+  const frac = (rowTop + H - 6 - y) / (H - 12);
   return lo + frac * (hi - lo);
 }
 
@@ -5074,7 +5094,7 @@ function _tlRender() {
   if (!clip || !svg) return;
   const tracks = _tlTrackList();
   const width  = TL_LEFT + Math.max(1, clip.durationMs) * clip.pxPerMs + TL_RIGHT_PAD;
-  const height = TL_RULER_H + tracks.length * TL_ROW_H + TL_ACTION_ROW_H;
+  const height = TL_RULER_H + ((_tlOverlay && tracks.length) ? TL_OVERLAY_H : tracks.length * TL_ROW_H) + TL_ACTION_ROW_H;
   svg.setAttribute('width', width);
   svg.setAttribute('height', height);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
@@ -5091,6 +5111,100 @@ function _tlRender() {
     svg.appendChild(label);
   }
 
+  const overlay = _tlOverlay && tracks.length > 0;
+  const laneArea = overlay ? TL_OVERLAY_H : tracks.length * TL_ROW_H;
+
+  // Overlay mode shares ONE µs scale across all maestro tracks so equal servo
+  // positions sit at equal heights (HCR keeps its own 0–99 scale).
+  let uLo = Infinity, uHi = -Infinity;
+  if (overlay) {
+    tracks.forEach(t => { if (t.kind === 'maestro') { const [l, h] = _tlTrackRange(t); uLo = Math.min(uLo, l); uHi = Math.max(uHi, h); } });
+    if (!(uHi > uLo)) { uLo = 1000; uHi = 2000; }
+  }
+  const trackLoHi = track => overlay ? (track.kind === 'maestro' ? [uLo, uHi] : [0, 99]) : _tlTrackRange(track);
+
+  // Draw one track's interactive foreground (curve line, control-point dots +
+  // hit targets, tangent handles). `color` tints the line/dots — each overlaid
+  // track gets its own; the normal per-lane view uses the accent.
+  const drawFg = (track, lo, hi, rowTop, color, emph) => {
+    const dim = emph === 'dim';           // a non-focused overlay track → faded
+    const lineW = emph === 'active' ? 2.6 : 1.5;
+    const kfs = track.kind === 'maestro' ? (clip.maestro[track.key] || []) : (clip.hcr[track.key] || []);
+    const valueOf = kf => track.kind === 'maestro' ? kf.pos / 4 : kf.vol;
+    if (kfs.length > 1) {
+      const pts = kfs.map(kf => `${_tlTimeToX(kf.t)},${_tlValueToY(valueOf(kf), lo, hi, rowTop)}`).join(' ');
+      const line = _tlSvgEl('polyline', { points: pts, fill: 'none', stroke: color, 'stroke-width': lineW, opacity: dim ? 0.3 : 1 });
+      line.style.pointerEvents = 'none';
+      svg.appendChild(line);
+    }
+    kfs.forEach(kf => {
+      if (track.kind === 'maestro' && !kf.cp && !_tlShowAllPoints) return;
+      const x = _tlTimeToX(kf.t), y = _tlValueToY(valueOf(kf), lo, hi, rowTop);
+      const isSel = clip.selected && clip.selected.kind === track.kind && clip.selected.key === track.key && clip.selected.id === kf.id;
+      const isPair = clip.selectedPair && clip.selectedPair.some(p => p.kind === track.kind && p.key === track.key && p.id === kf.id);
+      const isRaw = track.kind === 'maestro' && !kf.cp;
+      const dot = _tlSvgEl('circle', {
+        cx: x, cy: y, r: (isSel || isPair) ? 6 : (isRaw ? 2.5 : 5),
+        fill: isSel ? 'var(--red)' : isPair ? 'var(--yellow)' : color,
+        stroke: isRaw ? 'none' : '#fff', 'stroke-width': 1, opacity: (dim ? 0.4 : 1) * (isRaw ? 0.55 : 1),
+      });
+      dot.style.pointerEvents = 'none';
+      svg.appendChild(dot);
+      const hit = _tlSvgEl('circle', { cx: x, cy: y, r: isRaw ? 6 : 11, fill: 'transparent' });
+      hit.style.cursor = 'grab';
+      hit.addEventListener('pointerdown', ev => _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop));
+      hit.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); _tlDeleteKeyframe(track, kf); });
+      svg.appendChild(hit);
+    });
+    if (clip.selected && clip.selected.kind === 'maestro' && clip.selected.key === track.key) {
+      const selKf = kfs.find(k => k.id === clip.selected.id);
+      if (selKf && selKf.cp) _tlRenderHandles(svg, track, kfs, selKf, lo, hi, rowTop);
+    }
+  };
+
+  // ── PASS 1: backgrounds + gutter chrome (behind everything interactive) ────
+  if (overlay) {
+    const rowTop = TL_RULER_H;
+    const bg = _tlSvgEl('rect', { x: TL_LEFT, y: rowTop, width: width - TL_LEFT, height: TL_OVERLAY_H, fill: 'var(--hover-2)' });
+    bg.style.cursor = 'copy';
+    bg.addEventListener('click', ev => _tlOnOverlayBgClick(ev, tracks, trackLoHi, rowTop));
+    svg.appendChild(bg);
+    const rangeLbl = _tlSvgEl('text', { x: width - 6, y: rowTop + 12, 'font-size': 9, fill: 'var(--muted)', 'text-anchor': 'end' });
+    rangeLbl.textContent = `shared ${Math.round(uLo)}–${Math.round(uHi)}µs`;
+    svg.appendChild(rangeLbl);
+    // Legend: colored swatch + name + ✕ for each track, stacked in the gutter.
+    // Click an entry to FOCUS that track — it's emphasized, the others fade, and
+    // new points / the readout go to it. Essential when several tracks trace the
+    // same path and you need to work one specifically.
+    tracks.forEach((track, i) => {
+      const ly = rowTop + 14 + i * 15;
+      const color = TL_TRACK_COLORS[i % TL_TRACK_COLORS.length];
+      const id = `${track.kind}:${track.key}`;
+      const isActive = _tlClip.activeTrack === id;
+      if (isActive) svg.appendChild(_tlSvgEl('rect', { x: 4, y: ly - 8, width: TL_LEFT - 8, height: 15, rx: 3, fill: color, opacity: 0.18 }));
+      const swatch = _tlSvgEl('line', { x1: 24, y1: ly, x2: 40, y2: ly, stroke: color, 'stroke-width': isActive ? 4 : 3 });
+      swatch.style.pointerEvents = 'none';
+      svg.appendChild(swatch);
+      const nm = _tlSvgEl('text', { x: 45, y: ly + 3, 'font-size': 10, fill: isActive ? 'var(--text)' : 'var(--muted)', 'font-weight': isActive ? '700' : '400' });
+      nm.textContent = track.label;
+      const nmT = _tlSvgEl('title'); nmT.textContent = track.label; nm.appendChild(nmT);
+      nm.style.pointerEvents = 'none';
+      svg.appendChild(nm);
+      const nmMaxW = TL_LEFT - 45 - 4;
+      if (nm.getComputedTextLength() > nmMaxW) { let s = track.label; while (s.length > 1 && nm.getComputedTextLength() > nmMaxW) { s = s.slice(0, -1); nm.firstChild.textContent = s + '…'; } }
+      // Transparent hit rect over the whole entry (above swatch/name) toggles
+      // focus; the ✕ sits ON TOP of it so its own click deletes the track.
+      const hit = _tlSvgEl('rect', { x: 4, y: ly - 8, width: TL_LEFT - 8, height: 15, fill: 'transparent' });
+      hit.style.cursor = 'pointer';
+      const hitT = _tlSvgEl('title'); hitT.textContent = 'Click to focus this track (highlight it; new points and the readout go here)'; hit.appendChild(hitT);
+      hit.addEventListener('click', () => { _tlClip.activeTrack = isActive ? null : id; _tlRender(); });
+      svg.appendChild(hit);
+      const del = _tlSvgEl('text', { x: 10, y: ly + 3, 'font-size': 11, fill: 'var(--red)' });
+      del.textContent = '✕'; del.style.cursor = 'pointer'; del.style.userSelect = 'none';
+      del.addEventListener('click', ev => { ev.stopPropagation(); _tlDeleteTrack(track); });
+      svg.appendChild(del);
+    });
+  } else {
   tracks.forEach((track, i) => {
     const rowTop = TL_RULER_H + i * TL_ROW_H;
     const [lo, hi] = _tlTrackRange(track);
@@ -5133,58 +5247,50 @@ function _tlRender() {
                          : cr ? `limit ${Math.round(cr.minUs)}–${Math.round(cr.maxUs)}µs`
                          : `${Math.round(lo)}–${Math.round(hi)}µs`;
     svg.appendChild(rangeLbl);
+  });
+  }
 
-    const kfs = track.kind === 'maestro' ? (clip.maestro[track.key] || []) : (clip.hcr[track.key] || []);
-    const valueOf = kf => track.kind === 'maestro' ? kf.pos / 4 : kf.vol;
-    if (kfs.length > 1) {
-      const pts = kfs.map(kf => `${_tlTimeToX(kf.t)},${_tlValueToY(valueOf(kf), lo, hi, rowTop)}`).join(' ');
-      const line = _tlSvgEl('polyline', { points: pts, fill: 'none', stroke: 'var(--accent2)', 'stroke-width': 1.5 });
-      line.style.pointerEvents = 'none';   // clicks exactly ON the line fall through to the row bg (add-a-point)
-      svg.appendChild(line);
-    }
-    kfs.forEach(kf => {
-      // Clean-line rendering: on a maestro track only CONTROL POINTS get dots —
-      // the dense raw capture is just the line. ("All points" reveals raw dots.)
-      if (track.kind === 'maestro' && !kf.cp && !_tlShowAllPoints) return;
-      const x = _tlTimeToX(kf.t), y = _tlValueToY(valueOf(kf), lo, hi, rowTop);
-      const isSel = clip.selected && clip.selected.kind === track.kind && clip.selected.key === track.key && clip.selected.id === kf.id;
-      const isPair = clip.selectedPair && clip.selectedPair.some(p => p.kind === track.kind && p.key === track.key && p.id === kf.id);
-      // Visible dot is display-only; a larger transparent circle on top carries
-      // the pointer events so the dot is easy to grab/select/delete (the small
-      // visible radius made it easy to miss and accidentally add a new point).
-      const isRaw = track.kind === 'maestro' && !kf.cp;   // raw sample shown via "All points"
-      const dot = _tlSvgEl('circle', {
-        cx: x, cy: y, r: (isSel || isPair) ? 6 : (isRaw ? 2.5 : 5),
-        fill: isSel ? 'var(--red)' : isPair ? 'var(--yellow)' : 'var(--accent2)',
-        stroke: isRaw ? 'none' : '#fff', 'stroke-width': 1, opacity: isRaw ? 0.55 : 1,
-      });
-      dot.style.pointerEvents = 'none';
-      svg.appendChild(dot);
-      const hit = _tlSvgEl('circle', { cx: x, cy: y, r: isRaw ? 6 : 11, fill: 'transparent' });
-      hit.style.cursor = 'grab';
-      hit.addEventListener('pointerdown', ev => _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop));
-      hit.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); _tlDeleteKeyframe(track, kf); });
-      svg.appendChild(hit);
+  // Actions-lane label + background (click a blank spot to add an action here).
+  // Emitted in the BACKGROUND layer, before the interactive foreground below.
+  const actionsTop = TL_RULER_H + laneArea;
+  {
+    const aLbl = _tlSvgEl('text', { x: 8, y: actionsTop + TL_ACTION_ROW_H / 2 + 4, 'font-size': 11, fill: 'var(--text)' });
+    aLbl.textContent = 'Actions';
+    svg.appendChild(aLbl);
+    const aBg = _tlSvgEl('rect', { x: TL_LEFT, y: actionsTop, width: width - TL_LEFT, height: TL_ACTION_ROW_H, fill: 'var(--hover-2)' });
+    aBg.style.cursor = 'copy';
+    aBg.addEventListener('click', ev => {
+      const rect = svg.getBoundingClientRect();
+      _tlOpenActionEditor(null, _tlXToTime(ev.clientX - rect.left));
     });
-    // Tangent handles for the selected maestro control point (Photoshop-style:
-    // select a dot → its handle arms appear; drag a handle to bend the curve).
-    if (clip.selected && clip.selected.kind === 'maestro' && clip.selected.key === track.key) {
-      const selKf = kfs.find(k => k.id === clip.selected.id);
-      if (selKf && selKf.cp) _tlRenderHandles(svg, track, kfs, selKf, lo, hi, rowTop);
-    }
-  });
+    svg.appendChild(aBg);
+  }
 
-  const actionsTop = TL_RULER_H + tracks.length * TL_ROW_H;
-  const aLbl = _tlSvgEl('text', { x: 8, y: actionsTop + TL_ACTION_ROW_H / 2 + 4, 'font-size': 11, fill: 'var(--text)' });
-  aLbl.textContent = 'Actions';
-  svg.appendChild(aLbl);
-  const aBg = _tlSvgEl('rect', { x: TL_LEFT, y: actionsTop, width: width - TL_LEFT, height: TL_ACTION_ROW_H, fill: 'var(--hover-2)' });
-  aBg.style.cursor = 'copy';
-  aBg.addEventListener('click', ev => {
-    const rect = svg.getBoundingClientRect();
-    _tlOpenActionEditor(null, _tlXToTime(ev.clientX - rect.left));
-  });
-  svg.appendChild(aBg);
+  // ── PASS 2: interactive foreground (curve lines, dots + hit targets, tangent
+  // handles), drawn OVER every background so a lower lane's row background can't
+  // paint over — and swallow the clicks of — an upper lane's curve handles.
+  if (overlay) {
+    const activeId = _tlClip.activeTrack;
+    const anyActive = activeId && tracks.some(t => `${t.kind}:${t.key}` === activeId);
+    // Draw the focused track LAST so its line + dots sit on top and stay
+    // grabbable even where several tracks trace the same path; the rest fade.
+    tracks.map((t, i) => ({ t, i }))
+      .sort((a, b) => ((anyActive && `${a.t.kind}:${a.t.key}` === activeId) ? 1 : 0)
+                    - ((anyActive && `${b.t.kind}:${b.t.key}` === activeId) ? 1 : 0))
+      .forEach(({ t: track, i }) => {
+        const [lo, hi] = trackLoHi(track);
+        const isActive = anyActive && `${track.kind}:${track.key}` === activeId;
+        const emph = !anyActive ? 'normal' : (isActive ? 'active' : 'dim');
+        drawFg(track, lo, hi, TL_RULER_H, TL_TRACK_COLORS[i % TL_TRACK_COLORS.length], emph);
+      });
+  } else {
+    tracks.forEach((track, i) => {
+      const rowTop = TL_RULER_H + i * TL_ROW_H;
+      const [lo, hi] = _tlTrackRange(track);
+      drawFg(track, lo, hi, rowTop, 'var(--accent2)');
+    });
+  }
+
   clip.actions.forEach(a => {
     const x = _tlTimeToX(a.t), y = actionsTop + TL_ACTION_ROW_H / 2;
     const isSel = clip.selected && clip.selected.kind === 'action' && clip.selected.id === a.id;
@@ -5223,22 +5329,46 @@ function _tlRender() {
 }
 
 // ── Interactions ─────────────────────────────────────────────────────────────
+// Overlay mode: a click on the shared lane adds a control point to the FOCUSED
+// track (clicked in the legend), if any — that's how you disambiguate when
+// several tracks trace the same path. With no focus, it falls back to whichever
+// track's curve is nearest the click. Delegates to _tlOnTrackClick (snaps on).
+function _tlOnOverlayBgClick(ev, tracks, trackLoHi, rowTop) {
+  const rect = document.getElementById('tl-svg').getBoundingClientRect();
+  const t = _tlXToTime(ev.clientX - rect.left);
+  const clickY = ev.clientY - rect.top;
+  let best = null;
+  if (_tlClip.activeTrack) best = tracks.find(tr => `${tr.kind}:${tr.key}` === _tlClip.activeTrack) || null;
+  if (!best) {
+    let bestDist = Infinity;
+    tracks.forEach(track => {
+      const arr = track.kind === 'maestro' ? _tlClip.maestro[track.key] : _tlClip.hcr[track.key];
+      if (!arr || !arr.length) return;
+      const [lo, hi] = trackLoHi(track);
+      const valueOf = track.kind === 'maestro' ? (k => k.pos / 4) : (k => k.vol);
+      const v = _tlInterpolateAt(arr, valueOf, t);
+      if (v == null) return;
+      const dy = Math.abs(clickY - _tlValueToY(v, lo, hi, rowTop));
+      if (dy < bestDist) { bestDist = dy; best = track; }
+    });
+  }
+  if (!best) best = tracks[0];
+  if (!best) return;
+  const [lo, hi] = trackLoHi(best);
+  _tlOnTrackClick(ev, best, rowTop, lo, hi);
+}
 function _tlOnTrackClick(ev, track, rowTop, lo, hi) {
   const rect = document.getElementById('tl-svg').getBoundingClientRect();
   const t = _tlXToTime(ev.clientX - rect.left);
   const clickY = ev.clientY - rect.top;
-  let v = _tlYToValue(clickY, lo, hi, rowTop);
   const map = track.kind === 'maestro' ? _tlClip.maestro : _tlClip.hcr;
   const arr = map[track.key] || (map[track.key] = []);
-  // Snap-to-line: when inserting BETWEEN existing keyframes and the click lands
-  // near the current curve, drop the new point exactly ON the line so it doesn't
-  // kink the motion — you're adding a control point, then drag it (smoothly) to
-  // shape it. A deliberate click well off the line still places where you clicked.
-  if (arr.length >= 2 && t > arr[0].t && t < arr[arr.length - 1].t) {
-    const valueOf = track.kind === 'maestro' ? (k => k.pos / 4) : (k => k.vol);
-    const lineV = _tlInterpolateAt(arr, valueOf, t);
-    if (lineV != null && Math.abs(clickY - _tlValueToY(lineV, lo, hi, rowTop)) <= 8) v = lineV;   // "aimed at the line" → snap on
-  }
+  const valueOf = track.kind === 'maestro' ? (k => k.pos / 4) : (k => k.vol);
+  // Always drop the new control point ON the existing line (its value at that
+  // time), never at the height you happened to click — so dots stay on the curve
+  // and their tangent handles stay inside the track lane. You then DRAG the dot
+  // to move it. (An empty track has no line yet, so use the click height there.)
+  const v = arr.length ? _tlInterpolateAt(arr, valueOf, t) : _tlYToValue(clickY, lo, hi, rowTop);
   const kf = { id: _tlId(), t: Math.max(0, t), cp: true };   // user-added → always a control point
   if (track.kind === 'maestro') kf.pos = Math.round(_tlClampUs(track, v) * 4);   // clamp to imported endpoints if any
   else kf.vol = Math.max(0, Math.min(99, Math.round(v)));
@@ -5317,7 +5447,10 @@ function _tlRenderHandles(svg, track, kfs, kf, lo, hi, rowTop) {
   const cx = _tlTimeToX(kf.t), cy = _tlValueToY(v0, lo, hi, rowTop);
   [['L', kf.hL, -1], ['R', kf.hR, +1]].forEach(([side, h, sign]) => {
     const hx = _tlTimeToX(kf.t + sign * h.dt);
-    const hy = _tlValueToY(v0 + h.dv, lo, hi, rowTop);
+    // Clamp the handle dot to this track's own value band so it can never render
+    // into an adjacent lane (where it'd be un-grabbable). The drag already caps
+    // dv to [lo,hi]; this also tames the on-load default tangent.
+    const hy = _tlValueToY(Math.max(lo, Math.min(hi, v0 + h.dv)), lo, hi, rowTop);
     svg.appendChild(_tlSvgEl('line', { x1: cx, y1: cy, x2: hx, y2: hy, stroke: 'var(--yellow)', 'stroke-width': 1, opacity: 0.9 }));
     const hd = _tlSvgEl('circle', { cx: hx, cy: hy, r: 4, fill: 'var(--yellow)', stroke: '#000', 'stroke-width': 0.5 });
     hd.style.pointerEvents = 'none';
@@ -5370,11 +5503,6 @@ function _tlStartDragHandle(ev, track, kf, side, lo, hi, rowTop) {
   // move recomputes from this baseline, and shrinking the reach mid-drag
   // restores the outer region from it.
   const origins = arr.map(k => ({ k, t0: k.t, p0: k.pos }));
-  const snapArr = origins.map(o => ({ t: o.t0, pos: o.p0 }));   // built ONCE — snapVal runs 3×/move
-  const snapVal = t => {                          // µs at time t on the pre-drag curve
-    const q = _tlInterpolateAt(snapArr, s => s.pos, t);
-    return q == null ? kf.pos / 4 : q / 4;
-  };
   const v0 = kf.pos / 4;
   _tlFrozenRange = { kind: track.kind, key: track.key, lo, hi };
   let ended = false;
@@ -5395,31 +5523,24 @@ function _tlStartDragHandle(ev, track, kf, side, lo, hi, rowTop) {
       const vCur = _tlYToValue(mv.clientY - rect.top, lo, hi, rowTop);
       const h = side === 'R' ? kf.hR : kf.hL;
       h.dt = Math.max(20, Math.min(maxDt, sign * (tCur - kf.t)));   // horizontal reach (this side only)
-      h.dv = Math.max(lo - v0, Math.min(hi - v0, vCur - v0));       // vertical offset (slope)
-      // Cubic Hermite from the control point to the reach edge: slope at the
-      // point comes from the handle, slope at the edge matches the original
-      // curve so the reshape blends in with no kink.
-      const tE = kf.t + sign * h.dt;
-      const vE = snapVal(tE);
-      const mE = (snapVal(tE + 10) - snapVal(tE - 10)) / 20;        // µs/ms on the snapshot
-      // Pen-tool tangent relation: a cubic Bézier's derivative at an anchor is
-      // 3 × (handle − anchor) — the ×3 is what makes pulling a handle visibly
-      // BOW the curve (raw slope alone gives a barely-perceptible bump).
-      const m0 = 3 * sign * h.dv / h.dt;
-      const span = sign * (tE - kf.t);                              // = h.dt (positive)
+      h.dv = Math.max(lo - v0, Math.min(hi - v0, vCur - v0));       // vertical offset
+      const span  = h.dt;                     // reach on this side (ms, positive)
+      const slope = h.dv / h.dt;              // µs per ms of d — the curve leaves the cp aiming at the handle dot
       origins.forEach(o => {
-        if (o.k.id === kf.id) return;
-        const d = sign * (o.t0 - kf.t);                             // distance into this side, in ms
-        if (d <= 0) return;                                         // other side — untouched
-        if (d >= span) {
-          if (d <= maxDt) o.k.pos = o.p0;                           // outside current reach — restore
-          return;
-        }
+        if (o.k.id === kf.id) return;         // never move the dragged control point
+        const d = sign * (o.t0 - kf.t);       // ms into this side
+        if (d <= 0) return;                   // other side — untouched
+        if (d >= span) { if (d <= maxDt) o.k.pos = o.p0; return; }  // beyond reach — restore original
         const s = d / span;
-        const h00 = 2*s*s*s - 3*s*s + 1, h10 = s*s*s - 2*s*s + s;
-        const h01 = -2*s*s*s + 3*s*s,    h11 = s*s*s - s*s;
-        // Hermite in µs over the [point → edge] direction; time scale = span·sign
-        const val = h00 * v0 + h10 * (span * sign) * m0 + h01 * vE + h11 * (span * sign) * mE;
+        // Blend a straight tangent line (from the cp, aimed at the handle dot)
+        // back into each point's ORIGINAL captured value, weighted by a
+        // smoothstep that is 1 at the cp and 0 (with flat slope) at the reach
+        // edge. Because it fades into the original's OWN value+slope, it can't
+        // kink or overshoot — no fragile finite-difference edge slope, which
+        // was the cause of the spike near the edge on noisy recorded tracks.
+        const line = v0 + slope * d;
+        const w = 1 - (3 * s * s - 2 * s * s * s);   // 1 - smoothstep(s)
+        const val = w * line + (1 - w) * (o.p0 / 4);
         o.k.pos = Math.round(_tlClampUs(track, val) * 4);
       });
       _tlClip.dirty = true;
@@ -5434,6 +5555,7 @@ function _tlStartDragHandle(ev, track, kf, side, lo, hi, rowTop) {
 function _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop) {
   ev.preventDefault(); ev.stopPropagation();
   _tlClip.selected = { kind: track.kind, key: track.key, id: kf.id };
+  _tlClip.activeTrack = `${track.kind}:${track.key}`;   // grabbing a dot also focuses its track (overlay emphasis)
   // NOTE: do NOT clear selectedPair here — a shift-click to pick the 2nd keyframe
   // of an easing pair also enters this handler, and wiping the pair up-front would
   // make it impossible to ever hold two. The pair is cleared instead on a real
@@ -5945,6 +6067,10 @@ document.getElementById('tl-show-points').addEventListener('change', e => {
   _tlShowAllPoints = !!e.target.checked;
   if (_tlClip) _tlRender();
 });
+document.getElementById('tl-overlay').addEventListener('change', e => {
+  _tlOverlay = !!e.target.checked;
+  if (_tlClip) _tlRender();
+});
 document.getElementById('tl-curve-steps').addEventListener('input', e => {
   _tlCurveSteps = Math.max(2, Math.min(128, Math.round(+e.target.value || 16)));
 });
@@ -6440,9 +6566,13 @@ function applyConfig(data) {
     // Pad / truncate to NUM_MAESTRO_SLOTS so the array length is stable
     config.maestros = data.maestros.slice(0, NUM_MAESTRO_SLOTS);
     while (config.maestros.length < NUM_MAESTRO_SLOTS) {
-      config.maestros.push({ type: 0, device: 1 + config.maestros.length });
+      config.maestros.push({ type: 0, device: 1 + config.maestros.length, channels: [] });
     }
   }
+  // Mirror the device's per-channel Maestro names/endpoints into _maestroCh so
+  // the passthrough limits, timeline labels and knob editor read them straight
+  // from the loaded config (no longer localStorage-only).
+  _syncMaestroChFromConfig();
   if (data.wcbNetwork) {
     config.wcbNetwork = { ...config.wcbNetwork, ...data.wcbNetwork };
     // Coerce the numeric fields — if any arrive as strings they'd register as a
@@ -6511,13 +6641,43 @@ function applyBindingsUI() {
 // ── Imported Maestro channel info (from a Control Center settings file) ─────
 // Per-slot per-channel { min, max (¼µs), name }, imported from the Maestro's
 // exported settings XML so the tool knows each servo's real endpoints + names.
-// Reference-only (the Maestro clamps regardless), used by the passthrough
-// ranges, the timeline (guide-lines/clamp/labels), and the knob editor.
-// Browser-stored (localStorage) — it's per-Maestro hardware config, independent
-// of which board/config you're connected to and NOT sent to the firmware.
-let _maestroCh = {};   // { "<slot 1-8>": { "<ch 0-31>": {min,max,name,mode} } }
+// Used by the passthrough ranges, the timeline (guide-lines/clamp/labels), and
+// the knob editor.
+//
+// SOURCE OF TRUTH is the DEVICE CONFIG: config.maestros[i].channels[] round-trips
+// to the NaviCore (persists on the board, travels with config export/import).
+// `_maestroCh` is an in-memory MIRROR of that, kept because many consumers read
+// it; localStorage is only a pre-connection cache / migration source.
+let _maestroCh = {};   // { "<slot 1-8>": { "<ch 0-31>": {min,max,name} } }
 (function () { try { _maestroCh = JSON.parse(localStorage.getItem('rc_maestro_channels') || '{}') || {}; } catch (_) { _maestroCh = {}; } })();
 function _saveMaestroCh() { try { localStorage.setItem('rc_maestro_channels', JSON.stringify(_maestroCh)); } catch (_) {} }
+// _maestroCh[slot] (a {ch:{}} map) → the config.maestros[].channels array form.
+function _maestroChSlotToArray(slot) {
+  const s = _maestroCh[String(slot)] || {};
+  return Object.keys(s)
+    .map(ch => ({ ch: +ch, name: (s[ch].name || '').slice(0, 23), min: +s[ch].min || 0, max: +s[ch].max || 0 }))
+    .sort((a, b) => a.ch - b.ch);
+}
+// Rebuild _maestroCh from config.maestros[].channels after a config load. The
+// DEVICE config wins per slot; a slot the device has no channels for keeps any
+// pre-existing local import AND folds it into the config so a Save persists it —
+// never silently wiped.
+function _syncMaestroChFromConfig() {
+  if (!config || !Array.isArray(config.maestros)) return;
+  for (let i = 0; i < config.maestros.length; i++) {
+    const m = config.maestros[i]; if (!m) continue;
+    if (!Array.isArray(m.channels)) m.channels = [];
+    const slot = String(i + 1);
+    if (m.channels.length) {
+      const map = {};
+      m.channels.forEach(c => { if (c && c.ch != null) map[String(c.ch)] = { min: +c.min || 0, max: +c.max || 0, name: c.name || '' }; });
+      _maestroCh[slot] = map;
+    } else if (_maestroCh[slot] && Object.keys(_maestroCh[slot]).length) {
+      m.channels = _maestroChSlotToArray(slot);   // migrate a local-only import into the config
+    }
+  }
+  _saveMaestroCh();
+}
 // Stray file dropped OUTSIDE a drop target → swallow it so the browser doesn't
 // navigate away from the tool (which would lose unsaved config). The per-row
 // drop handlers still run first and do the actual import.
@@ -6586,19 +6746,23 @@ async function _importMaestroFile(slot, file) {
   }
   _maestroCh[String(slot)] = parsed;
   _saveMaestroCh();
+  // Write the names/endpoints INTO the device config so a Save persists them on
+  // the NaviCore and they travel with config export/import (no longer browser-only).
+  if (Array.isArray(config.maestros) && config.maestros[slot - 1]) config.maestros[slot - 1].channels = _maestroChSlotToArray(slot);
   const applied = _applyMaestroRangesToKnobs(slot);
   renderMaestroLocations();                                   // refresh the per-slot badge
   try { if (typeof renderKnobHighlights === 'function') renderKnobHighlights(); } catch (_) {}
   const nCh = Object.keys(parsed).length;
   alert(`Imported ${nCh} servo channel(s) for Maestro ${slot}.` +
-        (applied ? `\nSet the range on ${applied} passthrough output(s) — click Save to store the config.` : '') +
-        `\nTimeline tracks for this Maestro now show its limits + channel names.`);
+        (applied ? `\nSet the range on ${applied} passthrough output(s).` : '') +
+        `\nClick Save to store the names + endpoints ON the NaviCore — they now travel with the config.`);
 }
 function _clearMaestroImport(slot) {
   if (!_maestroCh[String(slot)]) return;
-  if (!confirm(`Forget the imported settings for Maestro ${slot}? (Passthrough ranges you already set are kept.)`)) return;
+  if (!confirm(`Forget the imported settings for Maestro ${slot}? (Passthrough ranges you already set are kept. Click Save afterward to clear them on the NaviCore too.)`)) return;
   delete _maestroCh[String(slot)];
   _saveMaestroCh();
+  if (Array.isArray(config.maestros) && config.maestros[slot - 1]) config.maestros[slot - 1].channels = [];
   renderMaestroLocations();
 }
 
@@ -6613,7 +6777,7 @@ function renderMaestroLocations() {
   if (!Array.isArray(config.maestros) || config.maestros.length !== NUM_MAESTRO_SLOTS) {
     // Defensive: ensure the array exists and is sized right
     config.maestros = Array.from({ length: NUM_MAESTRO_SLOTS },
-                                 (_, i) => ({ type: 0, device: 1 + i }));
+                                 (_, i) => ({ type: 0, device: 1 + i, channels: [] }));
   }
   wrap.innerHTML = '';
   for (let i = 0; i < NUM_MAESTRO_SLOTS; i++) {
@@ -10577,6 +10741,17 @@ function exportConfigCsv() {
         String(slot.device !== undefined ? slot.device : (i + 1)),  // maestroCh column = device #
         '', '', '', '', '', '', ''                    // remaining columns empty
       ])));
+      // Imported per-channel names/endpoints (¼µs) — one row per set channel, so
+      // the servo names + travel limits ride along in the exported config file.
+      if (Array.isArray(slot.channels)) slot.channels.forEach(c => {
+        if (!c) return;
+        const r = Array(header.length).fill('');
+        r[0] = 'maestrochan'; r[1] = 'M' + (i + 1); r[2] = String(i + 1);   // type, control, buttonId(=slot)
+        r[13] = String(c.ch);                                                // maestroCh column = channel #
+        r[14] = String(c.min || 0); r[15] = String(c.max || 0);             // posMin/posMax = ¼µs endpoints
+        r[17] = c.name || '';                                                // note column = servo name
+        rows.push(csvRow(r));
+      });
     });
   }
 
@@ -10703,8 +10878,8 @@ function handleConfigImportFile(event) {
         // the CSV explicitly contains them — then we replace.
         hcrDest:  config.hcrDest ? { ...config.hcrDest } : { transport: 'serial', port: 'S3' },
         maestros: Array.isArray(config.maestros)
-                    ? config.maestros.map(m => ({ ...m }))
-                    : Array.from({ length: NUM_MAESTRO_SLOTS }, (_, i) => ({ type: 0, device: 1 + i })),
+                    ? config.maestros.map(m => ({ ...m, channels: Array.isArray(m.channels) ? m.channels.map(c => ({ ...c })) : [] }))
+                    : Array.from({ length: NUM_MAESTRO_SLOTS }, (_, i) => ({ type: 0, device: 1 + i, channels: [] })),
         wcbNetwork: config.wcbNetwork
                       ? { ...config.wcbNetwork }
                       : { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20 },
@@ -10721,6 +10896,20 @@ function handleConfigImportFile(event) {
       const cellNum = (row, idx) => {
         const s = cellStr(row, idx);
         return s === '' ? NaN : Number(s);
+      };
+
+      // Maestro slot access for the parser. The FIRST touch of a slot (by a
+      // 'maestro' or 'maestrochan' row) clears its inherited channels so the CSV
+      // fully defines them — order-independent, so channel rows before/after the
+      // location row both work.
+      const _maeReset = new Set();
+      const ensureMaeSlot = idx => {
+        if (!Array.isArray(imported.maestros)) imported.maestros = [];
+        while (imported.maestros.length < NUM_MAESTRO_SLOTS) {
+          imported.maestros.push({ type: 0, device: 1 + imported.maestros.length, channels: [] });
+        }
+        if (!_maeReset.has(idx)) { imported.maestros[idx] = { ...imported.maestros[idx], channels: [] }; _maeReset.add(idx); }
+        if (!Array.isArray(imported.maestros[idx].channels)) imported.maestros[idx].channels = [];
       };
 
       for (let r = 1; r < rows.length; r++) {
@@ -10830,16 +11019,27 @@ function handleConfigImportFile(event) {
           csvHadMaestros = true;
           if (!Number.isFinite(buttonId) || buttonId < 1 || buttonId > NUM_MAESTRO_SLOTS) continue;
           const idx = buttonId - 1;
-          if (!Array.isArray(imported.maestros)) imported.maestros = [];
-          while (imported.maestros.length < NUM_MAESTRO_SLOTS) {
-            imported.maestros.push({ type: 0, device: 1 + imported.maestros.length });
-          }
+          ensureMaeSlot(idx);
           const slotType = Number(cellStr(row, indexes.slot));
           const slotDev  = Number(cellStr(row, indexes.maestroCh));
-          imported.maestros[idx] = {
-            type:   Number.isFinite(slotType) ? slotType : 0,
-            device: Number.isFinite(slotDev)  ? slotDev  : (1 + idx),
-          };
+          imported.maestros[idx].type   = Number.isFinite(slotType) ? slotType : 0;
+          imported.maestros[idx].device = Number.isFinite(slotDev)  ? slotDev  : (1 + idx);
+          continue;
+        }
+        // Imported per-channel name/endpoints — buttonId = slot ID, maestroCh =
+        // channel #, posMin/posMax = ¼µs endpoints, note = servo name.
+        if (type === 'maestrochan') {
+          if (!Number.isFinite(buttonId) || buttonId < 1 || buttonId > NUM_MAESTRO_SLOTS) continue;
+          const idx = buttonId - 1;
+          ensureMaeSlot(idx);
+          const ch = cellNum(row, indexes.maestroCh);
+          if (!Number.isFinite(ch) || ch < 0 || ch > 31) continue;
+          imported.maestros[idx].channels.push({
+            ch: ch,
+            name: cellStr(row, indexes.note).slice(0, 23),
+            min: Number(cellStr(row, indexes.posMin)) || 0,
+            max: Number(cellStr(row, indexes.posMax)) || 0,
+          });
           continue;
         }
 
@@ -10948,6 +11148,7 @@ function handleConfigImportFile(event) {
       config = imported;
       if (Object.keys(newSwitches).length) config.switches = newSwitches;
       if (Object.keys(newKnobs).length) config.knobs = newKnobs;
+      _syncMaestroChFromConfig();   // mirror the imported channel names/endpoints into _maestroCh
       // hcrDest / maestros are already on `imported` (default from in-memory
       // config OR overwritten by the parser above). The csvHad* flags are
       // informational — we don't strip stuff we already had.
