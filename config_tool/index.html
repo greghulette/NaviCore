@@ -941,7 +941,6 @@
       Via WCB
     </label>
     <button class="btn btn-blue"    id="btn-refresh" disabled>Refresh</button>
-    <button class="btn btn-success" id="btn-save"    disabled>Save</button>
     <button class="btn btn-ghost" id="btn-hwsetup" type="button">Config</button>
     <button class="btn btn-ghost" id="btn-export-cfg" type="button">Export</button>
     <button class="btn btn-ghost" id="btn-import-cfg" type="button">Import</button>
@@ -2234,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">021636QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">022339QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2397,9 +2396,9 @@
         <button class="btn btn-ghost" id="tl-play-btn" type="button" title="Play the cursor through the clip on the real servos (arms Live)." style="padding:3px 10px">▶ Preview</button>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <button class="btn btn-ghost" id="tl-add-maestro" type="button" style="padding:3px 10px">+ Maestro track</button>
-        <button class="btn btn-ghost" id="tl-add-hcr"     type="button" style="padding:3px 10px">+ HCR track</button>
+        <button class="btn btn-ghost" id="tl-add-action" type="button" title="Add an action (WCB / HCR / MP3 / play a clip …) at the yellow cursor line" style="padding:3px 10px">+ Action</button>
         <button class="btn btn-ghost" id="tl-trim-start"  type="button" title="Shift everything left so the first event starts at 0 — removes empty space at the start of the clip" style="padding:3px 10px">✂ Trim start</button>
-        <button class="btn btn-ghost" id="tl-smooth" type="button" title="Lightly smooth the FOCUSED channel's curve — click again for more. Focus a track (click its name in Overlay) or select a dot on it first." style="padding:3px 10px">〰 Smooth</button>
+        <button class="btn btn-ghost" id="tl-smooth" type="button" title="Lightly smooth the FOCUSED channel's curve — click again for more. Click a track name on the left to focus it (or select a dot on it) first." style="padding:3px 10px">〰 Smooth</button>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
                title="Dragging a servo keyframe also pulls its neighbours within this many ms, with a smooth falloff, so the motion stays smooth. Set 0 to move just the one point.">
@@ -2443,8 +2442,9 @@
         the curve), then drag it to reshape (nearby motion follows — see “Smooth drag”) · <b>select a control
         point to reveal its two handle arms; drag a handle to bend the curve</b> on that side (handle height =
         slope, distance = reach — Photoshop-style) · double-click-drag a dot to move just that one · right-click a
-        dot to delete it (or Delete/Backspace, or 🗑) · “All points” shows the raw captured dots · drag an action
-        diamond to move it in time, click to edit, right-click to delete · Shift-click two control points (no
+        dot to delete it (or Delete/Backspace, or 🗑) · “All points” shows the raw captured dots · <b>+ Action</b>
+        adds an action at the yellow cursor (or click the Actions lane); drag its diamond to move it in time, click
+        to edit, right-click to delete — two actions on the same spot auto-nudge 5 ms apart · Shift-click two control points (no
         other control point between) for an easing pair · drag the yellow handle to scrub · red ✕ deletes a whole
         track · Ctrl+scroll zooms at the pointer, ⤢ Fit fits · <b>Overlay</b> stacks every track into one lane in
         different colors to line curves up (dots/handles/add all still work); <b>Normalize</b> (on by default) scales
@@ -3690,7 +3690,7 @@ function setConnected(v) {
     if (fwScreenX20) fwScreenX20.textContent = '—';
     if (fwTab)       fwTab.textContent       = '—';
   }
-  ['btn-refresh','btn-save','btn-hwsetup-save','btn-defaults','btn-qs-send','btn-wcb-reboot'].forEach(id => {
+  ['btn-refresh','btn-hwsetup-save','btn-defaults','btn-qs-send','btn-wcb-reboot'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = !v;
   });
@@ -5068,10 +5068,10 @@ function _tlTrackList() {
     const label = `M${slot} Ch${ch}` + (info && info.name ? ` · ${info.name}` : '');
     tracks.push({ kind: 'maestro', key, label });
   });
-  Object.keys(_tlClip.hcr).sort().forEach(chan => {
-    const label = ['V', 'A', 'B'][+chan] || ('Ch' + chan);
-    tracks.push({ kind: 'hcr', key: chan, label: `HCR ${label}` });
-  });
+  // HCR volume tracks are no longer shown in the editor (start a sound/song with
+  // an Action instead). Any HCR keyframes in an existing clip are NOT listed
+  // here, but _tlClip.hcr + _tlFlattenEvents still round-trip them untouched on
+  // save, so loading and re-saving such a clip never drops them.
   return tracks;
 }
 
@@ -5228,10 +5228,18 @@ function _tlRender() {
   tracks.forEach((track, i) => {
     const rowTop = TL_RULER_H + i * TL_ROW_H;
     const [lo, hi] = _tlTrackRange(track);
-    const lbl = _tlSvgEl('text', { x: 8, y: rowTop + TL_ROW_H / 2 + 4, 'font-size': 11, fill: 'var(--text)' });
+    const id = `${track.kind}:${track.key}`;
+    const isFocused = _tlClip.activeTrack === id;
+    // Focused-track cue: an accent bar down the left of the lane. Click the track
+    // NAME to focus it — this is how you pick the channel for Smooth (and shows
+    // what edits target) even on a clean-line recorded track that has no dots.
+    if (isFocused) svg.appendChild(_tlSvgEl('rect', { x: TL_LEFT, y: rowTop, width: 3, height: TL_ROW_H, fill: 'var(--accent2)' }));
+    const lbl = _tlSvgEl('text', { x: 8, y: rowTop + TL_ROW_H / 2 + 4, 'font-size': 11, fill: isFocused ? 'var(--accent2)' : 'var(--text)', 'font-weight': isFocused ? '700' : '400' });
     lbl.textContent = track.label;
-    const lblTitle = _tlSvgEl('title'); lblTitle.textContent = track.label;   // full name on hover
+    const lblTitle = _tlSvgEl('title'); lblTitle.textContent = track.label + ' — click to focus this channel (Smooth acts on the focused channel)';
     lbl.appendChild(lblTitle);
+    lbl.style.cursor = 'pointer';
+    lbl.addEventListener('click', ev => { ev.stopPropagation(); _tlClip.activeTrack = isFocused ? null : id; _tlRender(); });
     svg.appendChild(lbl);
     // Truncate the label so a long servo name can't run into the timeline (the
     // gutter is TL_LEFT wide; leave room for the ✕ delete at TL_LEFT-14).
@@ -5421,8 +5429,8 @@ function _tlDeleteAction(a) {
 }
 
 // Delete a WHOLE track (all its keyframes). Confirmed because it's a bulk delete;
-// still non-destructive until Save (undone by closing without saving), and the
-// track can be re-added with "+ Maestro/HCR track".
+// still non-destructive until Save (undone by closing without saving / Undo), and
+// the track can be re-added with "+ Maestro track".
 function _tlDeleteTrack(track) {
   if (!confirm(`Delete the entire "${track.label}" track and all its keyframes?`)) return;
   _tlPushHistory();
@@ -6036,6 +6044,10 @@ function _tlCurrentTrack() {
   }
   if (_tlClip && _tlClip.selected && _tlClip.selected.kind !== 'action')
     return { kind: _tlClip.selected.kind, key: _tlClip.selected.key };
+  // Nothing explicitly focused/selected but there's only ONE track → use it, so
+  // Smooth just works on a single-channel clip without having to focus first.
+  const list = _tlClip ? _tlTrackList() : [];
+  if (list.length === 1) return { kind: list[0].kind, key: list[0].key };
   return null;
 }
 // One LIGHT smoothing pass over a channel's values (times unchanged, ends fixed)
@@ -6057,7 +6069,7 @@ function _tlSmoothTrack(track) {
 function _tlSmoothCurrent() {
   if (!_tlClip) return;
   const track = _tlCurrentTrack();
-  if (!track) { alert('Smooth works on one channel — focus a track (click its name in Overlay) or select a dot on it first, then Smooth.'); return; }
+  if (!track) { alert('Smooth works on one channel — click a track name on the left to focus it (or select a dot on it), then Smooth.'); return; }
   const arr = (track.kind === 'maestro' ? _tlClip.maestro : _tlClip.hcr)[track.key];
   if (!arr || arr.length < 3) { alert('That channel has too few points to smooth.'); return; }
   _tlPushHistory();
@@ -6092,11 +6104,6 @@ function _tlUpdateReadout() {
     const v = _tlInterpolateAt(kfs, k => k.pos, _tlClip.cursorMs);
     parts.push(`M${key.replace('-', ' Ch')} = ${Math.round(v / 4)}µs`);
   });
-  Object.entries(_tlClip.hcr).forEach(([chan, kfs]) => {
-    if (!kfs.length) return;
-    const v = _tlInterpolateAt(kfs, k => k.vol, _tlClip.cursorMs);
-    parts.push(`HCR${chan} = ${Math.round(v)}`);
-  });
   const activeActions = _tlClip.actions.filter(a => Math.abs(a.t - _tlClip.cursorMs) < 50);
   if (activeActions.length) parts.push(...activeActions.map(a => '▸ ' + actionSummary(a.action).replace(/<[^>]+>/g, '')));
   el.textContent = parts.join('   ·   ');
@@ -6105,6 +6112,14 @@ function _tlUpdateReadout() {
 // ── Action editor popover (add/edit a discrete command on the timeline) ─────
 let _tlEditingActionId = null;
 
+// Two actions must not share the EXACT same timestamp — the board dispatches
+// same-t events back-to-back with no gap for the target to react. Nudge a new/
+// edited action forward in 5 ms steps until its slot is free.
+function _tlFreeActionTime(t, ignoreId) {
+  let tt = Math.max(0, Math.round(t || 0));
+  while (_tlClip && _tlClip.actions.some(a => a.id !== ignoreId && a.t === tt)) tt += 5;
+  return tt;
+}
 function _tlOpenActionEditor(existing, defaultT) {
   _tlEditingActionId = existing ? existing.id : null;
   document.getElementById('tl-action-modal').classList.add('open');
@@ -6118,7 +6133,9 @@ function _tlOpenActionEditor(existing, defaultT) {
   });
   const action = existing ? existing.action : { type: typeSel.options[0].value };
   typeSel.value = action.type || typeSel.options[0].value;
-  document.getElementById('tl-action-time').value = existing ? existing.t : Math.max(0, Math.round(defaultT || 0));
+  // For a NEW action, pre-fill the time with the next FREE slot at/after the
+  // requested spot, so the field shows where it will actually land.
+  document.getElementById('tl-action-time').value = existing ? existing.t : _tlFreeActionTime(defaultT);
   document.getElementById('tl-action-delay').value = action.delay || 0;
   document.getElementById('tl-action-note').value = action.note || '';
   const fields = document.getElementById('tl-action-fields');
@@ -6140,7 +6157,9 @@ function _tlApplyActionEditor() {
   const action = readActionFromFid('tl-action-fields', type, extras);
   if (!action) { alert('Fill in the required fields (e.g. a command) first.'); return; }
   _tlPushHistory();
-  const t = Math.max(0, +(document.getElementById('tl-action-time').value || 0));
+  // Bump onto a free millisecond if this lands on top of another action (skip
+  // the one being edited) — the board needs a gap to react to each.
+  const t = _tlFreeActionTime(+(document.getElementById('tl-action-time').value || 0), _tlEditingActionId);
   if (_tlEditingActionId) {
     const entry = _tlClip.actions.find(a => a.id === _tlEditingActionId);
     if (entry) { entry.t = t; entry.action = action; }
@@ -6167,7 +6186,7 @@ document.getElementById('tl-close-btn').addEventListener('click', closeTimelineE
 document.getElementById('tl-save-btn').addEventListener('click', _tlSave);
 document.getElementById('tl-delete-btn').addEventListener('click', _tlDeleteSelected);
 document.getElementById('tl-add-maestro').addEventListener('click', _tlAddMaestroTrack);
-document.getElementById('tl-add-hcr').addEventListener('click', _tlAddHcrTrack);
+document.getElementById('tl-add-action').addEventListener('click', () => { if (_tlClip) _tlOpenActionEditor(null, _tlClip.cursorMs); });
 document.getElementById('tl-soft-radius').addEventListener('input', e => {
   _tlSoftRadius = Math.max(0, Math.min(5000, +e.target.value || 0));
 });
@@ -6813,7 +6832,10 @@ function _parseMaestroSettings(xmlText) {
   for (let i = 0; i < els.length; i++) {   // i = channel index (Channels are positional)
     const el = els[i];
     const mode = el.getAttribute('mode') || '';
-    if (mode && mode !== 'Servo' && mode !== 'ServoMultiplied') continue;   // skip Input/Output channels
+    // Skip Input/Output channels — but case-INSENSITIVELY: Pololu Control Center
+    // writes mode="Servo"/"ServoMultiplied", DroidNet writes mode="SERVO".
+    const modeLc = mode.toLowerCase();
+    if (mode && modeLc !== 'servo' && modeLc !== 'servomultiplied') continue;
     const min = parseInt(el.getAttribute('min'), 10);
     const max = parseInt(el.getAttribute('max'), 10);
     if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) continue;   // disabled / no range
@@ -8459,7 +8481,7 @@ function appendActionFields(container, action) {
     cmdSel.id = fid + '-maecmd';
     cmdSel.style.minWidth = '160px';
     const parts = (action.cmd || 'setTarget,0,6000').split(',').map(s => s.trim());
-    [['setTarget', 'Move a servo'], ['goHome', 'Send all servos home'], ['stopScript', 'Stop the script'],
+    [['setTarget', 'Set servo position'], ['goHome', 'Send all servos home'], ['stopScript', 'Stop the script'],
      ['restartScript', 'Run a script'], ['setSpeed', 'Set a speed limit'], ['setAccel', 'Set an acceleration limit']
     ].forEach(([v, lbl]) => { const o = document.createElement('option'); o.value = v; o.textContent = lbl; if (v === (parts[0] || 'setTarget')) o.selected = true; cmdSel.appendChild(o); });
     cmdSel.onchange = () => _renderMaestroActionArgs(fid, null);
@@ -9559,7 +9581,6 @@ async function saveConfigToBoard() {
 let _pendingSaveBaseline  = null;
 let _pendingSaveStartedAt = 0;
 let _pendingSaveTimer     = null;
-document.getElementById('btn-save').addEventListener('click', saveConfigToBoard);
 document.getElementById('btn-hwsetup-save').addEventListener('click', saveConfigToBoard);
 
 document.getElementById('btn-defaults').addEventListener('click', async () => {
@@ -9634,7 +9655,24 @@ function onThreeAxisGimbalsChange(checked) {
   if (typeof updateButtonHighlights === 'function') updateButtonHighlights();
   if (typeof renderKnobHighlights   === 'function') renderKnobHighlights();
 }
+// Are there config edits that haven't been pushed to the board? Compares the
+// in-memory config against what the board last confirmed — but against the
+// PENDING baseline if a Save is in flight (those changes are already on the
+// wire), so clicking Save then closing doesn't re-prompt before the ACK lands.
+function _configUnsaved() {
+  if (!_configLoaded) return false;
+  const base = _pendingSaveBaseline || _configBaseline;
+  return !!base && Object.keys(_diffConfigBranches(config, base)).length > 0;
+}
 function closeHwSetup() {
+  // The Config window is where all the wiring/hardware settings live and it has
+  // its own Save — so if you close it with unsaved edits, offer to save them to
+  // the NaviCore first (else they only live in the tool, not on the board).
+  if (_configUnsaved()) {
+    if (confirm('You have unsaved config changes.\n\nOK — save them to the NaviCore now.\nCancel — close without saving (your edits stay in the tool but are NOT on the board yet).')) {
+      saveConfigToBoard();
+    }
+  }
   document.getElementById('hwsetup-modal').classList.remove('open');
 }
 

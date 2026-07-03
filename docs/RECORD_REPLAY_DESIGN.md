@@ -311,6 +311,21 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.20 (2026-07-02, config-tool only):** **+ Action** toolbar button — opens the action editor at the yellow
+  cursor (`_tlOpenActionEditor(null, _tlClip.cursorMs)`), complementing the click-the-lane path. Same-timestamp
+  collision guard: `_tlFreeActionTime(t, ignoreId)` nudges a new/edited action forward in 5 ms steps until its slot
+  is free (so the board has a gap to react to each) — used both to pre-fill the New-action time field (shows where
+  it'll land) and in `_tlApplyActionEditor` (ignores the action being edited, so editing in place doesn't self-bump).
+  Verified: button opens at cursor; 3 actions dropped at the same spot land 1234/1239/1244; edit-in-place stays put;
+  undoable.
+- **v3.19 (2026-07-02, config-tool only):** (1) Removed the **HCR volume track** from the editor (start a sound/song
+  with an Action instead) — dropped the `+ HCR track` button + listener, and `_tlTrackList` no longer emits HCR
+  tracks. `_tlClip.hcr` + `_tlFlattenEvents` still round-trip any existing HCR keyframes untouched, so loading and
+  re-saving an old clip never drops them; they're just not shown/editable. (2) You can now **focus a channel outside
+  Overlay**: click a track's NAME in the gutter to focus it (accent bar + bold label) — needed because a clean-line
+  recorded track has no dots to select, so Smooth had nothing to act on. `_tlCurrentTrack()` also falls back to the
+  sole track when only one exists. Verified: HCR button gone / Maestro stays, HCR data round-trips, label-click
+  focuses + shows the cue, Smooth works per-channel in the stacked view + on a single-track clip with no focus.
 - **v3.18 (2026-07-02, config-tool only):** Two editor additions.
   **Undo** (`↶ Undo` button + Ctrl/Cmd+Z): a bounded stack (`TL_HISTORY_MAX = 50`) of JSON snapshots of the editable
   clip data (maestro/hcr/actions/durationMs), stored on `_tlClip.history`. `_tlPushHistory()` is called at the START
