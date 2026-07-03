@@ -311,6 +311,21 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.22 (2026-07-03, config-tool only):** **Length** field — change a clip's total time. Firmware derives clip
+  duration from the LAST event's timestamp (`clipDurationMs()`, no stored length), so `_tlSetLength()`: on GROW,
+  holds each maestro track's last pose out to the new end (adds an end keyframe) so the clip genuinely plays longer
+  and the extension PERSISTS (there's now an event at the new end) — those points are editable, so it's the start of
+  the added section, not a locked hold; on SHRINK, drops keyframes/actions past the new end (confirmed). Undoable.
+  Verified: extend 3→6 s holds both tracks' last values at 6000 + flatten max = 6000, add in the new area works,
+  shrink 6→2.5 s truncates (keeps the earlier action), undo restores.
+- **v3.21 (2026-07-03, config-tool only):** Better **Smooth**. The old 3-tap moving average barely rounded a
+  non-jittery sharp corner and, being a low-pass, pulled peaks toward the mean (amplitude loss that compounded over
+  repeated clicks). New `_tlSmoothTrack`: (1) a wider 5-tap binomial `[1 4 6 4 1]/16` rounds a sharp edge
+  noticeably in one click, then (2) it rescales the smoothed values back onto the ORIGINAL peak-to-peak span so the
+  servo keeps its full throw. Net: corners round without losing amplitude, and clicking again rounds MORE instead
+  of flattening. Verified on a step-like curve: amplitude held at 100% across 5 clicks, curvature −61% in one click
+  / −89% over five.
+
 - **v3.20 (2026-07-02, config-tool only):** **+ Action** toolbar button — opens the action editor at the yellow
   cursor (`_tlOpenActionEditor(null, _tlClip.cursorMs)`), complementing the click-the-lane path. Same-timestamp
   collision guard: `_tlFreeActionTime(t, ignoreId)` nudges a new/edited action forward in 5 ms steps until its slot

@@ -1668,7 +1668,14 @@ bool execCliLine(const String& line) {
                                            : "[REC] save failed (see reason above)");
     }
     else if (sub.equalsIgnoreCase("LOAD"))  Serial.println(navirec::loadClip(name.c_str()) ? "[REC] loaded" : "[REC] load failed (not found / no FS)");
-    else if (sub.equalsIgnoreCase("LS"))    { Serial.println("[REC] clips:"); navirec::listClips(Serial); }
+    else if (sub.equalsIgnoreCase("LS"))    {
+      // Report the clips-partition storage first (short marker → survives the WCB
+      // RTERM 160-byte wrap), then the per-clip list.
+      if (g_clipsReady) Serial.printf("[CLIPFS]{\"total\":%u,\"used\":%u}\n",
+                                      (unsigned)clipsFS.totalBytes(), (unsigned)clipsFS.usedBytes());
+      Serial.println("[REC] clips:");
+      navirec::listClips(Serial);
+    }
     else if (sub.equalsIgnoreCase("RM"))    Serial.println(navirec::deleteClip(name.c_str()) ? "[REC] deleted" : "[REC] delete failed");
     else if (sub.equalsIgnoreCase("RENAME")) {
       int c2 = name.indexOf(',');

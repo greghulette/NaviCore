@@ -2233,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">022339QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">030044QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2363,6 +2363,7 @@
           <h3 style="margin:0">Library</h3>
           <button class="btn btn-ghost" type="button" onclick="clipsRefresh()" style="padding:3px 10px" title="Reload clip list from the board">⟳ Refresh</button>
         </div>
+        <div id="clips-storage" style="margin-top:8px;display:none"></div>
         <div id="clips-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
           <div id="clips-empty" style="font-size:12px;color:var(--muted)">No clips loaded. Press ⟳ Refresh to query the board.</div>
         </div>
@@ -2398,6 +2399,12 @@
         <button class="btn btn-ghost" id="tl-add-maestro" type="button" style="padding:3px 10px">+ Maestro track</button>
         <button class="btn btn-ghost" id="tl-add-action" type="button" title="Add an action (WCB / HCR / MP3 / play a clip …) at the yellow cursor line" style="padding:3px 10px">+ Action</button>
         <button class="btn btn-ghost" id="tl-trim-start"  type="button" title="Shift everything left so the first event starts at 0 — removes empty space at the start of the clip" style="padding:3px 10px">✂ Trim start</button>
+        <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
+               title="Total clip length. Increase it to add time at the end — every servo holds its last pose out to the new length (drag those end points to animate the added section). Decrease it to trim the end.">
+          Length
+          <input type="number" id="tl-length" min="0" max="60" step="0.5" style="width:62px">
+          s
+        </label>
         <button class="btn btn-ghost" id="tl-smooth" type="button" title="Lightly smooth the FOCUSED channel's curve — click again for more. Click a track name on the left to focus it (or select a dot on it) first." style="padding:3px 10px">〰 Smooth</button>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
@@ -2446,7 +2453,8 @@
         adds an action at the yellow cursor (or click the Actions lane); drag its diamond to move it in time, click
         to edit, right-click to delete — two actions on the same spot auto-nudge 5 ms apart · Shift-click two control points (no
         other control point between) for an easing pair · drag the yellow handle to scrub · red ✕ deletes a whole
-        track · Ctrl+scroll zooms at the pointer, ⤢ Fit fits · <b>Overlay</b> stacks every track into one lane in
+        track · <b>✂ Trim start</b> removes leading empty space; <b>Length</b> sets the clip's total time — raise it to
+        add time at the end (each servo holds its pose out to the new end; drag those end points to animate) · Ctrl+scroll zooms at the pointer, ⤢ Fit fits · <b>Overlay</b> stacks every track into one lane in
         different colors to line curves up (dots/handles/add all still work); <b>Normalize</b> (on by default) scales
         each track to its own travel so same-joystick channels sit on top of each other — uncheck it for actual µs on
         one shared scale · <b>click a track name on the left to focus it</b>: it's highlighted, the rest fade, and
@@ -4465,6 +4473,11 @@ let _clipAsm   = null;   // { src, buf }   rejoining a split single marker (old 
 // true if the text was consumed as a clip-list marker — the caller must then NOT
 // echo it to the terminal.
 function _clipListFeed(src, text) {
+  // Clips-partition storage (arrives just before the list on ?REC,LS).
+  if (text.startsWith('[CLIPFS]')) {
+    try { _renderClipStorage(JSON.parse(text.slice(8))); } catch (_) {}
+    return true;
+  }
   // ── New per-item format ──
   if (text.startsWith('[CLIPLIST:BEGIN]')) { _clipItems = { src, items: [] }; return true; }
   if (text.startsWith('[CLIPLIST:END]')) {
@@ -4498,7 +4511,25 @@ function _clipListFeed(src, text) {
 }
 
 function _fmtDur(ms)  { ms = +ms || 0; return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s'; }
-function _fmtBytes(b) { b = +b || 0;  return b < 1024 ? b + ' B'  : (b / 1024).toFixed(1) + ' KB'; }
+function _fmtBytes(b) { b = +b || 0;  return b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(2) + ' MB'; }
+
+// Clips-partition usage bar (fed by the board's [CLIPFS] marker on ?REC,LS).
+function _renderClipStorage(info) {
+  const el = document.getElementById('clips-storage');
+  if (!el) return;
+  const total = +info.total || 0;
+  const used = Math.max(0, Math.min(+info.used || 0, total));
+  if (!total) { el.style.display = 'none'; return; }
+  const free = total - used;
+  const pct = Math.round(100 * used / total);
+  el.style.display = '';
+  el.innerHTML =
+    '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:3px">' +
+      '<span>' + _fmtBytes(used) + ' used</span>' +
+      '<span>' + _fmtBytes(free) + ' free of ' + _fmtBytes(total) + '</span></div>' +
+    '<div style="height:6px;border-radius:3px;background:var(--hover-2);overflow:hidden">' +
+      '<div style="height:100%;width:' + pct + '%;background:' + (pct > 90 ? 'var(--red)' : 'var(--accent2)') + '"></div></div>';
+}
 
 function renderClips(clips) {
   _updateClipNameOptions((clips || []).map(c => String(c.name || '')));   // feed the action-picker dropdown
@@ -5917,6 +5948,58 @@ function _tlTrimStart() {
   if (scroller) scroller.scrollLeft = 0;
 }
 
+// Change the clip's total LENGTH. The firmware derives a clip's duration from its
+// LAST event's timestamp (no separate stored length), so:
+//  • GROW: hold each maestro track's last pose out to the new end (adds an end
+//    keyframe) so the clip genuinely plays longer — those points are editable, so
+//    it's the start of the added section, not a permanent hold.
+//  • SHRINK: drop keyframes/actions past the new end (confirmed — it deletes).
+function _tlSetLength(seconds) {
+  if (!_tlClip) return;
+  const newDur = Math.max(0, Math.round((+seconds || 0) * 1000));
+  const cur = _tlClip.durationMs || 0;
+  if (newDur === cur) return;
+
+  if (newDur > cur) {
+    _tlPushHistory();
+    Object.values(_tlClip.maestro).forEach(arr => {
+      if (!arr.length) return;
+      const last = arr.reduce((m, k) => (k.t > m.t ? k : m), arr[0]);
+      if (last.t < newDur) arr.push({ id: _tlId(), t: newDur, pos: last.pos, cp: true });   // hold the last pose to the new end
+    });
+    _tlClip.durationMs = newDur;
+    _tlClip.dirty = true;
+    _tlSetStatus(`Extended to ${_fmtDur(newDur)} (servos hold — drag the end points to animate).`);
+    _tlRender();
+    return;
+  }
+
+  // SHRINK — count what would be removed and confirm before deleting.
+  const doomed = [];
+  Object.values(_tlClip.maestro).forEach(a => a.forEach(k => { if (k.t > newDur) doomed.push(k); }));
+  Object.values(_tlClip.hcr).forEach(a => a.forEach(k => { if (k.t > newDur) doomed.push(k); }));
+  _tlClip.actions.forEach(a => { if (a.t > newDur) doomed.push(a); });
+  if (doomed.length && !confirm(`Shorten the clip to ${_fmtDur(newDur)}? This deletes ${doomed.length} keyframe/action(s) after that point.`)) {
+    _tlUpdateToolbar();   // put the field back to the real length
+    return;
+  }
+  _tlPushHistory();
+  Object.keys(_tlClip.maestro).forEach(key => {
+    _tlClip.maestro[key] = _tlClip.maestro[key].filter(k => k.t <= newDur);
+    if (!_tlClip.maestro[key].length) delete _tlClip.maestro[key];
+  });
+  Object.keys(_tlClip.hcr).forEach(key => {
+    _tlClip.hcr[key] = _tlClip.hcr[key].filter(k => k.t <= newDur);
+    if (!_tlClip.hcr[key].length) delete _tlClip.hcr[key];
+  });
+  _tlClip.actions = _tlClip.actions.filter(a => a.t <= newDur);
+  _tlClip.durationMs = newDur;
+  _tlClip.cursorMs = Math.min(_tlClip.cursorMs, newDur);
+  _tlClip.dirty = true;
+  _tlSetStatus(`Shortened to ${_fmtDur(newDur)}.`);
+  _tlRender();
+}
+
 function _tlAddMaestroTrack() {
   if (!_tlClip) return;
   const slot = prompt('Maestro slot (1-8):', '1'); if (slot === null) return;
@@ -5953,6 +6036,10 @@ function _tlUpdateToolbar() {
   const delBtn = document.getElementById('tl-delete-btn');
   const undoBtn = document.getElementById('tl-undo');
   if (undoBtn) undoBtn.disabled = !(_tlClip && _tlClip.history && _tlClip.history.length);
+  // Reflect the clip's current length in the field (but not while it's focused,
+  // so it doesn't fight the user mid-type).
+  const lenEl = document.getElementById('tl-length');
+  if (lenEl && _tlClip && document.activeElement !== lenEl) lenEl.value = ((_tlClip.durationMs || 0) / 1000).toFixed(1);
   if (!bar || !delBtn) return;
   delBtn.style.display = _tlClip.selected ? '' : 'none';
   if (_tlClip.selectedPair && _tlClip.selectedPair.length === 2) {
@@ -6058,9 +6145,29 @@ function _tlSmoothTrack(track) {
   const arr = (track.kind === 'maestro' ? _tlClip.maestro : _tlClip.hcr)[track.key];
   if (!arr || arr.length < 3) return false;
   const isMae = track.kind === 'maestro';
-  const orig = arr.map(k => isMae ? k.pos : k.vol);   // ¼µs / 0-99
-  for (let i = 1; i < arr.length - 1; i++) {
-    const v = 0.125 * orig[i - 1] + 0.75 * orig[i] + 0.125 * orig[i + 1];
+  const get = k => isMae ? k.pos : k.vol;
+  const src = arr.map(get);                       // pre-pass values (¼µs / 0-99)
+  const n = src.length;
+  const oMin = Math.min(...src), oMax = Math.max(...src);
+  // 1) Round the corners with a 5-tap binomial [1 4 6 4 1]/16 (endpoints fixed).
+  //    A wider kernel rounds a sharp edge noticeably in ONE click (the old 3-tap
+  //    barely touched a non-jittery corner, hence "click 5×").
+  const sm = src.slice();
+  for (let i = 1; i < n - 1; i++) {
+    const a = src[i - 2 < 0 ? i - 1 : i - 2];
+    const e = src[i + 2 >= n ? i + 1 : i + 2];
+    sm[i] = (a + 4 * src[i - 1] + 6 * src[i] + 4 * src[i + 1] + e) / 16;
+  }
+  // 2) Restore the ORIGINAL peak-to-peak travel. A low-pass shrinks amplitude
+  //    (peaks get pulled toward the mean); rescaling the smoothed span back onto
+  //    [oMin,oMax] keeps the servo's full range while KEEPING the rounding — so
+  //    the curve gets rounder without losing its throw, and repeated clicks
+  //    round more instead of flattening.
+  let sMin = Math.min(...sm), sMax = Math.max(...sm);
+  const sSpan = sMax - sMin, oSpan = oMax - oMin;
+  const rescale = sSpan > 1e-6 && oSpan > 1e-6;
+  for (let i = 1; i < n - 1; i++) {
+    const v = rescale ? oMin + (sm[i] - sMin) * oSpan / sSpan : sm[i];
     if (isMae) arr[i].pos = Math.round(_tlClampUs(track, v / 4) * 4);
     else arr[i].vol = Math.max(0, Math.min(99, Math.round(v)));
   }
@@ -6211,6 +6318,7 @@ document.getElementById('tl-zoom-fit').addEventListener('click', _tlFit);
 document.getElementById('tl-undo').addEventListener('click', _tlUndo);
 document.getElementById('tl-smooth').addEventListener('click', _tlSmoothCurrent);
 document.getElementById('tl-trim-start').addEventListener('click', _tlTrimStart);
+document.getElementById('tl-length').addEventListener('change', e => _tlSetLength(e.target.value));
 document.getElementById('tl-live-btn').addEventListener('click', _tlToggleLive);
 document.getElementById('tl-play-btn').addEventListener('click', _tlPlayPreview);
 // Ctrl+scroll over the timeline → zoom at the pointer (finer step than the
@@ -6293,7 +6401,7 @@ function handleBoardMessage(line) {
   // (Via WCB, handled below).  Covers the new per-item markers ([CLIPLIST:BEGIN]/
   // [CLIPITEM]/[CLIPLIST:END]) and the old single [CLIPLIST]{...} marker; see
   // _clipListFeed.  "[CLIPLIST" (no ']') matches BEGIN/END and the old marker.
-  if (line.startsWith('[CLIPLIST') || line.startsWith('[CLIPITEM]')) { _clipListFeed(null, line); return; }
+  if (line.startsWith('[CLIPLIST') || line.startsWith('[CLIPITEM]') || line.startsWith('[CLIPFS]')) { _clipListFeed(null, line); return; }
   // Timeline editor transport (?REC,EDITLOAD / EDITBEGIN|EDITEV|EDITEND) — see
   // "Timeline editor" section below for _clipDlFeed / _tlFeedMarker.
   if (line.startsWith('[CLIPDL:')) { _clipDlFeed(null, line); return; }
