@@ -311,6 +311,13 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.23 (2026-07-03, firmware + tool; reflash for the storage number):** **Clips storage usage** in the Library
+  panel. Firmware `?REC,LS` now emits a short `[CLIPFS]{"total":N,"used":M}` marker (from `clipsFS.totalBytes()` /
+  `usedBytes()` on the 12 MB `clips` LittleFS partition) before the clip list — short enough to survive the WCB
+  RTERM 160-byte wrap. Tool: `_clipListFeed` parses `[CLIPFS]` (both Direct-USB and Via-WCB `[TERM]` paths) →
+  `_renderClipStorage()` shows a "used / free of total" bar (accent, red > 90%) above the clip list; hidden when
+  there's no clips partition (in-RAM-only build). Verified in the preview: bar text/percent/color, near-full red,
+  hidden at total 0, Via-WCB update.
 - **v3.22 (2026-07-03, config-tool only):** **Length** field — change a clip's total time. Firmware derives clip
   duration from the LAST event's timestamp (`clipDurationMs()`, no stored length), so `_tlSetLength()`: on GROW,
   holds each maestro track's last pose out to the new end (adds an end keyframe) so the clip genuinely plays longer
