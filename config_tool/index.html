@@ -2233,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">030044QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">060934QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2402,10 +2402,11 @@
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
                title="Total clip length. Increase it to add time at the end — every servo holds its last pose out to the new length (drag those end points to animate the added section). Decrease it to trim the end.">
           Length
-          <input type="number" id="tl-length" min="0" max="60" step="0.5" style="width:62px">
+          <input type="number" id="tl-length" min="0" max="600" step="0.5" style="width:62px">
           s
         </label>
         <button class="btn btn-ghost" id="tl-smooth" type="button" title="Lightly smooth the FOCUSED channel's curve — click again for more. Click a track name on the left to focus it (or select a dot on it) first." style="padding:3px 10px">〰 Smooth</button>
+        <button class="btn btn-ghost" id="tl-export-script" type="button" title="Export this clip as Maestro SCRIPT source (.txt) — keyframes reduced to peaks/direction changes so it fits the Maestro's ~8 KB script memory. Paste into Control Center's Script tab, then trigger it from NaviCore with the 'Run a script' action." style="padding:3px 10px">⬇ Script</button>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
                title="Dragging a servo keyframe also pulls its neighbours within this many ms, with a smooth falloff, so the motion stays smooth. Set 0 to move just the one point.">
@@ -2460,7 +2461,9 @@
         one shared scale · <b>click a track name on the left to focus it</b>: it's highlighted, the rest fade, and
         new points go to it (great when tracks overlap); click it again to unfocus · <b>↶ Undo</b> (Ctrl+Z) reverts
         the last edits (up to 50) · <b>〰 Smooth</b> lightly smooths the FOCUSED channel's curve — click again for
-        more (focus a track or select a dot on it first).
+        more (focus a track or select a dot on it first) · <b>⬇ Script</b> exports the clip as Maestro script
+        source (peaks/direction changes only, fits the Maestro's 8 KB script memory) — paste into Control Center's
+        Script tab and trigger it with the "Run a script" action.
       </div>
     </div>
   </div>
@@ -3679,6 +3682,11 @@ async function disconnect() {
     // The rc_trig one-shot can otherwise fire ~250 ms after teardown,
     // mutating live-display globals on a disconnected UI.
     if (_rcTrigReleaseTimer) { clearTimeout(_rcTrigReleaseTimer); _rcTrigReleaseTimer = null; }
+    // Clip transport buffers must not survive a reconnect — a stale half-built
+    // list/download would merge with (or eat) the next board's markers.
+    _clipItems = null; _clipAsm = null; _clipFsFresh = false;
+    _tlDownload = null;
+    _tlAbortWaiters('disconnected');   // reject in-flight timeline upload waiters
   }
 }
 
@@ -3697,6 +3705,9 @@ function setConnected(v) {
     if (fwScreenXL)  fwScreenXL.textContent  = '—';
     if (fwScreenX20) fwScreenX20.textContent = '—';
     if (fwTab)       fwTab.textContent       = '—';
+    // Clips storage bar is per-board — hide it so a reconnect to a different
+    // board (or older firmware with no [CLIPFS]) can't show stale numbers.
+    { const cs = document.getElementById('clips-storage'); if (cs) cs.style.display = 'none'; }
   }
   ['btn-refresh','btn-hwsetup-save','btn-defaults','btn-qs-send','btn-wcb-reboot'].forEach(id => {
     const el = document.getElementById(id);
@@ -4467,6 +4478,7 @@ function clipsRefresh() {
 // Everything here is config-tool-only; no bytes are lost on the wire, just split.
 let _clipItems = null;   // { src, items } accumulating between BEGIN and END (new format)
 let _clipAsm   = null;   // { src, buf }   rejoining a split single marker (old format)
+let _clipFsFresh = false; // a [CLIPFS] arrived in the current LS reply (cleared at LIST:END)
 
 // Feed one candidate line to the ingester.  `src` is the relaying WCB id (a
 // string) for [TERM:<src>] lines, or null for a bare Direct-USB line.  Returns
@@ -4475,13 +4487,17 @@ let _clipAsm   = null;   // { src, buf }   rejoining a split single marker (old 
 function _clipListFeed(src, text) {
   // Clips-partition storage (arrives just before the list on ?REC,LS).
   if (text.startsWith('[CLIPFS]')) {
-    try { _renderClipStorage(JSON.parse(text.slice(8))); } catch (_) {}
+    try { _renderClipStorage(JSON.parse(text.slice(8))); _clipFsFresh = true; } catch (_) {}
     return true;
   }
   // ── New per-item format ──
   if (text.startsWith('[CLIPLIST:BEGIN]')) { _clipItems = { src, items: [] }; return true; }
   if (text.startsWith('[CLIPLIST:END]')) {
     if (_clipItems && _clipItems.src === src) { renderClips(_clipItems.items); _clipItems = null; }
+    // A completed list with NO [CLIPFS] in the same reply = firmware that doesn't
+    // report storage — hide the bar rather than leave a previous board's numbers.
+    if (!_clipFsFresh) { const cs = document.getElementById('clips-storage'); if (cs) cs.style.display = 'none'; }
+    _clipFsFresh = false;
     return true;
   }
   if (text.startsWith('[CLIPITEM]')) {
@@ -5956,20 +5972,37 @@ function _tlTrimStart() {
 //  • SHRINK: drop keyframes/actions past the new end (confirmed — it deletes).
 function _tlSetLength(seconds) {
   if (!_tlClip) return;
-  const newDur = Math.max(0, Math.round((+seconds || 0) * 1000));
+  // Clamp to a sane ceiling (recording caps at 60 s, but edited routines may be
+  // assembled longer; 10 min bounds a typo like "3000").
+  const newDur = Math.max(0, Math.min(600000, Math.round((+seconds || 0) * 1000)));
   const cur = _tlClip.durationMs || 0;
-  if (newDur === cur) return;
+  if (newDur === cur) { _tlUpdateToolbar(); return; }
 
   if (newDur > cur) {
     _tlPushHistory();
+    // Hold the last value of EVERY keyframe track (maestro + any legacy HCR
+    // data) out to the new end — the firmware derives clip duration from the
+    // LAST event, so without an event at newDur the extension wouldn't persist.
     Object.values(_tlClip.maestro).forEach(arr => {
       if (!arr.length) return;
       const last = arr.reduce((m, k) => (k.t > m.t ? k : m), arr[0]);
       if (last.t < newDur) arr.push({ id: _tlId(), t: newDur, pos: last.pos, cp: true });   // hold the last pose to the new end
     });
+    Object.values(_tlClip.hcr).forEach(arr => {
+      if (!arr.length) return;
+      const last = arr.reduce((m, k) => (k.t > m.t ? k : m), arr[0]);
+      if (last.t < newDur) arr.push({ id: _tlId(), t: newDur, vol: last.vol });
+    });
     _tlClip.durationMs = newDur;
     _tlClip.dirty = true;
-    _tlSetStatus(`Extended to ${_fmtDur(newDur)} (servos hold — drag the end points to animate).`);
+    // No keyframe track reached the new end (an actions-only clip): the firmware
+    // derives duration from the LAST event, so the extension won't survive a
+    // save — be explicit instead of letting it silently shrink back.
+    const anyHold = Object.values(_tlClip.maestro).some(a => a.some(k => k.t === newDur)) ||
+                    Object.values(_tlClip.hcr).some(a => a.some(k => k.t === newDur));
+    _tlSetStatus(anyHold
+      ? `Extended to ${_fmtDur(newDur)} (servos hold — drag the end points to animate).`
+      : `Extended to ${_fmtDur(newDur)} in the editor — ⚠ this clip has only actions, so the saved clip still ends at its last event. Add a servo keyframe near the end to make the length stick.`);
     _tlRender();
     return;
   }
@@ -5980,7 +6013,10 @@ function _tlSetLength(seconds) {
   Object.values(_tlClip.hcr).forEach(a => a.forEach(k => { if (k.t > newDur) doomed.push(k); }));
   _tlClip.actions.forEach(a => { if (a.t > newDur) doomed.push(a); });
   if (doomed.length && !confirm(`Shorten the clip to ${_fmtDur(newDur)}? This deletes ${doomed.length} keyframe/action(s) after that point.`)) {
-    _tlUpdateToolbar();   // put the field back to the real length
+    // Restore the field UNCONDITIONALLY — it's still focused right after typing,
+    // and _tlUpdateToolbar skips a focused field (would leave the typed value).
+    const lenEl = document.getElementById('tl-length');
+    if (lenEl) lenEl.value = (cur / 1000).toFixed(1);
     return;
   }
   _tlPushHistory();
@@ -6116,6 +6152,12 @@ function _tlUndo() {
   _tlClip.maestro = snap.maestro; _tlClip.hcr = snap.hcr;
   _tlClip.actions = snap.actions; _tlClip.durationMs = snap.durationMs;
   _tlClip.selected = null; _tlClip.selectedPair = null;   // ids may no longer exist
+  // The focused track may not exist in the restored state (e.g. undoing an
+  // add-track) — a dangling focus would misroute Smooth/overlay adds.
+  if (_tlClip.activeTrack &&
+      !_tlTrackList().some(t => `${t.kind}:${t.key}` === _tlClip.activeTrack)) {
+    _tlClip.activeTrack = null;
+  }
   _tlClip.dirty = true;
   const b = document.getElementById('tl-undo'); if (b) b.disabled = _tlClip.history.length === 0;
   _tlRender();
@@ -6163,16 +6205,152 @@ function _tlSmoothTrack(track) {
   //    [oMin,oMax] keeps the servo's full range while KEEPING the rounding — so
   //    the curve gets rounder without losing its throw, and repeated clicks
   //    round more instead of flattening.
+  //
+  //    The rescale is applied to EVERY point (endpoints included) and then a
+  //    linear correction ramp pins the endpoints back to their original values.
+  //    Rescaling only the interior while hard-fixing the endpoints (the old way)
+  //    could STRETCH an interior point right past a fixed endpoint — e.g. a
+  //    global minimum crushed by the kernel then mapped back to oMin next to an
+  //    un-rescaled endpoint = a discontinuous step at the clip boundary. The
+  //    ramp spreads the endpoint correction smoothly across the whole clip.
   let sMin = Math.min(...sm), sMax = Math.max(...sm);
   const sSpan = sMax - sMin, oSpan = oMax - oMin;
   const rescale = sSpan > 1e-6 && oSpan > 1e-6;
+  if (rescale) {
+    const rs = sm.map(v => oMin + (v - sMin) * oSpan / sSpan);
+    const cFirst = src[0] - rs[0], cLast = src[n - 1] - rs[n - 1];
+    for (let i = 0; i < n; i++) sm[i] = rs[i] + (cFirst * (n - 1 - i) + cLast * i) / (n - 1);
+  }
   for (let i = 1; i < n - 1; i++) {
-    const v = rescale ? oMin + (sm[i] - sMin) * oSpan / sSpan : sm[i];
+    const v = sm[i];
     if (isMae) arr[i].pos = Math.round(_tlClampUs(track, v / 4) * 4);
     else arr[i].vol = Math.max(0, Math.min(99, Math.round(v)));
   }
   return true;
 }
+// ── Export a clip as Maestro SCRIPT source ───────────────────────────────────
+// Emits the same script style Maestro Control Center generates for sequences:
+// an empty main program (so nothing auto-runs), then one subroutine per clip
+// whose lines push a duration + channel targets and call a frame helper that
+// pops them into `<ch> servo` commands and a `delay`. Paste into Control
+// Center's Script tab → Apply; the routine then lives ON the Maestro and can be
+// triggered from NaviCore with the "Run a script" action (subroutine 0).
+//
+// Fidelity model per Greg: keyframe-REDUCE hard (keep peaks / direction changes
+// via Ramer-Douglas-Peucker) and let the Maestro's own per-channel speed/accel
+// settings smooth the motion between targets. Script memory is ~8 KB compiled —
+// the export auto-raises the reduction tolerance until the estimate sits well
+// below that (≤ 4 KB).
+
+// RDP polyline simplification on {t, pos} keyframes; tolerance in ¼µs.
+function _tlRdp(pts, tol) {
+  if (pts.length <= 2) return pts.slice();
+  const keep = new Array(pts.length).fill(false);
+  keep[0] = keep[pts.length - 1] = true;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    if (b - a < 2) continue;
+    const dt = pts[b].t - pts[a].t || 1;
+    const dv = pts[b].pos - pts[a].pos;
+    let worst = -1, worstD = tol;
+    for (let i = a + 1; i < b; i++) {
+      const ideal = pts[a].pos + dv * (pts[i].t - pts[a].t) / dt;
+      const d = Math.abs(pts[i].pos - ideal);
+      if (d > worstD) { worstD = d; worst = i; }
+    }
+    if (worst > 0) { keep[worst] = true; stack.push([a, worst], [worst, b]); }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+
+function _tlExportMaestroScript() {
+  if (!_tlClip) return;
+  const slots = [...new Set(Object.keys(_tlClip.maestro).filter(k => (_tlClip.maestro[k] || []).length).map(k => k.split('-')[0]))];
+  if (!slots.length) { alert('This clip has no servo keyframes to export.'); return; }
+  let slot = slots[0];
+  if (slots.length > 1) {
+    const focused = _tlClip.activeTrack && _tlClip.activeTrack.startsWith('maestro:') ? _tlClip.activeTrack.slice(8).split('-')[0] : slots[0];
+    const ans = prompt(`This clip drives Maestros ${slots.join(', ')} — a script runs on ONE Maestro. Export which slot?`, focused);
+    if (ans === null) return;
+    slot = String(+ans || slots[0]);
+    if (!slots.includes(slot)) { alert(`No keyframes for Maestro ${slot} in this clip.`); return; }
+  }
+
+  // Reduce each channel, auto-raising tolerance until the size estimate fits.
+  const chans = Object.keys(_tlClip.maestro)
+    .filter(k => k.split('-')[0] === slot && (_tlClip.maestro[k] || []).length)
+    .map(k => ({ ch: +k.split('-')[1], kfs: _tlClip.maestro[k].slice().sort((a, b) => a.t - b.t) }))
+    .sort((a, b) => a.ch - b.ch);
+  const origCount = chans.reduce((s, c) => s + c.kfs.length, 0);
+  let tol = 24;   // ¼µs (= 6 µs) — keeps peaks/direction changes, sheds capture noise
+  let frames, est, reduced;
+  for (let pass = 0; pass < 10; pass++) {
+    reduced = chans.map(c => ({ ch: c.ch, kfs: _tlRdp(c.kfs.map(k => ({ t: k.t, pos: k.pos })), tol) }));
+    // Frames = union of kept times; each frame sets the channels kept at that time.
+    const byTime = new Map();
+    reduced.forEach(c => c.kfs.forEach(k => {
+      const t = Math.round(k.t);
+      if (!byTime.has(t)) byTime.set(t, []);
+      byTime.get(t).push({ ch: c.ch, pos: Math.round(k.pos) });
+    }));
+    const times = [...byTime.keys()].sort((a, b) => a - b);
+    frames = times.map((t, i) => ({
+      dur: i < times.length - 1 ? times[i + 1] - t : 500,
+      sets: byTime.get(t).sort((a, b) => a.ch - b.ch),
+    }));
+    // Bytecode estimate: ~3 B per pushed literal, ~3 B per helper call, ~2 B per
+    // helper command, small fixed overhead. Conservative on the high side.
+    const literals = frames.reduce((s, f) => s + 1 + f.sets.length, 0);
+    const helperCmds = new Set(frames.map(f => f.sets.map(x => x.ch).join('_'))).size * 4;
+    est = literals * 3 + frames.length * 3 + helperCmds * 2 + 32;
+    if (est <= 4096) break;
+    tol *= 2;
+  }
+
+  // Split any hold longer than the Maestro's 30 s delay cap into repeat frames.
+  const outFrames = [];
+  frames.forEach(f => {
+    let d = f.dur;
+    outFrames.push({ dur: Math.min(d, 30000), sets: f.sets });
+    d -= 30000;
+    while (d > 0) { outFrames.push({ dur: Math.min(d, 30000), sets: [] }); d -= 30000; }
+  });
+
+  // Emit the script text.
+  const subName = ('clip_' + (_tlClip.name || 'export')).replace(/[^A-Za-z0-9_]/g, '_');
+  const helperFor = sets => 'frame_' + sets.map(x => x.ch).join('_');
+  const helpers = new Map();   // helperName → [ch...] (descending pops)
+  const lines = [];
+  lines.push('# NaviCore clip export — "' + (_tlClip.name || '') + '" → Maestro ' + slot);
+  lines.push('# Channels: ' + chans.map(c => { const inf = _maestroChInfo(slot, c.ch); return c.ch + (inf && inf.name ? ' (' + inf.name + ')' : ''); }).join(', '));
+  lines.push('# ' + origCount + ' keyframes reduced to ' + reduced.reduce((s, c) => s + c.kfs.length, 0) + ' (tolerance ' + (tol / 4) + ' µs) · ~' + est + ' bytes compiled (limit 8192)');
+  lines.push('# Paste into Maestro Control Center → Script tab → Apply Settings.');
+  lines.push('# Trigger from NaviCore with the "Run a script" action, subroutine 0.');
+  lines.push('# Tip: set per-channel Speed/Acceleration in Control Center — the Maestro');
+  lines.push('# smooths between these targets itself.');
+  lines.push('');
+  lines.push('sub ' + subName);
+  outFrames.forEach(f => {
+    if (!f.sets.length) { lines.push('  ' + f.dur + ' delay'); return; }   // pure hold continuation
+    const h = helperFor(f.sets);
+    if (!helpers.has(h)) helpers.set(h, f.sets.map(x => x.ch));
+    lines.push('  ' + f.dur + ' ' + f.sets.map(x => x.pos).join(' ') + ' ' + h);
+  });
+  lines.push('  quit');
+  lines.push('');
+  helpers.forEach((chList, name) => {
+    lines.push('sub ' + name);
+    [...chList].sort((a, b) => b - a).forEach(ch => lines.push('  ' + ch + ' servo'));
+    lines.push('  delay');
+    lines.push('  return');
+    lines.push('');
+  });
+  const text = lines.join('\n');
+  downloadCsv(text, (subName + '_maestro_script.txt'));
+  _tlSetStatus(`Exported Maestro ${slot} script: ${outFrames.length} frames, ~${est} B compiled (tolerance ${tol / 4} µs).`);
+}
+
 function _tlSmoothCurrent() {
   if (!_tlClip) return;
   const track = _tlCurrentTrack();
@@ -6317,6 +6495,7 @@ document.getElementById('tl-zoom-out').addEventListener('click', () => _tlZoomAt
 document.getElementById('tl-zoom-fit').addEventListener('click', _tlFit);
 document.getElementById('tl-undo').addEventListener('click', _tlUndo);
 document.getElementById('tl-smooth').addEventListener('click', _tlSmoothCurrent);
+document.getElementById('tl-export-script').addEventListener('click', _tlExportMaestroScript);
 document.getElementById('tl-trim-start').addEventListener('click', _tlTrimStart);
 document.getElementById('tl-length').addEventListener('change', e => _tlSetLength(e.target.value));
 document.getElementById('tl-live-btn').addEventListener('click', _tlToggleLive);
@@ -6728,6 +6907,15 @@ function handleBoardMessage(line) {
     // this snapshot — typically a single section (mappings or thresholds)
     // instead of all ~3 KB of config.  See _diffConfigBranches.
     _configBaseline = _deepClone(config);
+    // Maestro-channel migration, ORDER-CRITICAL: fold any localStorage-era
+    // import into config AFTER the baseline (so the diff sees it and Save
+    // ships it to the board), THEN sync the mirror to match the config
+    // exactly (deleting stale mirror entries for slots the board cleared).
+    if (_foldLocalMaestroChIntoConfig()) {
+      appendTerminalLine('< [config] Imported Maestro channel names/limits found in this browser — open Config and Save to store them on the NaviCore.', 'rx');
+    }
+    _syncMaestroChFromConfig();
+    renderMaestroLocations();   // badges reflect the freshly-synced mirror
     return;
   }
   if (msg.type === 'ACK') {
@@ -6813,10 +7001,10 @@ function applyConfig(data) {
       config.maestros.push({ type: 0, device: 1 + config.maestros.length, channels: [] });
     }
   }
-  // Mirror the device's per-channel Maestro names/endpoints into _maestroCh so
-  // the passthrough limits, timeline labels and knob editor read them straight
-  // from the loaded config (no longer localStorage-only).
-  _syncMaestroChFromConfig();
+  // NOTE: the _maestroCh mirror is NOT synced here — the CONFIG handler does
+  // baseline-snapshot → _foldLocalMaestroChIntoConfig → _syncMaestroChFromConfig
+  // in that order, so a localStorage-era import folds into the config AFTER the
+  // diff baseline (making Save actually ship it to the board).
   if (data.wcbNetwork) {
     config.wcbNetwork = { ...config.wcbNetwork, ...data.wcbNetwork };
     // Coerce the numeric fields — if any arrive as strings they'd register as a
@@ -6902,10 +7090,10 @@ function _maestroChSlotToArray(slot) {
     .map(ch => ({ ch: +ch, name: (s[ch].name || '').slice(0, 23), min: +s[ch].min || 0, max: +s[ch].max || 0 }))
     .sort((a, b) => a.ch - b.ch);
 }
-// Rebuild _maestroCh from config.maestros[].channels after a config load. The
-// DEVICE config wins per slot; a slot the device has no channels for keeps any
-// pre-existing local import AND folds it into the config so a Save persists it —
-// never silently wiped.
+// Rebuild _maestroCh EXACTLY from config.maestros[].channels — config (device or
+// imported CSV) is authoritative for EVERY slot, including empty ones (a stale
+// mirror entry for a slot the config has no channels for is DELETED, so it can't
+// resurrect channels the board/CSV intentionally cleared).
 function _syncMaestroChFromConfig() {
   if (!config || !Array.isArray(config.maestros)) return;
   for (let i = 0; i < config.maestros.length; i++) {
@@ -6916,11 +7104,30 @@ function _syncMaestroChFromConfig() {
       const map = {};
       m.channels.forEach(c => { if (c && c.ch != null) map[String(c.ch)] = { min: +c.min || 0, max: +c.max || 0, name: c.name || '' }; });
       _maestroCh[slot] = map;
-    } else if (_maestroCh[slot] && Object.keys(_maestroCh[slot]).length) {
-      m.channels = _maestroChSlotToArray(slot);   // migrate a local-only import into the config
+    } else {
+      delete _maestroCh[slot];
     }
   }
   _saveMaestroCh();
+}
+// Migration: fold a browser-local (localStorage-era) import into the config for
+// any slot the DEVICE has no channels for, so a Save persists it on the board.
+// MUST run AFTER the diff baseline is snapshot (see the CONFIG handler) — folding
+// before the snapshot bakes the channels into the baseline, the diff sees "no
+// change", and the migration silently never reaches the device.
+function _foldLocalMaestroChIntoConfig() {
+  if (!config || !Array.isArray(config.maestros)) return 0;
+  let folded = 0;
+  for (let i = 0; i < config.maestros.length; i++) {
+    const m = config.maestros[i]; if (!m) continue;
+    if (!Array.isArray(m.channels)) m.channels = [];
+    const slot = String(i + 1);
+    if (!m.channels.length && _maestroCh[slot] && Object.keys(_maestroCh[slot]).length) {
+      m.channels = _maestroChSlotToArray(slot);
+      folded++;
+    }
+  }
+  return folded;
 }
 // Stray file dropped OUTSIDE a drop target → swallow it so the browser doesn't
 // navigate away from the tool (which would lose unsaved config). The per-row
@@ -8905,6 +9112,9 @@ function openKnobModal(name) {
   // mode 1 when enabled. A single editor edits one mode at a time (editMode);
   // editingKnobDraft.outputs always mirrors the active mode's array.
   k.modeAware = !!d.modeAware;
+  // Which switch selects this knob's mode: -1 = the droid's global mode switch
+  // (default), else a switch index 0-7 (SA-SH) so the knob is gated on its own.
+  k.modeSwitchOverride = Number.isInteger(d.modeSwitchOverride) ? d.modeSwitchOverride : -1;
   const _m2 = Array.isArray(d.outputs2) ? d.outputs2.map(o => ({...o})) : [];
   const _m3 = Array.isArray(d.outputs3) ? d.outputs3.map(o => ({...o})) : [];
   k.outputsByMode = [ k.outputs, _m2, _m3 ];
@@ -8956,6 +9166,14 @@ function openKnobModal(name) {
             <input type="checkbox" id="kn-modeaware" ${k.modeAware ? 'checked' : ''}
                    onchange="toggleKnobModeAware(this.checked)">
             Follow 3 modes
+          </label>
+          <label id="kn-modesrc-wrap" style="display:${k.modeAware ? 'flex' : 'none'};align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-top:5px"
+                 title="Which switch selects THIS knob's mode. 'Global mode switch' follows the droid's main Mode selector; pick a specific switch (e.g. SA) to gate this knob independently — leave the passthrough outputs empty in the modes you want it silent.">
+            Mode from
+            <select id="kn-modesrc" onchange="if(editingKnobDraft) editingKnobDraft.modeSwitchOverride = +this.value">
+              <option value="-1" ${(k.modeSwitchOverride ?? -1) === -1 ? 'selected' : ''}>Global mode switch</option>
+              ${['SA','SB','SC','SD','SE','SF','SG','SH'].map((s,ix) => `<option value="${ix}" ${(k.modeSwitchOverride ?? -1) === ix ? 'selected' : ''}>${s}</option>`).join('')}
+            </select>
           </label>
         </div>
       </div>
@@ -9024,6 +9242,8 @@ function toggleKnobModeAware(checked) {
   editingKnobDraft.outputs  = editingKnobDraft.outputsByMode[0];
   const sel = document.getElementById('kn-editmode');
   if (sel) { sel.value = '1'; sel.style.display = checked ? '' : 'none'; }
+  const src = document.getElementById('kn-modesrc-wrap');
+  if (src) src.style.display = checked ? 'flex' : 'none';   // "Mode from" only matters when mode-aware
   renderKnobOutputs();
 }
 
@@ -9225,11 +9445,14 @@ function saveKnobModal() {
   });
   const modeAware = !!document.getElementById('kn-modeaware')?.checked;
   const byMode = editingKnobDraft.outputsByMode || [editingKnobDraft.outputs, [], []];
+  // -1 (global mode switch) unless mode-aware AND a specific switch is chosen.
+  const modeSrc = +(document.getElementById('kn-modesrc')?.value ?? -1);
   const obj = {
     channel:   +document.getElementById('kn-channel').value,
     function:  fn,
     reverse:   !!document.getElementById('kn-reverse').checked,
     modeAware: modeAware,
+    modeSwitchOverride: (modeAware && modeSrc >= 0 && modeSrc <= 7) ? modeSrc : -1,
     outputs:   fn === KF_NONE ? [] : clean(byMode[0]),   // mode 1 (+ all modes when !modeAware)
   };
   if (modeAware && fn !== KF_NONE) {                      // per-mode sets only when opted in
@@ -11164,14 +11387,25 @@ function handleConfigImportFile(event) {
       // Maestro slot access for the parser. The FIRST touch of a slot (by a
       // 'maestro' or 'maestrochan' row) clears its inherited channels so the CSV
       // fully defines them — order-independent, so channel rows before/after the
-      // location row both work.
+      // location row both work. The pre-clear channels are stashed PER SLOT: any
+      // slot the CSV supplies no 'maestrochan' rows for gets them restored after
+      // the parse — a CSV that's silent about a slot's channels (old-format
+      // export, or a hand-trimmed file) means "no opinion", never "wipe the
+      // names/endpoints stored on the board". Clearing a slot's channels is done
+      // with the ✕ button in Maestro Locations, not by editing CSVs.
       const _maeReset = new Set();
+      const _maePrevChannels = {};
+      const _maeHadChan = new Set();
       const ensureMaeSlot = idx => {
         if (!Array.isArray(imported.maestros)) imported.maestros = [];
         while (imported.maestros.length < NUM_MAESTRO_SLOTS) {
           imported.maestros.push({ type: 0, device: 1 + imported.maestros.length, channels: [] });
         }
-        if (!_maeReset.has(idx)) { imported.maestros[idx] = { ...imported.maestros[idx], channels: [] }; _maeReset.add(idx); }
+        if (!_maeReset.has(idx)) {
+          _maePrevChannels[idx] = Array.isArray(imported.maestros[idx].channels) ? imported.maestros[idx].channels : [];
+          imported.maestros[idx] = { ...imported.maestros[idx], channels: [] };
+          _maeReset.add(idx);
+        }
         if (!Array.isArray(imported.maestros[idx].channels)) imported.maestros[idx].channels = [];
       };
 
@@ -11294,6 +11528,7 @@ function handleConfigImportFile(event) {
         if (type === 'maestrochan') {
           if (!Number.isFinite(buttonId) || buttonId < 1 || buttonId > NUM_MAESTRO_SLOTS) continue;
           const idx = buttonId - 1;
+          _maeHadChan.add(idx);
           ensureMaeSlot(idx);
           const ch = cellNum(row, indexes.maestroCh);
           if (!Number.isFinite(ch) || ch < 0 || ch > 31) continue;
@@ -11408,10 +11643,16 @@ function handleConfigImportFile(event) {
         }
       }
 
+      // Restore channels for every touched slot the CSV had NO 'maestrochan'
+      // rows for (per-slot, not all-or-nothing): a file that's silent about a
+      // slot's channels must not wipe what's stored on the board.
+      _maeReset.forEach(idx => {
+        if (!_maeHadChan.has(idx)) imported.maestros[idx].channels = _maePrevChannels[idx] || [];
+      });
       config = imported;
       if (Object.keys(newSwitches).length) config.switches = newSwitches;
       if (Object.keys(newKnobs).length) config.knobs = newKnobs;
-      _syncMaestroChFromConfig();   // mirror the imported channel names/endpoints into _maestroCh
+      _syncMaestroChFromConfig();   // mirror := config exactly (CSV is authoritative; stale mirror entries cleared)
       // hcrDest / maestros are already on `imported` (default from in-memory
       // config OR overwritten by the parser above). The csvHad* flags are
       // informational — we don't strip stuff we already had.

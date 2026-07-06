@@ -1205,6 +1205,11 @@ static uint16_t lastKnobRaw[RC_NUM_KNOBS] = {
   0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,    // J1-J4
   0xFFFF, 0xFFFF                     // J5, J6 (X20 3-axis)
 };
+// Last mode each knob was dispatched in (0 = uninitialized). A knob using a
+// modeSwitchOverride follows its own switch, whose changes DON'T trip
+// resetModeAwareKnobs() (that only watches the global mode switch) — so we
+// detect the per-knob mode change here and re-arm.
+static int8_t lastKnobMode[RC_NUM_KNOBS] = {0};
 
 void processKnobs() {
   if (navirec::isReplaying()) return;   // replay owns the servos/volume during playback
@@ -1212,10 +1217,24 @@ void processKnobs() {
     RcKnob& kn = rcConfig.knobs[i];
     if (kn.channel < 1 || kn.channel > 24) continue;
     if (kn.function == KF_NONE) continue;
-    // Mode-aware knobs use the current 3-way-switch mode's output set; others
-    // always use mode 1. (lastKnobRaw[i] is reset to 0xFFFF on a mode change so
-    // the new mode's servo snaps to the current stick position — see processSbus.)
-    const int m = kn.modeAware ? FunctionSwState : 1;
+    // Which mode's output set this knob uses. Default = the global mode switch
+    // (FunctionSwState); a mode-aware knob may instead follow its OWN switch via
+    // modeSwitchOverride (0-7 = SA-SH) so it can be gated independently — e.g. a
+    // joystick that drives Maestro passthrough only when SA is flipped, without
+    // disturbing the droid's global mode.
+    int m = 1;
+    if (kn.modeAware) {
+      if (kn.modeSwitchOverride >= 0) {
+        const int sv = readBoundSwitchSbus(kn.modeSwitchOverride);
+        m = (sv < 0) ? FunctionSwState : (sv < 582 ? 1 : (sv < 1401 ? 2 : 3));
+      } else {
+        m = FunctionSwState;
+      }
+    }
+    // Re-arm on a per-knob mode change so the new mode's servo snaps to the
+    // current stick position next frame (resetModeAwareKnobs only fires on a
+    // GLOBAL mode change, so an override knob's switch move needs this).
+    if ((int8_t)m != lastKnobMode[i]) { lastKnobMode[i] = (int8_t)m; lastKnobRaw[i] = 0xFFFF; }
     const uint8_t         cnt  = rcKnobOutCount(kn, m);
     const RcKnobOutput*   outs = rcKnobOuts(kn, m);
     uint16_t raw = sbusValues[kn.channel - 1];

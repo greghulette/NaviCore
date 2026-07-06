@@ -311,6 +311,36 @@ as edited.
 
 ## 12. Changelog
 
+- **v3.24 (2026-07-03, config-tool only):** Second adversarial review sweep (27 raised → 10 confirmed → all
+  fixed/dispositioned) + **Maestro script export**.
+  **Review fixes:** (1) Maestro-channel MIGRATION actually persists now — the localStorage→config fold ran inside
+  applyConfig BEFORE the diff-baseline snapshot, so the baseline already contained the folded channels and Save
+  never shipped them; the fold now runs AFTER the baseline in the CONFIG handler (the resulting "unsaved changes"
+  prompt is CORRECT — the tool holds data the board lacks; a terminal note says so). `_syncMaestroChFromConfig` is
+  now an EXACT mirror (deletes stale mirror entries for slots the config has no channels for → a stale browser
+  can't resurrect cleared channels), with the fold split into `_foldLocalMaestroChIntoConfig`. (2) CSV import
+  restores channels PER SLOT for any slot the file has no `maestrochan` rows for (old-format or hand-trimmed CSVs
+  can't wipe board-stored names; clearing is the ✕ button's job). (3) Smooth's amplitude rescale now applies to
+  ALL points with a linear endpoint-correction ramp instead of hard-pinning endpoints — a crushed interior
+  extremum could previously be stretched right past a fixed endpoint into a discontinuous step at the clip
+  boundary. Verified on the pathological case AND amplitude still 100 % on structural curves. (4) Disconnect
+  clears the clip transport buffers (`_clipItems/_clipAsm/_clipFsFresh/_tlDownload` + aborts timeline waiters) so
+  stale fragments can't corrupt the next board's lists. (5) `_tlUndo` clears a dangling `activeTrack` when the
+  restored state no longer has that track. (6) Length-extend on an actions-only clip now WARNS that the saved
+  clip still ends at its last event (firmware derives duration from the last event; nothing holdable exists).
+  **Dispositioned as by-design:** NVS save path stays {type,device} only (channels would blow the 4 KB NVS
+  per-value cap; NVS is only a legacy-migration fallback for boards that predate channels — LittleFS is the
+  source of truth). Fold-after-baseline "false dirty" = intentional (see fix 1).
+  **⬇ Script export** (`_tlExportMaestroScript`, timeline toolbar): emits Maestro Control-Center-style SCRIPT
+  source — empty main program, one `sub clip_<name>` of `duration targets… frame_x_y` lines + generated frame
+  helper subs (values pushed ascending, popped `<ch> servo` descending, then `delay`). Keyframes reduced per
+  channel with RDP (base tolerance 6 µs, auto-doubling until the compiled-size estimate ≤ 4 KB — "keep peaks/
+  direction changes, let the Maestro's speed/accel smooth the rest"). Auto-picks the slot (prompts only on a
+  multi-slot clip, defaulting to the focused track's slot); >30 s holds split into chained delay frames; header
+  comments carry channel names, reduction stats, size estimate, and usage (paste into Control Center's Script
+  tab; trigger via NaviCore's "Run a script" action, subroutine 0). Verified: 120-kf capture → 31 frames /
+  ~339 B; 1500-kf noisy capture → ~65 frames / 616 B; multi-slot prompt honors choice; helper pop order correct;
+  actions-only clip alerts.
 - **v3.23 (2026-07-03, firmware + tool; reflash for the storage number):** **Clips storage usage** in the Library
   panel. Firmware `?REC,LS` now emits a short `[CLIPFS]{"total":N,"used":M}` marker (from `clipsFS.totalBytes()` /
   `usedBytes()` on the 12 MB `clips` LittleFS partition) before the clip list — short enough to survive the WCB
