@@ -518,7 +518,10 @@ static void maestroSetSpeed(uint8_t id, uint8_t ch, uint16_t spd) {
   uint8_t p[3] = { ch, (uint8_t)(spd & 0x7F), (uint8_t)((spd >> 7) & 0x7F) };
   // Cache only what actually went out — a dropped write must NOT mark the
   // channel "applied" (id validity is guaranteed once maestroWrite returns true).
-  if (maestroWrite(id, 0x87, p, 3) && ch < 32) g_maeSpeed[id - 1][ch] = spd;
+  if (maestroWrite(id, 0x87, p, 3) && ch < 32) {
+    g_maeSpeed[id - 1][ch] = spd;
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u ch %u  SetSpeed %u\n", id, ch, spd);
+  }
 }
 static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
   if (!maestroChanOk(id, ch)) return;
@@ -527,7 +530,10 @@ static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
   // (corrupting the Pololu data stream) and was one byte short of the frame
   // the Maestro expects for 0x89.
   uint8_t p[3] = { ch, (uint8_t)(accel & 0x7F), (uint8_t)((accel >> 7) & 0x7F) };
-  if (maestroWrite(id, 0x89, p, 3) && ch < 32) g_maeAccel[id - 1][ch] = accel;   // cache only what actually went out
+  if (maestroWrite(id, 0x89, p, 3) && ch < 32) {   // cache only what actually went out
+    g_maeAccel[id - 1][ch] = accel;
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u ch %u  SetAccel %u\n", id, ch, accel);
+  }
 }
 static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); }
 static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); maeSmoothInvalidateSlot(id); }
