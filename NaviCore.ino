@@ -196,6 +196,16 @@ Stream* s4 = nullptr;       // aux "S4"  (v2 "Serial 2")
 Stream* s5 = nullptr;       // aux "S5"  (v2 "Serial 3" GPIO38/47; WCB 3.2 "Serial 5" GPIO9/10)
 bool    s3IsHw = false;     // true when s3 points at the hardware UART0 (Serial0)
 
+// Board-aware aux-serial port label for logs/UI. idx 0/1/2 = s3/s4/s5.
+// NaviCore v2 PCB silkscreens "Serial 1/2/3"; WCB HW 3.2 = "Serial 3/4/5".
+// Static buffer — the caller uses it immediately (before the next call).
+static const char* auxPortLabel(int idx) {
+  static char lbl[12];
+  int n = ((int)rcConfig.boardType == 0) ? (idx + 1) : (idx + 3);
+  snprintf(lbl, sizeof(lbl), "Serial %d", n);
+  return lbl;
+}
+
 // Open/close an aux port, dispatching on hardware-UART vs bit-banged SoftwareSerial.
 static inline void auxBegin(Stream* p, bool isHw, uint32_t baud, uint8_t rxPin, uint8_t txPin) {
   if (!p) return;
@@ -572,6 +582,7 @@ static void maestroApplySmoothProfile(uint8_t id, int8_t prof) {
 // Parse and execute a Maestro action command string against slot `id` (1-8).
 // cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,sm]"
 //      | "setSpeed,ch,spd" | "setAccel,ch,acc" | "setSpeedAccel,ch,spd,acc"
+//      | "applyProfile,<spec>"  (spec: "u"=unlimited | "p0".."p5"=profile)
 //   restartScript's optional 3rd arg loads smoothing before the script runs:
 //   "u" = Unlimited (zero this Maestro's profile-managed channels); "p0".."p5" =
 //   apply that smoothing profile; absent = leave the channels as-is. (A legacy
@@ -603,6 +614,13 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
       uint8_t ch = (uint8_t)atoi(sCh);
       maestroSetSpeed(id, ch, (uint16_t)atoi(sSpd));
       maestroSetAccel(id, ch, (uint8_t) atoi(sAcc));
+    }
+  }
+  else if (strcmp(tok, "applyProfile") == 0) {    // load a smoothing profile (or Unlimited) onto this Maestro
+    char* sSpec = strtok(nullptr, ",");           // "u" = unlimited | "p0".."p5" = profile
+    if (sSpec) {
+      if (sSpec[0] == 'p' || sSpec[0] == 'P') { int p = atoi(sSpec + 1); if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) maestroApplySmoothProfile(id, (int8_t)p); }
+      else maestroResetSmoothedChannels(id);
     }
   }
   else if (strcmp(tok, "restartScript") == 0) {
@@ -1068,7 +1086,8 @@ static void rcExecuteActionNow(const RcAction& a) {
     }
     case RA_SERIAL: {
       String s(a.cmd);
-      dlog(DBG_SERIAL, "[DISPATCH] Serial %s  %s\n", a.target, a.cmd);
+      { int _pi = (a.target[0] == 'S' && a.target[1] >= '3' && a.target[1] <= '5') ? (a.target[1] - '3') : -1;
+        dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", (_pi >= 0) ? auxPortLabel(_pi) : a.target, a.cmd); }
       if      (!strcmp(a.target, "S3")) writeS3(s);
       else if (!strcmp(a.target, "S4")) writeS4(s);
       else if (!strcmp(a.target, "S5")) writeS5(s);   // both boards (v2 "Serial 3", WCB 3.2 "Serial 5")
@@ -1965,27 +1984,27 @@ bool execCliLine(const String& line) {
 // parser would live. Ports are drained every loop so their FIFOs never overflow;
 // the dlog is a no-op (nothing sent) unless the Serial debug chip is on.
 #define AUX_RX_BUF 128
-static void auxRxPollPort(Stream* p, const char* name, char* buf, uint8_t& len, unsigned long& lastMs) {
+static void auxRxPollPort(Stream* p, int idx, char* buf, uint8_t& len, unsigned long& lastMs) {
   if (!p) return;
   while (p->available()) {
     int c = p->read();
     lastMs = millis();
     if (c == '\n' || c == '\r') {
-      if (len) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX %s  %s\n", name, buf); len = 0; }
+      if (len) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s]  %s\n", auxPortLabel(idx), buf); len = 0; }
     } else {
-      if (len >= AUX_RX_BUF - 1) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX %s  %s\n", name, buf); len = 0; }
+      if (len >= AUX_RX_BUF - 1) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s]  %s\n", auxPortLabel(idx), buf); len = 0; }
       buf[len++] = (c >= 32 && c < 127) ? (char)c : '.';   // sanitize non-printable for the terminal
     }
   }
-  if (len && (millis() - lastMs) > 60) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX %s  %s\n", name, buf); len = 0; }
+  if (len && (millis() - lastMs) > 60) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s]  %s\n", auxPortLabel(idx), buf); len = 0; }
 }
 static void pollAuxSerialRx() {
   static char b3[AUX_RX_BUF], b4[AUX_RX_BUF], b5[AUX_RX_BUF];
   static uint8_t l3 = 0, l4 = 0, l5 = 0;
   static unsigned long m3 = 0, m4 = 0, m5 = 0;
-  auxRxPollPort(s3, "S3", b3, l3, m3);
-  auxRxPollPort(s4, "S4", b4, l4, m4);
-  auxRxPollPort(s5, "S5", b5, l5, m5);
+  auxRxPollPort(s3, 0, b3, l3, m3);
+  auxRxPollPort(s4, 1, b4, l4, m4);
+  auxRxPollPort(s5, 2, b5, l5, m5);
 }
 
 void handleSerialInput() {

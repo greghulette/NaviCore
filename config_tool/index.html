@@ -2233,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071319QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071341QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3447,6 +3447,14 @@ const serialPorts = [
   { v: 'S4', n: 'S4 — Aux serial 4' },
   { v: 'S5', n: 'S5 — Aux serial 5' },
 ];
+// Board-aware display label for an aux port. The stored VALUE stays "S3/S4/S5"
+// (config compat + firmware), but the NaviCore v2 PCB silkscreens "Serial 1/2/3"
+// while WCB HW 3.2 uses "Serial 3/4/5". Matches auxPortLabel() in the firmware.
+function _serialPortLabel(v) {
+  const idx = { S3: 0, S4: 1, S5: 2 }[v];
+  if (idx === undefined) return v;
+  return 'Serial ' + (((+config.boardType || 0) === 0) ? (idx + 1) : (idx + 3));
+}
 
 // HCR lookup tables (mirrors BC config tool — same fn numbers + chan
 // semantics so the receiving HCR vocalizer protocol matches).
@@ -7231,6 +7239,7 @@ function _clearMaestroImport(slot) {
 // firmware's smoothProfiles JSON. Knobs + Maestro script actions reference a
 // profile by index (0-5); -1 = none, "u" = unlimited (scripts only).
 let _editSmoothProfile = 0;   // which profile the Maestro-tab sliders edit
+let _openSmoothMaestros = new Set();   // which per-Maestro smoothing sections stay expanded across re-renders
 function _smoothProfiles() {
   if (!Array.isArray(config.smoothProfiles)) config.smoothProfiles = [];
   while (config.smoothProfiles.length < 6)
@@ -7359,6 +7368,8 @@ function renderMaestroLocations() {
       const chans = prof.entries.filter(e => +e.mid === i + 1);
       const det = document.createElement('details');
       det.style.cssText = 'margin:-2px 0 6px 46px';
+      det.open = _openSmoothMaestros.has(i);   // survive the re-render on add/remove channel
+      det.addEventListener('toggle', () => { if (det.open) _openSmoothMaestros.add(i); else _openSmoothMaestros.delete(i); });
       const sum = document.createElement('summary');
       sum.style.cssText = 'cursor:pointer;color:var(--accent2);font-size:11px';
       sum.textContent = `⚙ Smoothing — ${chans.length} channel${chans.length === 1 ? '' : 's'} in "${_smoothProfileName(_editSmoothProfile)}"`;
@@ -7488,7 +7499,7 @@ function renderMp3DestFields() {
       <label>Port:</label>
       <select id="mp3-port" style="font-size:12px"
               onchange="config.mp3Dest.port = this.value">
-        ${serialPorts.map(p => `<option value="${p.v}" ${p.v===port?'selected':''}>${p.v}</option>`).join('')}
+        ${serialPorts.map(p => `<option value="${p.v}" ${p.v===port?'selected':''}>${_serialPortLabel(p.v)}</option>`).join('')}
       </select>
       <small style="color:var(--muted);font-size:10px">baud set in Aux Serial Ports ↓</small>
     `;
@@ -7609,7 +7620,7 @@ function renderHcrDestFields() {
       <label>Port:</label>
       <select id="hcr-port" style="font-size:12px"
               onchange="config.hcrDest.port = this.value">
-        ${serialPorts.map(p => `<option value="${p.v}" ${p.v===port?'selected':''}>${p.v}</option>`).join('')}
+        ${serialPorts.map(p => `<option value="${p.v}" ${p.v===port?'selected':''}>${_serialPortLabel(p.v)}</option>`).join('')}
       </select>
     `;
     d.port = port;
@@ -8325,6 +8336,11 @@ function _maestroCmdSummary(slot, cmd) {
   if (p[0] === 'setSpeed')      return `${chName(+p[1] || 0)} speed ${p[2] || 0}`;
   if (p[0] === 'setAccel')      return `${chName(+p[1] || 0)} accel ${p[2] || 0}`;
   if (p[0] === 'setSpeedAccel') return `${chName(+p[1] || 0)} spd ${p[2] || 0} / acc ${p[3] || 0}`;
+  if (p[0] === 'applyProfile') {
+    if (p[1] === 'u') return 'smoothing → Unlimited';
+    const i = +String(p[1] || '').replace(/^p/, '');
+    return `smoothing → ${escH(_smoothProfiles()[i]?.name || 'Profile ' + (i + 1))}`;
+  }
   return escH(cmd || '');
 }
 
@@ -8749,6 +8765,18 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
       hint.textContent = `${info.name || 'servo'} · ${lo}–${hi}µs`;
       argWrap.appendChild(hint);
     }
+  } else if (cmd === 'applyProfile') {
+    // Apply a smoothing profile (or Unlimited) to this Maestro — lets a switch/
+    // button load smoothing by name instead of typing speed/accel by hand.
+    const prevSpec = parts ? (parts[1] !== undefined ? String(parts[1]) : 'p0') : (document.getElementById(fid + '-maeprof') ? document.getElementById(fid + '-maeprof').value : 'p0');
+    const pWrap = document.createElement('div'); pWrap.className = 'field-group';
+    const pLab = document.createElement('label'); pLab.style.cssText = 'font-size:11px'; pLab.textContent = 'Profile';
+    pLab.title = 'Which smoothing profile to load onto this Maestro when this fires. Unlimited = clear smoothing (full speed). Build profiles in the Maestro Locations tab.';
+    const pSel = document.createElement('select'); pSel.id = fid + '-maeprof';
+    pSel.innerHTML = `<option value="u"${prevSpec === 'u' ? ' selected' : ''}>Unlimited (full speed)</option>` +
+      _smoothProfiles().map((p, i) => `<option value="p${i}"${prevSpec === 'p' + i ? ' selected' : ''}>${escH(p.name || 'Profile ' + (i + 1))}</option>`).join('');
+    pWrap.appendChild(pLab); pWrap.appendChild(pSel);
+    argWrap.appendChild(pWrap);
   } else if (cmd === 'setSpeedAccel') {
     // Both limits in one action, as sliders. Speed slider maxes at 500 (0=off;
     // the useful smoothing range — 500+ is effectively instant); accel 0-255 is
@@ -8934,7 +8962,8 @@ function appendActionFields(container, action) {
     cmdSel.style.minWidth = '160px';
     const parts = (action.cmd || 'setTarget,0,6000').split(',').map(s => s.trim());
     [['setTarget', 'Set servo position'], ['goHome', 'Send all servos home'], ['stopScript', 'Stop the script'],
-     ['restartScript', 'Run a script'], ['setSpeedAccel', 'Set speed + accel (smoothing)'],
+     ['restartScript', 'Run a script'], ['applyProfile', 'Apply smoothing profile'],
+     ['setSpeedAccel', 'Set speed + accel (manual)'],
      ['setSpeed', 'Set a speed limit'], ['setAccel', 'Set an acceleration limit']
     ].forEach(([v, lbl]) => { const o = document.createElement('option'); o.value = v; o.textContent = lbl; if (v === (parts[0] || 'setTarget')) o.selected = true; cmdSel.appendChild(o); });
     cmdSel.onchange = () => _renderMaestroActionArgs(fid, null);
@@ -8952,7 +8981,7 @@ function appendActionFields(container, action) {
     portSel.id = fid + '-port';
     serialPorts.forEach(p => {
       const o = document.createElement('option');
-      o.value = p.v; o.textContent = p.n;
+      o.value = p.v; o.textContent = _serialPortLabel(p.v);
       if (p.v === action.port) o.selected = true;
       portSel.appendChild(o);
     });
@@ -9103,6 +9132,7 @@ function readActionFromFid(fid, type, extras) {
       const acc = clamp(+(document.getElementById(fid + '-maeacc')?.value || 0), 0, 255);
       cmd = `setSpeedAccel,${ch},${spd},${acc}`;
     }
+    else if (mcmd === 'applyProfile') { const spec = document.getElementById(fid + '-maeprof')?.value || 'p0'; cmd = `applyProfile,${spec}`; }
     else if (mcmd === 'restartScript') { const spec = document.getElementById(fid + '-maesm')?.value || ''; cmd = spec ? `restartScript,${clamp(val, 0, 127)},${spec}` : `restartScript,${clamp(val, 0, 127)}`; }
     else if (mcmd === 'stopScript')    cmd = 'stopScript';
     else                               cmd = 'goHome';
