@@ -227,6 +227,10 @@ struct RcKnob {
                        // modeAware: -1 = the global mode switch (default), else
                        // a switch index 0-7 (SA-SH). Lets one knob follow e.g.
                        // SA independently of the droid's global mode switch.
+  int8_t  smoothProfile;  // -1 = no smoothing; 0-5 = smoothing-profile index.
+                       // Each passthrough output's Maestro speed/accel come from
+                       // rcConfig.smoothProfiles[smoothProfile].entries[mid-1][ch]
+                       // (replaces the retired per-output smoothSpeed/smoothAccel).
   uint8_t outputCount; // mode-1 outputs (and ALL modes when !modeAware)
   RcKnobOutput outputs[RC_KNOB_MAX_OUTPUTS];
   uint8_t outputCount2[2];                       // modes 2 & 3 (only when modeAware)
@@ -412,6 +416,21 @@ inline int rcMapIndex(int mode, int btn) { return (mode - 1) * RC_NUM_THRESHOLDS
 // True for logical-button slots (22-36) — i.e. not drawn on the TX graphic.
 inline bool rcIsLogicalSlot(int btn) { return btn > RC_NUM_PHYSICAL && btn <= RC_NUM_THRESHOLDS; }
 
+// ── Smoothing profiles ───────────────────────────────────────────────────────
+// 6 named profiles, each a per-(Maestro id 1-8, channel 0-31) speed/accel map.
+// A passthrough knob references one (RcKnob.smoothProfile); a Maestro script
+// action can load one. DENSE in RAM (O(1) lookup in the SBUS hot path), SPARSE
+// in JSON (only non-zero channels emitted). speed/accel BOTH 0 = channel unset.
+#define RC_NUM_SMOOTH_PROFILES 6
+struct RcSmoothEntry {
+  uint16_t speed;   // Maestro Set Speed (0.25µs / 10ms), 0-16383; 0 = unset
+  uint8_t  accel;   // Maestro Set Accel 0-255; 0 = unset
+};
+struct RcSmoothProfile {
+  char          name[24];
+  RcSmoothEntry entries[RC_NUM_MAESTROS][32];   // [maestroId-1][channel]
+};
+
 struct RcConfig {
   uint8_t        txModel;        // RcTxModel — drives GUI layout + defaults
   // Per-build hardware option flag — meaningful only when txModel == TX_MODEL_X20.
@@ -449,6 +468,9 @@ struct RcConfig {
   // Maestro's Serial Settings (or its "Detect baud" mode). Remote/Kyber
   // Maestros are unaffected — that path is binary over ESP-NOW.
   uint32_t       maestroBaud;
+  // 6 smoothing profiles (see RcSmoothProfile). ~4.6 KB total; lives in the
+  // PSRAM-heap RcConfig, so it costs no DRAM.
+  RcSmoothProfile smoothProfiles[RC_NUM_SMOOTH_PROFILES];
 };
 
 // rcConfig is heap-allocated in PSRAM at boot (see NaviCore.ino setup()); the
@@ -598,6 +620,7 @@ void rcConfigLoadDefaults() {
     rcConfig.knobs[i].reverse     = false;
     rcConfig.knobs[i].modeAware   = false;
     rcConfig.knobs[i].modeSwitchOverride = -1;   // follow the global mode switch
+    rcConfig.knobs[i].smoothProfile = -1;        // no smoothing profile
     rcConfig.knobs[i].outputCount = 0;
     memset(rcConfig.knobs[i].outputs, 0, sizeof(rcConfig.knobs[i].outputs));
     rcConfig.knobs[i].outputCount2[0] = rcConfig.knobs[i].outputCount2[1] = 0;
@@ -632,6 +655,10 @@ void rcConfigLoadDefaults() {
     rcConfig.maestros[i].type   = 0;
     rcConfig.maestros[i].device = (uint8_t)(1 + i);   // 1, 2, ..., 8
   }
+
+  // Smoothing profiles — all empty; profile 0 pre-named "Default".
+  memset(rcConfig.smoothProfiles, 0, sizeof(rcConfig.smoothProfiles));
+  strlcpy(rcConfig.smoothProfiles[0].name, "Default", sizeof(rcConfig.smoothProfiles[0].name));
 
   // WCB network credentials — compile-time defaults from wcb_config.h.
   // NVS overrides these at runtime (see rcConfigLoadNVS).
@@ -712,11 +739,7 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["type"] = "stop";
       if (a.delayMs) obj["delay"] = a.delayMs;
       break;
-    case RA_SMOOTH_OVERRIDE:
-      obj["type"] = "smooth";
-      obj["cmd"]  = a.cmd;   // "set,<speed>,<accel>" | "clear"
-      if (a.delayMs) obj["delay"] = a.delayMs;
-      break;
+    // RA_SMOOTH_OVERRIDE retired (smoothing profiles superseded it) — not emitted.
     default: break;
   }
   if (a.note[0]) obj["note"] = a.note;
@@ -790,12 +813,9 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.type    = RA_STOP;
     a.delayMs = obj["delay"] | 0;
     ok = true;
-  } else if (strcmp(type, "smooth") == 0) {
-    a.type    = RA_SMOOTH_OVERRIDE;
-    strlcpy(a.cmd, obj["cmd"] | "clear", sizeof(a.cmd));   // "set,<spd>,<acc>" | "clear"
-    a.delayMs = obj["delay"] | 0;
-    ok = true;
   }
+  // (type "smooth" / RA_SMOOTH_OVERRIDE retired — an old config's smooth action
+  //  matches nothing here, so ok stays false and it's silently dropped.)
   if (ok) strlcpy(a.note, obj["note"] | "", sizeof(a.note));
   return ok;
 }
@@ -808,10 +828,9 @@ static void rcWriteKnobOuts(JsonArray arr, uint8_t count, const RcKnobOutput* ou
     oObj["maestroCh"] = outs[o].maestroCh;
     oObj["posMin"]    = outs[o].posMin;
     oObj["posMax"]    = outs[o].posMax;
-    // Sparse: only emit smoothing when set, so HCR/unsmoothed outputs stay clean
-    // and the config-tool diff-save sees no spurious change for the default 0.
-    if (outs[o].smoothSpeed) oObj["smoothSpeed"] = outs[o].smoothSpeed;
-    if (outs[o].smoothAccel) oObj["smoothAccel"] = outs[o].smoothAccel;
+    // NOTE: per-output smoothSpeed/smoothAccel are RETIRED — smoothing now lives
+    // in smoothing profiles (RcKnob.smoothProfile). We no longer emit them; the
+    // parser still reads them from legacy configs to migrate into profile 0.
   }
 }
 
@@ -827,17 +846,31 @@ static uint8_t rcReadKnobOuts(JsonArray arr, RcKnobOutput* outs) {
     out.maestroCh = (uint8_t) (oObj["maestroCh"] | 0);
     out.posMin    = (uint16_t)(oObj["posMin"]    | 4000);
     out.posMax    = (uint16_t)(oObj["posMax"]    | 8000);
-    out.smoothSpeed = (uint16_t)(oObj["smoothSpeed"] | 0);   // absent → 0 = unmanaged
+    out.smoothSpeed = (uint16_t)(oObj["smoothSpeed"] | 0);   // legacy — migrated into profile 0, then ignored
     out.smoothAccel = (uint8_t) (oObj["smoothAccel"] | 0);
     n++;
   }
   return n;
 }
 
+// Migration: copy any legacy per-output smoothing from an output set into
+// profile 0's per-(Maestro,channel) map. Returns true if it wrote anything.
+static bool rcSeedProfile0FromOuts(const RcKnobOutput* outs, uint8_t cnt) {
+  bool any = false;
+  for (uint8_t o = 0; o < cnt && o < RC_KNOB_MAX_OUTPUTS; o++) {
+    if (!(outs[o].smoothSpeed || outs[o].smoothAccel)) continue;
+    if (outs[o].target >= 1 && outs[o].target <= RC_NUM_MAESTROS && outs[o].maestroCh < 32) {
+      RcSmoothEntry& e = rcConfig.smoothProfiles[0].entries[outs[o].target - 1][outs[o].maestroCh];
+      e.speed = outs[o].smoothSpeed; e.accel = outs[o].smoothAccel; any = true;
+    }
+  }
+  return any;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Serialise full config to JSON string (for GET_CONFIG WebSocket response)
 // ─────────────────────────────────────────────────────────────────────────────
-String rcConfigToJSON() {
+String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing profiles
   // ArduinoJson 7: the constructor capacity is a legacy no-op — the document
   // grows elastically from the heap as needed. The REAL guard is the
   // overflowed() check at the bottom: if any allocation failed mid-build
@@ -845,7 +878,7 @@ String rcConfigToJSON() {
   // be silently MISSING mappings. Sending that truncated config would poison
   // the tool's baseline and a subsequent save would erase the dropped
   // mappings — so we return an ERROR envelope instead of truncated data.
-  DynamicJsonDocument doc(49152);
+  DynamicJsonDocument doc(65536);
 
   doc["txModel"]              = rcConfig.txModel;          // RcTxModel — GUI uses this to swap SVG / labels
   doc["threeAxisGimbals"]     = rcConfig.threeAxisGimbals; // X20 hardware option (shows/hides J5/J6 + stick-click matrix slots)
@@ -915,6 +948,7 @@ String rcConfigToJSON() {
     kObj["reverse"]   = kn.reverse;
     kObj["modeAware"] = kn.modeAware;
     kObj["modeSwitchOverride"] = kn.modeSwitchOverride;   // -1 = global mode switch
+    if (kn.smoothProfile != -1) kObj["smoothProfile"] = kn.smoothProfile;   // -1 = none (omitted)
     rcWriteKnobOuts(kObj.createNestedArray("outputs"), kn.outputCount, kn.outputs);  // mode 1
     if (kn.modeAware) {   // per-mode sets only when opted in
       rcWriteKnobOuts(kObj.createNestedArray("outputs2"), kn.outputCount2[0], kn.outputs2[0]);
@@ -976,6 +1010,23 @@ String rcConfigToJSON() {
   auxObj["S4"]      = rcConfig.auxBaud[1];
   auxObj["S5"]      = rcConfig.auxBaud[2];
   auxObj["maestro"] = rcConfig.maestroBaud;   // local Maestro bus (Serial2)
+
+  // Smoothing profiles — all 6 slots emitted (array index = profile id, so knob
+  // refs stay aligned); entries are SPARSE (only channels with speed|accel).
+  JsonArray spArr = doc.createNestedArray("smoothProfiles");
+  for (int p = 0; p < RC_NUM_SMOOTH_PROFILES; p++) {
+    const RcSmoothProfile& prof = rcConfig.smoothProfiles[p];
+    JsonObject pObj = spArr.createNestedObject();
+    pObj["name"] = prof.name;
+    JsonArray ents = pObj.createNestedArray("entries");
+    for (int mid = 1; mid <= RC_NUM_MAESTROS; mid++)
+      for (int ch = 0; ch < 32; ch++) {
+        const RcSmoothEntry& e = prof.entries[mid - 1][ch];
+        if (!e.speed && !e.accel) continue;   // sparse
+        JsonObject eObj = ents.createNestedObject();
+        eObj["mid"] = mid; eObj["ch"] = ch; eObj["spd"] = e.speed; eObj["acc"] = e.accel;
+      }
+  }
 
   // Truncation guard — see the note at the top of this function. Better to
   // fail loudly than hand the tool an incomplete config it would re-save.
@@ -1084,6 +1135,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       kn.reverse   = kObj["reverse"]   | false;
       kn.modeAware = kObj["modeAware"] | false;
       kn.modeSwitchOverride = kObj.containsKey("modeSwitchOverride") ? (int8_t)kObj["modeSwitchOverride"].as<int>() : -1;
+      kn.smoothProfile      = kObj.containsKey("smoothProfile")      ? (int8_t)kObj["smoothProfile"].as<int>()      : -1;
       kn.outputCount = 0; memset(kn.outputs, 0, sizeof(kn.outputs));
       kn.outputCount2[0] = kn.outputCount2[1] = 0; memset(kn.outputs2, 0, sizeof(kn.outputs2));
       if (kObj.containsKey("outputs"))                       // mode 1 (also loads legacy configs)
@@ -1094,6 +1146,45 @@ bool rcConfigFromJSON(const JsonObject& doc) {
         if (kObj.containsKey("outputs3")) kn.outputCount2[1] = rcReadKnobOuts(kObj["outputs3"], kn.outputs2[1]);
         else { kn.outputCount2[1] = kn.outputCount; memcpy(kn.outputs2[1], kn.outputs, sizeof(kn.outputs)); }
       }
+    }
+  }
+
+  // Smoothing profiles (array index = profile id). Clear all 6, then load.
+  for (int p = 0; p < RC_NUM_SMOOTH_PROFILES; p++) {
+    memset(rcConfig.smoothProfiles[p].entries, 0, sizeof(rcConfig.smoothProfiles[p].entries));
+    rcConfig.smoothProfiles[p].name[0] = '\0';
+  }
+  if (doc.containsKey("smoothProfiles")) {
+    int p = 0;
+    for (JsonObject pObj : doc["smoothProfiles"].as<JsonArray>()) {
+      if (p >= RC_NUM_SMOOTH_PROFILES) break;
+      RcSmoothProfile& prof = rcConfig.smoothProfiles[p];
+      strlcpy(prof.name, pObj["name"] | "", sizeof(prof.name));
+      if (pObj.containsKey("entries"))
+        for (JsonObject e : pObj["entries"].as<JsonArray>()) {
+          int mid = e["mid"] | 1, ch = e["ch"] | 0;
+          if (mid >= 1 && mid <= RC_NUM_MAESTROS && ch >= 0 && ch < 32) {
+            prof.entries[mid - 1][ch].speed = (uint16_t)(e["spd"] | 0);
+            prof.entries[mid - 1][ch].accel = (uint8_t) (e["acc"] | 0);
+          }
+        }
+      p++;
+    }
+  }
+  // MIGRATION: legacy per-output smoothing → Default profile 0, but ONLY for a
+  // passthrough knob with no profile assigned (an old config). New configs have
+  // smoothProfile set and no per-output smoothing, so this is a no-op for them.
+  for (int ki = 0; ki < RC_NUM_KNOBS; ki++) {
+    RcKnob& kn = rcConfig.knobs[ki];
+    if (kn.function != KF_MAESTRO_PASSTHROUGH || kn.smoothProfile != -1) continue;
+    bool any = rcSeedProfile0FromOuts(kn.outputs, kn.outputCount);
+    if (kn.modeAware) {
+      if (rcSeedProfile0FromOuts(kn.outputs2[0], kn.outputCount2[0])) any = true;
+      if (rcSeedProfile0FromOuts(kn.outputs2[1], kn.outputCount2[1])) any = true;
+    }
+    if (any) {
+      kn.smoothProfile = 0;
+      if (!rcConfig.smoothProfiles[0].name[0]) strlcpy(rcConfig.smoothProfiles[0].name, "Default", sizeof(rcConfig.smoothProfiles[0].name));
     }
   }
 

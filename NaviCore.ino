@@ -480,8 +480,9 @@ static bool maestroChanOk(uint8_t id, uint8_t ch) {
 // SBUS frame) and self-heal: maestroSetSpeed/maestroSetAccel below both update
 // this, so if a script action (or ?MAE,FREE) changes a channel, the next
 // passthrough stick move notices the mismatch and re-applies the knob's
-// smoothing. Zero-initialised = "nothing sent yet" (matches unmanaged channels;
-// a knob with smoothSpeed>0 always applies on its first move since 0 != want).
+// profile smoothing. Zero-initialised = "nothing sent yet" (matches unmanaged
+// channels; a profile channel with speed>0 always applies on its first move
+// since 0 != want).
 static uint16_t g_maeSpeed[RC_NUM_MAESTROS][32] = {};
 static uint16_t g_maeAccel[RC_NUM_MAESTROS][32] = {};
 static const uint16_t MAE_SMOOTH_UNKNOWN = 0xFFFF;   // sentinel: force re-apply on next move (out of the 0-16383/0-255 range)
@@ -496,13 +497,8 @@ static void maeSmoothInvalidateSlot(uint8_t id) {
   for (uint8_t ch = 0; ch < 32; ch++) { g_maeSpeed[id - 1][ch] = MAE_SMOOTH_UNKNOWN; g_maeAccel[id - 1][ch] = MAE_SMOOTH_UNKNOWN; }
 }
 
-// Global passthrough-smoothing override — a switch-bound RA_SMOOTH_OVERRIDE
-// action can set speed/accel that supersede EVERY passthrough knob's own
-// smoothing (for channels that already have smoothing enabled), or clear back
-// to per-knob. Runtime latch, not persisted; boot = off.
-static bool     g_smoothOverride      = false;
-static uint16_t g_smoothOverrideSpeed = 0;
-static uint8_t  g_smoothOverrideAccel = 0;
+// (The old global smoothing-override latch was retired — smoothing is now driven
+//  by per-knob / per-script smoothing PROFILES, see rcConfig.smoothProfiles.)
 
 // Pololu Maestro command byte values (compact protocol).
 //   0x84 SET_TARGET   · 0x87 SET_SPEED  · 0x89 SET_ACCEL
@@ -549,28 +545,37 @@ static void maestroRestartScript(uint8_t id, uint8_t sub) {
 // move. Used by the restartScript "reset smoothing first" option.
 static void maestroResetSmoothedChannels(uint8_t id) {
   if (id < 1 || id > RC_NUM_MAESTROS) return;
-  for (int i = 0; i < RC_NUM_KNOBS; i++) {
-    const RcKnob& kn = rcConfig.knobs[i];
-    if (kn.function != KF_MAESTRO_PASSTHROUGH) continue;
-    for (int m = 1; m <= 3; m++) {   // all mode output sets (mode-aware knobs differ per mode)
-      const uint8_t       cnt  = rcKnobOutCount(kn, m);
-      const RcKnobOutput* outs = rcKnobOuts(kn, m);
-      for (uint8_t o = 0; o < cnt && o < RC_KNOB_MAX_OUTPUTS; o++) {
-        if (outs[o].target == id && (outs[o].smoothSpeed || outs[o].smoothAccel)) {
-          maestroSetSpeed(id, outs[o].maestroCh, 0);
-          maestroSetAccel(id, outs[o].maestroCh, 0);
-        }
-      }
-      if (!kn.modeAware) break;      // non-mode-aware: mode 1 == all modes
+  for (uint8_t ch = 0; ch < 32; ch++) {
+    bool managed = false;
+    for (int p = 0; p < RC_NUM_SMOOTH_PROFILES && !managed; p++) {
+      const RcSmoothEntry& e = rcConfig.smoothProfiles[p].entries[id - 1][ch];
+      if (e.speed || e.accel) managed = true;
+    }
+    if (managed) { maestroSetSpeed(id, ch, 0); maestroSetAccel(id, ch, 0); }
+  }
+}
+
+// Load a smoothing profile's speed/accel onto Maestro `id`'s channels — used by
+// a script action to set the desired smoothing before the script runs.
+static void maestroApplySmoothProfile(uint8_t id, int8_t prof) {
+  if (id < 1 || id > RC_NUM_MAESTROS || prof < 0 || prof >= RC_NUM_SMOOTH_PROFILES) return;
+  const RcSmoothProfile& P = rcConfig.smoothProfiles[prof];
+  for (uint8_t ch = 0; ch < 32; ch++) {
+    const RcSmoothEntry& e = P.entries[id - 1][ch];
+    if (e.speed || e.accel) {
+      maestroSetSpeed(id, ch, e.speed > 16383 ? 16383 : e.speed);
+      maestroSetAccel(id, ch, e.accel);
     }
   }
 }
 
 // Parse and execute a Maestro action command string against slot `id` (1-8).
-// cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,reset]"
+// cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,sm]"
 //      | "setSpeed,ch,spd" | "setAccel,ch,acc" | "setSpeedAccel,ch,spd,acc"
-//   restartScript's optional 3rd arg "1" zeros this Maestro's smoothed
-//   passthrough channels first (so the script isn't throttled by smoothing).
+//   restartScript's optional 3rd arg loads smoothing before the script runs:
+//   "u" = Unlimited (zero this Maestro's profile-managed channels); "p0".."p5" =
+//   apply that smoothing profile; absent = leave the channels as-is. (A legacy
+//   bare "1" reset flag is also treated as Unlimited.)
 static void executeMaestroCmd(uint8_t id, const char* cmd) {
   char buf[32];
   strlcpy(buf, cmd, sizeof(buf));
@@ -601,10 +606,18 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     }
   }
   else if (strcmp(tok, "restartScript") == 0) {
-    char* sN     = strtok(nullptr, ",");
-    char* sReset = strtok(nullptr, ",");   // optional "1" = zero smoothed channels first
-    if (sReset && atoi(sReset)) maestroResetSmoothedChannels(id);
-    maestroRestartScript(id, sN ? (uint8_t)atoi(sN) : 0);
+    char* sN    = strtok(nullptr, ",");
+    char* sSpec = strtok(nullptr, ",");   // optional: "u"=unlimited | "0".."5"=profile | absent=leave
+    uint8_t sub = sN ? (uint8_t)atoi(sN) : 0;
+    if (sSpec) {
+      if (sSpec[0] == 'p' || sSpec[0] == 'P') {          // "p<N>" = apply profile N
+        int p = atoi(sSpec + 1);
+        if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) maestroApplySmoothProfile(id, (int8_t)p);
+      } else {                                            // "u" OR a legacy bare "1" reset flag → unlimited
+        maestroResetSmoothedChannels(id);
+      }
+    }
+    maestroRestartScript(id, sub);
   }
 }
 
@@ -1079,27 +1092,9 @@ static void rcExecuteActionNow(const RcAction& a) {
     case RA_STOP:
       navirec::requestStop();   // explicit halt (recording → save, or playback)
       break;
-    case RA_SMOOTH_OVERRIDE: {
-      // cmd = "set,<speed>,<accel>" | "clear". Supersedes every passthrough
-      // knob's own smoothing (on channels that already have smoothing enabled)
-      // until cleared. The per-(id,ch) cache re-applies the new values on the
-      // next stick move (want changes → cache mismatch), so no explicit reset.
-      char buf[24]; strlcpy(buf, a.cmd, sizeof(buf));
-      char* tok = strtok(buf, ",");
-      if (tok && strcmp(tok, "set") == 0) {
-        char* s  = strtok(nullptr, ",");
-        char* ac = strtok(nullptr, ",");
-        int sv = s ? atoi(s) : 0;
-        g_smoothOverrideSpeed = (uint16_t)(sv < 0 ? 0 : (sv > 16383 ? 16383 : sv));   // 14-bit; never the 0xFFFF sentinel
-        g_smoothOverrideAccel = ac ? (uint8_t) atoi(ac) : 0;
-        g_smoothOverride = true;
-        dlog(DBG_MAESTRO, "[DISPATCH] Smoothing override ON  spd=%u acc=%u\n", g_smoothOverrideSpeed, g_smoothOverrideAccel);
-      } else {
-        g_smoothOverride = false;
-        dlog(DBG_MAESTRO, "[DISPATCH] Smoothing override OFF (back to per-knob)\n");
-      }
-      break;
-    }
+    // RA_SMOOTH_OVERRIDE retired — superseded by smoothing profiles. An old
+    // config's "smooth" action is dropped at parse time (actionFromJson), so it
+    // never reaches here; the enum value stays reserved to avoid renumbering.
     default: break;
   }
 }
@@ -1365,19 +1360,21 @@ void processKnobs() {
       if (kn.function == KF_MAESTRO_PASSTHROUGH) {
         // out.target is the Maestro slot ID (1-8)
         const uint8_t mid = out.target, mch = out.maestroCh;
-        // A channel is "managed" once it opts into smoothing (per-knob speed OR
-        // accel > 0). While managed, drive BOTH speed and accel to the effective
-        // values — the global override latch if active, else the knob's own —
-        // INCLUDING 0, so nothing stays stuck when the override clears. Unmanaged
-        // channels (both 0) are never touched, so the Maestro's own settings
-        // stand. The cache makes each write a one-shot and self-heals: a script
-        // (or reset) changing the channel → next stick move re-applies.
-        if ((out.smoothSpeed || out.smoothAccel) && mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
-          uint16_t wantSpd = g_smoothOverride ? g_smoothOverrideSpeed : out.smoothSpeed;
-          if (wantSpd > 16383) wantSpd = 16383;   // Maestro speed is 14-bit; keep 'want' out of the 0xFFFF cache-sentinel range (self-corrects a rogue hand-edited value)
-          const uint16_t wantAcc = g_smoothOverride ? (uint16_t)g_smoothOverrideAccel : (uint16_t)out.smoothAccel;
-          if (g_maeSpeed[mid - 1][mch] != wantSpd) maestroSetSpeed(mid, mch, wantSpd);
-          if (g_maeAccel[mid - 1][mch] != wantAcc) maestroSetAccel(mid, mch, (uint8_t)wantAcc);
+        // Smoothing comes from the knob's profile: look up this channel's
+        // speed/accel in smoothProfiles[kn.smoothProfile]. No profile (-1) or an
+        // unset channel (0/0) = untouched, so the Maestro's own settings stand.
+        // A managed channel drives BOTH speed and accel (incl 0) so nothing stays
+        // stuck. The g_maeSpeed/g_maeAccel cache makes each write a one-shot and
+        // self-heals: a script changing the channel → next stick move re-applies.
+        if (kn.smoothProfile >= 0 && kn.smoothProfile < RC_NUM_SMOOTH_PROFILES &&
+            mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
+          const RcSmoothEntry& e = rcConfig.smoothProfiles[kn.smoothProfile].entries[mid - 1][mch];
+          if (e.speed || e.accel) {
+            uint16_t wantSpd = e.speed > 16383 ? 16383 : e.speed;   // Maestro speed is 14-bit; also keeps 'want' off the 0xFFFF cache sentinel
+            uint16_t wantAcc = e.accel;
+            if (g_maeSpeed[mid - 1][mch] != wantSpd) maestroSetSpeed(mid, mch, wantSpd);
+            if (g_maeAccel[mid - 1][mch] != wantAcc) maestroSetAccel(mid, mch, (uint8_t)wantAcc);
+          }
         }
         maestroSetTarget(mid, mch, mapped);
         navirec::captureMaestroKf(mid, mch, mapped);   // knob keyframe
@@ -1956,6 +1953,39 @@ bool execCliLine(const String& line) {
     return true;
   }
   return false;
+}
+
+// ── Aux-serial RX monitor ────────────────────────────────────────────────────
+// NaviCore drives S3/S4/S5 write-only for peripherals; nothing ever consumed
+// their RX. This drains each port and echoes complete lines to the USB console
+// under the "Serial" debug chip (prefix "[DISPATCH] Serial RX <port>" so it
+// groups with the outgoing Serial log). Line-buffered: flush on CR/LF, when the
+// buffer fills, or after ~60 ms idle. Non-printable bytes shown as '.'. The
+// per-line buffer is also the hook where a future "act on incoming serial"
+// parser would live. Ports are drained every loop so their FIFOs never overflow;
+// the dlog is a no-op (nothing sent) unless the Serial debug chip is on.
+#define AUX_RX_BUF 128
+static void auxRxPollPort(Stream* p, const char* name, char* buf, uint8_t& len, unsigned long& lastMs) {
+  if (!p) return;
+  while (p->available()) {
+    int c = p->read();
+    lastMs = millis();
+    if (c == '\n' || c == '\r') {
+      if (len) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX %s  %s\n", name, buf); len = 0; }
+    } else {
+      if (len >= AUX_RX_BUF - 1) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX %s  %s\n", name, buf); len = 0; }
+      buf[len++] = (c >= 32 && c < 127) ? (char)c : '.';   // sanitize non-printable for the terminal
+    }
+  }
+  if (len && (millis() - lastMs) > 60) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX %s  %s\n", name, buf); len = 0; }
+}
+static void pollAuxSerialRx() {
+  static char b3[AUX_RX_BUF], b4[AUX_RX_BUF], b5[AUX_RX_BUF];
+  static uint8_t l3 = 0, l4 = 0, l5 = 0;
+  static unsigned long m3 = 0, m4 = 0, m5 = 0;
+  auxRxPollPort(s3, "S3", b3, l3, m3);
+  auxRxPollPort(s4, "S4", b4, l4, m4);
+  auxRxPollPort(s5, "S5", b5, l5, m5);
 }
 
 void handleSerialInput() {
@@ -2615,6 +2645,10 @@ void loop() {
 
   // USB Serial input
   handleSerialInput();
+
+  // Aux-serial RX monitor — drain S3/S4/S5 and echo incoming lines under the
+  // "Serial" debug chip (write-only ports otherwise; groundwork for acting on it).
+  pollAuxSerialRx();
 
   // FPS counter
   trackSbusFps();

@@ -2233,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071119QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071319QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2299,7 +2299,7 @@
     <button class="dbg-chip" type="button" data-cat="wcb"     aria-pressed="false">WCB</button>
     <button class="dbg-chip" type="button" data-cat="hcr"     aria-pressed="false">HCR</button>
     <button class="dbg-chip" type="button" data-cat="mp3"     aria-pressed="false">MP3</button>
-    <button class="dbg-chip" type="button" data-cat="serial"  aria-pressed="false">Serial</button>
+    <button class="dbg-chip" type="button" data-cat="serial"  aria-pressed="false" title="Serial-port activity, both directions: outgoing Serial actions AND incoming bytes on S3/S4/S5 (shown as '[DISPATCH] Serial RX <port>')">Serial</button>
   </div>
   <div class="terminal-body" id="terminal-body">
     <!-- Primary column.  Direct USB: the connected board's CLI.  Via WCB: the
@@ -3437,7 +3437,6 @@ const actionTypeLabels = {
   'record':        'Record (toggle)',
   'play':          'Play clip',
   'stop':          'Stop',
-  'smooth':        'Smoothing override',
 };
 
 // Serial port targets — RC firmware exposes S3 and S4 as aux SoftwareSerial.
@@ -6994,6 +6993,7 @@ function applyConfig(data) {
   if (data.mappings)    config.mappings   = data.mappings;
   if (data.switches)    config.switches   = data.switches;
   if (data.knobs)       config.knobs      = data.knobs;
+  if (Array.isArray(data.smoothProfiles)) config.smoothProfiles = data.smoothProfiles;   // 6 smoothing profiles
   if (data.hcrDest)     config.hcrDest    = data.hcrDest;
   if (Array.isArray(data.maestros) && data.maestros.length) {
     // Pad / truncate to NUM_MAESTRO_SLOTS so the array length is stable
@@ -7226,6 +7226,57 @@ function _clearMaestroImport(slot) {
 // directly into config.maestros[] on every input change. The displayed
 // label is the same string used by the Maestro target dropdowns in the knob
 // modal / actions, so the user immediately sees consistent naming.
+// ── Smoothing profiles ──────────────────────────────────────────────────────
+// 6 named profiles, each a sparse list of {mid,ch,spd,acc} entries. Matches the
+// firmware's smoothProfiles JSON. Knobs + Maestro script actions reference a
+// profile by index (0-5); -1 = none, "u" = unlimited (scripts only).
+let _editSmoothProfile = 0;   // which profile the Maestro-tab sliders edit
+function _smoothProfiles() {
+  if (!Array.isArray(config.smoothProfiles)) config.smoothProfiles = [];
+  while (config.smoothProfiles.length < 6)
+    config.smoothProfiles.push({ name: config.smoothProfiles.length === 0 ? 'Default' : '', entries: [] });
+  config.smoothProfiles.forEach(p => { if (!Array.isArray(p.entries)) p.entries = []; if (typeof p.name !== 'string') p.name = ''; });
+  return config.smoothProfiles;
+}
+function _smoothProfileName(i) { const p = _smoothProfiles()[i]; return (p && p.name) ? p.name : `Profile ${i + 1}`; }
+function _smoothProfileOptions(sel, includeNone, includeUnlimited) {
+  let html = '';
+  if (includeNone)      html += `<option value="-1"${String(sel) === '-1' ? ' selected' : ''}>None (no smoothing)</option>`;
+  if (includeUnlimited) html += `<option value="u"${String(sel) === 'u' ? ' selected' : ''}>Unlimited (full speed)</option>`;
+  _smoothProfiles().forEach((p, i) => {
+    html += `<option value="${i}"${String(sel) === String(i) ? ' selected' : ''}>${escH(p.name || 'Profile ' + (i + 1))}</option>`;
+  });
+  return html;
+}
+// One channel row for the Maestro-tab smoothing editor (channel + 2 sliders + remove).
+function _smoothChanRow(mid, entry) {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+  const chSel = document.createElement('select');
+  chSel.style.minWidth = '150px';
+  chSel.innerHTML = _maestroChOptions(mid, entry.ch);
+  chSel.onchange = () => { entry.ch = +chSel.value; };
+  const mkSlider = (label, max, key) => {
+    const box = document.createElement('div');
+    box.style.cssText = 'display:flex;align-items:center;gap:5px';
+    const lab = document.createElement('span'); lab.style.cssText = 'font-size:11px;color:var(--muted)'; lab.textContent = label;
+    const s = document.createElement('input'); s.type = 'range'; s.min = 0; s.max = max; s.step = 1; s.value = entry[key] || 0; s.style.width = '100px';
+    const out = document.createElement('span'); out.style.cssText = 'font-size:11px;min-width:32px;text-align:right;color:var(--accent2)'; out.textContent = entry[key] || 0;
+    s.oninput = () => { out.textContent = s.value; entry[key] = +s.value; };
+    box.appendChild(lab); box.appendChild(s); box.appendChild(out);
+    return box;
+  };
+  const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn btn-ghost'; rm.textContent = '✕';
+  rm.style.cssText = 'font-size:11px;padding:2px 6px';
+  rm.title = 'Remove this channel from the profile';
+  rm.onclick = () => { const p = _smoothProfiles()[_editSmoothProfile]; p.entries = p.entries.filter(e => e !== entry); renderMaestroLocations(); };
+  row.appendChild(chSel);
+  row.appendChild(mkSlider('spd', 500, 'spd'));
+  row.appendChild(mkSlider('acc', 255, 'acc'));
+  row.appendChild(rm);
+  return row;
+}
+
 function renderMaestroLocations() {
   const wrap = document.getElementById('maestro-locations');
   if (!wrap) return;
@@ -7235,6 +7286,31 @@ function renderMaestroLocations() {
                                  (_, i) => ({ type: 0, device: 1 + i, channels: [] }));
   }
   wrap.innerHTML = '';
+
+  // Smoothing-profile toolbar — pick which profile the per-Maestro sliders edit.
+  const bar = document.createElement('div');
+  bar.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:2px 0 8px;border-bottom:1px solid var(--border);margin-bottom:4px';
+  bar.appendChild(Object.assign(document.createElement('span'), { textContent: 'Smoothing profile:', style: 'color:var(--muted)' }));
+  const psel = document.createElement('select');
+  psel.innerHTML = _smoothProfileOptions(_editSmoothProfile, false, false);
+  psel.value = String(_editSmoothProfile);
+  psel.title = 'Which smoothing profile the per-Maestro sliders below edit. A knob or script action picks which profile to use.';
+  psel.onchange = () => { _editSmoothProfile = +psel.value; renderMaestroLocations(); };
+  bar.appendChild(psel);
+  bar.appendChild(Object.assign(document.createElement('span'), { textContent: 'name:', style: 'color:var(--muted)' }));
+  const pname = document.createElement('input');
+  pname.type = 'text'; pname.placeholder = 'profile name'; pname.maxLength = 20; pname.style.width = '120px';
+  pname.value = _smoothProfiles()[_editSmoothProfile].name || '';
+  pname.oninput = () => { _smoothProfiles()[_editSmoothProfile].name = pname.value; };
+  pname.onchange = () => renderMaestroLocations();   // refresh the dropdown labels
+  bar.appendChild(pname);
+  const clr = document.createElement('button');
+  clr.type = 'button'; clr.className = 'btn btn-ghost'; clr.textContent = 'Clear profile'; clr.style.cssText = 'font-size:11px;padding:2px 8px';
+  clr.title = 'Remove all channel smoothing from this profile.';
+  clr.onclick = () => { if (confirm(`Clear all smoothing from "${_smoothProfileName(_editSmoothProfile)}"?`)) { _smoothProfiles()[_editSmoothProfile].entries = []; renderMaestroLocations(); } };
+  bar.appendChild(clr);
+  wrap.appendChild(bar);
+
   for (let i = 0; i < NUM_MAESTRO_SLOTS; i++) {
     const slot = config.maestros[i];
     const imported = _maestroCh[String(i + 1)];
@@ -7275,6 +7351,28 @@ function renderMaestroLocations() {
       if (f) _importMaestroFile(slotNum, f);
     });
     wrap.appendChild(row);
+
+    // Per-Maestro smoothing submenu (only for enabled slots) — edits the
+    // currently-selected profile's channels for THIS Maestro.
+    if (slot.type !== 0) {
+      const prof  = _smoothProfiles()[_editSmoothProfile];
+      const chans = prof.entries.filter(e => +e.mid === i + 1);
+      const det = document.createElement('details');
+      det.style.cssText = 'margin:-2px 0 6px 46px';
+      const sum = document.createElement('summary');
+      sum.style.cssText = 'cursor:pointer;color:var(--accent2);font-size:11px';
+      sum.textContent = `⚙ Smoothing — ${chans.length} channel${chans.length === 1 ? '' : 's'} in "${_smoothProfileName(_editSmoothProfile)}"`;
+      det.appendChild(sum);
+      const body = document.createElement('div');
+      body.style.cssText = 'padding:6px 0 4px 12px;display:flex;flex-direction:column;gap:5px';
+      chans.forEach(e => body.appendChild(_smoothChanRow(i + 1, e)));
+      const add = document.createElement('button');
+      add.type = 'button'; add.className = 'btn btn-ghost'; add.textContent = '+ add channel'; add.style.cssText = 'font-size:11px;padding:2px 8px;align-self:flex-start';
+      add.onclick = () => { prof.entries.push({ mid: i + 1, ch: 0, spd: 150, acc: 0 }); renderMaestroLocations(); };
+      body.appendChild(add);
+      det.appendChild(body);
+      wrap.appendChild(det);
+    }
   }
   // Wire change handlers — mutate config.maestros[i] directly, then refresh
   // any open knob modal's Maestro target dropdowns so labels stay in sync.
@@ -8262,10 +8360,6 @@ function actionSummary(a) {
   else if (a.type === 'record') core = a.cmd ? `Record "${escH(a.cmd)}"` : 'Record (toggle)';
   else if (a.type === 'play')   core = `Play${(+a.fn) ? ' ⟳' : ''}${a.cmd ? ' "' + escH(a.cmd) + '"' : ''}`;
   else if (a.type === 'stop')   core = 'Stop';
-  else if (a.type === 'smooth') {
-    const p = (a.cmd || 'clear').split(',');
-    core = p[0] === 'set' ? `Smooth override ${(+p[1]||0)}/${(+p[2]||0)}` : 'Smooth override: clear';
-  }
   else core = a.type;
   if (a.note && a.note.length)
     core += ` <span style="color:#888;font-style:italic">"${escH(a.note)}"</span>`;
@@ -8674,17 +8768,21 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
     // input's max attribute does NOT clamp when set programmatically.
     const prevSub = parts ? (+parts[1] || 0) : (document.getElementById(fid + '-maeval') ? +document.getElementById(fid + '-maeval').value : 0);
     numField('Subroutine #', fid + '-maeval', 0, 127, Math.max(0, Math.min(127, prevSub || 0)));
-    // Optional: zero this Maestro's smoothed passthrough channels before the
-    // script runs, so it isn't throttled by leftover passthrough smoothing.
-    // Preserve the checkbox on a channel/arg re-render (parts === null).
-    const prevReset = parts ? (+parts[2] || 0) : (document.getElementById(fid + '-maereset')?.checked ? 1 : 0);
-    const lbl = document.createElement('label');
-    lbl.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;align-self:center';
-    lbl.title = "Before the script starts, set speed=0 / accel=0 on this Maestro's smoothed passthrough channels so the script runs at full / its own speed. Smoothing auto-restores on the next stick move.";
-    const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.id = fid + '-maereset'; cb.checked = !!prevReset;
-    lbl.appendChild(cb); lbl.appendChild(document.createTextNode('Reset smoothing first'));
-    argWrap.appendChild(lbl);
+    // Smoothing to load before the script runs. parts[2]: absent = leave as-is,
+    // "u" = unlimited (full speed), "0".."5" = apply that profile.
+    let prevSpec = parts ? (parts[2] !== undefined ? String(parts[2]) : '') : (document.getElementById(fid + '-maesm') ? document.getElementById(fid + '-maesm').value : '');
+    if (/^\d+$/.test(prevSpec)) prevSpec = 'u';   // legacy bare "1" reset flag → Unlimited
+    const smWrap = document.createElement('div'); smWrap.className = 'field-group';
+    const smLab = document.createElement('label'); smLab.style.cssText = 'font-size:11px';
+    smLab.textContent = 'Smoothing on run';
+    smLab.title = "What smoothing to load before the script starts. Leave as-is = don't touch; Unlimited = full speed; or apply a profile. Your knob's profile restores on the next stick move.";
+    const smSel = document.createElement('select'); smSel.id = fid + '-maesm';
+    smSel.innerHTML =
+      `<option value=""${prevSpec === '' ? ' selected' : ''}>Leave as-is</option>` +
+      `<option value="u"${prevSpec === 'u' ? ' selected' : ''}>Unlimited (full speed)</option>` +
+      _smoothProfiles().map((p, i) => `<option value="p${i}"${prevSpec === 'p' + i ? ' selected' : ''}>${escH(p.name || 'Profile ' + (i + 1))}</option>`).join('');
+    smWrap.appendChild(smLab); smWrap.appendChild(smSel);
+    argWrap.appendChild(smWrap);
   } else {
     const note = document.createElement('span');
     note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
@@ -8944,43 +9042,6 @@ function appendActionFields(container, action) {
     hint.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
     hint.textContent = 'Stops recording (saves) or playback — no parameters.';
     container.appendChild(hint);
-  } else if (type === 'smooth') {
-    // Global passthrough-smoothing override: a switch can set speed/accel that
-    // supersede every passthrough knob's OWN smoothing (on channels that already
-    // have smoothing enabled), or clear back to per-knob. Bind "Set" to one
-    // switch position and "Clear" to another.
-    const parts = (action.cmd || 'set,600,40').split(',').map(s => s.trim());
-    const modeSel = document.createElement('select');
-    modeSel.id = fid + '-smmode'; modeSel.style.minWidth = '190px';
-    [['set', 'Set override (speed/accel)'], ['clear', 'Clear (back to per-knob)']].forEach(([v, lbl]) => {
-      const o = document.createElement('option'); o.value = v; o.textContent = lbl;
-      if (v === (parts[0] === 'clear' ? 'clear' : 'set')) o.selected = true;
-      modeSel.appendChild(o);
-    });
-    container.appendChild(makeFieldGroup('Override', modeSel));
-    const argWrap = document.createElement('div');
-    argWrap.id = fid + '-smargs';
-    argWrap.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end';
-    container.appendChild(argWrap);
-    const renderSm = () => {
-      argWrap.innerHTML = '';
-      if (modeSel.value !== 'set') {
-        const note = document.createElement('span');
-        note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
-        note.textContent = 'Clears the override — every passthrough knob returns to its own smoothing.';
-        argWrap.appendChild(note); return;
-      }
-      const mk = (label, id, max, val, title) => {
-        const inp = document.createElement('input');
-        inp.type = 'number'; inp.id = id; inp.min = 0; inp.max = max; inp.step = 1; inp.style.width = '80px';
-        inp.value = val; inp.title = title;
-        argWrap.appendChild(makeFieldGroup(label, inp));
-      };
-      mk('Speed (0=off)', fid + '-smspd', 16383, (+parts[1] || 0), 'Maestro Set Speed applied to every smoothed passthrough channel while this override is active.');
-      mk('Accel (0=off)', fid + '-smacc', 255, (+parts[2] || 0), 'Maestro Set Acceleration applied to every smoothed passthrough channel while active.');
-    };
-    modeSel.onchange = renderSm;
-    renderSm();
   }
 }
 
@@ -9042,7 +9103,7 @@ function readActionFromFid(fid, type, extras) {
       const acc = clamp(+(document.getElementById(fid + '-maeacc')?.value || 0), 0, 255);
       cmd = `setSpeedAccel,${ch},${spd},${acc}`;
     }
-    else if (mcmd === 'restartScript') { const reset = document.getElementById(fid + '-maereset')?.checked ? 1 : 0; cmd = reset ? `restartScript,${clamp(val, 0, 127)},1` : `restartScript,${clamp(val, 0, 127)}`; }
+    else if (mcmd === 'restartScript') { const spec = document.getElementById(fid + '-maesm')?.value || ''; cmd = spec ? `restartScript,${clamp(val, 0, 127)},${spec}` : `restartScript,${clamp(val, 0, 127)}`; }
     else if (mcmd === 'stopScript')    cmd = 'stopScript';
     else                               cmd = 'goHome';
     return { type: 'maestro', target: String(target), cmd, ...extras };
@@ -9082,13 +9143,6 @@ function readActionFromFid(fid, type, extras) {
   }
   if (type === 'stop') {
     return { type, ...extras };
-  }
-  if (type === 'smooth') {
-    const mode = document.getElementById(fid + '-smmode')?.value || 'set';
-    if (mode !== 'set') return { type, cmd: 'clear', ...extras };
-    const spd = Math.max(0, Math.min(16383, +(document.getElementById(fid + '-smspd')?.value || 0)));
-    const acc = Math.max(0, Math.min(255,   +(document.getElementById(fid + '-smacc')?.value || 0)));
-    return { type, cmd: `set,${spd},${acc}`, ...extras };
   }
   return null;
 }
@@ -9204,6 +9258,7 @@ function openKnobModal(name) {
   // Which switch selects this knob's mode: -1 = the droid's global mode switch
   // (default), else a switch index 0-7 (SA-SH) so the knob is gated on its own.
   k.modeSwitchOverride = Number.isInteger(d.modeSwitchOverride) ? d.modeSwitchOverride : -1;
+  k.smoothProfile      = Number.isInteger(d.smoothProfile)      ? d.smoothProfile      : -1;
   const _m2 = Array.isArray(d.outputs2) ? d.outputs2.map(o => ({...o})) : [];
   const _m3 = Array.isArray(d.outputs3) ? d.outputs3.map(o => ({...o})) : [];
   k.outputsByMode = [ k.outputs, _m2, _m3 ];
@@ -9264,6 +9319,10 @@ function openKnobModal(name) {
               ${['SA','SB','SC','SD','SE','SF','SG','SH'].map((s,ix) => `<option value="${ix}" ${(k.modeSwitchOverride ?? -1) === ix ? 'selected' : ''}>${s}</option>`).join('')}
             </select>
           </label>
+        </div>
+        <div class="field-group" style="align-self:flex-end">
+          <label style="font-size:11px" title="For Maestro passthrough knobs: which smoothing profile these servos use. Build profiles per-Maestro in the Maestro Locations tab. 'None' = instant (no smoothing).">Smoothing profile</label>
+          <select id="kn-smprof">${_smoothProfileOptions(k.smoothProfile ?? -1, true, false)}</select>
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-top:6px">${helpText}</div>
@@ -9431,16 +9490,6 @@ function renderKnobOutputFields(idx, o, fn) {
       <label>Pos max (µs)</label>
       <input type="number" id="kn-out-${idx}-max" min="500" max="2500" step="1" value="${Math.round((o.posMax ?? 8000) / 4)}" style="width:75px">
     </div>
-    <div class="field-group">
-      <label title="Maestro speed limit for this channel. 0 = off (instant, leaves the Maestro's own setting). Higher number = faster; lower = smoother/slower. Units are (0.25µs)/(10ms).">Smooth spd</label>
-      <input type="number" id="kn-out-${idx}-spd" min="0" max="16383" step="1" value="${o.smoothSpeed ?? 0}" style="width:70px"
-             title="Maestro Set Speed. 0 = off. Re-applied automatically after a script; a switch override can supersede it.">
-    </div>
-    <div class="field-group">
-      <label title="Maestro acceleration limit (ease in/out) for this channel. 0 = off. 1-255; lower = gentler.">Smooth acc</label>
-      <input type="number" id="kn-out-${idx}-acc" min="0" max="255" step="1" value="${o.smoothAccel ?? 0}" style="width:60px"
-             title="Maestro Set Acceleration 0-255. 0 = off. Adds S-curve ease in/out on top of the speed limit.">
-    </div>
     ${maeHint}
   `;
 }
@@ -9494,11 +9543,9 @@ function syncKnobOutputsFromDom() {
     const ch     = +(document.getElementById(`kn-out-${idx}-ch`)?.value     || 0);
     const pn     = toStore(+(document.getElementById(`kn-out-${idx}-min`)?.value || 0));
     const px     = toStore(+(document.getElementById(`kn-out-${idx}-max`)?.value || 0));
-    // Maestro passthrough smoothing (inputs absent for HCR → 0). Stored raw
-    // (Maestro Set Speed/Accel units), NOT scaled like the µs pos fields.
-    const spd    = +(document.getElementById(`kn-out-${idx}-spd`)?.value || 0);
-    const acc    = +(document.getElementById(`kn-out-${idx}-acc`)?.value || 0);
-    next.push({ target, maestroCh: ch, posMin: pn, posMax: px, smoothSpeed: spd, smoothAccel: acc });
+    // (Smoothing is no longer per-output — it lives in smoothing profiles,
+    //  referenced per-knob via editingKnobDraft.smoothProfile.)
+    next.push({ target, maestroCh: ch, posMin: pn, posMax: px });
   });
   editingKnobDraft.outputs = next;
   // Keep the active mode's array in the per-mode source-of-truth in sync.
@@ -9516,7 +9563,7 @@ function addKnobOutput() {
   if (fn === KF_HCR_VOLUME) {
     editingKnobDraft.outputs.push({ target: 0, maestroCh: 0, posMin: 0, posMax: 99 });
   } else {
-    editingKnobDraft.outputs.push({ target: 1, maestroCh: 0, posMin: 4000, posMax: 8000, smoothSpeed: 0, smoothAccel: 0 });
+    editingKnobDraft.outputs.push({ target: 1, maestroCh: 0, posMin: 4000, posMax: 8000 });
   }
   renderKnobOutputs();
 }
@@ -9539,17 +9586,12 @@ function saveKnobModal() {
     if (fn === KF_HCR_VOLUME) {
       return { target: +o.target || 0, posMin: +o.posMin || 0, posMax: +o.posMax || 99 };
     }
-    const mo = {
+    return {
       target:    Math.max(1, Math.min(NUM_MAESTRO_SLOTS, +o.target || 1)),
       maestroCh: +o.maestroCh || 0,
       posMin:    +o.posMin || 0,
       posMax:    +o.posMax || 0,
     };
-    // Sparse (mirror the firmware): only carry smoothing when set, so unsmoothed
-    // outputs stay clean and the diff-save sees no spurious change for the 0.
-    if (+o.smoothSpeed) mo.smoothSpeed = +o.smoothSpeed;
-    if (+o.smoothAccel) mo.smoothAccel = +o.smoothAccel;
-    return mo;
   });
   const modeAware = !!document.getElementById('kn-modeaware')?.checked;
   const byMode = editingKnobDraft.outputsByMode || [editingKnobDraft.outputs, [], []];
@@ -9561,6 +9603,7 @@ function saveKnobModal() {
     reverse:   !!document.getElementById('kn-reverse').checked,
     modeAware: modeAware,
     modeSwitchOverride: (modeAware && modeSrc >= 0 && modeSrc <= 7) ? modeSrc : -1,
+    smoothProfile: (fn === KF_MAESTRO_PASSTHROUGH) ? (+(document.getElementById('kn-smprof')?.value ?? -1)) : -1,
     outputs:   fn === KF_NONE ? [] : clean(byMode[0]),   // mode 1 (+ all modes when !modeAware)
   };
   if (modeAware && fn !== KF_NONE) {                      // per-mode sets only when opted in
