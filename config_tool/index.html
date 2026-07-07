@@ -2233,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071440QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071455QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7020,6 +7020,10 @@ function applyConfig(data) {
   if (data.switches)    config.switches   = data.switches;
   if (data.knobs)       config.knobs      = data.knobs;
   if (Array.isArray(data.smoothProfiles)) config.smoothProfiles = data.smoothProfiles;   // 6 smoothing profiles
+  _smoothProfiles();    // normalize to 6 profiles HERE — before the CONFIG handler snapshots the
+                        // diff baseline. Otherwise, when the board's config carries no smoothProfiles
+                        // (e.g. older firmware), a later render's lazy padding mutates config AFTER the
+                        // baseline and fabricates a phantom "unsaved config changes" prompt on close.
   if (data.hcrDest)     config.hcrDest    = data.hcrDest;
   if (Array.isArray(data.maestros) && data.maestros.length) {
     // Pad / truncate to NUM_MAESTRO_SLOTS so the array length is stable
@@ -7388,7 +7392,7 @@ function renderMaestroLocations() {
       <span style="color:var(--muted);min-width:40px">M${i+1}</span>
       <select data-mae-idx="${i}" data-mae-field="type" style="font-size:11px;padding:2px 4px">
         <option value="0" ${slot.type===0?'selected':''}>Disabled</option>
-        <option value="1" ${slot.type===1?'selected':''}>Local (Serial2)</option>
+        <option value="1" ${slot.type===1?'selected':''}>Local</option>
         <option value="2" ${slot.type===2?'selected':''}>Remote (broadcast)</option>
       </select>
       <span style="color:var(--muted);font-size:10px;text-align:right">dev</span>
