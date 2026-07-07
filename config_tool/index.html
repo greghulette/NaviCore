@@ -2233,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">070958QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071018QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3437,6 +3437,7 @@ const actionTypeLabels = {
   'record':        'Record (toggle)',
   'play':          'Play clip',
   'stop':          'Stop',
+  'smooth':        'Smoothing override',
 };
 
 // Serial port targets — RC firmware exposes S3 and S4 as aux SoftwareSerial.
@@ -8260,6 +8261,10 @@ function actionSummary(a) {
   else if (a.type === 'record') core = a.cmd ? `Record "${escH(a.cmd)}"` : 'Record (toggle)';
   else if (a.type === 'play')   core = `Play${(+a.fn) ? ' ⟳' : ''}${a.cmd ? ' "' + escH(a.cmd) + '"' : ''}`;
   else if (a.type === 'stop')   core = 'Stop';
+  else if (a.type === 'smooth') {
+    const p = (a.cmd || 'clear').split(',');
+    core = p[0] === 'set' ? `Smooth override ${(+p[1]||0)}/${(+p[2]||0)}` : 'Smooth override: clear';
+  }
   else core = a.type;
   if (a.note && a.note.length)
     core += ` <span style="color:#888;font-style:italic">"${escH(a.note)}"</span>`;
@@ -8646,6 +8651,17 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
     // input's max attribute does NOT clamp when set programmatically.
     const prevSub = parts ? (+parts[1] || 0) : (document.getElementById(fid + '-maeval') ? +document.getElementById(fid + '-maeval').value : 0);
     numField('Subroutine #', fid + '-maeval', 0, 127, Math.max(0, Math.min(127, prevSub || 0)));
+    // Optional: zero this Maestro's smoothed passthrough channels before the
+    // script runs, so it isn't throttled by leftover passthrough smoothing.
+    // Preserve the checkbox on a channel/arg re-render (parts === null).
+    const prevReset = parts ? (+parts[2] || 0) : (document.getElementById(fid + '-maereset')?.checked ? 1 : 0);
+    const lbl = document.createElement('label');
+    lbl.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;align-self:center';
+    lbl.title = "Before the script starts, set speed=0 / accel=0 on this Maestro's smoothed passthrough channels so the script runs at full / its own speed. Smoothing auto-restores on the next stick move.";
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.id = fid + '-maereset'; cb.checked = !!prevReset;
+    lbl.appendChild(cb); lbl.appendChild(document.createTextNode('Reset smoothing first'));
+    argWrap.appendChild(lbl);
   } else {
     const note = document.createElement('span');
     note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
@@ -8904,6 +8920,43 @@ function appendActionFields(container, action) {
     hint.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
     hint.textContent = 'Stops recording (saves) or playback — no parameters.';
     container.appendChild(hint);
+  } else if (type === 'smooth') {
+    // Global passthrough-smoothing override: a switch can set speed/accel that
+    // supersede every passthrough knob's OWN smoothing (on channels that already
+    // have smoothing enabled), or clear back to per-knob. Bind "Set" to one
+    // switch position and "Clear" to another.
+    const parts = (action.cmd || 'set,600,40').split(',').map(s => s.trim());
+    const modeSel = document.createElement('select');
+    modeSel.id = fid + '-smmode'; modeSel.style.minWidth = '190px';
+    [['set', 'Set override (speed/accel)'], ['clear', 'Clear (back to per-knob)']].forEach(([v, lbl]) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = lbl;
+      if (v === (parts[0] === 'clear' ? 'clear' : 'set')) o.selected = true;
+      modeSel.appendChild(o);
+    });
+    container.appendChild(makeFieldGroup('Override', modeSel));
+    const argWrap = document.createElement('div');
+    argWrap.id = fid + '-smargs';
+    argWrap.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end';
+    container.appendChild(argWrap);
+    const renderSm = () => {
+      argWrap.innerHTML = '';
+      if (modeSel.value !== 'set') {
+        const note = document.createElement('span');
+        note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
+        note.textContent = 'Clears the override — every passthrough knob returns to its own smoothing.';
+        argWrap.appendChild(note); return;
+      }
+      const mk = (label, id, max, val, title) => {
+        const inp = document.createElement('input');
+        inp.type = 'number'; inp.id = id; inp.min = 0; inp.max = max; inp.step = 1; inp.style.width = '80px';
+        inp.value = val; inp.title = title;
+        argWrap.appendChild(makeFieldGroup(label, inp));
+      };
+      mk('Speed (0=off)', fid + '-smspd', 16383, (+parts[1] || 0), 'Maestro Set Speed applied to every smoothed passthrough channel while this override is active.');
+      mk('Accel (0=off)', fid + '-smacc', 255, (+parts[2] || 0), 'Maestro Set Acceleration applied to every smoothed passthrough channel while active.');
+    };
+    modeSel.onchange = renderSm;
+    renderSm();
   }
 }
 
@@ -8960,7 +9013,7 @@ function readActionFromFid(fid, type, extras) {
     if      (mcmd === 'setTarget')     cmd = `setTarget,${ch},${clamp(val * 4, 0, 16383)}`;   // µs → ¼µs, Maestro 14-bit cap
     else if (mcmd === 'setSpeed')      cmd = `setSpeed,${ch},${clamp(val, 0, 16383)}`;
     else if (mcmd === 'setAccel')      cmd = `setAccel,${ch},${clamp(val, 0, 255)}`;
-    else if (mcmd === 'restartScript') cmd = `restartScript,${clamp(val, 0, 127)}`;
+    else if (mcmd === 'restartScript') { const reset = document.getElementById(fid + '-maereset')?.checked ? 1 : 0; cmd = reset ? `restartScript,${clamp(val, 0, 127)},1` : `restartScript,${clamp(val, 0, 127)}`; }
     else if (mcmd === 'stopScript')    cmd = 'stopScript';
     else                               cmd = 'goHome';
     return { type: 'maestro', target: String(target), cmd, ...extras };
@@ -9000,6 +9053,13 @@ function readActionFromFid(fid, type, extras) {
   }
   if (type === 'stop') {
     return { type, ...extras };
+  }
+  if (type === 'smooth') {
+    const mode = document.getElementById(fid + '-smmode')?.value || 'set';
+    if (mode !== 'set') return { type, cmd: 'clear', ...extras };
+    const spd = Math.max(0, Math.min(16383, +(document.getElementById(fid + '-smspd')?.value || 0)));
+    const acc = Math.max(0, Math.min(255,   +(document.getElementById(fid + '-smacc')?.value || 0)));
+    return { type, cmd: `set,${spd},${acc}`, ...extras };
   }
   return null;
 }

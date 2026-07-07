@@ -443,22 +443,27 @@ static inline uint16_t sbusToRange(int sbusVal, uint16_t outMin, uint16_t outMax
 //
 //  Pololu protocol frame: 0xAA <device> <cmd_compact & 0x7F> <payload...>
 // =============================================================================
-static void maestroWrite(uint8_t id, uint8_t cmd_compact,
+// Returns true only if the command was actually emitted on the wire. Callers
+// that cache channel state (passthrough smoothing) MUST gate their cache write
+// on this, else a dropped write (disabled/invalid slot, or a remote stream not
+// yet up) would poison the cache and defeat the self-healing re-apply.
+static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
                          const uint8_t* payload, size_t plen) {
-  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  if (id < 1 || id > RC_NUM_MAESTROS) return false;
   const RcMaestroSlot& slot = rcConfig.maestros[id - 1];
-  if (slot.type == 0) return;          // disabled (expected — not an error)
+  if (slot.type == 0) return false;    // disabled (expected — not an error)
   if (slot.device > 127) {             // invalid Pololu device # (config error)
     dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u: invalid Pololu device # %u (must be 0-127) — skipped\n",
          id, slot.device);
-    return;
+    return false;
   }
 
   Stream* dest = (slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast;
-  if (!dest) return;                    // remote slot but stream not yet up
+  if (!dest) return false;              // remote slot but stream not yet up
   uint8_t hdr[3] = { 0xAA, slot.device, (uint8_t)(cmd_compact & 0x7F) };
   dest->write(hdr, 3);
   if (payload && plen) dest->write(payload, plen);
+  return true;
 }
 
 // Valid Maestro channel guard (0-31 covers Micro/Mini Maestro 6/12/18/24).
@@ -479,6 +484,25 @@ static bool maestroChanOk(uint8_t id, uint8_t ch) {
 // a knob with smoothSpeed>0 always applies on its first move since 0 != want).
 static uint16_t g_maeSpeed[RC_NUM_MAESTROS][32] = {};
 static uint16_t g_maeAccel[RC_NUM_MAESTROS][32] = {};
+static const uint16_t MAE_SMOOTH_UNKNOWN = 0xFFFF;   // sentinel: force re-apply on next move (out of the 0-16383/0-255 range)
+
+// Invalidate a whole slot's smoothing cache so the next passthrough stick move
+// re-applies each channel's speed/accel. Called on Maestro-internal script
+// start/stop: a device-side script can change a channel's speed/accel that the
+// ESP32 never sees, so without this the cache would read "already applied" and
+// the knob's smoothing would never be restored.
+static void maeSmoothInvalidateSlot(uint8_t id) {
+  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  for (uint8_t ch = 0; ch < 32; ch++) { g_maeSpeed[id - 1][ch] = MAE_SMOOTH_UNKNOWN; g_maeAccel[id - 1][ch] = MAE_SMOOTH_UNKNOWN; }
+}
+
+// Global passthrough-smoothing override — a switch-bound RA_SMOOTH_OVERRIDE
+// action can set speed/accel that supersede EVERY passthrough knob's own
+// smoothing (for channels that already have smoothing enabled), or clear back
+// to per-knob. Runtime latch, not persisted; boot = off.
+static bool     g_smoothOverride      = false;
+static uint16_t g_smoothOverrideSpeed = 0;
+static uint8_t  g_smoothOverrideAccel = 0;
 
 // Pololu Maestro command byte values (compact protocol).
 //   0x84 SET_TARGET   · 0x87 SET_SPEED  · 0x89 SET_ACCEL
@@ -492,8 +516,9 @@ static void maestroSetTarget(uint8_t id, uint8_t ch, uint16_t pos) {
 static void maestroSetSpeed(uint8_t id, uint8_t ch, uint16_t spd) {
   if (!maestroChanOk(id, ch)) return;
   uint8_t p[3] = { ch, (uint8_t)(spd & 0x7F), (uint8_t)((spd >> 7) & 0x7F) };
-  maestroWrite(id, 0x87, p, 3);
-  if (id >= 1 && id <= RC_NUM_MAESTROS && ch < 32) g_maeSpeed[id - 1][ch] = spd;   // keep smoothing cache truthful
+  // Cache only what actually went out — a dropped write must NOT mark the
+  // channel "applied" (id validity is guaranteed once maestroWrite returns true).
+  if (maestroWrite(id, 0x87, p, 3) && ch < 32) g_maeSpeed[id - 1][ch] = spd;
 }
 static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
   if (!maestroChanOk(id, ch)) return;
@@ -502,18 +527,44 @@ static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
   // (corrupting the Pololu data stream) and was one byte short of the frame
   // the Maestro expects for 0x89.
   uint8_t p[3] = { ch, (uint8_t)(accel & 0x7F), (uint8_t)((accel >> 7) & 0x7F) };
-  maestroWrite(id, 0x89, p, 3);
-  if (id >= 1 && id <= RC_NUM_MAESTROS && ch < 32) g_maeAccel[id - 1][ch] = accel;  // keep smoothing cache truthful
+  if (maestroWrite(id, 0x89, p, 3) && ch < 32) g_maeAccel[id - 1][ch] = accel;   // cache only what actually went out
 }
 static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); }
-static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); }
+static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); maeSmoothInvalidateSlot(id); }
 static void maestroRestartScript(uint8_t id, uint8_t sub) {
   maestroWrite(id, 0xA7, &sub, 1);
+  maeSmoothInvalidateSlot(id);   // a device-side script may change speed/accel we can't see — re-apply on next stick move
+}
+
+// Zero speed/accel on every passthrough channel of Maestro `id` that has
+// smoothing enabled, so a Maestro script runs at full / its own speed instead
+// of being throttled by leftover passthrough smoothing. maestroSetSpeed/Accel
+// update the cache to 0, so the knob restores its smoothing on the next stick
+// move. Used by the restartScript "reset smoothing first" option.
+static void maestroResetSmoothedChannels(uint8_t id) {
+  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  for (int i = 0; i < RC_NUM_KNOBS; i++) {
+    const RcKnob& kn = rcConfig.knobs[i];
+    if (kn.function != KF_MAESTRO_PASSTHROUGH) continue;
+    for (int m = 1; m <= 3; m++) {   // all mode output sets (mode-aware knobs differ per mode)
+      const uint8_t       cnt  = rcKnobOutCount(kn, m);
+      const RcKnobOutput* outs = rcKnobOuts(kn, m);
+      for (uint8_t o = 0; o < cnt && o < RC_KNOB_MAX_OUTPUTS; o++) {
+        if (outs[o].target == id && (outs[o].smoothSpeed || outs[o].smoothAccel)) {
+          maestroSetSpeed(id, outs[o].maestroCh, 0);
+          maestroSetAccel(id, outs[o].maestroCh, 0);
+        }
+      }
+      if (!kn.modeAware) break;      // non-mode-aware: mode 1 == all modes
+    }
+  }
 }
 
 // Parse and execute a Maestro action command string against slot `id` (1-8).
-// cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n"
+// cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,reset]"
 //      | "setSpeed,ch,spd" | "setAccel,ch,acc"
+//   restartScript's optional 3rd arg "1" zeros this Maestro's smoothed
+//   passthrough channels first (so the script isn't throttled by smoothing).
 static void executeMaestroCmd(uint8_t id, const char* cmd) {
   char buf[32];
   strlcpy(buf, cmd, sizeof(buf));
@@ -534,7 +585,9 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     if (sCh && sAcc) maestroSetAccel(id, (uint8_t)atoi(sCh), (uint8_t)atoi(sAcc));
   }
   else if (strcmp(tok, "restartScript") == 0) {
-    char* sN = strtok(nullptr, ",");
+    char* sN     = strtok(nullptr, ",");
+    char* sReset = strtok(nullptr, ",");   // optional "1" = zero smoothed channels first
+    if (sReset && atoi(sReset)) maestroResetSmoothedChannels(id);
     maestroRestartScript(id, sN ? (uint8_t)atoi(sN) : 0);
   }
 }
@@ -1010,6 +1063,26 @@ static void rcExecuteActionNow(const RcAction& a) {
     case RA_STOP:
       navirec::requestStop();   // explicit halt (recording → save, or playback)
       break;
+    case RA_SMOOTH_OVERRIDE: {
+      // cmd = "set,<speed>,<accel>" | "clear". Supersedes every passthrough
+      // knob's own smoothing (on channels that already have smoothing enabled)
+      // until cleared. The per-(id,ch) cache re-applies the new values on the
+      // next stick move (want changes → cache mismatch), so no explicit reset.
+      char buf[24]; strlcpy(buf, a.cmd, sizeof(buf));
+      char* tok = strtok(buf, ",");
+      if (tok && strcmp(tok, "set") == 0) {
+        char* s  = strtok(nullptr, ",");
+        char* ac = strtok(nullptr, ",");
+        g_smoothOverrideSpeed = s  ? (uint16_t)atoi(s)  : 0;
+        g_smoothOverrideAccel = ac ? (uint8_t) atoi(ac) : 0;
+        g_smoothOverride = true;
+        dlog(DBG_MAESTRO, "[DISPATCH] Smoothing override ON  spd=%u acc=%u\n", g_smoothOverrideSpeed, g_smoothOverrideAccel);
+      } else {
+        g_smoothOverride = false;
+        dlog(DBG_MAESTRO, "[DISPATCH] Smoothing override OFF (back to per-knob)\n");
+      }
+      break;
+    }
     default: break;
   }
 }
@@ -1275,13 +1348,18 @@ void processKnobs() {
       if (kn.function == KF_MAESTRO_PASSTHROUGH) {
         // out.target is the Maestro slot ID (1-8)
         const uint8_t mid = out.target, mch = out.maestroCh;
-        // Apply this output's smoothing to the channel if it has drifted from
-        // what we last set (0 = leave the channel's own speed/accel alone). The
-        // cache makes this a one-shot until a script/reset changes the channel,
-        // then the next stick move re-applies it (self-healing smoothing).
-        if (mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
-          if (out.smoothSpeed && g_maeSpeed[mid - 1][mch] != out.smoothSpeed) maestroSetSpeed(mid, mch, out.smoothSpeed);
-          if (out.smoothAccel && g_maeAccel[mid - 1][mch] != out.smoothAccel) maestroSetAccel(mid, mch, out.smoothAccel);
+        // A channel is "managed" once it opts into smoothing (per-knob speed OR
+        // accel > 0). While managed, drive BOTH speed and accel to the effective
+        // values — the global override latch if active, else the knob's own —
+        // INCLUDING 0, so nothing stays stuck when the override clears. Unmanaged
+        // channels (both 0) are never touched, so the Maestro's own settings
+        // stand. The cache makes each write a one-shot and self-heals: a script
+        // (or reset) changing the channel → next stick move re-applies.
+        if ((out.smoothSpeed || out.smoothAccel) && mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
+          const uint16_t wantSpd = g_smoothOverride ? g_smoothOverrideSpeed : out.smoothSpeed;
+          const uint16_t wantAcc = g_smoothOverride ? (uint16_t)g_smoothOverrideAccel : (uint16_t)out.smoothAccel;
+          if (g_maeSpeed[mid - 1][mch] != wantSpd) maestroSetSpeed(mid, mch, wantSpd);
+          if (g_maeAccel[mid - 1][mch] != wantAcc) maestroSetAccel(mid, mch, (uint8_t)wantAcc);
         }
         maestroSetTarget(mid, mch, mapped);
         navirec::captureMaestroKf(mid, mch, mapped);   // knob keyframe

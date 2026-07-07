@@ -48,6 +48,10 @@ enum RcActionType : uint8_t {
                                //   loop() so a remote (Core-0) trigger is safe.
   RA_STOP              = 10,  // Stop recording (save) OR playback — explicit halt,
                                //   in case you'd rather not use the Record/Play toggle.
+  RA_SMOOTH_OVERRIDE   = 11,  // Global passthrough-smoothing override latch (a
+                               //   switch can set speed/accel that supersede every
+                               //   passthrough knob's own). cmd = "set,<spd>,<acc>"
+                               //   | "clear". Runtime only — not a servo output.
 };
 
 // MP3 Trigger function codes, stored in RcAction::fn for RA_MP3 actions.
@@ -708,6 +712,11 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["type"] = "stop";
       if (a.delayMs) obj["delay"] = a.delayMs;
       break;
+    case RA_SMOOTH_OVERRIDE:
+      obj["type"] = "smooth";
+      obj["cmd"]  = a.cmd;   // "set,<speed>,<accel>" | "clear"
+      if (a.delayMs) obj["delay"] = a.delayMs;
+      break;
     default: break;
   }
   if (a.note[0]) obj["note"] = a.note;
@@ -779,6 +788,11 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     ok = true;
   } else if (strcmp(type, "stop") == 0) {
     a.type    = RA_STOP;
+    a.delayMs = obj["delay"] | 0;
+    ok = true;
+  } else if (strcmp(type, "smooth") == 0) {
+    a.type    = RA_SMOOTH_OVERRIDE;
+    strlcpy(a.cmd, obj["cmd"] | "clear", sizeof(a.cmd));   // "set,<spd>,<acc>" | "clear"
     a.delayMs = obj["delay"] | 0;
     ok = true;
   }
