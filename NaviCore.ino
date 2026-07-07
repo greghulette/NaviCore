@@ -470,6 +470,16 @@ static bool maestroChanOk(uint8_t id, uint8_t ch) {
   return false;
 }
 
+// Per-(Maestro id 1-8, channel 0-31) cache of the last Speed/Accel WE wrote.
+// Passthrough smoothing uses it so Set Speed/Accel are sent ONCE (not every
+// SBUS frame) and self-heal: maestroSetSpeed/maestroSetAccel below both update
+// this, so if a script action (or ?MAE,FREE) changes a channel, the next
+// passthrough stick move notices the mismatch and re-applies the knob's
+// smoothing. Zero-initialised = "nothing sent yet" (matches unmanaged channels;
+// a knob with smoothSpeed>0 always applies on its first move since 0 != want).
+static uint16_t g_maeSpeed[RC_NUM_MAESTROS][32] = {};
+static uint16_t g_maeAccel[RC_NUM_MAESTROS][32] = {};
+
 // Pololu Maestro command byte values (compact protocol).
 //   0x84 SET_TARGET   · 0x87 SET_SPEED  · 0x89 SET_ACCEL
 //   0xA2 GO_HOME      · 0xA4 STOP_SCRIPT · 0xA7 RESTART_SCRIPT_AT_SUB
@@ -483,6 +493,7 @@ static void maestroSetSpeed(uint8_t id, uint8_t ch, uint16_t spd) {
   if (!maestroChanOk(id, ch)) return;
   uint8_t p[3] = { ch, (uint8_t)(spd & 0x7F), (uint8_t)((spd >> 7) & 0x7F) };
   maestroWrite(id, 0x87, p, 3);
+  if (id >= 1 && id <= RC_NUM_MAESTROS && ch < 32) g_maeSpeed[id - 1][ch] = spd;   // keep smoothing cache truthful
 }
 static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
   if (!maestroChanOk(id, ch)) return;
@@ -492,6 +503,7 @@ static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
   // the Maestro expects for 0x89.
   uint8_t p[3] = { ch, (uint8_t)(accel & 0x7F), (uint8_t)((accel >> 7) & 0x7F) };
   maestroWrite(id, 0x89, p, 3);
+  if (id >= 1 && id <= RC_NUM_MAESTROS && ch < 32) g_maeAccel[id - 1][ch] = accel;  // keep smoothing cache truthful
 }
 static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); }
 static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); }
@@ -1262,8 +1274,17 @@ void processKnobs() {
       uint16_t mapped = sbusToRange(raw, out.posMin, out.posMax);
       if (kn.function == KF_MAESTRO_PASSTHROUGH) {
         // out.target is the Maestro slot ID (1-8)
-        maestroSetTarget(out.target, out.maestroCh, mapped);
-        navirec::captureMaestroKf(out.target, out.maestroCh, mapped);   // knob keyframe
+        const uint8_t mid = out.target, mch = out.maestroCh;
+        // Apply this output's smoothing to the channel if it has drifted from
+        // what we last set (0 = leave the channel's own speed/accel alone). The
+        // cache makes this a one-shot until a script/reset changes the channel,
+        // then the next stick move re-applies it (self-healing smoothing).
+        if (mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
+          if (out.smoothSpeed && g_maeSpeed[mid - 1][mch] != out.smoothSpeed) maestroSetSpeed(mid, mch, out.smoothSpeed);
+          if (out.smoothAccel && g_maeAccel[mid - 1][mch] != out.smoothAccel) maestroSetAccel(mid, mch, out.smoothAccel);
+        }
+        maestroSetTarget(mid, mch, mapped);
+        navirec::captureMaestroKf(mid, mch, mapped);   // knob keyframe
       } else if (kn.function == KF_HCR_VOLUME) {
         // out.target is the HCR audio chan (0/1/2/3 = V/A/B/All); mapped is volume 0-99
         dispatchHcrVolume(out.target, (uint8_t)mapped);

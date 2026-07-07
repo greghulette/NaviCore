@@ -2233,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">060934QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">070958QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9342,6 +9342,16 @@ function renderKnobOutputFields(idx, o, fn) {
       <label>Pos max (µs)</label>
       <input type="number" id="kn-out-${idx}-max" min="500" max="2500" step="1" value="${Math.round((o.posMax ?? 8000) / 4)}" style="width:75px">
     </div>
+    <div class="field-group">
+      <label title="Maestro speed limit for this channel. 0 = off (instant, leaves the Maestro's own setting). Higher number = faster; lower = smoother/slower. Units are (0.25µs)/(10ms).">Smooth spd</label>
+      <input type="number" id="kn-out-${idx}-spd" min="0" max="16383" step="1" value="${o.smoothSpeed ?? 0}" style="width:70px"
+             title="Maestro Set Speed. 0 = off. Re-applied automatically after a script; a switch override can supersede it.">
+    </div>
+    <div class="field-group">
+      <label title="Maestro acceleration limit (ease in/out) for this channel. 0 = off. 1-255; lower = gentler.">Smooth acc</label>
+      <input type="number" id="kn-out-${idx}-acc" min="0" max="255" step="1" value="${o.smoothAccel ?? 0}" style="width:60px"
+             title="Maestro Set Acceleration 0-255. 0 = off. Adds S-curve ease in/out on top of the speed limit.">
+    </div>
     ${maeHint}
   `;
 }
@@ -9395,7 +9405,11 @@ function syncKnobOutputsFromDom() {
     const ch     = +(document.getElementById(`kn-out-${idx}-ch`)?.value     || 0);
     const pn     = toStore(+(document.getElementById(`kn-out-${idx}-min`)?.value || 0));
     const px     = toStore(+(document.getElementById(`kn-out-${idx}-max`)?.value || 0));
-    next.push({ target, maestroCh: ch, posMin: pn, posMax: px });
+    // Maestro passthrough smoothing (inputs absent for HCR → 0). Stored raw
+    // (Maestro Set Speed/Accel units), NOT scaled like the µs pos fields.
+    const spd    = +(document.getElementById(`kn-out-${idx}-spd`)?.value || 0);
+    const acc    = +(document.getElementById(`kn-out-${idx}-acc`)?.value || 0);
+    next.push({ target, maestroCh: ch, posMin: pn, posMax: px, smoothSpeed: spd, smoothAccel: acc });
   });
   editingKnobDraft.outputs = next;
   // Keep the active mode's array in the per-mode source-of-truth in sync.
@@ -9413,7 +9427,7 @@ function addKnobOutput() {
   if (fn === KF_HCR_VOLUME) {
     editingKnobDraft.outputs.push({ target: 0, maestroCh: 0, posMin: 0, posMax: 99 });
   } else {
-    editingKnobDraft.outputs.push({ target: 1, maestroCh: 0, posMin: 4000, posMax: 8000 });
+    editingKnobDraft.outputs.push({ target: 1, maestroCh: 0, posMin: 4000, posMax: 8000, smoothSpeed: 0, smoothAccel: 0 });
   }
   renderKnobOutputs();
 }
@@ -9436,12 +9450,17 @@ function saveKnobModal() {
     if (fn === KF_HCR_VOLUME) {
       return { target: +o.target || 0, posMin: +o.posMin || 0, posMax: +o.posMax || 99 };
     }
-    return {
+    const mo = {
       target:    Math.max(1, Math.min(NUM_MAESTRO_SLOTS, +o.target || 1)),
       maestroCh: +o.maestroCh || 0,
       posMin:    +o.posMin || 0,
       posMax:    +o.posMax || 0,
     };
+    // Sparse (mirror the firmware): only carry smoothing when set, so unsmoothed
+    // outputs stay clean and the diff-save sees no spurious change for the 0.
+    if (+o.smoothSpeed) mo.smoothSpeed = +o.smoothSpeed;
+    if (+o.smoothAccel) mo.smoothAccel = +o.smoothAccel;
+    return mo;
   });
   const modeAware = !!document.getElementById('kn-modeaware')?.checked;
   const byMode = editingKnobDraft.outputsByMode || [editingKnobDraft.outputs, [], []];

@@ -198,6 +198,13 @@ struct RcKnobOutput {
   // KF_HCR_VOLUME:          HCR volume value at SBUS min/max (0-99 clamped)
   uint16_t posMin;
   uint16_t posMax;
+  // KF_MAESTRO_PASSTHROUGH smoothing (unused for HCR). 0 = don't manage — leave
+  // the Maestro channel's own speed/accel. When >0, the passthrough applies
+  // Set Speed / Set Acceleration to this channel so targets ramp in hardware
+  // (S-curve), and re-applies them automatically after a script/reset clobbers
+  // the channel (see g_maeSpeed/g_maeAccel cache in NaviCore.ino).
+  uint16_t smoothSpeed;   // Maestro Set Speed units (0.25µs / 10ms); 0-16383; 0 = unmanaged
+  uint8_t  smoothAccel;   // Maestro Set Accel 0-255; 0 = unmanaged
 };
 
 struct RcKnob {
@@ -787,6 +794,10 @@ static void rcWriteKnobOuts(JsonArray arr, uint8_t count, const RcKnobOutput* ou
     oObj["maestroCh"] = outs[o].maestroCh;
     oObj["posMin"]    = outs[o].posMin;
     oObj["posMax"]    = outs[o].posMax;
+    // Sparse: only emit smoothing when set, so HCR/unsmoothed outputs stay clean
+    // and the config-tool diff-save sees no spurious change for the default 0.
+    if (outs[o].smoothSpeed) oObj["smoothSpeed"] = outs[o].smoothSpeed;
+    if (outs[o].smoothAccel) oObj["smoothAccel"] = outs[o].smoothAccel;
   }
 }
 
@@ -802,6 +813,8 @@ static uint8_t rcReadKnobOuts(JsonArray arr, RcKnobOutput* outs) {
     out.maestroCh = (uint8_t) (oObj["maestroCh"] | 0);
     out.posMin    = (uint16_t)(oObj["posMin"]    | 4000);
     out.posMax    = (uint16_t)(oObj["posMax"]    | 8000);
+    out.smoothSpeed = (uint16_t)(oObj["smoothSpeed"] | 0);   // absent → 0 = unmanaged
+    out.smoothAccel = (uint8_t) (oObj["smoothAccel"] | 0);
     n++;
   }
   return n;
