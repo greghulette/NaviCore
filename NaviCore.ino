@@ -2534,6 +2534,14 @@ void setup() {
     wcbReady = true;   // ESP-NOW is up — wcb-> calls are now safe
     wcb->onCommand(onWCBCommand);
     wcb->onRawPacket(naviota::otaRawPacketHook);   // OTA control/data structs (55/243 B) over the mesh
+    // WDP device-identity advertising (WCB_Client 1.7.0 "WDP-DA") — announce this
+    // NaviCore on the mesh so every WCB auto-discovers it (it appears in ?WDP,LIST
+    // / the config tool with its firmware + board, no manual labeling). The advert
+    // goes out as a boot burst then re-broadcasts periodically from wcb->update()
+    // (already called every loop()). Rides the ETM broadcast layer (WCB default).
+    wcb->setIdentity("NaviCore", FW_VERSION,
+                     rcConfig.boardType == 0 ? "NaviCore v2" : "WCB 3.2",
+                     "rc sbus maestro hcr");
     remoteCliQueue = xQueueCreate(3, sizeof(RemoteCliMsg));  // relayed CLI lines → drainRemoteCli()
     Serial.printf("[WCB] Joined network as device ID %d (quantity=%d)\n",
                   rcConfig.wcbNetwork.deviceId, rcConfig.wcbNetwork.quantity);

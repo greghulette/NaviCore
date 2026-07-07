@@ -2233,7 +2233,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071341QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">071440QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2515,6 +2515,7 @@
         <button class="cfg-tab"        type="button" data-tab="hcr">HCR</button>
         <button class="cfg-tab"        type="button" data-tab="mp3">MP3 Trigger</button>
         <button class="cfg-tab"        type="button" data-tab="maestro">Maestro</button>
+        <button class="cfg-tab"        type="button" data-tab="smoothing">Smoothing</button>
         <button class="cfg-tab"        type="button" data-tab="serial">Baud Rates</button>
         <button class="cfg-tab"        type="button" data-tab="firmware">Firmware</button>
       </nav>
@@ -2789,6 +2790,23 @@
               <br><b>Import</b> a Maestro's saved settings file (📁 button <i>or drag-and-drop
               the file onto a row</i>) to pull in that Maestro's real per-channel endpoints
               and names — they drive the passthrough ranges and the timeline editor.
+            </div>
+          </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             Smoothing tab — per-Maestro/per-channel servo-smoothing profiles.
+             ════════════════════════════════════════════════════════════ -->
+        <section class="cfg-pane" id="cfg-pane-smoothing">
+          <h2 class="cfg-pane-title">Smoothing Profiles</h2>
+          <div class="sb-section" style="border-bottom:none">
+            <div id="smoothing-editor" style="display:flex;flex-direction:column;gap:6px"></div>
+            <div class="noconn" style="margin-top:6px">
+              A smoothing profile sets the Maestro <b>speed</b> and <b>acceleration</b> per
+              servo channel. A joystick knob picks a profile (in its editor), and a Maestro
+              <i>"Apply smoothing profile"</i> action or a script can load one — so the same
+              servos can move gently or snappily on demand. Lower speed/accel = smoother.
+              Enable a Maestro in the Maestro tab first, then add its channels here.
             </div>
           </div>
         </section>
@@ -7238,8 +7256,7 @@ function _clearMaestroImport(slot) {
 // 6 named profiles, each a sparse list of {mid,ch,spd,acc} entries. Matches the
 // firmware's smoothProfiles JSON. Knobs + Maestro script actions reference a
 // profile by index (0-5); -1 = none, "u" = unlimited (scripts only).
-let _editSmoothProfile = 0;   // which profile the Maestro-tab sliders edit
-let _openSmoothMaestros = new Set();   // which per-Maestro smoothing sections stay expanded across re-renders
+let _editSmoothProfile = 0;   // which profile the Smoothing pane edits
 function _smoothProfiles() {
   if (!Array.isArray(config.smoothProfiles)) config.smoothProfiles = [];
   while (config.smoothProfiles.length < 6)
@@ -7278,12 +7295,74 @@ function _smoothChanRow(mid, entry) {
   const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn btn-ghost'; rm.textContent = '✕';
   rm.style.cssText = 'font-size:11px;padding:2px 6px';
   rm.title = 'Remove this channel from the profile';
-  rm.onclick = () => { const p = _smoothProfiles()[_editSmoothProfile]; p.entries = p.entries.filter(e => e !== entry); renderMaestroLocations(); };
+  rm.onclick = () => { const p = _smoothProfiles()[_editSmoothProfile]; p.entries = p.entries.filter(e => e !== entry); renderSmoothingPane(); };
   row.appendChild(chSel);
   row.appendChild(mkSlider('spd', 500, 'spd'));
   row.appendChild(mkSlider('acc', 255, 'acc'));
   row.appendChild(rm);
   return row;
+}
+
+// Dedicated "Smoothing" config pane — profile toolbar + a per-enabled-Maestro
+// channel editor (channel + speed/accel sliders). Renders into #smoothing-editor.
+function renderSmoothingPane() {
+  const wrap = document.getElementById('smoothing-editor');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  _smoothProfiles();   // ensure 6 profiles exist
+
+  const bar = document.createElement('div');
+  bar.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:2px 0 8px;border-bottom:1px solid var(--border);margin-bottom:6px';
+  bar.appendChild(Object.assign(document.createElement('span'), { textContent: 'Profile:', style: 'color:var(--muted)' }));
+  const psel = document.createElement('select');
+  psel.innerHTML = _smoothProfileOptions(_editSmoothProfile, false, false);
+  psel.value = String(_editSmoothProfile);
+  psel.title = 'Which profile you are editing. Knobs and Maestro actions pick which profile to use.';
+  psel.onchange = () => { _editSmoothProfile = +psel.value; renderSmoothingPane(); };
+  bar.appendChild(psel);
+  bar.appendChild(Object.assign(document.createElement('span'), { textContent: 'name:', style: 'color:var(--muted)' }));
+  const pname = document.createElement('input');
+  pname.type = 'text'; pname.placeholder = 'profile name'; pname.maxLength = 20; pname.style.width = '140px';
+  pname.value = _smoothProfiles()[_editSmoothProfile].name || '';
+  pname.oninput = () => { _smoothProfiles()[_editSmoothProfile].name = pname.value; };
+  pname.onchange = () => renderSmoothingPane();
+  bar.appendChild(pname);
+  const clr = document.createElement('button');
+  clr.type = 'button'; clr.className = 'btn btn-ghost'; clr.textContent = 'Clear profile'; clr.style.cssText = 'font-size:11px;padding:2px 8px';
+  clr.title = 'Remove all channel smoothing from this profile.';
+  clr.onclick = () => { if (confirm(`Clear all smoothing from "${_smoothProfileName(_editSmoothProfile)}"?`)) { _smoothProfiles()[_editSmoothProfile].entries = []; renderSmoothingPane(); } };
+  bar.appendChild(clr);
+  wrap.appendChild(bar);
+
+  const prof = _smoothProfiles()[_editSmoothProfile];
+  let anyEnabled = false;
+  (Array.isArray(config.maestros) ? config.maestros : []).forEach((slot, i) => {
+    if (!slot || slot.type === 0) return;
+    anyEnabled = true;
+    const mid = i + 1;
+    const chans = prof.entries.filter(e => +e.mid === mid);
+    const sect = document.createElement('div');
+    sect.style.cssText = 'margin-bottom:8px';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-size:12px;color:var(--accent2);font-weight:600;margin-bottom:4px';
+    title.textContent = `Maestro ${mid}${chans.length ? '' : ' — no channels'}`;
+    sect.appendChild(title);
+    const body = document.createElement('div');
+    body.style.cssText = 'padding-left:12px;display:flex;flex-direction:column;gap:5px';
+    chans.forEach(e => body.appendChild(_smoothChanRow(mid, e)));
+    const add = document.createElement('button');
+    add.type = 'button'; add.className = 'btn btn-ghost'; add.textContent = '+ add channel'; add.style.cssText = 'font-size:11px;padding:2px 8px;align-self:flex-start';
+    add.onclick = () => { prof.entries.push({ mid, ch: 0, spd: 150, acc: 0 }); renderSmoothingPane(); };
+    body.appendChild(add);
+    sect.appendChild(body);
+    wrap.appendChild(sect);
+  });
+  if (!anyEnabled) {
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:12px;color:var(--muted);padding:8px 0';
+    hint.textContent = 'No Maestros enabled. Enable one in the Maestro tab, then return here to add its channels.';
+    wrap.appendChild(hint);
+  }
 }
 
 function renderMaestroLocations() {
@@ -7295,31 +7374,6 @@ function renderMaestroLocations() {
                                  (_, i) => ({ type: 0, device: 1 + i, channels: [] }));
   }
   wrap.innerHTML = '';
-
-  // Smoothing-profile toolbar — pick which profile the per-Maestro sliders edit.
-  const bar = document.createElement('div');
-  bar.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:2px 0 8px;border-bottom:1px solid var(--border);margin-bottom:4px';
-  bar.appendChild(Object.assign(document.createElement('span'), { textContent: 'Smoothing profile:', style: 'color:var(--muted)' }));
-  const psel = document.createElement('select');
-  psel.innerHTML = _smoothProfileOptions(_editSmoothProfile, false, false);
-  psel.value = String(_editSmoothProfile);
-  psel.title = 'Which smoothing profile the per-Maestro sliders below edit. A knob or script action picks which profile to use.';
-  psel.onchange = () => { _editSmoothProfile = +psel.value; renderMaestroLocations(); };
-  bar.appendChild(psel);
-  bar.appendChild(Object.assign(document.createElement('span'), { textContent: 'name:', style: 'color:var(--muted)' }));
-  const pname = document.createElement('input');
-  pname.type = 'text'; pname.placeholder = 'profile name'; pname.maxLength = 20; pname.style.width = '120px';
-  pname.value = _smoothProfiles()[_editSmoothProfile].name || '';
-  pname.oninput = () => { _smoothProfiles()[_editSmoothProfile].name = pname.value; };
-  pname.onchange = () => renderMaestroLocations();   // refresh the dropdown labels
-  bar.appendChild(pname);
-  const clr = document.createElement('button');
-  clr.type = 'button'; clr.className = 'btn btn-ghost'; clr.textContent = 'Clear profile'; clr.style.cssText = 'font-size:11px;padding:2px 8px';
-  clr.title = 'Remove all channel smoothing from this profile.';
-  clr.onclick = () => { if (confirm(`Clear all smoothing from "${_smoothProfileName(_editSmoothProfile)}"?`)) { _smoothProfiles()[_editSmoothProfile].entries = []; renderMaestroLocations(); } };
-  bar.appendChild(clr);
-  wrap.appendChild(bar);
-
   for (let i = 0; i < NUM_MAESTRO_SLOTS; i++) {
     const slot = config.maestros[i];
     const imported = _maestroCh[String(i + 1)];
@@ -7360,30 +7414,6 @@ function renderMaestroLocations() {
       if (f) _importMaestroFile(slotNum, f);
     });
     wrap.appendChild(row);
-
-    // Per-Maestro smoothing submenu (only for enabled slots) — edits the
-    // currently-selected profile's channels for THIS Maestro.
-    if (slot.type !== 0) {
-      const prof  = _smoothProfiles()[_editSmoothProfile];
-      const chans = prof.entries.filter(e => +e.mid === i + 1);
-      const det = document.createElement('details');
-      det.style.cssText = 'margin:-2px 0 6px 46px';
-      det.open = _openSmoothMaestros.has(i);   // survive the re-render on add/remove channel
-      det.addEventListener('toggle', () => { if (det.open) _openSmoothMaestros.add(i); else _openSmoothMaestros.delete(i); });
-      const sum = document.createElement('summary');
-      sum.style.cssText = 'cursor:pointer;color:var(--accent2);font-size:11px';
-      sum.textContent = `⚙ Smoothing — ${chans.length} channel${chans.length === 1 ? '' : 's'} in "${_smoothProfileName(_editSmoothProfile)}"`;
-      det.appendChild(sum);
-      const body = document.createElement('div');
-      body.style.cssText = 'padding:6px 0 4px 12px;display:flex;flex-direction:column;gap:5px';
-      chans.forEach(e => body.appendChild(_smoothChanRow(i + 1, e)));
-      const add = document.createElement('button');
-      add.type = 'button'; add.className = 'btn btn-ghost'; add.textContent = '+ add channel'; add.style.cssText = 'font-size:11px;padding:2px 8px;align-self:flex-start';
-      add.onclick = () => { prof.entries.push({ mid: i + 1, ch: 0, spd: 150, acc: 0 }); renderMaestroLocations(); };
-      body.appendChild(add);
-      det.appendChild(body);
-      wrap.appendChild(det);
-    }
   }
   // Wire change handlers — mutate config.maestros[i] directly, then refresh
   // any open knob modal's Maestro target dropdowns so labels stay in sync.
@@ -10204,6 +10234,7 @@ function setConfigTab(name) {
   if (name === 'logical') renderLogicalButtons();   // (re)populate rows when opened
   if (name === 'firmware') checkFirmwareLatest();    // fetch + compare latest GitHub version (cached)
   if (name === 'serial')  applyBaudRateLabels();     // board-aware S3/S4/S5 ↔ Serial 1/2/3 labels
+  if (name === 'smoothing') renderSmoothingPane();   // build the profile editor when opened
   if (!found) setConfigTab('channels');   // fallback if stored name is stale
   else try { localStorage.setItem('rcConfigLastTab', name); } catch {}
 }
@@ -11422,6 +11453,30 @@ function exportConfigCsv() {
     });
   }
 
+  // Smoothing profiles — a 'smoothprofile' row carries a profile's name at its
+  // index (buttonId col), and a 'smoothchan' row per channel entry
+  // (slot=Maestro id, maestroCh=channel, posMin=speed, posMax=accel). Profiles
+  // with neither a name nor entries are skipped. (Knob→profile assignment is not
+  // in the legacy-flat knob CSV — it persists via the board save.)
+  if (Array.isArray(config.smoothProfiles)) {
+    config.smoothProfiles.forEach((p, i) => {
+      if (!p) return;
+      const ents = Array.isArray(p.entries) ? p.entries : [];
+      if (p.name && p.name.length) {
+        const r = Array(header.length).fill('');
+        r[0] = 'smoothprofile'; r[2] = String(i); r[17] = p.name;
+        rows.push(csvRow(r));
+      }
+      ents.forEach(e => {
+        const r = Array(header.length).fill('');
+        r[0] = 'smoothchan'; r[2] = String(i);
+        r[12] = String(e.mid); r[13] = String(e.ch);
+        r[14] = String(e.spd || 0); r[15] = String(e.acc || 0);
+        rows.push(csvRow(r));
+      });
+    });
+  }
+
   const thresholds = config.thresholds || defaultThresholds();
   for (let mode = 1; mode <= 3; mode++) {
     for (let btn = 1; btn <= RC_TOTAL_SLOTS; btn++) {
@@ -11590,6 +11645,18 @@ function handleConfigImportFile(event) {
         if (!Array.isArray(imported.maestros[idx].channels)) imported.maestros[idx].channels = [];
       };
 
+      // Smoothing profiles: CSV is authoritative only if it carries ANY smoothing
+      // row. The first touch replaces the inherited profiles with 6 empties, so a
+      // file silent about smoothing keeps whatever is on the board.
+      let _smoothCleared = false;
+      const ensureSmoothProfiles = () => {
+        if (!_smoothCleared) {
+          imported.smoothProfiles = Array.from({ length: 6 }, () => ({ name: '', entries: [] }));
+          _smoothCleared = true;
+        }
+        return imported.smoothProfiles;
+      };
+
       for (let r = 1; r < rows.length; r++) {
         const row = rows[r];
         if (!row.some(cell => cell !== undefined && String(cell).trim() !== '')) continue;
@@ -11719,6 +11786,25 @@ function handleConfigImportFile(event) {
             min: Number(cellStr(row, indexes.posMin)) || 0,
             max: Number(cellStr(row, indexes.posMax)) || 0,
           });
+          continue;
+        }
+        // Smoothing profile name (buttonId = profile index 0-5, note = name).
+        if (type === 'smoothprofile') {
+          if (Number.isFinite(buttonId) && buttonId >= 0 && buttonId < 6)
+            ensureSmoothProfiles()[buttonId].name = note.slice(0, 20);
+          continue;
+        }
+        // Smoothing profile channel entry (buttonId = profile index, slot =
+        // Maestro id, maestroCh = channel, posMin = speed, posMax = accel).
+        if (type === 'smoothchan') {
+          const smMid = Number(slot), smCh = Number(maestroCh);
+          if (Number.isFinite(buttonId) && buttonId >= 0 && buttonId < 6 &&
+              Number.isFinite(smMid) && smMid >= 1 && smMid <= NUM_MAESTRO_SLOTS &&
+              Number.isFinite(smCh) && smCh >= 0 && smCh <= 31) {
+            ensureSmoothProfiles()[buttonId].entries.push({
+              mid: smMid, ch: smCh, spd: Number(posMin) || 0, acc: Number(posMax) || 0,
+            });
+          }
           continue;
         }
 
@@ -11855,6 +11941,7 @@ function handleConfigImportFile(event) {
         if (bsel) bsel.value = String(config.boardType | 0); }   // reflect imported board profile
       applyBaudRateLabels();
       renderMaestroLocations();
+      renderSmoothingPane();
     } catch (err) {
       alert('Import failed: ' + err.message);
     } finally {
