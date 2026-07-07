@@ -1149,12 +1149,14 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     }
   }
 
-  // Smoothing profiles (array index = profile id). Clear all 6, then load.
-  for (int p = 0; p < RC_NUM_SMOOTH_PROFILES; p++) {
-    memset(rcConfig.smoothProfiles[p].entries, 0, sizeof(rcConfig.smoothProfiles[p].entries));
-    rcConfig.smoothProfiles[p].name[0] = '\0';
-  }
+  // Smoothing profiles (array index = profile id). Update ONLY when the message
+  // carries the branch — a diff-save (SET_CONFIG) that omits smoothProfiles must
+  // NOT wipe them, so the clear lives INSIDE the containsKey guard.
   if (doc.containsKey("smoothProfiles")) {
+    for (int p = 0; p < RC_NUM_SMOOTH_PROFILES; p++) {
+      memset(rcConfig.smoothProfiles[p].entries, 0, sizeof(rcConfig.smoothProfiles[p].entries));
+      rcConfig.smoothProfiles[p].name[0] = '\0';
+    }
     int p = 0;
     for (JsonObject pObj : doc["smoothProfiles"].as<JsonArray>()) {
       if (p >= RC_NUM_SMOOTH_PROFILES) break;
