@@ -1073,7 +1073,8 @@ static void rcExecuteActionNow(const RcAction& a) {
       if (tok && strcmp(tok, "set") == 0) {
         char* s  = strtok(nullptr, ",");
         char* ac = strtok(nullptr, ",");
-        g_smoothOverrideSpeed = s  ? (uint16_t)atoi(s)  : 0;
+        int sv = s ? atoi(s) : 0;
+        g_smoothOverrideSpeed = (uint16_t)(sv < 0 ? 0 : (sv > 16383 ? 16383 : sv));   // 14-bit; never the 0xFFFF sentinel
         g_smoothOverrideAccel = ac ? (uint8_t) atoi(ac) : 0;
         g_smoothOverride = true;
         dlog(DBG_MAESTRO, "[DISPATCH] Smoothing override ON  spd=%u acc=%u\n", g_smoothOverrideSpeed, g_smoothOverrideAccel);
@@ -1356,7 +1357,8 @@ void processKnobs() {
         // stand. The cache makes each write a one-shot and self-heals: a script
         // (or reset) changing the channel → next stick move re-applies.
         if ((out.smoothSpeed || out.smoothAccel) && mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
-          const uint16_t wantSpd = g_smoothOverride ? g_smoothOverrideSpeed : out.smoothSpeed;
+          uint16_t wantSpd = g_smoothOverride ? g_smoothOverrideSpeed : out.smoothSpeed;
+          if (wantSpd > 16383) wantSpd = 16383;   // Maestro speed is 14-bit; keep 'want' out of the 0xFFFF cache-sentinel range (self-corrects a rogue hand-edited value)
           const uint16_t wantAcc = g_smoothOverride ? (uint16_t)g_smoothOverrideAccel : (uint16_t)out.smoothAccel;
           if (g_maeSpeed[mid - 1][mch] != wantSpd) maestroSetSpeed(mid, mch, wantSpd);
           if (g_maeAccel[mid - 1][mch] != wantAcc) maestroSetAccel(mid, mch, (uint8_t)wantAcc);
