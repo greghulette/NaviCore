@@ -568,7 +568,7 @@ static void maestroResetSmoothedChannels(uint8_t id) {
 
 // Parse and execute a Maestro action command string against slot `id` (1-8).
 // cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,reset]"
-//      | "setSpeed,ch,spd" | "setAccel,ch,acc"
+//      | "setSpeed,ch,spd" | "setAccel,ch,acc" | "setSpeedAccel,ch,spd,acc"
 //   restartScript's optional 3rd arg "1" zeros this Maestro's smoothed
 //   passthrough channels first (so the script isn't throttled by smoothing).
 static void executeMaestroCmd(uint8_t id, const char* cmd) {
@@ -589,6 +589,16 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
   else if (strcmp(tok, "setAccel")      == 0) {
     char* sCh = strtok(nullptr, ","); char* sAcc = strtok(nullptr, ",");
     if (sCh && sAcc) maestroSetAccel(id, (uint8_t)atoi(sCh), (uint8_t)atoi(sAcc));
+  }
+  else if (strcmp(tok, "setSpeedAccel") == 0) {   // both in one action (smoothing)
+    char* sCh  = strtok(nullptr, ",");
+    char* sSpd = strtok(nullptr, ",");
+    char* sAcc = strtok(nullptr, ",");
+    if (sCh && sSpd && sAcc) {
+      uint8_t ch = (uint8_t)atoi(sCh);
+      maestroSetSpeed(id, ch, (uint16_t)atoi(sSpd));
+      maestroSetAccel(id, ch, (uint8_t) atoi(sAcc));
+    }
   }
   else if (strcmp(tok, "restartScript") == 0) {
     char* sN     = strtok(nullptr, ",");
