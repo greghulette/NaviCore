@@ -2253,7 +2253,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">072302QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">072322QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9386,12 +9386,17 @@ function openKnobModal(name) {
   // (default), else a switch index 0-7 (SA-SH) so the knob is gated on its own.
   k.modeSwitchOverride = Number.isInteger(d.modeSwitchOverride) ? d.modeSwitchOverride : -1;
   k.smoothProfile      = Number.isInteger(d.smoothProfile)      ? d.smoothProfile      : -1;
-  const _m2 = Array.isArray(d.outputs2) ? d.outputs2.map(o => ({...o})) : [];
-  const _m3 = Array.isArray(d.outputs3) ? d.outputs3.map(o => ({...o})) : [];
-  k.outputsByMode = [ k.outputs, _m2, _m3 ];
+  // null = the mode was NEVER configured (key absent) → seed it from mode 1 as a
+  // convenience. [] = the user intentionally emptied it → KEEP it empty (silent in
+  // that mode; see the 'Mode from' tooltip). Conflating the two reseeded an emptied
+  // mode from mode 1 on every reopen — the "I deleted it but it came back" bug.
+  // Mirrors the firmware's containsKey("outputs2") logic (rc_config.h ~1143).
+  const _m2 = Array.isArray(d.outputs2) ? d.outputs2.map(o => ({...o})) : null;
+  const _m3 = Array.isArray(d.outputs3) ? d.outputs3.map(o => ({...o})) : null;
+  k.outputsByMode = [ k.outputs, _m2 || [], _m3 || [] ];
   if (k.modeAware) {
-    if (!k.outputsByMode[1].length) k.outputsByMode[1] = k.outputs.map(o => ({...o}));
-    if (!k.outputsByMode[2].length) k.outputsByMode[2] = k.outputs.map(o => ({...o}));
+    if (_m2 === null) k.outputsByMode[1] = k.outputs.map(o => ({...o}));
+    if (_m3 === null) k.outputsByMode[2] = k.outputs.map(o => ({...o}));
   }
   k.editMode = 1;
   k.outputs  = k.outputsByMode[0];
