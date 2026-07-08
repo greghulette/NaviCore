@@ -497,6 +497,23 @@ static uint16_t g_maeSpeed[RC_NUM_MAESTROS][32] = {};
 static uint16_t g_maeAccel[RC_NUM_MAESTROS][32] = {};
 static const uint16_t MAE_SMOOTH_UNKNOWN = 0xFFFF;   // sentinel: force re-apply on next move (out of the 0-16383/0-255 range)
 
+// Per-Maestro "active smoothing profile" master — a switch's "Apply smoothing
+// profile" action sets it, and passthrough joysticks driving that Maestro FOLLOW
+// it (it wins over each knob's own profile). Runtime latch, not persisted; boot
+// = released. Values: -1 RELEASED (joysticks use their own profile); -2 OFF (force
+// no smoothing / snappy); 0..5 = that profile is the Maestro's master.
+#define SMOOTH_MASTER_OFF (-2)
+static int8_t g_activeSmoothProfile[RC_NUM_MAESTROS] = { -1, -1, -1, -1, -1, -1, -1, -1 };   // one per Maestro (RC_NUM_MAESTROS=8)
+
+// Resolve the EFFECTIVE smoothing profile for a passthrough knob on Maestro `mid`:
+// the Maestro's active master beats the knob's own; OFF = none.
+static int8_t resolveKnobSmoothProfile(const RcKnob& kn, uint8_t mid) {
+  const int8_t act = (mid >= 1 && mid <= RC_NUM_MAESTROS) ? g_activeSmoothProfile[mid - 1] : -1;
+  if (act == SMOOTH_MASTER_OFF) return -1;   // Off → force no smoothing
+  if (act >= 0)                 return act;   // master profile wins over the knob's own
+  return kn.smoothProfile;                    // released → knob's own (-1 = none)
+}
+
 // Invalidate a whole slot's smoothing cache so the next passthrough stick move
 // re-applies each channel's speed/accel. Called on Maestro-internal script
 // start/stop: a device-side script can change a channel's speed/accel that the
@@ -579,10 +596,43 @@ static void maestroApplySmoothProfile(uint8_t id, int8_t prof) {
   }
 }
 
+// Re-drive every passthrough channel on Maestro `id` to its EFFECTIVE smoothing
+// (active master > knob's own > none), INCLUDING 0 to snap a channel back when
+// the master releases or turns smoothing Off. Called when the active profile
+// changes so the switch takes effect immediately (and channels that leave the
+// active profile reset to snappy). Steady-state stick moves only RE-apply a
+// positive limit (see processKnobs) so scripts/EEPROM on unmanaged channels are
+// left alone; this is the one place that actively drives 0.
+static void reapplyActiveSmoothing(uint8_t id) {
+  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  for (int i = 0; i < RC_NUM_KNOBS; i++) {
+    const RcKnob& kn = rcConfig.knobs[i];
+    if (kn.function != KF_MAESTRO_PASSTHROUGH) continue;
+    const int8_t eff = resolveKnobSmoothProfile(kn, id);
+    for (int m = 1; m <= 3; m++) {
+      const uint8_t       cnt  = rcKnobOutCount(kn, m);
+      const RcKnobOutput* outs = rcKnobOuts(kn, m);
+      for (uint8_t o = 0; o < cnt && o < RC_KNOB_MAX_OUTPUTS; o++) {
+        if (outs[o].target != id || outs[o].maestroCh >= 32) continue;
+        const uint8_t ch = outs[o].maestroCh;
+        uint16_t wantSpd = 0, wantAcc = 0;
+        if (eff >= 0 && eff < RC_NUM_SMOOTH_PROFILES) {
+          const RcSmoothEntry& e = rcConfig.smoothProfiles[eff].entries[id - 1][ch];
+          wantSpd = e.speed > 16383 ? 16383 : e.speed; wantAcc = e.accel;
+        }
+        if (g_maeSpeed[id - 1][ch] != wantSpd) maestroSetSpeed(id, ch, wantSpd);
+        if (g_maeAccel[id - 1][ch] != wantAcc) maestroSetAccel(id, ch, (uint8_t)wantAcc);
+      }
+      if (!kn.modeAware) break;
+    }
+  }
+}
+
 // Parse and execute a Maestro action command string against slot `id` (1-8).
 // cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,sm]"
 //      | "setSpeed,ch,spd" | "setAccel,ch,acc" | "setSpeedAccel,ch,spd,acc"
-//      | "applyProfile,<spec>"  (spec: "u"=unlimited | "p0".."p5"=profile)
+//      | "applyProfile,<spec>"  — sets this Maestro's ACTIVE smoothing master
+//        (joysticks follow it): "p0".."p5"=profile | "u"=off (no smoothing) | "r"=release
 //   restartScript's optional 3rd arg loads smoothing before the script runs:
 //   "u" = Unlimited (zero this Maestro's profile-managed channels); "p0".."p5" =
 //   apply that smoothing profile; absent = leave the channels as-is. (A legacy
@@ -616,11 +666,14 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
       maestroSetAccel(id, ch, (uint8_t) atoi(sAcc));
     }
   }
-  else if (strcmp(tok, "applyProfile") == 0) {    // load a smoothing profile (or Unlimited) onto this Maestro
-    char* sSpec = strtok(nullptr, ",");           // "u" = unlimited | "p0".."p5" = profile
-    if (sSpec) {
-      if (sSpec[0] == 'p' || sSpec[0] == 'P') { int p = atoi(sSpec + 1); if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) maestroApplySmoothProfile(id, (int8_t)p); }
-      else maestroResetSmoothedChannels(id);
+  else if (strcmp(tok, "applyProfile") == 0) {    // set this Maestro's ACTIVE smoothing master — joysticks follow it
+    char* sSpec = strtok(nullptr, ",");           // "p0".."p5" = profile | "u" = off (no smoothing) | "r" = release (per-knob)
+    if (sSpec && id >= 1 && id <= RC_NUM_MAESTROS) {
+      if      (sSpec[0] == 'p' || sSpec[0] == 'P') { int p = atoi(sSpec + 1); if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) g_activeSmoothProfile[id - 1] = (int8_t)p; }
+      else if (sSpec[0] == 'r' || sSpec[0] == 'R') g_activeSmoothProfile[id - 1] = -1;                // release → each knob's own
+      else                                         g_activeSmoothProfile[id - 1] = SMOOTH_MASTER_OFF;  // "u" → off (no smoothing)
+      reapplyActiveSmoothing(id);
+      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u active smoothing → %d\n", id, g_activeSmoothProfile[id - 1]);
     }
   }
   else if (strcmp(tok, "restartScript") == 0) {
@@ -1379,15 +1432,16 @@ void processKnobs() {
       if (kn.function == KF_MAESTRO_PASSTHROUGH) {
         // out.target is the Maestro slot ID (1-8)
         const uint8_t mid = out.target, mch = out.maestroCh;
-        // Smoothing comes from the knob's profile: look up this channel's
-        // speed/accel in smoothProfiles[kn.smoothProfile]. No profile (-1) or an
-        // unset channel (0/0) = untouched, so the Maestro's own settings stand.
-        // A managed channel drives BOTH speed and accel (incl 0) so nothing stays
-        // stuck. The g_maeSpeed/g_maeAccel cache makes each write a one-shot and
-        // self-heals: a script changing the channel → next stick move re-applies.
-        if (kn.smoothProfile >= 0 && kn.smoothProfile < RC_NUM_SMOOTH_PROFILES &&
+        // Smoothing comes from the EFFECTIVE profile — the Maestro's active master
+        // (set by a switch) if any, else this knob's own (resolveKnobSmoothProfile).
+        // No effective profile (-1) or an unset channel (0/0) = untouched here, so
+        // scripts/EEPROM stand; a managed channel re-applies its speed/accel via the
+        // g_maeSpeed/g_maeAccel cache (self-heals after a script). Master changes
+        // reset channels via reapplyActiveSmoothing() — the one place that drives 0.
+        const int8_t eff = resolveKnobSmoothProfile(kn, mid);
+        if (eff >= 0 && eff < RC_NUM_SMOOTH_PROFILES &&
             mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
-          const RcSmoothEntry& e = rcConfig.smoothProfiles[kn.smoothProfile].entries[mid - 1][mch];
+          const RcSmoothEntry& e = rcConfig.smoothProfiles[eff].entries[mid - 1][mch];
           if (e.speed || e.accel) {
             uint16_t wantSpd = e.speed > 16383 ? 16383 : e.speed;   // Maestro speed is 14-bit; also keeps 'want' off the 0xFFFF cache sentinel
             uint16_t wantAcc = e.accel;

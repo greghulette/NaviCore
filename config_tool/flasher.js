@@ -93,6 +93,37 @@ function loadScript(src) {
 //   part   → 0x8000    (partition table)
 //   nvs    → 0x9000    (NVS — NOT touched here so saved config survives)
 //   ota_0  → 0x10000   (application)
+function _otaSleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+// Fetch a URL, retrying through GitHub's transient rate-limits (HTTP 429, and
+// the 403 GitHub uses for abuse throttling) and 5xx. Honors Retry-After when
+// present, else exponential backoff. GitHub throttles heavy/rapid access to raw
+// content + the API per-IP; a short wait almost always clears it, so a few
+// automatic retries beat failing the whole OTA on a transient throttle.
+async function _fetchRetry(url, onLog, label) {
+  const MAX_ATTEMPTS = 4;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let r = null;
+    try {
+      r = await fetch(url);
+    } catch (netErr) {
+      if (attempt === MAX_ATTEMPTS) throw netErr;
+      await _otaSleep(1500 * attempt);
+      continue;
+    }
+    if (r.ok) return r;
+    const retryable = (r.status === 429 || r.status === 403 || r.status >= 500);
+    if (retryable && attempt < MAX_ATTEMPTS) {
+      const ra = parseInt(r.headers.get('retry-after') || '', 10);
+      const waitMs = Number.isFinite(ra) ? Math.min(30000, ra * 1000)
+                                         : Math.min(8000, 1500 * Math.pow(2, attempt - 1));
+      if (onLog) onLog(`GitHub throttled ${label || 'download'} (HTTP ${r.status}) — retrying in ${Math.round(waitMs / 1000)}s… (${attempt}/${MAX_ATTEMPTS - 1})`);
+      await _otaSleep(waitMs);
+      continue;
+    }
+    return r;   // non-retryable status (or out of attempts) — caller reports it
+  }
+}
+
 async function fetchFirmwareImages(onLog) {
   const branch = getFirmwareBranch();
   const apiUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_BIN_PATH}?ref=${branch}`;
@@ -101,7 +132,7 @@ async function fetchFirmwareImages(onLog) {
     onLog(`⚠ Firmware source branch: ${branch} (not the released 'main')`);
   onLog(`Scanning ${GITHUB_BIN_PATH}/ on GitHub (${branch})…`);
 
-  const listResp = await fetch(apiUrl);
+  const listResp = await _fetchRetry(apiUrl, onLog, 'firmware list');
   if (!listResp.ok) throw new Error(`GitHub API: HTTP ${listResp.status}`);
   const files = await listResp.json();
 
@@ -112,7 +143,7 @@ async function fetchFirmwareImages(onLog) {
       return null;
     }
     onLog(`Found: ${match.name}`);
-    const r = await fetch(match.download_url);
+    const r = await _fetchRetry(match.download_url, onLog, match.name);
     if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${match.name}`);
     const buf = await r.arrayBuffer();
     if (buf.byteLength === 0) throw new Error(`${match.name} is empty`);
@@ -135,10 +166,10 @@ async function fetchFirmwareImages(onLog) {
   // committed under a FIXED name so CI's stock per-build _ESP32S3_boot.bin can
   // never shadow it. It is the matched pair of the firmware's in-app boot guard.
   // Partition table stays the tagged per-build _ESP32S3_part.bin.
-  const [bootBuf, partBuf] = await Promise.all([
-    fetchBySuffix('WCB_S3_custom_bootloader_16MB_wdt3s.bin', false),
-    fetchBySuffix('_ESP32S3_part.bin', false),
-  ]);
+  // Sequential (not Promise.all) so we don't fire concurrent large raw-content
+  // fetches at GitHub — a burst is more likely to trip its per-IP rate limit.
+  const bootBuf = await fetchBySuffix('WCB_S3_custom_bootloader_16MB_wdt3s.bin', false);
+  const partBuf = await fetchBySuffix('_ESP32S3_part.bin', false);
   let hasBootPart = false;
   if (bootBuf && partBuf) {
     images.unshift(
