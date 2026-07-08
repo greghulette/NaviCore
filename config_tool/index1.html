@@ -12,22 +12,22 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
     /* ── Atlas RC · dark (default) ── */
-    --bg:        #121721;
-    --surface:   #182030;   /* topbar / sidebar / header */
-    --surface-2: #1e2637;   /* nested panels */
-    --card:      #1c3055;   /* blue-tinted card */
-    --elevated:  #222c3d;   /* modals / popovers */
-    --field:     #141b26;   /* inputs */
+    --bg:        #0a0d12;
+    --surface:   #0e131b;   /* topbar / sidebar / header */
+    --surface-2: #121822;   /* nested panels */
+    --card:      #13233f;   /* blue-tinted card */
+    --elevated:  #161d29;   /* modals / popovers */
+    --field:     #0d1117;   /* inputs */
     --accent:        #2b86ff;
     --accent2:       #1f6fef;
     --accent-bright: #5cb0ff;
     --accent-deep:   #1547b0;
     --accent3:   #ff7a3d;   /* contrast color for live activity (orange) */
-    --text:      #e2e8f1;
-    --muted:     #97a1b0;
-    --faint:     #727c8b;
-    --border:    #313d50;
-    --line-2:    #3d4c62;
+    --text:      #dde3ec;
+    --muted:     #8a93a1;
+    --faint:     #69727f;
+    --border:    #222b39;
+    --line-2:    #2c3849;
     --green:     #36c08a;
     --yellow:    #e0b341;
     --red:       #f0584b;
@@ -443,12 +443,6 @@
   #modal .modal { display: flex; flex-direction: column; overflow: hidden; }
   #modal .modal-header, #modal .modal-footer { flex: 0 0 auto; }
   #modal .modal-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
-  /* Lighten the action modal's nested panels so it doesn't read as one dark
-     block: a clear elevation ramp — modal base < tier card < action row —
-     with dark inputs on top for contrast. */
-  #modal .modal-header, #modal .modal-footer { background: #202939; }
-  #modal .tier-card { background: #2b3749; border: 1px solid #384662; }
-  #modal .action-row { background: #35435a; border: 1px solid #475874; border-left: 3px solid var(--accent); }
   /* Tap-tier tabs — one tier (single/double/triple tap) shown at a time. */
   .tier-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
   .tier-tab { appearance: none; flex: 1; cursor: pointer; user-select: none; font-family: inherit;
@@ -559,15 +553,9 @@
   /* Tap tier cards */
   .tier-card  { background: var(--card); border-radius: 8px; padding: 14px; margin-bottom: 12px; }
   .tier-title { font-size: 12px; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; letter-spacing: 1px; }
-  .rows-container { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; }
-  /* Each action reads as its own distinct panel: a neutral surface (not the
-     near-invisible white overlay) with a border + left accent stripe so rows
-     no longer blend into the blue tier card or into each other. */
-  .action-row { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap;
-    padding: 12px; padding-left: 13px; background: var(--surface-2);
-    border: 1px solid var(--line-2); border-left: 3px solid var(--accent);
-    border-radius: 8px; }
-  .action-row label { font-size: 12px; font-weight: 500; color: var(--text); opacity: .8; }
+  .rows-container { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .action-row { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; padding: 6px; background: var(--hover-2); border-radius: 6px; }
+  .action-row label { font-size: 12px; color: var(--muted); }
   .btn-remove-action {
     background: transparent; color: var(--red); border: 1px solid var(--red);
     border-radius: 4px; width: 26px; height: 26px; padding: 0;
@@ -2265,7 +2253,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">081608QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">081441QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3069,7 +3057,7 @@
 
 <!-- ── Button Config Modal ── -->
 <div class="modal-overlay" id="modal">
-  <div class="modal" style="background-color: #232d3e; width: 640px">
+  <div class="modal">
     <div class="modal-header">
       <span id="modal-title" class="modal-title"></span>
       <div id="modal-mode-badges"></div>
@@ -9916,39 +9904,35 @@ function openKnobModal(name) {
   container.innerHTML = `
     <div class="tier-card">
       <div class="tier-title">Source</div>
-      <div class="action-row" style="flex-direction:column; align-items:stretch; gap:14px">
-        <div style="display:flex; flex-wrap:wrap; gap:16px; align-items:flex-end">
-          <div class="field-group">
-            <label>SBUS channel</label>
-            <input type="number" id="kn-channel" min="0" max="24" value="${k.channel}" style="width:70px"
-                   title="0 = disabled, 1-24 = SBUS channel number">
-          </div>
-          <div class="field-group">
-            <label>Function</label>
-            <select id="kn-function" onchange="changeKnobFunction(+this.value)">
-              ${Object.entries(knobFunctions).map(([v, lbl]) =>
-                `<option value="${v}" ${+v === k.function ? 'selected' : ''}>${lbl}</option>`
-              ).join('')}
-            </select>
-          </div>
-          <div class="field-group">
-            <label style="font-size:11px" title="For Maestro passthrough knobs: which smoothing profile these servos use. Build profiles per-Maestro in the Maestro Locations tab. 'None' = instant (no smoothing).">Smoothing profile</label>
-            <select id="kn-smprof">${_smoothProfileOptions(k.smoothProfile ?? -1, true, false)}</select>
-          </div>
+      <div class="action-row" style="flex-wrap:wrap; gap:10px">
+        <div class="field-group">
+          <label>SBUS channel</label>
+          <input type="number" id="kn-channel" min="0" max="24" value="${k.channel}" style="width:70px"
+                 title="0 = disabled, 1-24 = SBUS channel number">
         </div>
-        <div style="display:flex; flex-wrap:wrap; gap:12px 22px; align-items:center; padding-top:12px; border-top:1px solid var(--border)">
+        <div class="field-group">
+          <label>Function</label>
+          <select id="kn-function" onchange="changeKnobFunction(+this.value)">
+            ${Object.entries(knobFunctions).map(([v, lbl]) =>
+              `<option value="${v}" ${+v === k.function ? 'selected' : ''}>${lbl}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="field-group" style="align-self:flex-end">
           <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
             <input type="checkbox" id="kn-reverse" ${k.reverse ? 'checked' : ''}
                    title="Invert this axis around its centre. Stick up reads as down for downstream outputs.">
             Reverse direction
           </label>
+        </div>
+        <div class="field-group" style="align-self:flex-end">
           <label style="display:flex; align-items:center; gap:6px; cursor:pointer"
                  title="When on, this knob drives a DIFFERENT output set per 3-way-switch mode — one stick, three behaviors. Off = one output set for all modes.">
             <input type="checkbox" id="kn-modeaware" ${k.modeAware ? 'checked' : ''}
                    onchange="toggleKnobModeAware(this.checked)">
             Follow 3 modes
           </label>
-          <label id="kn-modesrc-wrap" style="display:${k.modeAware ? 'flex' : 'none'};align-items:center;gap:6px;font-size:11px;color:var(--muted)"
+          <label id="kn-modesrc-wrap" style="display:${k.modeAware ? 'flex' : 'none'};align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-top:5px"
                  title="Which switch selects THIS knob's mode. 'Global mode switch' follows the droid's main Mode selector; pick a specific switch (e.g. SA) to gate this knob independently — leave the passthrough outputs empty in the modes you want it silent.">
             Mode from
             <select id="kn-modesrc" onchange="if(editingKnobDraft) editingKnobDraft.modeSwitchOverride = +this.value">
@@ -9956,6 +9940,10 @@ function openKnobModal(name) {
               ${['SA','SB','SC','SD','SE','SF','SG','SH'].map((s,ix) => `<option value="${ix}" ${(k.modeSwitchOverride ?? -1) === ix ? 'selected' : ''}>${s}</option>`).join('')}
             </select>
           </label>
+        </div>
+        <div class="field-group" style="align-self:flex-end">
+          <label style="font-size:11px" title="For Maestro passthrough knobs: which smoothing profile these servos use. Build profiles per-Maestro in the Maestro Locations tab. 'None' = instant (no smoothing).">Smoothing profile</label>
+          <select id="kn-smprof">${_smoothProfileOptions(k.smoothProfile ?? -1, true, false)}</select>
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-top:6px">${helpText}</div>
