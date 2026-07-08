@@ -2253,7 +2253,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">072322QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">080851QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10448,15 +10448,25 @@ async function reopenAfterFlash(p) {
 // Brick-safe: a failed/interrupted transfer leaves the current app running.
 let _otaInProgress    = false;
 let _otaMarkerResolver = null;   // set while awaiting the next [OTA:*] marker
+// Markers that arrived with NO active waiter. USB-CDC can coalesce two markers
+// emitted a few ms apart (e.g. [OTA:BEGIN,START] then a fast-erase [OTA:BEGIN,OK])
+// into ONE serial read(); the read loop then dispatches both synchronously, and
+// the second lands before the awaiting continuation has re-armed the resolver
+// (re-arm is a microtask behind `await`). Buffer those instead of dropping them.
+let _otaPendingMarkers = [];
 
-// Called from handleBoardMessage for any "[OTA:" line — resolves a pending wait.
+// Called from handleBoardMessage for any "[OTA:" line — resolves a pending wait,
+// or buffers the marker if no waiter is armed yet (see _otaPendingMarkers).
 function _otaHandleMarker(line) {
   if (_otaMarkerResolver) { const r = _otaMarkerResolver; _otaMarkerResolver = null; r(line); }
+  else _otaPendingMarkers.push(line);
 }
 
 // Resolve on the next [OTA:*] marker, or reject on timeout. Construct this
 // BEFORE sending the command so a fast marker can't arrive before we're listening.
+// If a marker already arrived (buffered), consume it immediately — no wait/timeout.
 function _otaAwaitMarker(timeoutMs) {
+  if (_otaPendingMarkers.length) return Promise.resolve(_otaPendingMarkers.shift());
   return new Promise((resolve, reject) => {
     const to = setTimeout(() => { _otaMarkerResolver = null; reject(new Error('timed out waiting for board response')); }, timeoutMs);
     _otaMarkerResolver = (line) => { clearTimeout(to); resolve(line); };
@@ -10483,6 +10493,7 @@ async function otaUpdateOverUsb() {
   };
 
   _otaInProgress = true;
+  _otaPendingMarkers = []; _otaMarkerResolver = null;   // discard any stale marker from a prior/aborted run
   const btn = document.getElementById('btn-fw-ota');
   if (btn) { btn.disabled = true; btn.textContent = '⚡ Updating over USB…'; }
   if (logEl) logEl.textContent = '';
@@ -10561,6 +10572,7 @@ async function otaUpdateOverUsb() {
   } finally {
     _otaInProgress = false;
     _otaMarkerResolver = null;
+    _otaPendingMarkers = [];
     if (btn) { btn.disabled = false; btn.textContent = '⚡ Update over USB (OTA)'; }
   }
 }
@@ -10598,6 +10610,7 @@ async function otaUpdateOverWcb() {
   };
 
   _otaInProgress = true;
+  _otaPendingMarkers = []; _otaMarkerResolver = null;   // discard any stale marker from a prior/aborted run
   const btn = document.getElementById('btn-fw-ota-wcb');
   if (btn) { btn.disabled = true; btn.textContent = '📡 Updating over WCB…'; }
   if (logEl) logEl.textContent = '';
@@ -10660,6 +10673,7 @@ async function otaUpdateOverWcb() {
   } finally {
     _otaInProgress = false;
     _otaMarkerResolver = null;
+    _otaPendingMarkers = [];
     if (btn) { btn.disabled = false; btn.textContent = '📡 Update over WCB (OTA)'; }
   }
 }
