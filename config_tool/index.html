@@ -437,6 +437,26 @@
   .modal-body   { padding: 20px; }
   .modal-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
 
+  /* Action modal (#modal): pin the header + footer, scroll only the body, so the
+     Apply button is ALWAYS visible even with a tall action list. Scoped to #modal
+     so the Config window keeps its own scroll behavior. */
+  #modal .modal { display: flex; flex-direction: column; overflow: hidden; }
+  #modal .modal-header, #modal .modal-footer { flex: 0 0 auto; }
+  #modal .modal-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+  /* Tap-tier tabs — one tier (single/double/triple tap) shown at a time. */
+  .tier-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tier-tab { appearance: none; flex: 1; cursor: pointer; user-select: none; font-family: inherit;
+    padding: 9px 8px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card); color: var(--muted); font-size: 13px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    transition: background .15s, color .15s, border-color .15s; }
+  .tier-tab:hover { color: var(--text); }
+  .tier-tab.active { background: rgba(43,134,255,.12); color: var(--accent); border-color: var(--accent); }
+  .tier-tab-count { display: inline-flex; align-items: center; justify-content: center;
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+    font-size: 11px; font-weight: 700; background: var(--accent); color: #fff; }
+  .tier-tab-count.empty { display: none; }
+
   /* ─── Configuration modal — tabbed layout with visual contrast ───────
      The default .modal background (--surface = #161616) matches the page
      bg exactly and blends in. The cfg-modal variant uses a slightly
@@ -2233,7 +2253,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">072222QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">072235QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8528,12 +8548,43 @@ function openModal(btn) {
     updatePWMTooltips();
   });
 
+  // Tap-tier tabs — show ONE tier at a time so the modal stays short and Apply
+  // stays in view. All three cards are still built (state lives in the DOM; Save
+  // reads all three); the tabs just toggle which is visible, and each tab shows a
+  // count so a configured-but-hidden tier is obvious.
+  const tabBar = document.createElement('div');
+  tabBar.className = 'tier-tabs';
+  const tierNames = ['', 'Single tap', 'Double tap', 'Triple tap'];
+  for (let tier = 1; tier <= 3; tier++) {
+    const tb = document.createElement('button');
+    tb.type = 'button'; tb.className = 'tier-tab'; tb.dataset.tier = tier;
+    tb.onclick = () => setActionTier(tier);
+    tb.innerHTML = `${tierNames[tier]}<span class="tier-tab-count empty" id="tier-tab-count-${tier}"></span>`;
+    tabBar.appendChild(tb);
+  }
+  container.appendChild(tabBar);
+
   for (let tier = 1; tier <= 3; tier++) {
     const acts = m['t' + tier] || [];
     container.appendChild(buildTierCard(tier, acts));
   }
+  // Now the cards are in the DOM — set the tab counts + row-button state (the
+  // build-time call inside buildTierCard runs while the card is still detached).
+  for (let tier = 1; tier <= 3; tier++) refreshTierState(tier);
+  setActionTier(1);   // start on single-tap
 
   document.getElementById('modal').classList.add('open');
+}
+
+// Show one tap-tier's card; hide the others; highlight its tab.
+function setActionTier(tier) {
+  tier = +tier;
+  document.querySelectorAll('#tiers-container .tier-tab')
+          .forEach(t => t.classList.toggle('active', +t.dataset.tier === tier));
+  for (let t = 1; t <= 3; t++) {
+    const card = document.getElementById(`tier-card-${t}`);
+    if (card) card.style.display = (t === tier) ? '' : 'none';
+  }
 }
 
 const MAX_ACTIONS_PER_TIER = 5;
@@ -8543,8 +8594,7 @@ function buildTierCard(tier, actions) {
   card.className = 'tier-card';
   card.id = `tier-card-${tier}`;
 
-  const titles = ['', 'Single tap (1×)', 'Double tap (2×)', 'Triple tap (3×)'];
-  card.innerHTML = `<div class="tier-title">${titles[tier]}</div>`;
+  card.innerHTML = '';   // the tier name now lives on the tab bar above
 
   const rows = document.createElement('div');
   rows.id = `rows-${tier}`;
@@ -8605,6 +8655,15 @@ function refreshTierState(tier) {
     addBtn.disabled = atMax;
     addBtn.textContent = atMax ? `Max ${MAX_ACTIONS_PER_TIER} actions` : '+ Add action';
   }
+  // Tab badge = number of CONFIGURED actions (a row with a type chosen), so a
+  // tier with actions is obvious even while its tab is hidden.
+  const countEl = document.getElementById(`tier-tab-count-${tier}`);
+  if (countEl) {
+    let n = 0;
+    rowEls.forEach(r => { const sel = r.querySelector('select'); if (sel && sel.value) n++; });
+    countEl.textContent = n ? String(n) : '';
+    countEl.classList.toggle('empty', n === 0);
+  }
 }
 
 function buildActionRow(tier, ai, action) {
@@ -8623,7 +8682,7 @@ function buildActionRow(tier, ai, action) {
     if (v === (action.type || '')) opt.selected = true;
     typeSelect.appendChild(opt);
   });
-  typeSelect.onchange = () => updateActionFields(tier, ai);
+  typeSelect.onchange = () => { updateActionFields(tier, ai); refreshTierState(tier); };
 
   row.appendChild(makeFieldGroup('Action', typeSelect));
 
