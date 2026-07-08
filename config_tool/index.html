@@ -2253,7 +2253,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">072235QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">072302QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10494,11 +10494,24 @@ async function otaUpdateOverUsb() {
     const CHUNK = 1024;
     const toB64 = u8 => btoa(String.fromCharCode.apply(null, u8));   // <=1 KB slices
 
-    // BEGIN — the board erases the inactive slot (~1.2 MB; can take a few seconds).
-    setStatus('OTA: begin (erasing slot)…');
-    let wait = _otaAwaitMarker(20000);
+    // BEGIN — the board erases the inactive OTA slot (~2 MB) before it can accept
+    // any data, and that erase BLOCKS the board for several seconds. It used to be
+    // the #1 cause of "timed out waiting for board response" on the FIRST attempt:
+    // a cold full-slot erase could brush past the old 20 s window, while the retry
+    // succeeded only because the slot was already erased (fast re-erase).
+    //   • Newer firmware emits an early [OTA:BEGIN,START] the instant it hears the
+    //     command (before the erase) — we accept it, then wait out the erase with a
+    //     fresh long window. Older firmware only emits [OTA:BEGIN,OK] AFTER the erase,
+    //     so the first window itself is generous enough to cover a cold erase.
+    setStatus('OTA: begin (erasing slot — up to ~40 s on the first update)…');
+    let wait = _otaAwaitMarker(40000);
     await sendLine(`?OTALOCAL,BEGIN,${size},1`, true);
     let m = await wait;
+    if (/^\[OTA:BEGIN,START/.test(m)) {          // board heard us — now wait out the erase
+      setStatus('OTA: erasing slot…');
+      wait = _otaAwaitMarker(40000);
+      m = await wait;
+    }
     if (!/^\[OTA:BEGIN,OK/.test(m)) throw new Error('board rejected BEGIN — ' + m);
 
     // DATA — ACK-paced; advance the local offset to the board's contiguous cursor.

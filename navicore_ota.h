@@ -227,6 +227,14 @@ inline void processOtaLocalCommand(const String &args) {
     if (p < 0) { Serial.println("[OTA] BEGIN usage: ?OTALOCAL,BEGIN,<imageSize>,<family 0|1>"); return; }
     uint32_t size   = (uint32_t) rest.substring(0, p).toInt();
     uint8_t  family = (uint8_t)  rest.substring(p + 1).toInt();
+    // Ack RECEIPT before the (blocking, multi-second) inactive-slot erase inside
+    // otaBegin(). Without this the host sees no response until the erase finishes,
+    // and a cold full-slot erase could exceed its wait window — the classic
+    // "fails first, works second" OTA timeout. The leading '\n' guards the marker
+    // from gluing onto a partial telemetry line in the host's line-split reader;
+    // flush() forces it onto the wire before the erase stalls the CPU.
+    Serial.print("\n[OTA:BEGIN,START]\n");
+    Serial.flush();
     bool ok = otaBegin(OTA_LOCAL_SESSION, size, family);
     Serial.printf("[OTA:BEGIN,%s,%u]\n", ok ? "OK" : "ERR", otaWrittenOffset());
     return;
