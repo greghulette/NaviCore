@@ -2253,7 +2253,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">080851QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">081441QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2517,6 +2517,18 @@
     </div>
   </div>
 </div>
+
+<!-- ── Command Library picker — browse/compose droid commands for a WCB action ── -->
+<div class="modal-overlay" id="cmdlib-modal" style="z-index:220">
+  <div class="modal" style="max-width:560px;width:94%">
+    <div class="modal-header">
+      <span class="modal-title">📚 Command Library</span>
+      <button class="btn btn-ghost" id="cmdlib-close" type="button" style="padding:4px 10px">✕</button>
+    </div>
+    <div class="modal-body" id="cmdlib-body"></div>
+  </div>
+</div>
+<input type="file" id="cmdlib-import-file" accept=".json,application/json" style="display:none">
 
 <!-- ── Hardware Setup Modal — configure-once wiring/credentials ── -->
 <div class="modal-overlay" id="hwsetup-modal">
@@ -9010,6 +9022,438 @@ function renderMp3ArgField(container, fn, curVal) {
   else container.appendChild(g);
 }
 
+// ── WCB Command Library ─────────────────────────────────────────────────────
+// A small, editable catalog of droid command TEMPLATES you can pick from when
+// configuring a "WCB unicast/broadcast" action, instead of memorising raw
+// strings like ";H,STIM,H,STRONG". Each command is a template with {param}
+// placeholders; params are enums (a dropdown of code→label) or ints, and the
+// composer encodes the wire string live (and decodes one back for editing —
+// see ncDecodeCommand). The schema deliberately mirrors the DroidNet Command
+// Library's field NAMES (kind/template/params/enum) so their board files can
+// be IMPORTED at runtime (single file, or the whole manifest+boards catalog
+// via "Fetch from URL") — but we ship our OWN starter data, curated straight
+// from the real WCB firmware's command parser + wiki (Code/WCB/WCB_HCR.cpp,
+// WCB_MP3.cpp, WCB_WLED.cpp + Command-Reference.md), NOT DroidNet's (their
+// data is MPL-2.0; we don't vendor it). Replace/extend via Import, Fetch, or
+// window.NC_COMMAND_LIBRARY.
+const NC_CMDLIB_SEED = {
+  schema: 'navicore-command-library/v1',
+  version: '0.2.0-wcb-verified',
+  enums: {
+    onoff:            { label: 'State',    values: [ {code:'0',label:'Off'}, {code:'1',label:'On'} ] },
+    'hcr.emotion':    { label: 'Emotion',  values: [ {code:'H',label:'Happy'}, {code:'S',label:'Sad'}, {code:'M',label:'Mad'}, {code:'C',label:'Scared'} ] },
+    'hcr.strength':   { label: 'Strength', values: [ {code:'MOD',label:'Moderate'}, {code:'STRONG',label:'Strong'} ] },
+    'hcr.channel':    { label: 'Channel',  values: [ {code:'A',label:'Channel A'}, {code:'B',label:'Channel B'} ] },
+    'hcr.volchannel': { label: 'Channel',  values: [ {code:'V',label:'Voice (V)'}, {code:'A',label:'Channel A'}, {code:'B',label:'Channel B'} ] },
+  },
+  boards: [
+    { id:'wcb-hcr', name:'HCR (Human-Cyborg Relations)', kind:'wcb-verb', commands: [
+      { id:'hcr.stim', name:'Emotional stimulus', category:'Emotion', template:';H,STIM,{emotion},{strength}',
+        params:[ {name:'emotion', label:'Emotion', enum:'hcr.emotion', default:'H', required:true},
+                 {name:'strength', label:'Strength', enum:'hcr.strength', default:'STRONG', required:true} ], examples:[';H,STIM,H,STRONG'] },
+      { id:'hcr.trigger', name:'Trigger emotion', category:'Emotion', template:';H,TRIGGER,{emotion},{strength}',
+        params:[ {name:'emotion', label:'Emotion', enum:'hcr.emotion', default:'H', required:true},
+                 {name:'strength', label:'Strength', enum:'hcr.strength', default:'STRONG', required:true} ], examples:[';H,TRIGGER,M,MOD'] },
+      { id:'hcr.setemotion', name:'Set emotion level', category:'Emotion', template:';H,SETEMOTION,{emotion},{level}',
+        params:[ {name:'emotion', label:'Emotion', enum:'hcr.emotion', default:'H', required:true},
+                 {name:'level', label:'Level (0-100)', type:'int', min:0, max:100, default:50, required:true} ], examples:[';H,SETEMOTION,S,40'] },
+      { id:'hcr.overload', name:'Overload', category:'Emotion', template:';H,OVERLOAD', examples:[';H,OVERLOAD'] },
+      { id:'hcr.stopemote', name:'Stop emote', category:'Emotion', template:';H,STOPEMOTE', examples:[';H,STOPEMOTE'] },
+      { id:'hcr.resetemotions', name:'Reset emotions', category:'Emotion', template:';H,RESETEMOTIONS', examples:[';H,RESETEMOTIONS'] },
+      { id:'hcr.override', name:'Override emotions', category:'Emotion', template:';H,OVERRIDE,{state}',
+        params:[ {name:'state', label:'State', enum:'onoff', default:'1', required:true} ], examples:[';H,OVERRIDE,1'] },
+      { id:'hcr.stop', name:'Stop all sound', category:'Sound', template:';H,STOP', examples:[';H,STOP'] },
+      { id:'hcr.play', name:'Play WAV', category:'Sound', template:';H,PLAY,{channel},{track}',
+        params:[ {name:'channel', label:'Channel', enum:'hcr.channel', default:'A', required:true},
+                 {name:'track', label:'Track # (0-9999)', type:'int', min:0, max:9999, default:0, required:true} ], examples:[';H,PLAY,A,42'] },
+      { id:'hcr.stopwav', name:'Stop WAV', category:'Sound', template:';H,STOPWAV,{channel}',
+        params:[ {name:'channel', label:'Channel', enum:'hcr.channel', default:'A', required:true} ], examples:[';H,STOPWAV,A'] },
+      { id:'hcr.vol', name:'Set volume', category:'Sound', template:';H,VOL,{channel},{level}',
+        params:[ {name:'channel', label:'Channel', enum:'hcr.volchannel', default:'V', required:true},
+                 {name:'level', label:'Level', type:'int', min:0, max:99, default:50, required:true} ], examples:[';H,VOL,V,50'] },
+      { id:'hcr.musetoggle', name:'Toggle Muse', category:'Muse', template:';H,MUSE,TOGGLE', examples:[';H,MUSE,TOGGLE'] },
+    ]},
+    { id:'wcb-wled', name:'WLED Lighting', kind:'wcb-verb', commands: [
+      { id:'wled.on', name:'Lights on', category:'Power', template:';L,ON', examples:[';L,ON'] },
+      { id:'wled.off', name:'Lights off', category:'Power', template:';L,OFF', examples:[';L,OFF'] },
+      { id:'wled.toggle', name:'Toggle', category:'Power', template:';L,TOGGLE', examples:[';L,TOGGLE'] },
+      { id:'wled.bri', name:'Set brightness', category:'Lighting', template:';L,BRI,{level}',
+        params:[ {name:'level', label:'Brightness (0-255)', type:'int', min:0, max:255, default:128, required:true} ], examples:[';L,BRI,128'] },
+      { id:'wled.preset', name:'Recall preset', category:'Lighting', template:';L,PS,{preset}',
+        params:[ {name:'preset', label:'Preset #', type:'int', min:0, max:250, default:1, required:true} ], examples:[';L,PS,3'] },
+      { id:'wled.color', name:'Set color', category:'Lighting', template:';L,COL,{color}',
+        params:[ {name:'color', label:'Color (RRGGBB)', default:'FF0000', pattern:'^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$', required:true} ], examples:[';L,COL,FF0000'] },
+    ]},
+    { id:'wcb-mp3', name:'MP3 Trigger', kind:'wcb-verb', commands: [
+      { id:'mp3.play', name:'Play track', category:'Sound', template:';A,PLAY,{track}',
+        params:[ {name:'track', label:'Track # (1-255)', type:'int', min:1, max:255, default:1, required:true} ], examples:[';A,PLAY,5'] },
+      { id:'mp3.playfs', name:'Play file index', category:'Sound', template:';A,PLAYFS,{index}',
+        params:[ {name:'index', label:'File index (0-255)', type:'int', min:0, max:255, default:0, required:true} ], examples:[';A,PLAYFS,3'] },
+      { id:'mp3.stop', name:'Stop', category:'Sound', template:';A,STOP', examples:[';A,STOP'] },
+      { id:'mp3.next', name:'Next track', category:'Sound', template:';A,NEXT', examples:[';A,NEXT'] },
+      { id:'mp3.prev', name:'Previous track', category:'Sound', template:';A,PREV', examples:[';A,PREV'] },
+      { id:'mp3.vol', name:'Set volume', category:'Sound', template:';A,VOL,{level}',
+        params:[ {name:'level', label:'Volume (0=loudest, 64=quietest)', type:'int', min:0, max:64, default:20, required:true} ], examples:[';A,VOL,25'] },
+      { id:'mp3.volup', name:'Volume up', category:'Sound', template:';A,VOLUP', examples:[';A,VOLUP'] },
+      { id:'mp3.voldn', name:'Volume down', category:'Sound', template:';A,VOLDN', examples:[';A,VOLDN'] },
+    ]},
+    { id:'wcb-maestro', name:'Maestro (via WCB)', kind:'wcb-verb', commands: [
+      { id:'maestro.run', name:'Run script', category:'Servo', template:';M{maestroId}{sequence}',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
+                 {name:'sequence', label:'Sequence #', type:'int', min:0, max:99, default:1, required:true} ], examples:[';M11'] },
+    ]},
+  ],
+};
+
+// Active library = an imported/override library if present, else the seed.
+function ncCommandLibrary() { return window.NC_COMMAND_LIBRARY || NC_CMDLIB_SEED; }
+function _cmdlibEnum(id)    { return (ncCommandLibrary().enums || {})[id] || null; }
+
+// Encode a command template + param values → the wire string the WCB receives.
+function ncEncodeCommand(cmd, values) {
+  let out = cmd.template || '';
+  (cmd.params || []).forEach(p => {
+    let v = (values && values[p.name] !== undefined && values[p.name] !== '') ? values[p.name]
+          : (p.default !== undefined ? p.default : '');
+    if (p.type === 'int' && p.pad) v = String(v).padStart(p.pad, '0');
+    out = out.split('{' + p.name + '}').join(v);
+  });
+  return out;
+}
+
+// Decode a wire string BACK into {board, cmd, values} by matching it against
+// every known command's template, so re-opening the picker on an already-
+// configured action jumps straight to the composer, pre-filled for editing
+// instead of dumping you back at the list. Builds a regex per template: each
+// {param} becomes a capture group — width N (a declared fixed digit count,
+// needed for templates with no separator between adjacent params, e.g. the
+// Maestro ";M{maestroId}{sequence}" run command) → \d{N}; an enum param →
+// alternation of its known codes (longest-first, so no code is a prefix trap
+// for another); an int param → \d+; free text → a lazy .+? (safe because it's
+// bounded by the next literal, typically a comma, via regex backtracking) —
+// UNLESS two free-text params sit back-to-back with no literal between them
+// (only possible in an imported/hand-authored command; the seed never does
+// this), in which case the split point would be an artifact of backtracking
+// rather than the real data boundary — that command is marked undecodable
+// (regex: null) rather than silently mis-splitting. No match anywhere → null
+// (falls back to the list view).
+//
+// Regexes are memoized on the command object (cmd.__ncRe), tagged with the
+// catalog "generation" they were built against. _cmdlibMergeLibraryData bumps
+// _cmdlibGeneration on every import/fetch, so a command whose ENUM changed
+// out from under it (e.g. a re-imported enum with different codes, on a board
+// the merge didn't otherwise replace) rebuilds instead of matching stale codes.
+let _cmdlibGeneration = 0;
+function _reEscape(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function _ncCommandPattern(cmd) {
+  if (cmd.__ncRe && cmd.__ncRe.gen === _cmdlibGeneration) return cmd.__ncRe;
+  const byName = {};
+  (cmd.params || []).forEach(p => { byName[p.name] = p; });
+  const parts = String(cmd.template || '').split(/\{([A-Za-z][A-Za-z0-9]*)\}/);
+  let re = '^';
+  const order = [];
+  let prevWasFreeText = false;
+  let ambiguous = false;
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) { re += _reEscape(parts[i]); continue; }
+    const p = byName[parts[i]] || { name: parts[i] };
+    order.push(p.name);
+    const literalBefore = parts[i - 1];
+    let isFreeText = false;
+    if (p.width)          re += '(\\d{' + (+p.width) + '})';
+    else if (p.enum) {
+      const en = _cmdlibEnum(p.enum);
+      const codes = ((en && en.values) || []).map(v => _reEscape(String(v.code))).sort((a, b) => b.length - a.length);
+      if (codes.length) re += '(' + codes.join('|') + ')';
+      else { isFreeText = true; re += '(.+?)'; }
+    } else if (p.type === 'int') re += '(\\d+)';
+    else { isFreeText = true; re += '(.+?)'; }
+    if (literalBefore === '' && prevWasFreeText && isFreeText) ambiguous = true;
+    prevWasFreeText = isFreeText;
+  }
+  re += '$';
+  const regex = ambiguous ? null : new RegExp(re);
+  return (cmd.__ncRe = { regex, order, gen: _cmdlibGeneration });
+}
+function ncDecodeCommand(wire) {
+  const s = String(wire || '').trim();
+  if (!s) return null;
+  for (const board of (ncCommandLibrary().boards || [])) {
+    for (const cmd of (board.commands || [])) {
+      const pat = _ncCommandPattern(cmd);
+      if (!pat.regex) continue;   // ambiguous template — refuse to guess
+      const m = pat.regex.exec(s);
+      if (!m) continue;
+      const values = {};
+      pat.order.forEach((name, i) => { values[name] = m[i + 1]; });
+      return { board, cmd, values };
+    }
+  }
+  return null;
+}
+
+let _cmdlibFid    = null;   // the action-row fields div id we write back into
+let _cmdlibSel    = null;   // { board, cmd } currently selected
+let _cmdlibValues = {};     // param name → current string value
+
+// Opens on the LIST, unless the row's current command decodes to a known
+// library entry — then it jumps straight to the composer pre-filled with the
+// decoded values, so re-opening an already-configured action is an EDIT, not
+// a from-scratch pick. Decode failure (custom/unknown string) just falls back
+// to the list; nothing about the row is touched until "Use command →".
+function openCmdLibrary(fid) {
+  _cmdlibFid = fid; _cmdlibSel = null; _cmdlibValues = {};
+  const modal = document.getElementById('cmdlib-modal');
+  document.getElementById('cmdlib-close').onclick = closeCmdLibrary;
+  modal.onclick = e => { if (e.target === modal) closeCmdLibrary(); };
+  const curCmd  = document.getElementById(fid + '-cmd')?.value || '';
+  const decoded = curCmd ? ncDecodeCommand(curCmd) : null;
+  if (decoded) { _cmdlibSel = { board: decoded.board, cmd: decoded.cmd }; _cmdlibValues = decoded.values; _cmdlibShowComposer(); }
+  else         { _cmdlibShowList(); }
+  modal.classList.add('open');
+}
+function closeCmdLibrary() {
+  document.getElementById('cmdlib-modal').classList.remove('open');
+  _cmdlibFid = null; _cmdlibSel = null; _cmdlibValues = {};
+}
+
+// List view: search box + Import + Fetch(manifest) + commands grouped by board.
+function _cmdlibShowList() {
+  const body = document.getElementById('cmdlib-body');
+  body.innerHTML =
+    `<div style="padding:12px 16px 0;display:flex;gap:8px;align-items:center">
+       <input type="text" id="cmdlib-search" placeholder="Search commands…" style="flex:1;box-sizing:border-box">
+       <button type="button" id="cmdlib-import" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Import a command library .json (our schema or a DroidNet board file)">Import…</button>
+     </div>
+     <details style="margin:10px 16px 0">
+       <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Fetch a whole library from a manifest URL (e.g. DroidNet Command Library)</summary>
+       <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+         <input type="text" id="cmdlib-manifest-url" value="${escH(NC_DROIDNET_MANIFEST_URL)}" style="flex:1;box-sizing:border-box;font-family:monospace;font-size:12px">
+         <button type="button" id="cmdlib-fetch" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap">Fetch</button>
+       </div>
+       <div id="cmdlib-fetchlog" style="margin-top:6px;font-family:monospace;font-size:11px;color:var(--muted);max-height:120px;overflow-y:auto;white-space:pre-wrap"></div>
+     </details>
+     <div id="cmdlib-list" style="padding:8px 16px 14px;max-height:60vh;overflow-y:auto"></div>`;
+  const search = document.getElementById('cmdlib-search');
+  search.oninput = () => _cmdlibRenderList(search.value);
+  document.getElementById('cmdlib-import').onclick = () => document.getElementById('cmdlib-import-file').click();
+  document.getElementById('cmdlib-fetch').onclick = _cmdlibFetchClicked;
+  _cmdlibRenderList('');
+  search.focus();
+}
+
+// "Fetch" button handler — runs the manifest+boards fetch, streaming progress
+// into the log area, then re-renders the list so newly-imported commands show
+// up immediately (search box state is intentionally reset — the catalog just
+// changed under it).
+async function _cmdlibFetchClicked() {
+  const btn    = document.getElementById('cmdlib-fetch');
+  const urlEl  = document.getElementById('cmdlib-manifest-url');
+  const logEl  = document.getElementById('cmdlib-fetchlog');
+  const url = (urlEl?.value || '').trim();
+  if (!url) return;
+  const log = line => { if (logEl) { logEl.textContent += (logEl.textContent ? '\n' : '') + line; logEl.scrollTop = logEl.scrollHeight; } };
+  if (logEl) logEl.textContent = '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Fetching…'; }
+  try {
+    await _cmdlibImportFromManifest(url, log);
+    _cmdlibRenderList(document.getElementById('cmdlib-search')?.value || '');
+  } catch (e) {
+    log('✗ ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Fetch'; }
+  }
+}
+
+function _cmdlibRenderList(filter) {
+  const list = document.getElementById('cmdlib-list');
+  if (!list) return;
+  const lib = ncCommandLibrary();
+  const f = (filter || '').trim().toLowerCase();
+  const esc = s => escH(String(s == null ? '' : s));
+  let html = '', any = false;
+  (lib.boards || []).forEach(board => {
+    const matches = (board.commands || []).filter(c =>
+      !f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f));
+    if (!matches.length) return;
+    any = true;
+    html += `<div style="margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)">${esc(board.name)}</div>`;
+    matches.forEach(c => {
+      html += `<button type="button" class="cmdlib-item" data-board="${esc(board.id)}" data-cmd="${esc(c.id)}"
+        style="display:block;width:100%;text-align:left;margin-top:6px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);cursor:pointer">
+        <div style="font-weight:600">${esc(c.name)}</div>
+        <div style="font-size:11px;color:var(--muted);font-family:monospace">${esc(c.template || (c.examples && c.examples[0]) || '')}</div>
+      </button>`;
+    });
+  });
+  if (!any) html += `<div style="color:var(--muted);padding:16px 4px">No commands match. Try Import to add a library.</div>`;
+  list.innerHTML = html;
+  list.querySelectorAll('.cmdlib-item').forEach(btn => btn.onclick = () => _cmdlibSelect(btn.dataset.board, btn.dataset.cmd));
+}
+
+function _cmdlibSelect(boardId, cmdId) {
+  const lib = ncCommandLibrary();
+  const board = (lib.boards || []).find(b => b.id === boardId);
+  const cmd = board && (board.commands || []).find(c => c.id === cmdId);
+  if (!cmd) return;
+  _cmdlibSel = { board, cmd };
+  _cmdlibValues = {};
+  (cmd.params || []).forEach(p => { _cmdlibValues[p.name] = (p.default !== undefined ? String(p.default) : ''); });
+  _cmdlibShowComposer();
+}
+
+// Composer view: WCB target (unicast only) + param fields + live preview.
+function _cmdlibShowComposer() {
+  const body = document.getElementById('cmdlib-body');
+  const { board, cmd } = _cmdlibSel;
+  const hasTarget = !!document.getElementById(_cmdlibFid + '-target');
+  const esc = s => escH(String(s == null ? '' : s));
+  let html = `<div style="padding:14px 16px;display:flex;flex-direction:column;gap:12px">`;
+  html += `<button type="button" id="cmdlib-back" class="btn btn-ghost" style="align-self:flex-start;padding:4px 10px">← Back</button>`;
+  html += `<div><div style="font-weight:600;font-size:15px">${esc(cmd.name)}</div><div style="font-size:12px;color:var(--muted)">${esc(board.name)}</div></div>`;
+  if (hasTarget) {
+    const curTarget = document.getElementById(_cmdlibFid + '-target')?.value || 1;
+    html += `<div class="field-group"><label>WCB # (destination board)</label><input type="number" id="cmdlib-target" min="1" max="20" value="${esc(curTarget)}" style="width:80px"></div>`;
+  }
+  (cmd.params || []).forEach((p, i) => {
+    const pid = 'cmdlib-p-' + i;
+    let field;
+    if (p.enum) {
+      const en = _cmdlibEnum(p.enum);
+      const opts = ((en && en.values) || []).map(v =>
+        `<option value="${esc(v.code)}" ${String(v.code) === String(_cmdlibValues[p.name]) ? 'selected' : ''}>${esc(v.label)} (${esc(v.code)})</option>`).join('');
+      field = `<select id="${pid}" data-pname="${esc(p.name)}">${opts}</select>`;
+    } else if (p.type === 'int') {
+      field = `<input type="number" id="${pid}" data-pname="${esc(p.name)}" ${p.min != null ? `min="${esc(p.min)}"` : ''} ${p.max != null ? `max="${esc(p.max)}"` : ''} value="${esc(_cmdlibValues[p.name])}" style="width:110px">`;
+    } else {
+      field = `<input type="text" id="${pid}" data-pname="${esc(p.name)}" value="${esc(_cmdlibValues[p.name])}" style="width:180px">`;
+    }
+    html += `<div class="field-group"><label>${esc(p.label || p.name)}</label>${field}</div>`;
+  });
+  html += `<div><div style="font-size:11px;color:var(--muted)">Preview (sent to the WCB)</div>
+    <div id="cmdlib-preview" style="font-family:monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);word-break:break-all"></div></div>`;
+  html += `<div class="wcb-send-row" style="justify-content:flex-end;gap:8px">
+    <button type="button" id="cmdlib-cancel2" class="btn btn-ghost">Cancel</button>
+    <button type="button" id="cmdlib-use" class="btn btn-blue">Use command →</button></div>`;
+  html += `</div>`;
+  body.innerHTML = html;
+  body.querySelectorAll('[data-pname]').forEach(el => {
+    el.oninput = el.onchange = () => { _cmdlibValues[el.dataset.pname] = el.value; _cmdlibUpdatePreview(); };
+  });
+  document.getElementById('cmdlib-back').onclick    = _cmdlibShowList;
+  document.getElementById('cmdlib-cancel2').onclick = closeCmdLibrary;
+  document.getElementById('cmdlib-use').onclick     = _cmdlibUse;
+  _cmdlibUpdatePreview();
+}
+
+function _cmdlibUpdatePreview() {
+  const el = document.getElementById('cmdlib-preview');
+  if (el && _cmdlibSel) el.textContent = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
+}
+
+// Write the composed command back into the action row's inputs, then close.
+// Set .value directly — do NOT call updateActionFields (it rebuilds/clears the
+// inputs) and no input event is needed (values are only read on Save).
+function _cmdlibUse() {
+  if (!_cmdlibSel || !_cmdlibFid) return;
+  const wire = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
+  const cmdInput = document.getElementById(_cmdlibFid + '-cmd');
+  if (cmdInput) cmdInput.value = wire;
+  const tgt    = document.getElementById('cmdlib-target');
+  const rowTgt = document.getElementById(_cmdlibFid + '-target');
+  if (tgt && rowTgt && tgt.value) rowTgt.value = tgt.value;
+  closeCmdLibrary();
+}
+
+// Merge ONE parsed library-shaped object (our {boards:[...]} or a DroidNet
+// board file {components:[...]}) into the active catalog. Boards merge by id
+// (incoming replaces existing); enums merge shallowly (incoming wins per key).
+// Returns the count of boards added/replaced. Shared by the single-file
+// Import and the multi-file manifest Fetch below.
+//
+// `data` is UNTRUSTED (a user-picked file, or JSON fetched from a URL the
+// user typed) — validate shape defensively rather than trust it, since a
+// malformed `commands` (not an array) would otherwise reach every .forEach/
+// .filter/.map in the list/composer/encode/decode paths and crash them on
+// the NEXT modal open, not just for the bad board.
+function _cmdlibMergeLibraryData(data) {
+  const cur = window.NC_COMMAND_LIBRARY || JSON.parse(JSON.stringify(NC_CMDLIB_SEED));
+  cur.boards = cur.boards || [];
+  if (data && data.enums && typeof data.enums === 'object') cur.enums = Object.assign({}, cur.enums, data.enums);
+  const raw = (data && (data.boards || data.components)) || [];
+  const incoming = Array.isArray(raw) ? raw : [];
+  let added = 0;
+  incoming.forEach(b => {
+    if (!b || !b.id) return;
+    const nb = { id: b.id, name: b.name || b.id, kind: b.kind || 'wcb-verb', commands: Array.isArray(b.commands) ? b.commands : [] };
+    const idx = cur.boards.findIndex(x => x.id === nb.id);
+    if (idx >= 0) cur.boards[idx] = nb; else cur.boards.push(nb);
+    added++;
+  });
+  window.NC_COMMAND_LIBRARY = cur;
+  _cmdlibGeneration++;   // invalidate every command's memoized decode regex — an enum (or board) may have just changed
+  return added;
+}
+
+// Import a library .json FILE at runtime: our schema (boards[]) OR a DroidNet
+// board file (components[] + top-level enums). We never ship DroidNet's MPL
+// data in this repo — the user brings it themselves (file or URL fetch).
+function _cmdlibImport(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const added = _cmdlibMergeLibraryData(JSON.parse(reader.result));
+      _cmdlibShowList();
+      if (!added) alert('No boards found in that file. Expected our schema (boards[]) or a DroidNet board file (components[]).');
+    } catch (e) { alert('Could not import library: ' + e.message); }
+  };
+  reader.readAsText(file);
+}
+document.getElementById('cmdlib-import-file')?.addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (f) _cmdlibImport(f);
+  e.target.value = '';   // allow re-importing the same file
+});
+
+// Multi-file import: fetch a DroidNet-shaped MANIFEST (catalog index) and
+// every board it lists, merging each in as it arrives. Board file paths in
+// the manifest are relative to the manifest's OWN directory, not repo root
+// (e.g. manifest at ".../libraries/manifest.json" + entry.file "boards/x.json"
+// resolves to ".../libraries/boards/x.json") — this is DroidNet's actual
+// layout, confirmed against the live repo. Sequential (not parallel) so the
+// progress log reads top-to-bottom and a single slow/failed board doesn't
+// abort the rest; one board's fetch failure is logged and skipped, not fatal.
+const NC_DROIDNET_MANIFEST_URL = 'https://raw.githubusercontent.com/travisccook/Droidnet-Command-Library/main/libraries/manifest.json';
+async function _cmdlibFetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+async function _cmdlibImportFromManifest(manifestUrl, onLog) {
+  const log = onLog || (() => {});
+  log(`Fetching manifest…`);
+  const manifest = await _cmdlibFetchJson(manifestUrl);
+  const boards = Array.isArray(manifest.boards) ? manifest.boards : [];
+  if (!boards.length) throw new Error('Manifest has no boards[] — is this a DroidNet-shaped manifest URL?');
+  const baseDir = manifestUrl.slice(0, manifestUrl.lastIndexOf('/') + 1);
+  log(`Manifest OK — ${boards.length} board file(s) listed. Fetching…`);
+  let added = 0; const failed = [];
+  for (const entry of boards) {
+    if (!entry || !entry.file) continue;
+    const label = entry.name || entry.id || entry.file;
+    try {
+      const data = await _cmdlibFetchJson(baseDir + entry.file);
+      added += _cmdlibMergeLibraryData(data);
+      log(`  ✓ ${label}`);
+    } catch (e) {
+      failed.push(label);
+      log(`  ✗ ${label} — ${e.message}`);
+    }
+  }
+  log(`Done — ${added} board(s) imported${failed.length ? `, ${failed.length} failed` : ''}.`);
+  return { added, failed };
+}
+
 function appendActionFields(container, action) {
   container.innerHTML = '';
   const type = action.type || '';
@@ -9026,21 +9470,31 @@ function appendActionFields(container, action) {
 
     const cmdInput = document.createElement('input');
     cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-    cmdInput.placeholder = ':BL55,1';
+    cmdInput.placeholder = ';H,STIM,H,STRONG';
     cmdInput.style.width = '180px';
     cmdInput.maxLength = 95;
     cmdInput.value = action.cmd || '';
 
     container.appendChild(makeFieldGroup('WCB #', targetInput));
     container.appendChild(makeFieldGroup('Command', cmdInput));
+    { const libBtn = document.createElement('button');
+      libBtn.type = 'button'; libBtn.className = 'btn btn-ghost'; libBtn.textContent = '📚';
+      libBtn.title = 'Pick from the command library'; libBtn.style.cssText = 'padding:4px 8px';
+      libBtn.onclick = () => openCmdLibrary(fid);
+      container.appendChild(makeFieldGroup(' ', libBtn)); }
   } else if (type === 'wcb_broadcast') {
     const cmdInput = document.createElement('input');
     cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-    cmdInput.placeholder = ':BLALL,1';
+    cmdInput.placeholder = ';L,ON';
     cmdInput.style.width = '220px';
     cmdInput.maxLength = 95;
     cmdInput.value = action.cmd || '';
     container.appendChild(makeFieldGroup('Broadcast cmd', cmdInput));
+    { const libBtn = document.createElement('button');
+      libBtn.type = 'button'; libBtn.className = 'btn btn-ghost'; libBtn.textContent = '📚';
+      libBtn.title = 'Pick from the command library'; libBtn.style.cssText = 'padding:4px 8px';
+      libBtn.onclick = () => openCmdLibrary(fid);
+      container.appendChild(makeFieldGroup(' ', libBtn)); }
   } else if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
     // Friendly structured Maestro action: pick a Maestro, a plain-language command,
     // then a named channel + position (µs). We assemble the raw "setTarget,ch,pos"
