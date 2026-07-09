@@ -2265,7 +2265,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">081608QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">090957QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9227,7 +9227,17 @@ async function openCmdLibrary(fid) {
   modal.classList.add('open');
   _cmdlibOpenView(fid);
   await _cmdlibReady;
-  if (_cmdlibFid === fid && !_cmdlibSel) _cmdlibOpenView(fid);   // still on the list for this row -> refresh with the full catalog
+  // Once the vendored catalog finishes loading, upgrade the view for THIS row —
+  // but only if the user is still on the list and hasn't picked anything. If
+  // they've started typing a filter, keep their query + caret and just re-run
+  // the search against the now-larger catalog, instead of rebuilding the whole
+  // list (which would discard their keystrokes mid-type). search.focus() runs on
+  // the initial render, so gate on a typed VALUE, not focus.
+  if (_cmdlibFid === fid && !_cmdlibSel) {
+    const s = document.getElementById('cmdlib-search');
+    if (s && s.value.trim()) _cmdlibRenderList(s.value);
+    else _cmdlibOpenView(fid);
+  }
 }
 function _cmdlibOpenView(fid) {
   const curCmd  = document.getElementById(fid + '-cmd')?.value || '';
