@@ -671,6 +671,24 @@ inline void emitMode(int mode) {
 // momentarily-garbled name for one 3 s poll, so no lock is warranted.
 static char _wcbAlias[21][25] = {{0}};
 inline const char* wcbAlias(int id) { return (id >= 1 && id <= 20) ? _wcbAlias[id] : ""; }
+// Set/refresh a board's cached friendly name — from EITHER a "?WHOAMI" reply OR a
+// live WDP advert (see onWcbNeighbor). The library rebuilds a neighbor's facts
+// wholesale on every advert, so feeding the WDP name through here is what lets a
+// RENAMED board update its status-panel name (the ?WHOAMI cache alone is held
+// once set). Sanitizes chars that would break the UNescaped JSON buildWcbStatus
+// emits. Call ONLY from the Core-0 receive path (onWCBCommand / onNeighbor) so
+// every writer to _wcbAlias stays on one core.
+inline void setWcbAlias(int id, const char* name) {
+  if (id < 1 || id > 20 || !name) return;
+  char*  dst = _wcbAlias[id];
+  size_t cap = sizeof(_wcbAlias[id]) - 1, j = 0;
+  for (size_t k = 0; name[k] && j < cap; k++) {
+    char c = name[k];
+    if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;   // JSON-hostile chars
+    dst[j++] = c;
+  }
+  dst[j] = '\0';
+}
 
 // "?WHOAMI" is re-sent each status poll only until a board's alias is cached.
 // A board with NO alias configured never replies with a name, which used to
@@ -880,20 +898,7 @@ inline bool handle(uint8_t senderID, const char* command) {
   // A WCB's reply to our "?WHOAMI": cache its friendly name so GET_WCB_STATUS
   // can label it in the config tool. id = the replying board's WCB number.
   if (!strcmp(type, "wcb_alias")) {
-    int id = doc["id"] | 0;
-    const char* a = doc["alias"] | "";
-    if (id >= 1 && id <= 20) {
-      // Sanitize: drop characters that would break the JSON we emit UNescaped in
-      // buildWcbStatus() and the USB status line (double-quote, backslash, controls).
-      char*  dst = _wcbAlias[id];
-      size_t cap = sizeof(_wcbAlias[id]) - 1, j = 0;
-      for (size_t k = 0; a[k] && j < cap; k++) {
-        char c = a[k];
-        if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;
-        dst[j++] = c;
-      }
-      dst[j] = '\0';
-    }
+    setWcbAlias(doc["id"] | 0, doc["alias"] | "");   // range-checks + sanitizes
     return true;
   }
 

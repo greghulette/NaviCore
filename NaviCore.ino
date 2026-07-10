@@ -2731,6 +2731,13 @@ void drainRemoteCli() {
 void onWcbNeighbor(const WCBNeighbor& nb) {
   if (!nb.valid || nb.isClient) return;
   if (nb.wcbNumber < 1 || nb.wcbNumber > WCB_MAX_BOARDS) return;
+  // Adopt the board's LIVE advertised name for the status panel. The library
+  // replaces a neighbor's facts wholesale each advert, so a RENAMED board updates
+  // its name HERE, the moment its next advert arrives — the ?WHOAMI cache alone is
+  // held once set. This also makes ?WHOAMI self-limiting: buildWcbStatus only
+  // queries ?WHOAMI while the alias is empty, so a WDP-advertising board is never
+  // queried. Same Core-0 context as the wcb_alias handler that also writes it.
+  if (nb.name[0]) rcTelemetry::setWcbAlias(nb.wcbNumber, nb.name);
   if (!peerEventQueue) return;
   uint8_t id = nb.wcbNumber;
   xQueueSend(peerEventQueue, &id, 0);        // non-blocking; a dropped enqueue is caught on the next advert
