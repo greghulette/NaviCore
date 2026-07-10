@@ -2729,16 +2729,18 @@ void drainRemoteCli() {
 // count as "peers" here — client devices (other controllers advertising via
 // setIdentity) are skipped.
 void onWcbNeighbor(const WCBNeighbor& nb) {
-  if (!nb.valid || nb.isClient) return;
+  if (!nb.valid) return;
   if (nb.wcbNumber < 1 || nb.wcbNumber > WCB_MAX_BOARDS) return;
-  // Adopt the board's LIVE advertised name for the status panel. The library
-  // replaces a neighbor's facts wholesale each advert, so a RENAMED board updates
-  // its name HERE, the moment its next advert arrives — the ?WHOAMI cache alone is
-  // held once set. This also makes ?WHOAMI self-limiting: buildWcbStatus only
-  // queries ?WHOAMI while the alias is empty, so a WDP-advertising board is never
-  // queried. Same Core-0 context as the wcb_alias handler that also writes it.
+  // Adopt the node's LIVE advertised name for the status panel — for WCBs AND
+  // client devices (a mesh monitor, another controller). The library replaces a
+  // neighbor's facts wholesale each advert, so a RENAMED node updates its name
+  // HERE the moment its next advert arrives (the ?WHOAMI cache alone is held once
+  // set). This also makes ?WHOAMI self-limiting: buildWcbStatus only queries while
+  // the alias is empty, so an advertising node is never queried. Same Core-0
+  // context as the wcb_alias handler that also writes the cache.
   if (nb.name[0]) rcTelemetry::setWcbAlias(nb.wcbNumber, nb.name);
-  if (!peerEventQueue) return;
+  // The new-peer action/alert fires only for real WCB peers, not client devices.
+  if (nb.isClient || !peerEventQueue) return;
   uint8_t id = nb.wcbNumber;
   xQueueSend(peerEventQueue, &id, 0);        // non-blocking; a dropped enqueue is caught on the next advert
 }

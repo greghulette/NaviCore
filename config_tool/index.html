@@ -2273,7 +2273,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">101217QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">101243QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9134,41 +9134,16 @@ function renderMp3ArgField(container, fn, curVal) {
 // window.NC_COMMAND_LIBRARY.
 const NC_CMDLIB_SEED = {
   schema: 'navicore-command-library/v1',
-  version: '0.2.0-wcb-verified',
-  enums: {
-    onoff:            { label: 'State',    values: [ {code:'0',label:'Off'}, {code:'1',label:'On'} ] },
-    'hcr.emotion':    { label: 'Emotion',  values: [ {code:'H',label:'Happy'}, {code:'S',label:'Sad'}, {code:'M',label:'Mad'}, {code:'C',label:'Scared'} ] },
-    'hcr.strength':   { label: 'Strength', values: [ {code:'MOD',label:'Moderate'}, {code:'STRONG',label:'Strong'} ] },
-    'hcr.channel':    { label: 'Channel',  values: [ {code:'A',label:'Channel A'}, {code:'B',label:'Channel B'} ] },
-    'hcr.volchannel': { label: 'Channel',  values: [ {code:'V',label:'Voice (V)'}, {code:'A',label:'Channel A'}, {code:'B',label:'Channel B'} ] },
-  },
+  version: '0.3.0-wled-maestro',
+  // HCR + MP3 removed 2026-07-10: the vendored DroidNet library (auto-loaded) is a
+  // firmware-accurate SUPERSET for both, so it is the single source of truth for them
+  // (see cmdlib/droidnet/NOTICE.md). What remains is ONLY what DroidNet doesn't cover:
+  // WLED (no DroidNet board at all) and Maestro (DroidNet's `maestro` is currently
+  // incomplete — id 0-2 / seq 0-9 only; ours matches the firmware's 0-9 / 0-99). Once
+  // DroidNet's maestro is fixed upstream, drop wcb-maestro too and this becomes
+  // WLED-only (or empty, if WLED is ever added upstream).
+  enums: {},
   boards: [
-    { id:'wcb-hcr', name:'HCR (Human-Cyborg Relations)', kind:'wcb-verb', commands: [
-      { id:'hcr.stim', name:'Emotional stimulus', category:'Emotion', template:';H,STIM,{emotion},{strength}',
-        params:[ {name:'emotion', label:'Emotion', enum:'hcr.emotion', default:'H', required:true},
-                 {name:'strength', label:'Strength', enum:'hcr.strength', default:'STRONG', required:true} ], examples:[';H,STIM,H,STRONG'] },
-      { id:'hcr.trigger', name:'Trigger emotion', category:'Emotion', template:';H,TRIGGER,{emotion},{strength}',
-        params:[ {name:'emotion', label:'Emotion', enum:'hcr.emotion', default:'H', required:true},
-                 {name:'strength', label:'Strength', enum:'hcr.strength', default:'STRONG', required:true} ], examples:[';H,TRIGGER,M,MOD'] },
-      { id:'hcr.setemotion', name:'Set emotion level', category:'Emotion', template:';H,SETEMOTION,{emotion},{level}',
-        params:[ {name:'emotion', label:'Emotion', enum:'hcr.emotion', default:'H', required:true},
-                 {name:'level', label:'Level (0-100)', type:'int', min:0, max:100, default:50, required:true} ], examples:[';H,SETEMOTION,S,40'] },
-      { id:'hcr.overload', name:'Overload', category:'Emotion', template:';H,OVERLOAD', examples:[';H,OVERLOAD'] },
-      { id:'hcr.stopemote', name:'Stop emote', category:'Emotion', template:';H,STOPEMOTE', examples:[';H,STOPEMOTE'] },
-      { id:'hcr.resetemotions', name:'Reset emotions', category:'Emotion', template:';H,RESETEMOTIONS', examples:[';H,RESETEMOTIONS'] },
-      { id:'hcr.override', name:'Override emotions', category:'Emotion', template:';H,OVERRIDE,{state}',
-        params:[ {name:'state', label:'State', enum:'onoff', default:'1', required:true} ], examples:[';H,OVERRIDE,1'] },
-      { id:'hcr.stop', name:'Stop all sound', category:'Sound', template:';H,STOP', examples:[';H,STOP'] },
-      { id:'hcr.play', name:'Play WAV', category:'Sound', template:';H,PLAY,{channel},{track}',
-        params:[ {name:'channel', label:'Channel', enum:'hcr.channel', default:'A', required:true},
-                 {name:'track', label:'Track # (0-9999)', type:'int', min:0, max:9999, default:0, required:true} ], examples:[';H,PLAY,A,42'] },
-      { id:'hcr.stopwav', name:'Stop WAV', category:'Sound', template:';H,STOPWAV,{channel}',
-        params:[ {name:'channel', label:'Channel', enum:'hcr.channel', default:'A', required:true} ], examples:[';H,STOPWAV,A'] },
-      { id:'hcr.vol', name:'Set volume', category:'Sound', template:';H,VOL,{channel},{level}',
-        params:[ {name:'channel', label:'Channel', enum:'hcr.volchannel', default:'V', required:true},
-                 {name:'level', label:'Level', type:'int', min:0, max:99, default:50, required:true} ], examples:[';H,VOL,V,50'] },
-      { id:'hcr.musetoggle', name:'Toggle Muse', category:'Muse', template:';H,MUSE,TOGGLE', examples:[';H,MUSE,TOGGLE'] },
-    ]},
     { id:'wcb-wled', name:'WLED Lighting', kind:'wcb-verb', commands: [
       { id:'wled.on', name:'Lights on', category:'Power', template:';L,ON', examples:[';L,ON'] },
       { id:'wled.off', name:'Lights off', category:'Power', template:';L,OFF', examples:[';L,OFF'] },
@@ -9179,19 +9154,6 @@ const NC_CMDLIB_SEED = {
         params:[ {name:'preset', label:'Preset #', type:'int', min:0, max:250, default:1, required:true} ], examples:[';L,PS,3'] },
       { id:'wled.color', name:'Set color', category:'Lighting', template:';L,COL,{color}',
         params:[ {name:'color', label:'Color (RRGGBB)', default:'FF0000', pattern:'^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$', required:true} ], examples:[';L,COL,FF0000'] },
-    ]},
-    { id:'wcb-mp3', name:'MP3 Trigger', kind:'wcb-verb', commands: [
-      { id:'mp3.play', name:'Play track', category:'Sound', template:';A,PLAY,{track}',
-        params:[ {name:'track', label:'Track # (1-255)', type:'int', min:1, max:255, default:1, required:true} ], examples:[';A,PLAY,5'] },
-      { id:'mp3.playfs', name:'Play file index', category:'Sound', template:';A,PLAYFS,{index}',
-        params:[ {name:'index', label:'File index (0-255)', type:'int', min:0, max:255, default:0, required:true} ], examples:[';A,PLAYFS,3'] },
-      { id:'mp3.stop', name:'Stop', category:'Sound', template:';A,STOP', examples:[';A,STOP'] },
-      { id:'mp3.next', name:'Next track', category:'Sound', template:';A,NEXT', examples:[';A,NEXT'] },
-      { id:'mp3.prev', name:'Previous track', category:'Sound', template:';A,PREV', examples:[';A,PREV'] },
-      { id:'mp3.vol', name:'Set volume', category:'Sound', template:';A,VOL,{level}',
-        params:[ {name:'level', label:'Volume (0=loudest, 64=quietest)', type:'int', min:0, max:64, default:20, required:true} ], examples:[';A,VOL,25'] },
-      { id:'mp3.volup', name:'Volume up', category:'Sound', template:';A,VOLUP', examples:[';A,VOLUP'] },
-      { id:'mp3.voldn', name:'Volume down', category:'Sound', template:';A,VOLDN', examples:[';A,VOLDN'] },
     ]},
     { id:'wcb-maestro', name:'Maestro (via WCB)', kind:'wcb-verb', commands: [
       { id:'maestro.run', name:'Run script', category:'Servo', template:';M{maestroId}{sequence}',
