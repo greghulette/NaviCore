@@ -471,6 +471,12 @@ struct RcConfig {
   // 6 smoothing profiles (see RcSmoothProfile). ~4.6 KB total; lives in the
   // PSRAM-heap RcConfig, so it costs no DRAM.
   RcSmoothProfile smoothProfiles[RC_NUM_SMOOTH_PROFILES];
+  // Fired when a NEW WCB peer is first detected on the mesh (WDP onNeighbor),
+  // after a boot-time grace window so the initial fleet discovery doesn't spam.
+  // Global — one action set for any new peer; dedup + boot suppression are
+  // handled in firmware (see the peer-event drain in NaviCore.ino loop()).
+  RcTier   peerNewActions;   // up to 5 actions; count 0 = alert only, no action
+  bool     peerAlert;        // also do a passive NeoPixel flash + terminal line
 };
 
 // rcConfig is heap-allocated in PSRAM at boot (see NaviCore.ino setup()); the
@@ -554,6 +560,8 @@ void rcConfigLoadDefaults() {
   rcConfig.matrixChannel    = 7;            // button matrix on CH7
   rcConfig.matrixDebounceFrames = 1;     // digital SBUS source — fastest; bump for analog matrix
   rcConfig.funcBindings.modeSwitch = SW_SE;  // SE (CH12) drives mode 1/2/3
+  rcConfig.peerNewActions.count = 0;         // no action on a newly-detected WCB peer by default
+  rcConfig.peerAlert            = true;      // passive NeoPixel + terminal alert on a new peer (on)
 
   // Default PWM threshold bands — measured SBUS values from the live X18
   // (matrix channel), center ±12 (~17-count neutral deadband between buttons;
@@ -891,6 +899,13 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   JsonObject fb = doc.createNestedObject("funcBindings");
   fb["mode"] = rcConfig.funcBindings.modeSwitch;
 
+  // New-peer event: a passive-alert flag + one global tier of actions.
+  JsonObject pe = doc.createNestedObject("peerEvent");
+  pe["alert"] = rcConfig.peerAlert;
+  JsonArray peActs = pe.createNestedArray("actions");
+  for (int ai = 0; ai < rcConfig.peerNewActions.count; ai++)
+    actionToJson(rcConfig.peerNewActions.a[ai], peActs.createNestedObject());
+
   JsonArray thArr = doc.createNestedArray("thresholds");
   for (int i = 0; i < RC_NUM_THRESHOLDS; i++) {
     JsonObject th = thArr.createNestedObject();
@@ -1063,6 +1078,21 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   if (doc.containsKey("funcBindings")) {
     JsonObject fb = doc["funcBindings"];
     rcConfig.funcBindings.modeSwitch = fb["mode"] | rcConfig.funcBindings.modeSwitch;
+  }
+
+  // New-peer event (diff-safe: only touched when the branch is present).
+  if (doc.containsKey("peerEvent")) {
+    JsonObject pe = doc["peerEvent"];
+    rcConfig.peerAlert = pe["alert"] | rcConfig.peerAlert;
+    if (pe.containsKey("actions")) {
+      JsonArray acts = pe["actions"];
+      int ai = 0;
+      rcConfig.peerNewActions.count = 0;
+      for (JsonObject aObj : acts) {
+        if (ai >= RC_ACTIONS_PER_TIER) break;
+        if (actionFromJson(aObj, rcConfig.peerNewActions.a[ai])) rcConfig.peerNewActions.count = ++ai;
+      }
+    }
   }
 
   if (doc.containsKey("thresholds")) {

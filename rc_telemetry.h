@@ -689,16 +689,34 @@ static bool    _aliasWasUp[21] = {false};
 // large network's reply still fits one ESP-NOW packet (structCommand[200]).
 // Also lazily fires "?WHOAMI" at online-but-unnamed boards so names fill in.
 // Returns the JSON length (clamped to n-1 if it overflowed buf).
+// Dynamic WCB roster for the status panel: a board is "known" (shown) if it's
+// within the pre-registered floor (wcb_quantity — always listed, even offline),
+// OR currently online, OR we've heard its WDP advert (auto-joined beyond the
+// floor). This surfaces auto-discovered boards without wcb_quantity having to
+// cover them. Self appears only if it falls within the floor (unchanged).
+inline bool wcbBoardKnown(int i, int floor) {
+  if (i >= 1 && i <= floor) return true;
+  if (!wcb) return false;
+  return wcb->isOnline((uint8_t)i) || (wcb->getNeighbor((uint8_t)i) != nullptr);
+}
+inline int wcbHighestKnown(int floor) {
+  int hi = (floor > WCB_MAX_BOARDS) ? WCB_MAX_BOARDS : (floor < 0 ? 0 : floor);
+  for (int i = WCB_MAX_BOARDS; i > hi; i--)
+    if (wcbBoardKnown(i, floor)) { hi = i; break; }
+  return hi;
+}
+
 inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases) {
   if (!buf || n == 0) return 0;
-  int q = rcConfig.wcbNetwork.quantity;
+  int q = rcConfig.wcbNetwork.quantity;   // pre-registered floor (still reported as "quantity")
   if (q < 0) q = 0;
   if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
   const int selfId = rcConfig.wcbNetwork.deviceId;
+  const int hi = wcbHighestKnown(q);       // extend past the floor to cover auto-discovered boards
   size_t len = snprintf(buf, n,
       "{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"relay\":%d,\"online\":[",
       q, selfId, (int)relayId);
-  for (int i = 1; i <= q && len < n; i++) {
+  for (int i = 1; i <= hi && len < n; i++) {
     const bool up = (i == selfId) ? true : (wcb && wcb->isOnline(i));
     if (i != selfId) {
       if (up && !_aliasWasUp[i]) _aliasTries[i] = 0;   // came online → re-arm the alias query
@@ -712,10 +730,15 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
     }
     len += snprintf(buf + len, n - len, "%s%s", (i > 1) ? "," : "", up ? "1" : "0");
   }
+  // known[] tells the tool which slots to actually render (floor + discovered),
+  // so gaps above the floor that aren't real boards aren't drawn as offline chips.
+  if (len < n) len += snprintf(buf + len, n - len, "],\"known\":[");
+  for (int i = 1; i <= hi && len < n; i++)
+    len += snprintf(buf + len, n - len, "%s%s", (i > 1) ? "," : "", wcbBoardKnown(i, q) ? "1" : "0");
   if (len < n) len += snprintf(buf + len, n - len, "]");
   if (includeAliases) {
     if (len < n) len += snprintf(buf + len, n - len, ",\"aliases\":[");
-    for (int i = 1; i <= q && len < n; i++)
+    for (int i = 1; i <= hi && len < n; i++)
       len += snprintf(buf + len, n - len, "%s\"%s\"", (i > 1) ? "," : "",
                       (i == selfId) ? "" : wcbAlias(i));
     if (len < n) len += snprintf(buf + len, n - len, "]");

@@ -84,6 +84,17 @@ navirterm::CaptureSink rtermSink;
 struct RemoteCliMsg { uint8_t relay; char cmd[200]; };
 QueueHandle_t remoteCliQueue = nullptr;
 
+// ── New-peer detection → configured action + passive alert ──────────────────
+// wcb->onNeighbor() fires on the WiFi/ESP-NOW task (Core 0) whenever a WDP advert
+// is decoded. That callback only ENQUEUES the board number; all the real work
+// (dedup, boot-grace suppression, action dispatch, LED flash, terminal line)
+// runs in drainPeerEvents() from loop() (Core 1) where flash/serial I/O is safe.
+QueueHandle_t peerEventQueue   = nullptr;
+uint32_t      g_peerSeenMask   = 0;   // bit (id-1) set once a board's new-peer event has been handled this session
+uint32_t      g_peerGraceUntil = 0;   // millis(): boards first heard before this are recorded silently (the boot fleet)
+uint32_t      g_peerFlashUntil = 0;   // millis(): show the new-peer LED pulse until then (0 = not flashing)
+#define PEER_GRACE_MS 8000            // suppress the initial fleet-discovery burst for 8 s after wcb->begin()
+
 // =============================================================================
 //  Pin assignments — RUNTIME, selected by the active board profile
 // =============================================================================
@@ -1954,9 +1965,12 @@ bool execCliLine(const String& line) {
           Serial.printf("WCB device ID: %d  quantity: %d\n",
                         rcConfig.wcbNetwork.deviceId, rcConfig.wcbNetwork.quantity);
           Serial.print("  Board status: ");
-          for (int i = 1; i <= rcConfig.wcbNetwork.quantity; i++)
-            Serial.printf("WCB%d=%s ", i, wcb->isOnline(i) ? "UP" : "dn");
-          Serial.println();
+          { int q = rcConfig.wcbNetwork.quantity;
+            int hi = rcTelemetry::wcbHighestKnown(q);
+            for (int i = 1; i <= hi; i++)
+              if (rcTelemetry::wcbBoardKnown(i, q))
+                Serial.printf("WCB%d=%s%s ", i, wcb->isOnline(i) ? "UP" : "dn", (i > q) ? "*" : ""); }
+          Serial.println(" (* = auto-discovered beyond quantity)");
           break;
         }
         case 12: Serial.printf("Mode=%d  matrixBtn=%d  matrixVal=%d\n",
@@ -2234,9 +2248,10 @@ void handleSerialInput() {
           Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
         } else if (strcmp(type,"GET_WCB_STATUS")==0) {
-          // Lightweight liveness poll for the GUI's sidebar WCB Status
-          // panel. Reads wcb->isOnline(i) for boards 1..quantity. The
-          // sketch's CLI #L11 prints the same info as human-readable text.
+          // Lightweight liveness poll for the GUI's sidebar WCB Status panel.
+          // Reads wcb->isOnline(i) for the floor (1..quantity) PLUS any auto-
+          // discovered boards above it (up to the highest known); known[] marks
+          // which slots the tool should actually render.
           int q = rcConfig.wcbNetwork.quantity;
           if (q < 0) q = 0;
           if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
@@ -2244,9 +2259,10 @@ void handleSerialInput() {
           // peer heartbeats via ETM and never returns true for our own
           // deviceId, so we force "1" for the local board.
           int selfId = rcConfig.wcbNetwork.deviceId;
+          int hi = rcTelemetry::wcbHighestKnown(q);
           Serial.printf("{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"online\":[",
                         q, selfId);
-          for (int i = 1; i <= q; i++) {
+          for (int i = 1; i <= hi; i++) {
             bool up = (i == selfId) ? true : (wcb && wcb->isOnline(i));
             Serial.printf("%s%s", (i > 1) ? "," : "", up ? "1" : "0");
             // Lazily learn each online board's friendly alias: ask once with
@@ -2255,10 +2271,13 @@ void handleSerialInput() {
             if (up && i != selfId && wcb && wcbReady && !rcTelemetry::wcbAlias(i)[0])
               wcb->send((uint8_t)i, "?WHOAMI");
           }
+          Serial.print("],\"known\":[");
+          for (int i = 1; i <= hi; i++)
+            Serial.printf("%s%s", (i > 1) ? "," : "", rcTelemetry::wcbBoardKnown(i, q) ? "1" : "0");
           // Friendly names (from the ?WHOAMI replies); "" until a board answers
           // (a board must have ?SPECIAL,ON to unicast its reply back to us).
           Serial.print("],\"aliases\":[");
-          for (int i = 1; i <= q; i++)
+          for (int i = 1; i <= hi; i++)
             Serial.printf("%s\"%s\"", (i > 1) ? "," : "",
                           (i == selfId) ? "" : rcTelemetry::wcbAlias(i));
           Serial.println("]}");
@@ -2596,6 +2615,18 @@ void setup() {
     wcb->setIdentity("NaviCore", FW_VERSION,
                      rcConfig.boardType == 0 ? "NaviCore v2" : "WCB 3.2",
                      "rc sbus maestro hcr");
+    // Auto-join (default ON, set explicitly): discover + keep WCB peers live from
+    // their WDP adverts, so wcb_quantity is only the pre-registered floor and the
+    // fleet is reachable without it covering every board.
+    wcb->setAutoJoin(true);
+    // New-peer event: onNeighbor enqueues, drainPeerEvents() (loop) fires the
+    // action + alert. Arm the grace window so the boot-time fleet discovery is
+    // recorded silently instead of firing for every board that's already present.
+    // Create the queue + arm the grace window BEFORE registering onNeighbor so an
+    // advert that arrives immediately can't hit a null queue / unarmed grace.
+    peerEventQueue   = xQueueCreate(8, sizeof(uint8_t));
+    g_peerGraceUntil = millis() + PEER_GRACE_MS;
+    wcb->onNeighbor(onWcbNeighbor);
     remoteCliQueue = xQueueCreate(3, sizeof(RemoteCliMsg));  // relayed CLI lines → drainRemoteCli()
     Serial.printf("[WCB] Joined network as device ID %d (quantity=%d)\n",
                   rcConfig.wcbNetwork.deviceId, rcConfig.wcbNetwork.quantity);
@@ -2654,6 +2685,16 @@ static void updateStatusLed() {
     return;
   }
 
+  // Brief non-latching cyan pulse when a NEW WCB peer is detected (peerAlert).
+  // Ranks below a latched fault, above the routine SBUS indication.
+  if (g_peerFlashUntil) {
+    if ((int32_t)(now - g_peerFlashUntil) < 0) {
+      if (mode != 3) { setStatusLed(C_CYAN, STATUS_LED_BRIGHT); mode = 3; }
+      return;
+    }
+    g_peerFlashUntil = 0; mode = -1;   // pulse ended — force a clean repaint of the SBUS state below
+  }
+
   bool sbusAlive = (sbusLastFrameMs != 0) && (now - sbusLastFrameMs < SBUS_LED_TIMEOUT_MS);
   if (sbusAlive) {
     if (mode != 0) { setStatusLed(C_BLUE, STATUS_LED_BRIGHT); mode = 0; }   // receiving → steady blue
@@ -2683,6 +2724,43 @@ void drainRemoteCli() {
   rcSerial.disarmCapture();
 }
 
+// onNeighbor callback — runs on the WiFi/ESP-NOW task (Core 0). Do the MINIMUM:
+// enqueue the WCB number; drainPeerEvents() (loop) does the rest. Only real WCBs
+// count as "peers" here — client devices (other controllers advertising via
+// setIdentity) are skipped.
+void onWcbNeighbor(const WCBNeighbor& nb) {
+  if (!nb.valid || nb.isClient) return;
+  if (nb.wcbNumber < 1 || nb.wcbNumber > WCB_MAX_BOARDS) return;
+  if (!peerEventQueue) return;
+  uint8_t id = nb.wcbNumber;
+  xQueueSend(peerEventQueue, &id, 0);        // non-blocking; a dropped enqueue is caught on the next advert
+}
+
+// Drain queued new-peer detections (loop, Core 1): dedup by id, suppress the
+// boot-time fleet-discovery burst (grace window), then fire the configured
+// action tier + the passive alert. Fires at most once per board per session.
+void drainPeerEvents() {
+  if (!peerEventQueue) return;
+  uint8_t id;
+  while (xQueueReceive(peerEventQueue, &id, 0) == pdTRUE) {
+    if (id < 1 || id > WCB_MAX_BOARDS) continue;
+    const uint32_t bit = 1UL << (id - 1);
+    if (g_peerSeenMask & bit) continue;                        // already handled this board this session
+    g_peerSeenMask |= bit;
+    if ((int32_t)(millis() - g_peerGraceUntil) < 0) continue;  // still in the boot grace window — record silently
+
+    const WCBNeighbor* nb = (wcb && wcbReady) ? wcb->getNeighbor(id) : nullptr;
+    const char* alias = (nb && nb->name[0]) ? nb->name : "";
+
+    if (rcConfig.peerAlert) {                                  // passive alert = terminal line + LED pulse
+      Serial.printf("[PEER] New WCB %u%s%s detected\n", id, alias[0] ? " " : "", alias);
+      g_peerFlashUntil = millis() + 1500;                      // brief cyan LED pulse (see updateStatusLed)
+    }
+    const RcTier& tier = rcConfig.peerNewActions;              // configured action(s), reuse the normal dispatch
+    for (int i = 0; i < tier.count; i++) rcExecuteAction(tier.a[i]);
+  }
+}
+
 void loop() {
   // WCB — heartbeats, ACKs, WCBStream flushes
   if (wcb && wcbReady) wcb->update();
@@ -2697,6 +2775,10 @@ void loop() {
   // Serial output tee'd back to the bridge as RTERM packets. Cheap no-op when
   // nothing is pending.
   drainRemoteCli();
+
+  // New WCB peer detected on the mesh → fire the configured action + passive
+  // alert (deferred here from the Core-0 onNeighbor callback). Cheap no-op idle.
+  drainPeerEvents();
 
   // Record/replay — drain captured events into the PSRAM clip (Core-1 sole
   // writer) and advance any active replay. Both cheap no-ops when idle.
