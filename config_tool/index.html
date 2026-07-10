@@ -2265,7 +2265,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">092131QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">100854QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3845,6 +3845,7 @@ function startWcbStatusPoll() {
   wcbEverSeen = new Set();          // fresh per-session memory
   wcbSelfId   = 0;
   wcbAliases  = [];
+  wcbKnown    = null;               // drop the previous board's slot mask (else it lingers until the first reply)
   wcbRelay    = 0;
   wcbQuantity = 0;
   renderWcbStatus(null);            // shows "configure first" or "—"
@@ -3867,6 +3868,7 @@ function stopWcbStatusPoll() {
   wcbSelfId   = 0;
   wcbRelay    = 0;
   wcbQuantity = 0;
+  wcbKnown    = null;
   const list = document.getElementById('wcb-status-list');
   if (list) list.innerHTML = '<div class="noconn">Connect board to see WCB status</div>';
 }
@@ -7677,6 +7679,13 @@ function applyWcbNetworkUI() {
   updateWcbDirtyBadge();
 }
 
+// Tracks whether the user actually edited the peer ACTION rows this render.
+// The structured action editor is lossy for externally-authored values (a raw
+// maestro pos gets ¼µs-quantized on the render→collect round-trip). Re-collecting
+// only when the user has edited means merely opening the WCB tab and Saving can't
+// silently rewrite a firmware-authored peerEvent action.
+let _peerEventDirty = false;
+
 // New-peer event editor (WCB Network tab): the passive-alert checkbox + an inline
 // action editor reusing the button/switch tier machinery under the 'peer' key.
 function renderPeerEventEditor() {
@@ -7688,15 +7697,19 @@ function renderPeerEventEditor() {
   container.innerHTML = '';
   container.appendChild(buildTierCard('peer', config.peerEvent.actions || []));
   refreshTierState('peer');
+  _peerEventDirty = false;                              // fresh render matches config
+  container.oninput = container.onchange = () => { _peerEventDirty = true; };
 }
 
 // Commit the inline editor's DOM back into config.peerEvent before a Save.
 // GUARDED on the editor being rendered (#rows-peer present) so a Save from a
-// session that never opened the WCB tab can't wipe peerEvent.actions to [].
+// session that never opened the WCB tab can't wipe peerEvent.actions to []. The
+// alert flag always syncs (a lossless bool); the ACTIONS re-collect only when the
+// user edited them (_peerEventDirty) — see that flag's note.
 function syncPeerEventFromDom() {
   if (!document.getElementById('rows-peer')) return;
   if (!config.peerEvent) config.peerEvent = { alert: true, actions: [] };
-  config.peerEvent.actions = collectTierActions('peer');
+  if (_peerEventDirty) config.peerEvent.actions = collectTierActions('peer');
   const cb = document.getElementById('peer-alert');
   if (cb) config.peerEvent.alert = cb.checked;
 }
@@ -12052,6 +12065,11 @@ document.getElementById('btn-qs-send').addEventListener('click', async () => {
 //  CSV export / import
 // ════════════════════════════════════════════════════════════════════════════
 function exportConfigCsv() {
+  // NOTE: the new-peer event (config.peerEvent = { alert, actions[] }) is
+  // intentionally NOT in the CSV — its actions[] is a variable-length action
+  // list that doesn't fit this flat single-value row model. Use JSON
+  // export/import to carry peerEvent; a CSV round-trip omits it (and, since
+  // import only overwrites peerEvent when present, never clobbers it).
   // CSV column layout — kept stable for tooling. transport/wcbPort were
   // dropped when HCR destination became a global setting (no longer per
   // action); their values now live in a dedicated "hcrDest" config row.
