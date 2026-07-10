@@ -463,6 +463,14 @@
     font-size: 11px; font-weight: 700; background: var(--accent); color: #fff; }
   .tier-tab-count.empty { display: none; }
 
+  /* Command-library picker: collapsible board sections (collapsed by default). */
+  .cmdlib-board > summary { list-style: none; }
+  .cmdlib-board > summary::-webkit-details-marker { display: none; }
+  .cmdlib-board > summary::marker { content: ''; }
+  .cmdlib-board > summary:hover { border-color: var(--accent); }
+  .cmdlib-board[open] > summary .cmdlib-caret { transform: rotate(90deg); }
+  .cmdlib-caret { display: inline-block; transition: transform .12s; }
+
   /* ─── Configuration modal — tabbed layout with visual contrast ───────
      The default .modal background (--surface = #161616) matches the page
      bg exactly and blends in. The cfg-modal variant uses a slightly
@@ -2265,7 +2273,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">100854QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">101147QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9386,7 +9394,18 @@ function _cmdlibRenderList(filter) {
       !f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f));
     if (!matches.length) return;
     any = true;
-    html += `<div style="margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)">${esc(board.name)}</div>`;
+    // Boards render COLLAPSED by default, so the picker opens as a tidy list of
+    // board sections rather than a wall of commands. A search auto-expands the
+    // boards that have matches so results are visible without clicking in.
+    const cnt = matches.length;
+    const cntLabel = f ? (cnt + ' match' + (cnt === 1 ? '' : 'es')) : (cnt + ' cmd' + (cnt === 1 ? '' : 's'));
+    html += `<details class="cmdlib-board"${f ? ' open' : ''}>
+      <summary style="cursor:pointer;display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);user-select:none">
+        <span class="cmdlib-caret" style="color:var(--muted);font-size:11px">&#9656;</span>
+        <span style="font-weight:600;flex:1">${esc(board.name)}</span>
+        <span style="font-size:11px;color:var(--muted)">${cntLabel}</span>
+      </summary>
+      <div style="padding:2px 0 4px">`;
     matches.forEach(c => {
       html += `<button type="button" class="cmdlib-item" data-board="${esc(board.id)}" data-cmd="${esc(c.id)}"
         style="display:block;width:100%;text-align:left;margin-top:6px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);cursor:pointer">
@@ -9394,6 +9413,7 @@ function _cmdlibRenderList(filter) {
         <div style="font-size:11px;color:var(--muted);font-family:monospace">${esc(c.template || (c.examples && c.examples[0]) || '')}</div>
       </button>`;
     });
+    html += `</div></details>`;
   });
   if (!any) html += `<div style="color:var(--muted);padding:16px 4px">No commands match. Try Import to add a library.</div>`;
   list.innerHTML = html;
