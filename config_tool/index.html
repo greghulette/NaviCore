@@ -2273,7 +2273,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">131220QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">131239QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3891,12 +3891,17 @@ function stopWcbStatusPoll() {
 // Forget a learned (auto-joined) peer from the status panel. Confirms first, then
 // tells NaviCore to drop it from its persistent (NVS) peer list and re-polls so the
 // chip updates. It re-joins automatically if it advertises on the mesh again.
-function forgetLearnedPeer(id) {
+function forgetLearnedPeer(id, btnEl) {
   const nm = (wcbAliases && wcbAliases[id - 1]) ? String(wcbAliases[id - 1]).trim() : '';
   const label = nm ? `WCB ${id} · ${nm}` : `WCB ${id}`;
   if (!confirm(`Forget learned peer ${label}?\n\nNaviCore stops tracking it and drops it from persistent (NVS) storage, so it disappears from this panel until it's heard again. It re-joins automatically if it advertises on the mesh.`)) return;
+  // Remove the chip immediately so it feels responsive. The re-poll below then
+  // CONFIRMS: if the RC actually forgot it, it stays gone; if not (e.g. firmware
+  // without the FORGET_PEER handler, or the peer is still advertising), the next
+  // status poll re-adds the chip — which tells you the forget didn't take.
+  try { const chip = btnEl && btnEl.closest('.wcb-chip'); if (chip) chip.remove(); } catch (_) {}
   sendJSON({ type: 'FORGET_PEER', id }).catch(() => {});
-  setTimeout(() => { if (isWcbConfigured() || viaWcbActive) sendJSON({ type: 'GET_WCB_STATUS' }, true).catch(() => {}); }, 500);
+  setTimeout(() => { if (isWcbConfigured() || viaWcbActive) sendJSON({ type: 'GET_WCB_STATUS' }, true).catch(() => {}); }, 600);
 }
 
 function renderWcbStatus(online) {
@@ -3947,7 +3952,7 @@ function renderWcbStatus(online) {
     // ✕ forget — only for learned/auto-discovered peers (above the pre-registered
     // floor); floor peers 1..quantity aren't learned and can't be forgotten.
     const forgetBtn = (i > quantity)
-      ? ` <button type="button" title="Forget this learned peer" onclick="forgetLearnedPeer(${i})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:2px 5px;border-radius:3px" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">✕</button>`
+      ? ` <button type="button" title="Forget this learned peer" onclick="forgetLearnedPeer(${i}, this)" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:2px 5px;border-radius:3px" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">✕</button>`
       : '';
     html += `<div class="wcb-chip">
       <span class="wcb-chip-dot${stateCls}"></span>
