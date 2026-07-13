@@ -2273,7 +2273,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">131505QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">131515QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3836,6 +3836,19 @@ let wcbStatusTimer = null;
 let wcbAliases     = [];   // per-board friendly names from WCB_STATUS replies (index i-1)
 let wcbKnown       = null;  // per-board "render this slot" mask from WCB_STATUS (floor + auto-discovered); null = old fw
 let wcbClients     = [];   // per-board "this slot is a client device (not a WCB board)" flag from WCB_STATUS
+// After a forget, a WCB_STATUS reply the RC BUILT before it processed the forget
+// still carries known[id]=1. sendJSON is fire-and-forget (no response
+// correlation), so that stale reply can land just after we optimistically remove
+// the chip — or arrive reordered over the WCB bridge — and redraw it <1s later.
+// While an id is in this map (id -> expiry ms) we blank it in the mask so no
+// stale/reordered reply can resurrect it. Self-expiring, NOT a blacklist.
+let wcbForgetSuppress = new Map();
+// How long to swallow a stale known[id]=1 after a forget. Covers the 600ms
+// confirm re-poll plus USB/bridge in-flight + ETM-retransmit latency. Deliberately
+// NOT cleared early on online[id]=1: _boards[].online is a ~30s decaying level, so
+// a just-powered-off board still reads online=1 for seconds — an early-clear on it
+// would defeat the suppression and reproduce the bug.
+const WCB_FORGET_SUPPRESS_MS = 2500;
 let wcbEverSeen    = new Set();    // board IDs that have reported online
 let wcbSelfId      = 0;             // local deviceId, from firmware reply
 let wcbRelay       = 0;             // WCB # relaying the Via-WCB bridge (0 = direct USB); badged in the panel
@@ -3858,6 +3871,7 @@ function startWcbStatusPoll() {
   wcbAliases  = [];
   wcbKnown    = null;               // drop the previous board's slot mask (else it lingers until the first reply)
   wcbClients  = [];
+  wcbForgetSuppress.clear();        // drop any pending forget-suppression from a prior session
   wcbRelay    = 0;
   wcbQuantity = 0;
   renderWcbStatus(null);            // shows "configure first" or "—"
@@ -3882,6 +3896,7 @@ function stopWcbStatusPoll() {
   wcbQuantity = 0;
   wcbKnown    = null;
   wcbClients  = [];
+  wcbForgetSuppress.clear();
   const list = document.getElementById('wcb-status-list');
   if (list) list.innerHTML = '<div class="noconn">Connect board to see WCB status</div>';
 }
@@ -3895,10 +3910,16 @@ function forgetLearnedPeer(id, btnEl) {
   const nm = (wcbAliases && wcbAliases[id - 1]) ? String(wcbAliases[id - 1]).trim() : '';
   const label = nm ? `WCB ${id} · ${nm}` : `WCB ${id}`;
   if (!confirm(`Forget learned peer ${label}?\n\nNaviCore stops tracking it and drops it from persistent (NVS) storage, so it disappears from this panel until it's heard again. It re-joins automatically if it advertises on the mesh.`)) return;
-  // Remove the chip immediately so it feels responsive. The re-poll below then
-  // CONFIRMS: if the RC actually forgot it, it stays gone; if not (e.g. firmware
-  // without the FORGET_PEER handler, or the peer is still advertising), the next
-  // status poll re-adds the chip — which tells you the forget didn't take.
+  // Suppress this slot briefly so a stale/reordered WCB_STATUS reply — one the RC
+  // built BEFORE it processed the forget, still carrying known[id]=1 — can't
+  // redraw the chip in the <1s after we remove it. Blank the local mask too, so
+  // any render in the meantime is consistent. After the window lapses the RC is
+  // authoritative again: a truly-forgotten (or off) board stays gone; if the RC
+  // still reports it known (e.g. the FORGET_PEER was dropped over the bridge), the
+  // chip reappears — the honest "the forget didn't take" feedback.
+  wcbForgetSuppress.set(id, Date.now() + WCB_FORGET_SUPPRESS_MS);
+  if (Array.isArray(wcbKnown)) wcbKnown[id - 1] = false;
+  // Remove the chip immediately so it feels responsive.
   try { const chip = btnEl && btnEl.closest('.wcb-chip'); if (chip) chip.remove(); } catch (_) {}
   sendJSON({ type: 'FORGET_PEER', id }).catch(() => {});
   setTimeout(() => { if (isWcbConfigured() || viaWcbActive) sendJSON({ type: 'GET_WCB_STATUS' }, true).catch(() => {}); }, 600);
@@ -7055,6 +7076,21 @@ function handleBoardMessage(line) {
     // clients[] = which slots are client devices (mesh monitors / other controllers)
     // rather than WCB boards; absent on older firmware → treat all as boards.
     wcbClients = Array.isArray(msg.clients) ? msg.clients : [];
+    // Forget de-flicker: this reply may be one the RC BUILT before it processed a
+    // FORGET_PEER (or a bridge-reordered one), still carrying known[id]=1. While an
+    // id is inside its post-forget window, blank it in the mask so a stale/reordered
+    // reply can't resurrect the just-removed chip. Pure self-expiry (~2.5s) — NOT a
+    // blacklist and NO early-clear on online[id]=1 (that's a ~30s decaying level, so
+    // a just-powered-off board still reads online=1 and would defeat the suppression).
+    // Once the window lapses the RC is authoritative again, so a still-known board
+    // simply reappears on the next poll.
+    if (wcbForgetSuppress.size) {
+      const now = Date.now();
+      for (const [fid, exp] of wcbForgetSuppress) {
+        if (now >= exp) { wcbForgetSuppress.delete(fid); continue; }
+        if (Array.isArray(wcbKnown)) wcbKnown[fid - 1] = false;
+      }
+    }
     renderWcbStatus(Array.isArray(msg.online) ? msg.online : []);
     return;
   }
