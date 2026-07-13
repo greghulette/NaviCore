@@ -2328,17 +2328,31 @@ void handleSerialInput() {
           Serial.printf("{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"online\":[",
                         q, selfId);
           for (int i = 1; i <= hi; i++) {
-            bool up = (i == selfId) ? true : (wcb && wcb->isOnline(i));
+            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+            const bool client = nb ? nb->isClient : rcTelemetry::wcbIsClient(i);
+            // "live now": heartbeat for a WCB, a fresh WDP advert for a CLIENT.
+            bool up = (i == selfId) ? true
+                    : (client ? (nb != nullptr) : (wcb && wcb->isOnline(i)));
             Serial.printf("%s%s", (i > 1) ? "," : "", up ? "1" : "0");
             // Lazily learn each online board's friendly alias: ask once with
             // "?WHOAMI"; the {"type":"wcb_alias"} reply is cached by
-            // rcTelemetry::handle(). Re-asks each poll only until cached.
-            if (up && i != selfId && wcb && wcbReady && !rcTelemetry::wcbAlias(i)[0])
+            // rcTelemetry::handle(). Re-asks each poll only until cached. Skip
+            // clients — they're named from their WDP advert, not ?WHOAMI.
+            if (up && !client && i != selfId && wcb && wcbReady && !rcTelemetry::wcbAlias(i)[0])
               wcb->send((uint8_t)i, "?WHOAMI");
           }
           Serial.print("],\"known\":[");
           for (int i = 1; i <= hi; i++)
             Serial.printf("%s%s", (i > 1) ? "," : "", rcTelemetry::wcbBoardKnown(i, q) ? "1" : "0");
+          // clients[] — 1 = client device (mesh monitor / other controller), not a
+          // WCB board. Live neighbor if present, else the cache (so a learned client
+          // still tags after its advert ages out).
+          Serial.print("],\"clients\":[");
+          for (int i = 1; i <= hi; i++) {
+            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+            bool client = nb ? nb->isClient : rcTelemetry::wcbIsClient(i);
+            Serial.printf("%s%s", (i > 1) ? "," : "", client ? "1" : "0");
+          }
           // Friendly names (from the ?WHOAMI replies); "" until a board answers
           // (a board must have ?SPECIAL,ON to unicast its reply back to us).
           Serial.print("],\"aliases\":[");
@@ -2813,6 +2827,10 @@ void onWcbNeighbor(const WCBNeighbor& nb) {
   // the alias is empty, so an advertising node is never queried. Same Core-0
   // context as the wcb_alias handler that also writes the cache.
   if (nb.name[0]) rcTelemetry::setWcbAlias(nb.wcbNumber, nb.name);
+  // Cache client-vs-board so the status panel can still tag a learned client as a
+  // client after its advert ages out (a client never heartbeats). Unconditional —
+  // a client may advertise without a name.
+  rcTelemetry::setWcbClient(nb.wcbNumber, nb.isClient);
   // The new-peer action/alert fires only for real WCB peers, not client devices.
   if (nb.isClient || !peerEventQueue) return;
   uint8_t id = nb.wcbNumber;

@@ -699,6 +699,14 @@ inline void emitMode(int mode) {
 // momentarily-garbled name for one 3 s poll, so no lock is warranted.
 static char _wcbAlias[21][25] = {{0}};
 inline const char* wcbAlias(int id) { return (id >= 1 && id <= 20) ? _wcbAlias[id] : ""; }
+// Parallel cache of whether each learned node is a CLIENT (mesh monitor / other
+// controller) vs a WCB board. Held like the alias so a learned client still reads
+// as a client on the status panel after its WDP advert ages out (a client never
+// heartbeats, so it can't be re-identified while offline). Written on Core 0
+// (onNeighbor), read on Core 1 (buildWcbStatus) — a single byte, benign to race.
+static bool _wcbIsClient[21] = {false};
+inline bool wcbIsClient(int id) { return (id >= 1 && id <= 20) ? _wcbIsClient[id] : false; }
+inline void setWcbClient(int id, bool isClient) { if (id >= 1 && id <= 20) _wcbIsClient[id] = isClient; }
 // Set/refresh a board's cached friendly name — from EITHER a "?WHOAMI" reply OR a
 // live WDP advert (see onWcbNeighbor). The library rebuilds a neighbor's facts
 // wholesale on every advert, so feeding the WDP name through here is what lets a
@@ -746,7 +754,13 @@ static bool    _aliasWasUp[21] = {false};
 inline bool wcbBoardKnown(int i, int floor) {
   if (i >= 1 && i <= floor) return true;
   if (!wcb) return false;
-  return wcb->isOnline((uint8_t)i) || (wcb->getNeighbor((uint8_t)i) != nullptr);
+  // Show a board if it's live (heartbeat) OR advertising (WDP neighbor) OR a
+  // PERMANENT learned peer — the last keeps an auto-joined node (esp. a client,
+  // which never heartbeats) on the panel even while it's powered off / its WDP
+  // advert has aged out, and on a fresh boot where it's restored but not yet heard.
+  return wcb->isOnline((uint8_t)i)
+      || (wcb->getNeighbor((uint8_t)i) != nullptr)
+      || wcb->isLearnedPeer((uint8_t)i);
 }
 inline int wcbHighestKnown(int floor) {
   int hi = (floor > WCB_MAX_BOARDS) ? WCB_MAX_BOARDS : (floor < 0 ? 0 : floor);
@@ -766,8 +780,14 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
       "{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"relay\":%d,\"online\":[",
       q, selfId, (int)relayId);
   for (int i = 1; i <= hi && len < n; i++) {
-    const bool up = (i == selfId) ? true : (wcb && wcb->isOnline(i));
-    if (i != selfId) {
+    const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+    const bool client = nb ? nb->isClient : wcbIsClient(i);
+    // "live now": heartbeat for a WCB; a fresh WDP advert for a CLIENT (a client
+    // never heartbeats, so a present monitor would otherwise always read offline).
+    // self is always live.
+    const bool up = (i == selfId) ? true
+                  : (client ? (nb != nullptr) : (wcb && wcb->isOnline(i)));
+    if (i != selfId && !client) {   // ?WHOAMI only to heartbeat boards — a client is named from its advert
       if (up && !_aliasWasUp[i]) _aliasTries[i] = 0;   // came online → re-arm the alias query
       _aliasWasUp[i] = up;
       // Ask for the friendly name only until it's cached AND only a few times —
@@ -784,6 +804,16 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
   if (len < n) len += snprintf(buf + len, n - len, "],\"known\":[");
   for (int i = 1; i <= hi && len < n; i++)
     len += snprintf(buf + len, n - len, "%s%s", (i > 1) ? "," : "", wcbBoardKnown(i, q) ? "1" : "0");
+  if (len < n) len += snprintf(buf + len, n - len, "]");
+  // clients[] — 1 = this slot is a client device (mesh monitor / other controller),
+  // not a WCB board. Prefer the live WDP neighbor; fall back to the cache so a
+  // learned client still tags correctly after its advert has aged out.
+  if (len < n) len += snprintf(buf + len, n - len, ",\"clients\":[");
+  for (int i = 1; i <= hi && len < n; i++) {
+    const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+    const bool client = nb ? nb->isClient : wcbIsClient(i);
+    len += snprintf(buf + len, n - len, "%s%s", (i > 1) ? "," : "", client ? "1" : "0");
+  }
   if (len < n) len += snprintf(buf + len, n - len, "]");
   if (includeAliases) {
     if (len < n) len += snprintf(buf + len, n - len, ",\"aliases\":[");
