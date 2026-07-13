@@ -2,7 +2,7 @@
 //  NaviCore.ino — WCB-based RC Controller (formerly RC-Controller / HyperCore)
 //  Target hardware: NaviCore v2 PCB (default) or WCB HW 3.2 — ESP32-S3,
 //  selected at runtime by rcConfig.boardType (see applyBoardProfile()).
-//
+// 
 //  Features:
 //    • SBUS input (16 or 24 channel, auto-detected) on shared UART1 RX
 //    • SBUS output passthrough on the SAME shared UART1 TX (per board profile:
