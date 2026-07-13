@@ -2227,6 +2227,8 @@ void handleSerialInput() {
         filter["mode"]   = true;   // TRIGGER
         filter["btn"]    = true;   // TRIGGER
         filter["tap"]    = true;   // TRIGGER
+        filter["id"]     = true;   // FORGET_PEER (without this the id is stripped → parsed as 0 → "out of range")
+        filter["all"]    = true;   // FORGET_PEER
         DynamicJsonDocument hdr(256);
         DeserializationError perr = deserializeJson(
             hdr, serialInputBuf,
