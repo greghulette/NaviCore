@@ -52,6 +52,8 @@ inline uint32_t      _count    = 0;          // events in clip
 inline volatile uint8_t _state = ST_IDLE;
 inline volatile bool _capturing = false;     // gate read in the tap (single volatile)
 inline uint32_t      _recStart = 0;
+inline char          _recordName[41] = {0};  // name latched when the CURRENT take started — immune to a
+                                             // later Play/Record trigger overwriting _pendingName mid-record
 inline uint8_t       _mode     = 1;          // mode at capture (context)
 inline QueueHandle_t _queue    = nullptr;
 inline volatile uint16_t _lastPos[8][32];    // [slot-1][ch], LASTPOS_NONE = unset
@@ -157,17 +159,20 @@ inline void drain() {
   if (!_queue) return;
   RecEvent ev;
   while (xQueueReceive(_queue, &ev, 0) == pdTRUE) {
-    if (_state == ST_RECORDING && _count < _cap) _buf[_count++] = ev;
+    if (_state != ST_RECORDING) continue;
+    if (_count < _cap) _buf[_count++] = ev;
+    else _drops++;   // PSRAM clip buffer full — account the dropped keyframe so info() is truthful
   }
-  // 30 s backstop — auto-stop a runaway capture.
-  if (_state == ST_RECORDING && (millis() - _recStart) > REC_MAX_MS) {
-    _capturing = false; _state = ST_IDLE;
-  }
+  // NOTE: the runaway-capture backstop lives in checkRecordBackstop() (called
+  // from loop), NOT here — drain() is also invoked from stopRecord()/stop(),
+  // and firing an auto-SAVE from an abort would save a take the user discarded.
 }
 
 // ── Record control ───────────────────────────────────────────────────────────
 inline bool startRecord(uint8_t mode) {
   if (_state != ST_IDLE || !_buf) return false;
+  _recordName[0] = '\0';    // default (e.g. CLI ?REC,START): no latched name → auto "rec_N" on save.
+                            // The trigger path sets _recordName after this returns true.
   _mode = mode; _count = 0; _drops = 0;
   _recStart = millis();
   _state = ST_RECORDING;
@@ -413,6 +418,8 @@ inline bool saveClip(const char* name) {
   return ok;
 }
 
+inline int _cmpEventByTime(const void* a, const void* b);   // defined below; used by loadClip's re-sort
+
 inline bool loadClip(const char* name) {
   if (!_clipFS || _state != ST_IDLE || !_buf) return false;
   char path[48]; if (!_clipPath(path, sizeof(path), name)) return false;
@@ -425,6 +432,12 @@ inline bool loadClip(const char* name) {
   f.close();
   _count = got / sizeof(RecEvent);
   _mode  = h.mode;
+  // Force non-decreasing tMs regardless of on-flash order. replayTick()'s
+  // event cursor, clipDurationMs() (reads the LAST slot), and the phase-1b
+  // curve-chain builder all assume time-ordered events, so a corrupt or
+  // externally-authored .ncr can't drive replay off the rails. Same re-sort
+  // editEnd() performs after a timeline upload; idempotent for a good clip.
+  if (_count > 1) qsort(_buf, _count, sizeof(RecEvent), _cmpEventByTime);
   return _count > 0;
 }
 
@@ -619,6 +632,33 @@ inline void _autoClipName(char* out, size_t n) {
   strlcpy(out, "rec_x", n);   // pathological (10000 takes) — reuse a slot rather than fail
 }
 
+// Runaway-capture backstop (loop, Core 1). Auto-stop a recording that has run
+// past REC_MAX_MS AND SAVE it, so a long take is never silently lost — mirrors
+// pollControl()'s CTL_REC_TOGGLE save (configured slot name, or an auto "rec_N"
+// when blank). Kept separate from drain() (which also runs from stopRecord()/
+// stop()) so it can only fire from loop and never turns an abort into a save.
+// Resolve the clip name for saving the CURRENT recording: the name latched when
+// THIS take started (immune to a later Play/Record trigger writing _pendingName),
+// else an auto "rec_N". Used by every save-a-recording path so a poisoned
+// _pendingName can never redirect a take onto another clip's slot.
+inline const char* _takeName(char* autoBuf, size_t n) {
+  if (_recordName[0]) return (const char*)_recordName;
+  _autoClipName(autoBuf, n);
+  return autoBuf;
+}
+
+// Call right AFTER drain() so in-flight events are already flushed into _buf.
+inline void checkRecordBackstop() {
+  if (_state != ST_RECORDING || (millis() - _recStart) <= REC_MAX_MS) return;
+  _capturing = false;
+  _state = ST_IDLE;                          // saveClip() guards on ST_IDLE — drop first
+  char autoName[16];
+  const char* nm = _takeName(autoName, sizeof(autoName));
+  if (saveClip(nm))
+    Serial.printf("[REC] capped at %lus — saved clip '%s'\n",
+                  (unsigned long)(REC_MAX_MS / 1000), nm);
+}
+
 // Run a deferred Record/Play trigger from loop() (Core 1). Play toggles: press
 // while playing → stop, so one button both starts and stops (incl. a loop).
 inline void pollControl() {
@@ -629,17 +669,15 @@ inline void pollControl() {
     case CTL_REC_TOGGLE: {
       if (_state == ST_RECORDING) {
         stopRecord();
-        // ALWAYS save on stop so a take is never lost: use the trigger's
-        // configured clip name (overwrites that slot), or auto-name "rec_N" when
-        // it was left blank. stopRecord() already dropped us to ST_IDLE, so
-        // saveClip()'s idle-guard passes.
+        // ALWAYS save on stop so a take is never lost: use the name latched at
+        // START (_takeName, not the possibly-poisoned _pendingName), or auto-name
+        // "rec_N" when blank. stopRecord() already dropped us to ST_IDLE.
         char autoName[16];
-        const char* nm;
-        if (_pendingName[0]) nm = (const char*)_pendingName;
-        else { _autoClipName(autoName, sizeof(autoName)); nm = autoName; }
+        const char* nm = _takeName(autoName, sizeof(autoName));
         if (saveClip(nm)) Serial.printf("[REC] saved clip '%s'\n", nm);
       } else if (_state == ST_IDLE) {
-        startRecord(_pendingMode);
+        if (startRecord(_pendingMode))
+          strlcpy((char*)_recordName, (const char*)_pendingName, sizeof(_recordName));  // latch THIS take's name
       }
       break;
     }
@@ -653,7 +691,16 @@ inline void pollControl() {
       }
       break;
     case CTL_STOP:
-      stop();
+      if (_state == ST_RECORDING) {
+        // A STOP trigger during recording SAVES the take (the documented
+        // recording->save contract) — it must not discard it like a replay-abort.
+        stopRecord();                                  // flush + drop to ST_IDLE
+        char autoName[16];
+        const char* nm = _takeName(autoName, sizeof(autoName));
+        if (saveClip(nm)) Serial.printf("[REC] stopped — saved clip '%s'\n", nm);
+      } else {
+        stop();                                        // replay-abort (or idle) — nothing to save
+      }
       break;
   }
 }

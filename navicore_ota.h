@@ -331,7 +331,12 @@ inline void handleOtaEndPacket(const uint8_t *raw) {
   sendOtaAck(pkt.sourceWCB, pkt.sessionId, ok ? OTA_ST_OK : OTA_ST_ERR, otaWrittenOffset());
   if (ok) {
     Serial.println("[OTA] remote update verified — rebooting into new firmware...");
-    delay(300);   // let the ACK actually transmit before the radio drops
+    // Re-send the success ACK a few times: a single dropped ESP-NOW frame here
+    // would make the browser report the OTA FAILED even though the image is
+    // verified and the boot slot already switched. Cheap redundancy before the
+    // radio drops at restart. (Runs in loop()/Core 1 where OTA packets are drained.)
+    for (int r = 0; r < 3; r++) { delay(80); sendOtaAck(pkt.sourceWCB, pkt.sessionId, OTA_ST_OK, otaWrittenOffset()); }
+    delay(150);   // let the last ACK actually transmit before the radio drops
     ESP.restart();
   }
 }

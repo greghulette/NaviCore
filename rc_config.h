@@ -1056,6 +1056,11 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   return out;
 }
 
+// Re-seed request for processSwitches(): true at boot and set true again after
+// every config apply so a changed switch channel/positions re-seeds switchPrevPos
+// without firing a phantom action. Read + cleared on Core 1 in processSwitches().
+inline bool g_switchSeedPending = true;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Load config from JSON object (from SET_CONFIG WebSocket message)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1268,8 +1273,11 @@ bool rcConfigFromJSON(const JsonObject& doc) {
 
   if (doc.containsKey("wcbNetwork")) {
     JsonObject wcbObj = doc["wcbNetwork"];
-    rcConfig.wcbNetwork.macOct2  = (uint8_t)(wcbObj["macOct2"]  | rcConfig.wcbNetwork.macOct2);
-    rcConfig.wcbNetwork.macOct3  = (uint8_t)(wcbObj["macOct3"]  | rcConfig.wcbNetwork.macOct3);
+    // Presence-check, not '|': ArduinoJson's | treats a JSON 0 as "missing", but
+    // 0x00 is a legitimate (factory-default) MAC octet, so | would silently keep
+    // the old value when the user sets an octet to 0.
+    if (wcbObj.containsKey("macOct2")) rcConfig.wcbNetwork.macOct2 = (uint8_t)(wcbObj["macOct2"].as<int>() & 0xFF);
+    if (wcbObj.containsKey("macOct3")) rcConfig.wcbNetwork.macOct3 = (uint8_t)(wcbObj["macOct3"].as<int>() & 0xFF);
     strlcpy(rcConfig.wcbNetwork.password,
             wcbObj["password"] | rcConfig.wcbNetwork.password,
             sizeof(rcConfig.wcbNetwork.password));
@@ -1297,6 +1305,10 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     rcConfig.auxBaud[2] = (uint32_t)(auxObj["S5"]      | rcConfig.auxBaud[2]);
     rcConfig.maestroBaud = (uint32_t)(auxObj["maestro"] | rcConfig.maestroBaud);
   }
+  // A switch's channel/positions may have changed — re-seed switchPrevPos on the
+  // next SBUS frame so processSwitches doesn't fire a phantom action from a stale
+  // prior position. (Boot already starts with this true.)
+  g_switchSeedPending = true;
   return true;
 }
 
@@ -1779,8 +1791,9 @@ void rcConfigLoadNVS() {
     DynamicJsonDocument doc(256);
     if (deserializeJson(doc, s) == DeserializationError::Ok) {
       JsonObject root = doc.as<JsonObject>();
-      rcConfig.wcbNetwork.macOct2  = (uint8_t)(root["macOct2"]  | rcConfig.wcbNetwork.macOct2);
-      rcConfig.wcbNetwork.macOct3  = (uint8_t)(root["macOct3"]  | rcConfig.wcbNetwork.macOct3);
+      // Presence-check, not '|' — 0x00 is a legitimate MAC octet (see rcConfigFromJSON).
+      if (root.containsKey("macOct2")) rcConfig.wcbNetwork.macOct2 = (uint8_t)(root["macOct2"].as<int>() & 0xFF);
+      if (root.containsKey("macOct3")) rcConfig.wcbNetwork.macOct3 = (uint8_t)(root["macOct3"].as<int>() & 0xFF);
       strlcpy(rcConfig.wcbNetwork.password,
               root["password"] | rcConfig.wcbNetwork.password,
               sizeof(rcConfig.wcbNetwork.password));

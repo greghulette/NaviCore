@@ -90,8 +90,16 @@ public:
 
       // Gap-based delimiter: if too much time elapsed since the previous byte,
       // the previous frame must have ended.  Try to parse it before consuming
-      // the new byte as the start of a new frame.
-      if (inFrame_ && sinceLastByte > INTER_FRAME_GAP_US && bufIdx_ > 0) {
+      // the new byte as the start of a new frame. GATED on the buffer already
+      // holding a STRUCTURALLY COMPLETE frame: nowUs is sampled once per read()
+      // (line 76) and lastByteUs_ collapses to it after the first byte, so
+      // sinceLastByte exceeds the gap only on the FIRST byte drained in a call —
+      // frequently a mid-frame continuation byte. Flushing a PARTIAL there runs
+      // tryParseAndReset on an incomplete buffer (variant==0), which resets
+      // lockStreak_; under multi-ms loop timing that repeats every frame and the
+      // stream NEVER locks (silent total loss of servo control). A partial just
+      // keeps accumulating across read() calls instead.
+      if (inFrame_ && sinceLastByte > INTER_FRAME_GAP_US && bufIsCompleteFrame()) {
         gotFrame = tryParseAndReset() || gotFrame;
       }
 
@@ -107,6 +115,24 @@ public:
 
       buf_[bufIdx_++] = b;
 
+      // Eager length-based flush for a post-stall backlog. The gap check above
+      // uses a single micros() sampled once per read() call, so two frames that
+      // are BOTH sitting in the UART FIFO (drained back-to-back after a long
+      // loop() stall) have no detectable inter-frame gap — and once bytes are
+      // FIFO-buffered their original timing is gone, so only STRUCTURE can split
+      // them. Once the stream is LOCKED we know the exact frame length, so flush
+      // the instant a full frame's worth of bytes ends on a footer, splitting the
+      // backlog on frame boundaries instead of overflowing (which would discard
+      // both). Gated on a confirmed lock + the DETECTED length so it can never
+      // misfire on a 24-ch data byte that happens to be 0x00 at offset 24 (the
+      // 16-frame length is a prefix of the 24-frame). Pre-lock/noisy streams fall
+      // through to the unchanged gap-based path.
+      if (lockStreak_ >= LOCK_FRAMES && detectedFrameLen &&
+          bufIdx_ == detectedFrameLen && buf_[detectedFrameLen - 1] == SBUS_FOOTER) {
+        gotFrame = tryParseAndReset() || gotFrame;
+        continue;
+      }
+
       // Buffer-overflow guard — should never hit if framing works.
       if (bufIdx_ >= FRAME_LEN_24 + 4) {
         inFrame_ = false;
@@ -115,9 +141,10 @@ public:
       }
     }
 
-    // Also flush at end if a frame is sitting complete in the buffer and we
-    // haven't seen more bytes within the gap window.
-    if (inFrame_ && bufIdx_ > 0 && (micros() - lastByteUs_) > INTER_FRAME_GAP_US) {
+    // Also flush at end if a COMPLETE frame is sitting in the buffer and we
+    // haven't seen more bytes within the gap window. Same complete-frame gate as
+    // the mid-loop flush above — never flush a partial (it would reset the lock).
+    if (inFrame_ && bufIsCompleteFrame() && (micros() - lastByteUs_) > INTER_FRAME_GAP_US) {
       gotFrame = tryParseAndReset() || gotFrame;
     }
 
@@ -131,6 +158,15 @@ private:
   int      bufIdx_ = 0;
   bool     inFrame_ = false;
   unsigned long lastByteUs_ = 0;
+
+  // True when buf_ currently holds a structurally complete frame (exact length +
+  // header + footer) of either variant. The gap / post-loop flushes gate on this
+  // so a partial buffer is never flushed (which would reset the lock streak); a
+  // partial simply keeps accumulating across read() calls until it completes.
+  bool bufIsCompleteFrame() const {
+    return (bufIdx_ == FRAME_LEN_16 && buf_[0] == SBUS_HEADER && buf_[FRAME_LEN_16 - 1] == SBUS_FOOTER) ||
+           (bufIdx_ == FRAME_LEN_24 && buf_[0] == SBUS_HEADER && buf_[FRAME_LEN_24 - 1] == SBUS_FOOTER);
+  }
 
   // ── Frame-confirmation lock (noise rejection) ──────────────────────────────
   // Header + footer + exact length can be matched by RF noise / a half-booted

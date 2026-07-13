@@ -95,6 +95,17 @@ uint32_t      g_peerGraceUntil = 0;   // millis(): boards first heard before thi
 uint32_t      g_peerFlashUntil = 0;   // millis(): show the new-peer LED pulse until then (0 = not flashing)
 #define PEER_GRACE_MS 8000            // suppress the initial fleet-discovery burst for 8 s after wcb->begin()
 
+// ── Remote TRIGGER → deferred dispatch (Core 0 → Core 1) ────────────────────
+// A remote {"type":"TRIGGER"} arrives in onWCBCommand → rcTelemetry::handle() on
+// Core 0 (WiFi task). Dispatching it there would run the full action chain
+// (Maestro Serial2, HCR/MP3 aux-serial, WCB sends, speed/accel caches) on the
+// wrong core, racing processSbus() on Core 1 over the same UART/caches with no
+// lock. The TRIGGER handler instead enqueues here and drainRemoteTriggers()
+// (loop, Core 1) dispatches it, so remote and local triggers share the one
+// single-core dispatch path the Maestro/tap-timing/record-replay code assumes.
+struct RemoteTrigger { uint8_t mode, btn, tap; };
+QueueHandle_t remoteTriggerQueue = nullptr;
+
 // =============================================================================
 //  Pin assignments — RUNTIME, selected by the active board profile
 // =============================================================================
@@ -333,7 +344,8 @@ int oldValueMode    = 100;
 // (clean digital SBUS source), 2-4 for a noisy analog transmitter matrix.
 // Only a true sub-frame tap (press+release inside one ~9-14 ms frame interval)
 // is unrecoverable — a hard SBUS-protocol limit, not logic.
-bool matrixArmed       = true; // true → a confirmed-neutral release has armed the next press
+bool matrixArmed       = false; // must be re-armed by a confirmed neutral before the first fire
+                                // (starting true let a button already in-band at boot fire a phantom press)
 int  matrixCandidate   = 0;    // decoded button currently being debounced
 int  matrixCandCount   = 0;    // consecutive frames matrixCandidate has held in-band
 int  matrixNeutralCount = 0;   // consecutive NEUTRAL (decoded==0) frames — for release debounce
@@ -440,8 +452,15 @@ int pwmToButton(int val) {
 
 static inline uint16_t sbusToRange(int sbusVal, uint16_t outMin, uint16_t outMax) {
   long mapped = (long)(sbusVal - 172) * (outMax - outMin) / (1811 - 172) + outMin;
-  if (mapped < (long)outMin) mapped = outMin;
-  if (mapped > (long)outMax) mapped = outMax;
+  // Clamp to the numeric range regardless of endpoint order. A reversed output
+  // (posMin > posMax, e.g. a mirrored servo) makes the map produce a correct
+  // DESCENDING ramp; order-dependent clamps (outMin as floor, outMax as ceil)
+  // would then fight and pin every in-range value to one extreme. lo/hi fixes it
+  // and is behavior-identical in the normal outMin <= outMax case.
+  long lo = outMin < outMax ? outMin : outMax;
+  long hi = outMin < outMax ? outMax : outMin;
+  if (mapped < lo) mapped = lo;
+  if (mapped > hi) mapped = hi;
   return (uint16_t)mapped;
 }
 
@@ -482,9 +501,16 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
   Stream* dest = (slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast;
   if (!dest) return false;              // remote slot but stream not yet up
   uint8_t hdr[3] = { 0xAA, slot.device, (uint8_t)(cmd_compact & 0x7F) };
-  dest->write(hdr, 3);
-  if (payload && plen) dest->write(payload, plen);
-  return true;
+  const size_t frameLen = 3 + ((payload && plen) ? plen : 0);
+  // Remote (broadcast WCBStream) path: if this whole Pololu frame won't fit in
+  // the stream's buffer, flush first so a burst that programs many channels is
+  // split on FRAME boundaries into multiple ESP-NOW packets — never truncated
+  // mid-frame (which would forward a corrupt byte-stream to the remote Maestro).
+  if (slot.type != 1 && maestroBroadcast && maestroBroadcast->bytesFree() < frameLen)
+    maestroBroadcast->flushNow();
+  size_t wrote = dest->write(hdr, 3);
+  if (payload && plen) wrote += dest->write(payload, plen);
+  return wrote == frameLen;             // false if the sink dropped any byte (truncated)
 }
 
 // Valid Maestro channel guard (0-31 covers Micro/Mini Maestro 6/12/18/24).
@@ -543,12 +569,15 @@ static void maeSmoothInvalidateSlot(uint8_t id) {
 //   0xA2 GO_HOME      · 0xA4 STOP_SCRIPT · 0xA7 RESTART_SCRIPT_AT_SUB
 static void maestroSetTarget(uint8_t id, uint8_t ch, uint16_t pos) {
   if (!maestroChanOk(id, ch)) return;
+  if (pos > 16383) pos = 16383;   // target is 14-bit; clamp so an out-of-range value
+                                  // is capped, not wrapped to its low 14 bits (wrong servo pos)
   uint8_t p[3] = { ch, (uint8_t)(pos & 0x7F), (uint8_t)((pos >> 7) & 0x7F) };
   maestroWrite(id, 0x84, p, 3);
   navirec::shadowSetTarget(id, ch, pos);   // record/replay last-position shadow (all moves)
 }
 static void maestroSetSpeed(uint8_t id, uint8_t ch, uint16_t spd) {
   if (!maestroChanOk(id, ch)) return;
+  if (spd > 16383) spd = 16383;   // speed is 14-bit; saturate instead of aliasing (16384 -> 0 = unlimited)
   uint8_t p[3] = { ch, (uint8_t)(spd & 0x7F), (uint8_t)((spd >> 7) & 0x7F) };
   // Cache only what actually went out — a dropped write must NOT mark the
   // channel "applied" (id validity is guaranteed once maestroWrite returns true).
@@ -982,13 +1011,22 @@ static void executeHcrAction(const RcAction& a) {
 // No trailing newline: this travels as a WCB command (the WCB strips the ';'
 // and routes 'A...' to its MP3 driver) — not a raw serial forward.
 static String mp3FormatCommand(uint8_t fn, int16_t arg) {
+  // Validate arg with the SAME ranges mp3SendLocal enforces so both transports
+  // accept exactly the same set of actions — a WCB-routed MP3 command must not
+  // forward a garbage track/index/volume the local path would have rejected.
   switch (fn) {
-    case MP3_PLAY:   return String(";A,PLAY,")   + arg;   // track 1-255
-    case MP3_PLAYFS: return String(";A,PLAYFS,") + arg;   // index 0-255
+    case MP3_PLAY:
+      if (arg < 1 || arg > 255) return "";                // track 1-255
+      return String(";A,PLAY,")   + arg;
+    case MP3_PLAYFS:
+      if (arg < 0 || arg > 255) return "";                // index 0-255
+      return String(";A,PLAYFS,") + arg;
     case MP3_STOP:   return ";A,STOP";
     case MP3_NEXT:   return ";A,NEXT";
     case MP3_PREV:   return ";A,PREV";
-    case MP3_VOL:    return String(";A,VOL,")    + arg;   // 0=loudest..64=inaudible
+    case MP3_VOL:
+      if (arg < 0 || arg > 64) return "";                 // 0=loudest..64=inaudible
+      return String(";A,VOL,")    + arg;
     case MP3_VOLUP:  return ";A,VOLUP";
     case MP3_VOLDN:  return ";A,VOLDN";
     default:         return "";
@@ -1311,15 +1349,24 @@ void checkDeferredTap() {
 //  Switch processing
 // =============================================================================
 void processSwitches() {
+  // Seed switchPrevPos with each switch's actual decoded position WITHOUT firing
+  // whenever a re-seed is pending: at boot (g_switchSeedPending starts true) and
+  // after EVERY config apply (rcConfigFromJSON sets it), so changing a switch's
+  // channel/positions via SET_CONFIG/RESET_DEFAULTS can't fire a phantom action
+  // from a now-stale switchPrevPos[]. processSbus only reaches here on a valid,
+  // non-failsafe frame, so the pending seed lands on the first valid frame after
+  // the change. (Matches the matrix debounce, which re-arms on a confirmed neutral.)
   for (int i = 0; i < RC_NUM_SWITCHES; i++) {
     RcSwitch& sw = rcConfig.switches[i];
     if (sw.channel < 1 || sw.channel > 24) continue;
     int pos = readSwitchPos(sbusValues[sw.channel - 1], sw.positions);
+    if (g_switchSeedPending) { switchPrevPos[i] = pos; continue; }   // seed only, don't fire
     if (pos == switchPrevPos[i]) continue;
     switchPrevPos[i] = pos;
     RcTier& tier = sw.t[pos];
     for (int ai = 0; ai < tier.count; ai++) rcExecuteAction(tier.a[ai]);
   }
+  g_switchSeedPending = false;
 }
 
 // =============================================================================
@@ -1405,6 +1452,11 @@ void processKnobs() {
     int m = 1;
     if (kn.modeAware) {
       if (kn.modeSwitchOverride >= 0) {
+        // The override decodes the 3 modes from the switch's SBUS band. A
+        // 2-POSITION switch only reads the low/high bands (sv<582 / sv>=1401),
+        // so it can address modes 1 and 3 but never mode 2 — a mode override
+        // needs a 3-position switch to reach all three. The config tool only
+        // offers 3-position switches here for that reason.
         const int sv = readBoundSwitchSbus(kn.modeSwitchOverride);
         m = (sv < 0) ? FunctionSwState : (sv < 582 ? 1 : (sv < 1401 ? 2 : 3));
       } else {
@@ -1463,8 +1515,10 @@ void processKnobs() {
         maestroSetTarget(mid, mch, mapped);
         navirec::captureMaestroKf(mid, mch, mapped);   // knob keyframe
       } else if (kn.function == KF_HCR_VOLUME) {
-        // out.target is the HCR audio chan (0/1/2/3 = V/A/B/All); mapped is volume 0-99
-        dispatchHcrVolume(out.target, (uint8_t)mapped);
+        // out.target is the HCR audio chan (0/1/2/3 = V/A/B/All); mapped is volume 0-99.
+        // Clamp before the uint8 cast: a posMin/posMax above 255 would otherwise
+        // wrap (e.g. 300 → 44) instead of pinning to the max volume.
+        dispatchHcrVolume(out.target, (uint8_t)(mapped > 99 ? 99 : mapped));
       }
     }
   }
@@ -1624,6 +1678,17 @@ static void __attribute__((noinline)) queueRemoteCli(uint8_t relay, const char* 
   m.relay = relay;
   strlcpy(m.cmd, command, sizeof(m.cmd));
   xQueueSend(remoteCliQueue, &m, 0);   // non-blocking; drop under load
+}
+
+// Enqueue a remote TRIGGER for drainRemoteTriggers() (loop, Core 1). Called from
+// rcTelemetry::handle() on the Core-0 ESP-NOW callback; noinline keeps the POD
+// off that callback's stack frame (same discipline as queueRemoteCli). Args are
+// already range-validated by the caller. Non-static: rc_telemetry.h forward-
+// declares it (like rcDispatch) since the header is compiled before this point.
+void __attribute__((noinline)) queueRemoteTrigger(int mode, int btn, uint8_t tap) {
+  if (!remoteTriggerQueue) return;
+  RemoteTrigger t{ (uint8_t)mode, (uint8_t)btn, tap };
+  xQueueSend(remoteTriggerQueue, &t, 0);   // non-blocking; drop under load
 }
 
 // =============================================================================
@@ -2605,8 +2670,18 @@ void setup() {
     setStatusLed(C_ORANGE, 200);   // show immediately for the rest of setup()
   } else {
     wcbReady = true;   // ESP-NOW is up — wcb-> calls are now safe
-    wcb->onCommand(onWCBCommand);
+    // Create the remote-TRIGGER queue BEFORE registering onCommand so a TRIGGER
+    // arriving the instant the callback is live has a live queue to land in
+    // (queueRemoteTrigger no-ops on a null queue, so a miss is only dropped, but
+    // ordering it first avoids losing the very first remote trigger).
+    remoteTriggerQueue = xQueueCreate(8, sizeof(RemoteTrigger));
+    remoteCliQueue     = xQueueCreate(3, sizeof(RemoteCliMsg));  // relayed CLI lines → drainRemoteCli()
+    wcb->onCommand(onWCBCommand);   // both queues must be live BEFORE the callback that feeds them
     wcb->onRawPacket(naviota::otaRawPacketHook);   // OTA control/data structs (55/243 B) over the mesh
+    // Create the OTA packet queue here (Core 1) instead of lazily inside the
+    // Core-0 RX callback, so the very first OTA frame can't be lost to the
+    // create/publish race. The lazy-create in enqueueOtaPacket() stays as a fallback.
+    naviota::otaPktQueue = xQueueCreate(12, sizeof(naviota::OtaPktSlot));
     // WDP device-identity advertising (WCB_Client 1.7.0 "WDP-DA") — announce this
     // NaviCore on the mesh so every WCB auto-discovers it (it appears in ?WDP,LIST
     // / the config tool with its firmware + board, no manual labeling). The advert
@@ -2627,7 +2702,6 @@ void setup() {
     peerEventQueue   = xQueueCreate(8, sizeof(uint8_t));
     g_peerGraceUntil = millis() + PEER_GRACE_MS;
     wcb->onNeighbor(onWcbNeighbor);
-    remoteCliQueue = xQueueCreate(3, sizeof(RemoteCliMsg));  // relayed CLI lines → drainRemoteCli()
     Serial.printf("[WCB] Joined network as device ID %d (quantity=%d)\n",
                   rcConfig.wcbNetwork.deviceId, rcConfig.wcbNetwork.quantity);
   }
@@ -2770,6 +2844,23 @@ void drainPeerEvents() {
   }
 }
 
+// Dispatch remote TRIGGERs deferred from the Core-0 onWCBCommand callback (loop,
+// Core 1). Running rcDispatch here — the same core as a local matrix press —
+// means the Maestro UART, HCR/MP3 aux-serial, speed/accel caches, tap-timing
+// state machine and record-replay gate are all touched from ONE core, with no
+// cross-core race. Args are re-validated defensively even though the enqueuer
+// already checked them.
+void drainRemoteTriggers() {
+  if (!remoteTriggerQueue) return;
+  RemoteTrigger t;
+  while (xQueueReceive(remoteTriggerQueue, &t, 0) == pdTRUE) {
+    if (t.mode < 1 || t.mode > 3) continue;
+    if (t.btn  < 1 || t.btn  > RC_NUM_THRESHOLDS) continue;
+    uint8_t tap = t.tap < 1 ? 1 : (t.tap > 3 ? 3 : t.tap);
+    rcDispatch(t.mode * 100 + t.btn, tap);
+  }
+}
+
 void loop() {
   // WCB — heartbeats, ACKs, WCBStream flushes
   if (wcb && wcbReady) wcb->update();
@@ -2789,10 +2880,17 @@ void loop() {
   // alert (deferred here from the Core-0 onNeighbor callback). Cheap no-op idle.
   drainPeerEvents();
 
+  // Remote TRIGGER — dispatch any {"type":"TRIGGER"} relayed from the config tool
+  // / mesh, deferred here from the Core-0 onWCBCommand callback so it shares the
+  // local matrix press's single-core dispatch path (no cross-core Maestro/cache
+  // race). Cheap no-op when nothing is pending.
+  drainRemoteTriggers();
+
   // Record/replay — drain captured events into the PSRAM clip (Core-1 sole
   // writer) and advance any active replay. Both cheap no-ops when idle.
   navirec::pollControl();   // run any Record/Play trigger deferred from dispatch (Core-1 safe)
   navirec::drain();
+  navirec::checkRecordBackstop();   // auto-stop+SAVE a capture that ran past REC_MAX_MS (never lose a long take)
   navirec::replayTick();
   if (navirec::takeReplayDone()) Serial.println("[REC] ▶ playback complete");
 

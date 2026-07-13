@@ -80,6 +80,7 @@ extern bool          lostFrameOld;       // SBUS lost-frame flag (no signal)
 extern bool          sbusFailsafe;       // SBUS failsafe flag (TX lost / disarmed)
 extern bool          wcbReady;           // true only after wcb->begin() succeeded (ESP-NOW usable)
 void                rcDispatch(int buttonId, uint8_t tapCount);
+void                queueRemoteTrigger(int mode, int btn, uint8_t tap);   // Core-0 → loop hop for remote TRIGGER (defined in .ino)
 void                resetModeAwareKnobs();   // re-arm mode-aware knobs on a mode change (defined in .ino)
 
 // Forward declarations from rc_config.h — needed for SET_CONFIG / GET_CONFIG
@@ -165,8 +166,11 @@ inline FragSession* _findOrAllocSession(uint16_t sid, uint8_t total, uint8_t sen
     }
   }
   for (auto& s : _fragPool) {
-    if (s.sid == sid)             return &s;
-    if (!freeSlot && s.sid == 0)  freeSlot = &s;
+    // Match on (sid, senderID), not sid alone: two config tools each start
+    // _nextOutSid at 1, so without the senderID check their sid=1 sessions would
+    // collide and interleave fragments into one corrupt reassembly.
+    if (s.sid == sid && s.senderID == senderID) return &s;
+    if (!freeSlot && s.sid == 0)                freeSlot = &s;
   }
   if (!freeSlot) return nullptr;                // pool exhausted — drop
   freeSlot->sid      = sid;
@@ -240,6 +244,7 @@ struct OutboundSend {
   uint16_t next       = 0;   // index of the next fragment to send (0-based)
   uint32_t lastSendMs = 0;   // millis() of the last fragment sent
   String   payload;          // full wrapped CONFIG JSON, held for the send
+  uint16_t chunkOff[FRAG_MAX_PARTS + 1] = {0};   // codepoint-safe byte boundaries: slice idx = [chunkOff[idx], chunkOff[idx+1])
 };
 inline OutboundSend _outSend;
 
@@ -247,11 +252,13 @@ inline OutboundSend _outSend;
 // fatal envelope-size error (caller aborts the job); MAC-layer loss is
 // handled by ETM retries, not reported here.
 inline bool _sendFragment(uint16_t idx) {
-  const size_t off = (size_t)idx * FRAG_CHUNK_BYTES;
-  if (off >= _outSend.payload.length()) return false;          // out of range — shouldn't happen
-  const size_t remaining = _outSend.payload.length() - off;
-  const size_t len = (remaining < FRAG_CHUNK_BYTES) ? remaining : FRAG_CHUNK_BYTES;
-  String slice = _outSend.payload.substring(off, off + len);
+  if (idx >= _outSend.total) return false;                     // out of range — shouldn't happen
+  // Slice on the precomputed codepoint-safe boundaries (see _startGetConfigSend)
+  // so a multi-byte UTF-8 char is never split across two fragments — the tool
+  // reassembles by concatenating slices and would otherwise show U+FFFD.
+  const size_t off = _outSend.chunkOff[idx];
+  const size_t end = _outSend.chunkOff[idx + 1];
+  String slice = _outSend.payload.substring(off, end);
 
   // ArduinoJson escapes quotes / backslashes / control chars in the slice.
   StaticJsonDocument<300> env;
@@ -290,11 +297,32 @@ inline bool _startGetConfigSend(uint8_t target) {
   wrapped += body;
   wrapped += "}";
 
-  const size_t total = (wrapped.length() + FRAG_CHUNK_BYTES - 1) / FRAG_CHUNK_BYTES;
+  // Split into codepoint-safe chunks (each <= FRAG_CHUNK_BYTES bytes, never cutting
+  // a multi-byte UTF-8 char) and record the byte boundaries. `total` is the chunk
+  // count; _sendFragment slices on these boundaries so a multi-byte value in the
+  // CONFIG can't be torn across two fragments (the receiver positionally join()s).
+  size_t total = 0;
+  {
+    size_t i = 0; const size_t N = wrapped.length();
+    _outSend.chunkOff[0] = 0;
+    while (i < N && total < FRAG_MAX_PARTS) {
+      size_t take = 0;
+      while (i + take < N) {
+        unsigned char c = (unsigned char)wrapped[i + take];
+        size_t cp = (c < 0x80) ? 1 : ((c >> 5) == 0x6) ? 2 : ((c >> 4) == 0xE) ? 3 : ((c >> 3) == 0x1E) ? 4 : 1;
+        if (take + cp > FRAG_CHUNK_BYTES) break;
+        take += cp;
+      }
+      if (take == 0) take = 1;                        // pathological lone continuation byte — make progress
+      i += take; total++;
+      _outSend.chunkOff[total] = (uint16_t)i;
+    }
+    if (i < N) total = (size_t)FRAG_MAX_PARTS + 1;    // didn't fit within the part budget — force the bail
+  }
   if (total == 0 || total > FRAG_MAX_PARTS) {
-    Serial.printf("[RC] CONFIG send bailed: %u bytes needs %u fragments (max %u). "
+    Serial.printf("[RC] CONFIG send bailed: %u bytes needs > %u fragments. "
                   "Use Direct USB for this size.\n",
-                  (unsigned)wrapped.length(), (unsigned)total, (unsigned)FRAG_MAX_PARTS);
+                  (unsigned)wrapped.length(), (unsigned)FRAG_MAX_PARTS);
     return false;
   }
 
@@ -682,6 +710,9 @@ inline void setWcbAlias(int id, const char* name) {
   if (id < 1 || id > 20 || !name) return;
   char*  dst = _wcbAlias[id];
   size_t cap = sizeof(_wcbAlias[id]) - 1, j = 0;
+  dst[0] = '\0';   // terminate first so a racing Core-1 %s read during the rewrite
+                   // sees an empty/short-but-terminated string, never a torn long one
+                   // (the last byte dst[24] is invariantly '\0', so no row over-read either)
   for (size_t k = 0; name[k] && j < cap; k++) {
     char c = name[k];
     if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;   // JSON-hostile chars
@@ -811,6 +842,11 @@ inline bool handle(uint8_t senderID, const char* command) {
       Serial.println("[RC] Fragment pool exhausted — dropping");
       return true;
     }
+    // The session's total is fixed by its FIRST fragment. A later envelope for
+    // the same sid that disagrees on 'of' is malformed/spoofed — its 'f' could
+    // index past the real part set and inflate 'got' to false-complete the
+    // session with missing/stale parts. Drop the mismatched fragment.
+    if ((uint8_t)total != sess->total) return true;
     // Use the explicit received[] flag rather than parts[].length() so an
     // empty slice (legitimately possible if the sender ever produces one)
     // can't masquerade as "not yet received" on duplicate arrivals.
@@ -830,7 +866,13 @@ inline bool handle(uint8_t senderID, const char* command) {
                     (unsigned)sid, f, total, sess->got,
                     isNewFragment ? "" : " (dup)");
     }
-    if (sess->got >= sess->total) {
+    // Complete only when EVERY part 0..total-1 is actually present — don't trust
+    // the got counter alone to decide reassembly is ready.
+    bool complete = sess->got >= sess->total;
+    if (complete)
+      for (uint8_t i = 0; i < sess->total; i++)
+        if (!sess->received[i]) { complete = false; break; }
+    if (complete) {
       // Reassemble — concatenate all parts in order.
       String full;
       full.reserve(sess->total * FRAG_CHUNK_BYTES);
@@ -903,10 +945,17 @@ inline bool handle(uint8_t senderID, const char* command) {
   }
 
   // ── TRIGGER ──────────────────────────────────────────────────────────────
-  // Same shape the config tool already sends over Web Serial.  Goes through
-  // the SAME rcDispatch path as a local matrix press — so any
-  // dispatch-side telemetry (emitTrig, dispatch-echo when that lands) fires
-  // exactly once per remote trigger, indistinguishable from a local press.
+  // Same shape the config tool already sends over Web Serial. It must reach the
+  // SAME rcDispatch path as a local matrix press — but handle() runs in the
+  // ESP-NOW receive callback on Core 0, and rcDispatch runs the full action
+  // chain (Maestro Serial2 writes, HCR/MP3 aux-serial, WCB sends, speed/accel
+  // caches) which ALSO runs from processSbus() on Core 1. Two cores hitting the
+  // same UART/caches with no lock interleaves bytes and corrupts frames — the
+  // exact cross-core hazard every other heavy handler here defers. So enqueue
+  // and let drainRemoteTriggers() (loop, Core 1) dispatch it: remote and local
+  // triggers then share the single-core dispatch path the Maestro / tap-timing /
+  // record-replay subsystems assume. Dispatch-side telemetry still fires exactly
+  // once, indistinguishable from a local press.
   if (!strcmp(type, "TRIGGER")) {
     int mode = doc["mode"] | 0;
     int btn  = doc["btn"]  | 0;
@@ -914,7 +963,7 @@ inline bool handle(uint8_t senderID, const char* command) {
     if (mode >= 1 && mode <= 3 &&
         btn  >= 1 && btn  <= RC_NUM_THRESHOLDS) {
       if (tap < 1) tap = 1; else if (tap > 3) tap = 3;
-      rcDispatch(mode * 100 + btn, (uint8_t)tap);
+      queueRemoteTrigger(mode, btn, (uint8_t)tap);   // defer to Core 1 (see above)
     }
     return true;
   }

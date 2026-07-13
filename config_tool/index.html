@@ -2273,7 +2273,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">101243QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">130908QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3654,6 +3654,8 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true) {
   }
   port   = p;
   writer = w;
+  readBuffer = '';   // drop any partial (newline-less) line left from a prior session so it can't
+                     // prepend garbage to the first line of this one (covers Connect + post-flash reopen)
   startReading();
   setConnected(true);
   document.getElementById('status-text').textContent = 'Waiting for board…';
@@ -4065,6 +4067,23 @@ const FRAG_MAX_PARTS   = 192;   // matches RC firmware (rc_telemetry.h); 192 × 
 const FRAG_MAX_ENV_BYTES = 187;
 let   _nextOutSid      = 1;
 
+// Split a string into chunks each <= maxBytes UTF-8 bytes, never cutting a
+// codepoint. Iterating `for..of` walks by code point (surrogate pairs stay
+// whole), so every chunk is a valid string and concatenating them reproduces the
+// input exactly — which the RC's reassembly (it joins the `s` slices) requires.
+function _utf8Chunks(str, maxBytes) {
+  const enc = new TextEncoder();
+  const chunks = [];
+  let cur = '', curBytes = 0;
+  for (const ch of str) {
+    const chBytes = enc.encode(ch).length;
+    if (curBytes + chBytes > maxBytes && cur) { chunks.push(cur); cur = ''; curBytes = 0; }
+    cur += ch; curBytes += chBytes;
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
 async function sendJSON(obj, silent = false) {
   if (!viaWcbActive) {
     await sendLine(JSON.stringify(obj), silent);
@@ -4091,8 +4110,13 @@ async function sendJSON(obj, silent = false) {
   // "Missing CRC".  Previously this gated on 250 (the raw ESP-NOW MTU),
   // which let 188-245 byte commands through to be silently dropped — a
   // real hole reachable by diff-saves that touch one mid-size branch.
-  // Anything larger than 187 must go through the fragmenter below.
-  if (inner.length <= FRAG_MAX_ENV_BYTES) {
+  // Anything larger than 187 must go through the fragmenter below. Measure the
+  // UTF-8 BYTE length, not inner.length (UTF-16 code units): a payload can be
+  // <=187 code units but >187 bytes with any multi-byte character, which would
+  // wrongly skip fragmentation, get its CRC truncated by the bridge, and be
+  // silently dropped by the RC as "Missing CRC".
+  const innerBytes = new TextEncoder().encode(inner).length;
+  if (innerBytes <= FRAG_MAX_ENV_BYTES) {
     await sendLine(prefix + inner, silent);
     return;
   }
@@ -4101,9 +4125,15 @@ async function sendJSON(obj, silent = false) {
   // sid==0 as the "free slot" sentinel in its session pool).
   const sid = _nextOutSid++;
   if (_nextOutSid > 65535) _nextOutSid = 1;
-  const total = Math.ceil(inner.length / FRAG_CHUNK_BYTES);
+  // Chunk on UTF-8 byte budget + codepoint boundaries (not code-unit substring),
+  // so a multi-byte character is never split across two fragments — the RC joins
+  // the `s` slices, so the reassembled JSON must stay valid UTF-8.
+  const chunks = _utf8Chunks(inner, FRAG_CHUNK_BYTES);
+  const total  = chunks.length;
   if (total > FRAG_MAX_PARTS) {
-    console.error(`sendJSON: payload would need ${total} fragments (max ${FRAG_MAX_PARTS})`);
+    const msg = `Send aborted — payload needs ${total} fragments (max ${FRAG_MAX_PARTS}). Use Direct USB for a config this large.`;
+    console.error('sendJSON: ' + msg);
+    appendTerminalLine('< [config] ' + msg, 'error');   // surface it, don't fail silently
     return;
   }
   for (let i = 0; i < total; i++) {
@@ -4115,13 +4145,16 @@ async function sendJSON(obj, silent = false) {
       console.warn(`sendJSON: port closed mid-send, aborted at fragment ${i + 1}/${total}`);
       return;
     }
-    const slice = inner.substring(i * FRAG_CHUNK_BYTES, (i + 1) * FRAG_CHUNK_BYTES);
+    const slice = chunks[i];
     const env   = JSON.stringify({ f: i + 1, of: total, sid, s: slice });
-    // Guard against envelope drift past the bridge's CRC-suffix budget.
-    // If this ever fires the RC side will see "Missing CRC" — see the
-    // FRAG_MAX_ENV_BYTES note above for the root cause.
-    if (env.length > FRAG_MAX_ENV_BYTES) {
-      console.error(`sendJSON: fragment ${i + 1}/${total} envelope ${env.length} > ${FRAG_MAX_ENV_BYTES}-byte cap — reduce FRAG_CHUNK_BYTES`);
+    // Guard against envelope drift past the bridge's CRC-suffix budget. Measure
+    // BYTES (the envelope is escaped + may carry multi-byte chars). If this ever
+    // fires the RC side would see "Missing CRC" — reduce FRAG_CHUNK_BYTES.
+    const envBytes = new TextEncoder().encode(env).length;
+    if (envBytes > FRAG_MAX_ENV_BYTES) {
+      const msg = `Send aborted at fragment ${i + 1}/${total} — envelope ${envBytes} B over the ${FRAG_MAX_ENV_BYTES} B cap (heavily-escaped value). Use Direct USB.`;
+      console.error('sendJSON: ' + msg);
+      appendTerminalLine('< [config] ' + msg, 'error');   // surface it, don't fail silently
       return;
     }
     await sendLine(prefix + env, silent);
@@ -4890,7 +4923,9 @@ function _clipDlFeed(src, text) {
 function _tlDownloadComplete() {
   const dl = _tlDownload;
   if (!dl) return;
-  const expected = +(dl.header && dl.header.count) ?? -1;
+  // unary + always yields a number (NaN, never null/undefined), so `?? -1` never
+  // fired — make the -1 sentinel real so a missing/NaN count is caught by >=0.
+  const expected = (dl.header && Number.isFinite(+dl.header.count)) ? +dl.header.count : -1;
   if (!(expected >= 0) || dl.events.length !== expected) {
     _tlDownload = null;
     _tlShowLoadError(`Download incomplete — got ${dl ? dl.events.length : 0} of ${dl && dl.header ? dl.header.count : '?'} events.` +
@@ -5213,7 +5248,10 @@ function _tlChannelRange(track) {
 // Clamp a µs value to a maestro channel's imported endpoints (or just ≥0).
 function _tlClampUs(track, us) {
   const cr = _tlChannelRange(track);
-  return cr ? Math.max(cr.minUs, Math.min(cr.maxUs, us)) : Math.max(0, us);
+  // No imported range → clamp to a generous servo µs band so a keyframe drag can't
+  // push pos past the servo travel (or past uint16 once scaled to ¼µs on the wire).
+  // Every timeline write site funnels through here, so this covers them all.
+  return cr ? Math.max(cr.minUs, Math.min(cr.maxUs, us)) : Math.max(0, Math.min(2600, us));
 }
 
 function _tlTrackList() {
@@ -6226,7 +6264,9 @@ function _tlApplyEasing() {
     const t = Math.round(kfA.t + (kfB.t - kfA.t) * (i / steps));
     const v = valA + (valB - valA) * frac;
     const kf = { id: _tlId(), t };
-    if (a.kind === 'maestro') kf.pos = Math.max(0, Math.round(v));
+    // v is ¼µs; clamp through _tlClampUs (µs) like every other insert so eased
+    // points on a channel with imported limits stay within the servo band.
+    if (a.kind === 'maestro') kf.pos = Math.round(_tlClampUs({ kind: 'maestro', key: a.key }, v / 4) * 4);
     else kf.vol = Math.max(0, Math.min(99, Math.round(v)));
     inserted.push(kf);
   }
@@ -6636,7 +6676,11 @@ window.addEventListener('keydown', e => {
 
 // ── Read loop ──────────────────────────────────────────────────────────────
 async function startReading() {
-  const decoder = new TextDecoder();
+  // Persist decoder state across reads with {stream:true} so a multi-byte UTF-8
+  // character split across two USB chunks is reassembled instead of turning into
+  // mojibake (corrupted clip names / terminal text). Reset on error recovery
+  // below since a TextDecoder can't be reset in place.
+  let decoder = new TextDecoder();
   while (port && port.readable && !disconnecting) {
     try {
       reader = port.readable.getReader();
@@ -6644,7 +6688,7 @@ async function startReading() {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          readBuffer += decoder.decode(value);
+          readBuffer += decoder.decode(value, { stream: true });
           let idx;
           while ((idx = readBuffer.indexOf('\n')) !== -1) {
             const line = readBuffer.slice(0, idx).trim();
@@ -6660,6 +6704,7 @@ async function startReading() {
       if (!port || disconnecting) break;
       console.warn('Read recovered after:', e.name || 'error', '— continuing');
       readBuffer = '';
+      decoder = new TextDecoder();   // drop any half-consumed multi-byte state so it can't prepend garbage
       await new Promise(r => setTimeout(r, 50));
     }
   }
@@ -7019,6 +7064,16 @@ function handleBoardMessage(line) {
     // this snapshot — typically a single section (mappings or thresholds)
     // instead of all ~3 KB of config.  See _diffConfigBranches.
     _configBaseline = _deepClone(config);
+    // A fresh board snapshot just became the diff baseline. Any SET_CONFIG still
+    // awaiting ACK is now stale — its captured baseline predates this Refresh, so
+    // letting the late ACK advance _configBaseline to it (ACK handler above) would
+    // corrupt subsequent diff-saves. Drop the in-flight save so the delayed ACK is
+    // ignored — mirrors the NACK / disconnect cleanup.
+    if (_pendingSaveBaseline) {
+      _pendingSaveBaseline = null;
+      if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
+      appendTerminalLine('< [config] Refresh loaded fresh board state — in-flight Save baseline discarded (re-Save if needed).', 'rx');
+    }
     // Maestro-channel migration, ORDER-CRITICAL: fold any localStorage-era
     // import into config AFTER the baseline (so the diff sees it and Save
     // ships it to the board), THEN sync the mirror to match the config
@@ -8763,12 +8818,14 @@ function refreshTierState(tier) {
     addBtn.disabled = atMax;
     addBtn.textContent = atMax ? `Max ${MAX_ACTIONS_PER_TIER} actions` : '+ Add action';
   }
-  // Tab badge = number of CONFIGURED actions (a row with a type chosen), so a
-  // tier with actions is obvious even while its tab is hidden.
+  // Tab badge = number of actions that will actually be SAVED, so it can't
+  // overstate. Count only rows readActionFromUI() returns non-null for — the same
+  // test collectTierActions uses — because a row with a type chosen but a blank
+  // required field (e.g. an empty WCB/serial command) is silently dropped on save.
   const countEl = document.getElementById(`tier-tab-count-${tier}`);
   if (countEl) {
     let n = 0;
-    rowEls.forEach(r => { const sel = r.querySelector('select'); if (sel && sel.value) n++; });
+    rowEls.forEach(r => { if (readActionFromUI(tier, r.dataset.ai)) n++; });
     countEl.textContent = n ? String(n) : '';
     countEl.classList.toggle('empty', n === 0);
   }
@@ -8924,6 +8981,10 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
   const curChSel = document.getElementById(fid + '-maech');
   const ch = parts ? (+parts[1] || 0) : (curChSel ? +curChSel.value : 0);
   const rawArg = parts ? (+parts[2] || 0) : null;    // ¼µs for setTarget; raw for speed/accel
+  // Preserve the entered µs across a re-render (a channel change rebuilds these
+  // fields) — read the live value BEFORE the clear below. Only on a re-render
+  // (parts==null); a fresh load (parts!=null) uses the stored value.
+  const prevPosUs = (!parts && document.getElementById(fid + '-maeval')) ? +document.getElementById(fid + '-maeval').value : null;
   argWrap.innerHTML = '';
 
   const addChannel = () => {
@@ -8959,13 +9020,29 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
     addChannel();
     const info = _maestroChInfo(slot, ch);
     const lo = info ? Math.round(info.min / 4) : 500, hi = info ? Math.round(info.max / 4) : 2500;
-    const posUs = rawArg != null ? Math.round(rawArg / 4) : (info ? Math.round((lo + hi) / 2) : 1500);
-    numField('Position (µs)', fid + '-maeval', lo, hi, Math.max(lo, Math.min(hi, posUs)));
+    // On a channel-change re-render, keep the entered µs if it's valid for the NEW
+    // channel's range (don't reset to midpoint); a genuine command switch, or a
+    // value out of the new range, falls back to the midpoint/1500 default.
+    const posUs = rawArg != null ? Math.round(rawArg / 4)
+                : (prevPosUs != null && Number.isFinite(prevPosUs) && prevPosUs >= lo && prevPosUs <= hi) ? prevPosUs
+                : (info ? Math.round((lo + hi) / 2) : 1500);
+    // Show the STORED value, don't snap it to the channel endpoints — a stored
+    // position outside the imported min/max (or after the endpoints were re-
+    // imported narrower) must survive an edit-save cycle, not be silently
+    // rewritten to the clamp bound. Warn instead so the user can keep or fix it.
+    const posInp = numField('Position (µs)', fid + '-maeval', lo, hi, posUs);
+    if (rawArg != null) posInp.dataset.rawArg = String(rawArg);   // remember exact ¼µs to avoid a quantizing round-trip on an untouched save
     if (info) {
       const hint = document.createElement('span');
       hint.style.cssText = 'font-size:10px;color:var(--accent2);align-self:center';
       hint.textContent = `${info.name || 'servo'} · ${lo}–${hi}µs`;
       argWrap.appendChild(hint);
+    }
+    if (info && (posUs < lo || posUs > hi)) {
+      const warn = document.createElement('span');
+      warn.style.cssText = 'font-size:10px;color:var(--red);align-self:center';
+      warn.textContent = `⚠ ${posUs}µs outside ${lo}–${hi}µs`;
+      argWrap.appendChild(warn);
     }
   } else if (cmd === 'applyProfile') {
     // Set this Maestro's ACTIVE smoothing master — joysticks driving this Maestro
@@ -8989,7 +9066,12 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
     addChannel();
     const spd0 = parts ? (+parts[2] || 0) : (document.getElementById(fid + '-maespd') ? +document.getElementById(fid + '-maespd').value : 150);
     const acc0 = parts ? (+parts[3] || 0) : (document.getElementById(fid + '-maeacc') ? +document.getElementById(fid + '-maeacc').value : 0);
-    sliderField('Speed (0=off)', fid + '-maespd', 500, Math.max(0, Math.min(500, spd0)), 'Maestro speed limit. 0 = off (instant). Lower = smoother/slower. Full range is 0-16383 but 500+ is effectively instant.');
+    // Extend the slider past the usual 0-500 smoothing range only when a stored
+    // value needs it, so a speed >500 round-trips instead of snapping to 500 on
+    // an edit-save cycle (the save path allows up to the hardware max 16383). The
+    // common 0-500 case keeps its fine granularity.
+    const spdMax = Math.min(16383, Math.max(500, spd0));
+    sliderField('Speed (0=off)', fid + '-maespd', spdMax, Math.max(0, Math.min(spdMax, spd0)), 'Maestro speed limit. 0 = off (instant). Lower = smoother/slower. Full range is 0-16383 but 500+ is effectively instant.');
     sliderField('Accel (0=off)', fid + '-maeacc', 255, Math.max(0, Math.min(255, acc0)), 'Maestro acceleration limit 0-255. 0 = off. Lower = gentler ease in/out.');
   } else if (cmd === 'setSpeed' || cmd === 'setAccel') {
     addChannel();
@@ -9790,7 +9872,19 @@ function readActionFromFid(fid, type, extras) {
     // programmatically-set or hand-typed out-of-range values.
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v) || 0));
     let cmd;
-    if      (mcmd === 'setTarget')     cmd = `setTarget,${ch},${clamp(val * 4, 0, 16383)}`;   // µs → ¼µs, Maestro 14-bit cap
+    if (mcmd === 'setTarget') {
+      // Preserve the exact stored ¼µs when the µs field wasn't changed. Displaying
+      // a non-multiple-of-4 ¼µs as round(¼µs/4) and re-emitting val*4 would quantize
+      // it (by up to 2 ¼µs) on every no-op save. If the field still shows the same
+      // µs as the stored value, re-emit the original ¼µs verbatim; otherwise the
+      // user edited it, so recompute val*4.
+      const inp = document.getElementById(fid + '-maeval');
+      const storedRaw = (inp && inp.dataset.rawArg != null) ? +inp.dataset.rawArg : null;
+      const pos = (storedRaw != null && Math.round(storedRaw / 4) === val)
+                    ? clamp(storedRaw, 0, 16383)
+                    : clamp(val * 4, 0, 16383);
+      cmd = `setTarget,${ch},${pos}`;   // µs → ¼µs, Maestro 14-bit cap
+    }
     else if (mcmd === 'setSpeed')      cmd = `setSpeed,${ch},${clamp(val, 0, 16383)}`;
     else if (mcmd === 'setAccel')      cmd = `setAccel,${ch},${clamp(val, 0, 255)}`;
     else if (mcmd === 'setSpeedAccel') {
@@ -10021,7 +10115,17 @@ function openKnobModal(name) {
             Mode from
             <select id="kn-modesrc" onchange="if(editingKnobDraft) editingKnobDraft.modeSwitchOverride = +this.value">
               <option value="-1" ${(k.modeSwitchOverride ?? -1) === -1 ? 'selected' : ''}>Global mode switch</option>
-              ${['SA','SB','SC','SD','SE','SF','SG','SH'].map((s,ix) => `<option value="${ix}" ${(k.modeSwitchOverride ?? -1) === ix ? 'selected' : ''}>${s}</option>`).join('')}
+              ${['SA','SB','SC','SD','SE','SF','SG','SH'].map((s,ix) => {
+                // A mode override picks one of 3 modes from the switch's SBUS band,
+                // so only a 3-position switch can address all three. Hide 2-position
+                // switches (they'd reach only modes 1 & 3) — but keep one that's
+                // already selected visible, flagged, so a legacy config is explainable.
+                const sp = (config.switches && config.switches[s] && +config.switches[s].positions) || 3;
+                const sel = (k.modeSwitchOverride ?? -1) === ix;
+                if (sp < 3 && !sel) return '';
+                const tag = sp < 3 ? ' (2-pos — only modes 1 &amp; 3)' : '';
+                return `<option value="${ix}" ${sel ? 'selected' : ''}>${s}${tag}</option>`;
+              }).join('')}
             </select>
           </label>
         </div>
@@ -10054,7 +10158,7 @@ function openKnobModal(name) {
 // the new function (Maestro qus vs HCR volume 0-99), then re-render.
 function changeKnobFunction(newFn) {
   if (!editingKnobDraft) return;
-  syncKnobOutputsFromDom();
+  syncKnobOutputsFromDom(editingKnobDraft.function);   // read current fields in the OLD function's units
   editingKnobDraft.function = newFn;
   const coerce = o => {
     if (newFn === KF_HCR_VOLUME) {
@@ -10250,13 +10354,18 @@ function _onKnobOutMaestroChange(idx) {
 // the firmware is untouched and old ¼µs configs still round-trip correctly.
 const US_TO_QUS = 4;
 
-function syncKnobOutputsFromDom() {
+function syncKnobOutputsFromDom(fnOverride) {
   if (!editingKnobDraft) return;
   const rows = document.querySelectorAll('#kn-outputs-rows .action-row');
   const next = [];
   // Maestro Pass-Through pos fields are shown in µs but stored in quarter-µs;
-  // HCR Volume fields are a raw 0-99 and pass through unchanged.
-  const fn = +(document.getElementById('kn-function')?.value ?? editingKnobDraft.function ?? KF_NONE);
+  // HCR Volume fields are a raw 0-99 and pass through unchanged. The unit
+  // conversion must use the function the DOM fields were RENDERED for —
+  // changeKnobFunction passes the OLD function (fnOverride) so a function switch
+  // reads the live fields in their real units before coerce converts them (else
+  // e.g. a 99 volume would be read as µs → ×4 → 396, which coerce then misses).
+  const fn = (fnOverride != null) ? fnOverride
+           : +(document.getElementById('kn-function')?.value ?? editingKnobDraft.function ?? KF_NONE);
   const toStore = (fn === KF_MAESTRO_PASSTHROUGH) ? (v => Math.round(v * US_TO_QUS)) : (v => v);
   rows.forEach(r => {
     const idx = r.dataset.idx;
@@ -10305,7 +10414,10 @@ function saveKnobModal() {
   // Pass-Through, keep all four fields. Applied per mode.
   const clean = arr => (arr || []).map(o => {
     if (fn === KF_HCR_VOLUME) {
-      return { target: +o.target || 0, posMin: +o.posMin || 0, posMax: +o.posMax || 99 };
+      // Preserve a genuine Vol-max of 0 (mute): `|| 99` would silently rewrite it.
+      // A cleared field arrives as 0 (syncKnobOutputsFromDom coerces), which is the
+      // correct 0=mute value; only NaN/undefined falls back to 99.
+      return { target: +o.target || 0, posMin: +o.posMin || 0, posMax: Number.isFinite(+o.posMax) ? +o.posMax : 99 };
     }
     return {
       target:    Math.max(1, Math.min(NUM_MAESTRO_SLOTS, +o.target || 1)),
@@ -10448,8 +10560,16 @@ function buildSwitchTiers(sw) {
 function rebuildSwitchTiers() {
   if (!editingSw) return;
   const cur = config.switches[editingSw] || {};
+  // Capture live edits from the CURRENTLY-rendered tiers so a positions/channel
+  // change doesn't discard them; DON'T touch a tier that isn't rendered (e.g. p1
+  // while a 2-position layout is showing) so its saved actions survive a round-trip.
+  for (const idx of [0, 1, 2]) {
+    if (document.getElementById(`rows-p${idx}`)) cur['p' + idx] = collectTierActions('p' + idx);
+  }
   cur.positions = +document.getElementById('sw-positions').value;
   cur.channel   = +document.getElementById('sw-channel').value;
+  if (!config.switches) config.switches = {};
+  config.switches[editingSw] = cur;   // persist captured edits so they survive across rebuilds
   buildSwitchTiers(cur);
 }
 
@@ -10463,6 +10583,13 @@ function saveSwitchModal() {
   for (const idx of indices) {
     const acts = collectTierActions('p' + idx);
     if (acts.length) out['p' + idx] = acts;
+  }
+  // A 2-position switch shows no MID tier, but preserve any previously-configured
+  // MID (p1) actions instead of silently dropping them — they reappear if the
+  // switch is set back to 3-position.
+  if (out.positions === 2) {
+    const prev = config.switches && config.switches[editingSw];
+    if (prev && prev.p1 && prev.p1.length) out.p1 = prev.p1;
   }
   if (!config.switches) config.switches = {};
   config.switches[editingSw] = out;
@@ -11123,7 +11250,7 @@ async function otaUpdateOverUsb() {
 
     // DATA — ACK-paced; advance the local offset to the board's contiguous cursor.
     setStatus('OTA: streaming…');
-    let offset = 0;
+    let offset = 0, stalls = 0;
     while (offset < size) {
       const slice = bytes.subarray(offset, Math.min(offset + CHUNK, size));
       wait = _otaAwaitMarker(10000);
@@ -11131,9 +11258,15 @@ async function otaUpdateOverUsb() {
       m = await wait;
       const ack = /^\[OTA:ACK,(\d+)\]/.exec(m);
       const nak = /^\[OTA:NAK,(\d+)\]/.exec(m);
+      const before = offset;
       if (ack)      offset = parseInt(ack[1], 10);
       else if (nak) { offset = parseInt(nak[1], 10); log(`Resyncing to cursor ${offset}…`); }
       else          throw new Error('unexpected response — ' + m);
+      // Bound non-advancing ACK/NAKs: each _otaAwaitMarker re-arms its own
+      // timeout, so a board that keeps re-ACKing the same offset (< size) would
+      // otherwise spin forever without ever timing out.
+      if (offset === before) { if (++stalls > 60) throw new Error(`OTA stalled at ${offset} — board not advancing`); }
+      else stalls = 0;
       setProgress(offset, size);
     }
 
@@ -11222,36 +11355,59 @@ async function otaUpdateOverWcb() {
     // Relay ACK = [OTA:ACK,<src>,<session>,<offset>,<status>]  (status 0 = OK)
     const parseAck = m => { const x = /^\[OTA:ACK,(\d+),(\d+),(\d+),(\d+)\]/.exec(m); return x ? { src:+x[1], session:+x[2], offset:+x[3], status:+x[4] } : null; };
 
-    // BEGIN — the target erases its inactive slot (~1.2 MB; a few seconds) then ACKs.
-    setStatus('OTA-WCB: begin (target erasing slot)…');
-    let wait = _otaAwaitMarker(25000);
-    await sendLine(`?OTA,BEGIN,${target},${session},${size},1`, true);
-    let ack = parseAck(await wait);
-    if (!ack || ack.status !== 0) throw new Error('target rejected BEGIN (chip family / no OTA slot / offline?)');
+    // Send a control/DATA line and await OUR ACK (matching session+src). Skips
+    // foreign/stale ACKs (a different target or a prior session) WITHOUT resending,
+    // and RESENDS on a per-attempt timeout — so a single dropped ESP-NOW DATA/ACK
+    // no longer aborts the whole multi-thousand-packet transfer. The target treats
+    // a resent BEGIN/DATA/END idempotently (re-erase / cursor re-ACK / re-verify).
+    // Returns the matched ACK, or null if every attempt times out.
+    const otaSendAwaitAck = async (lineToSend, perTryMs, attempts) => {
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        let w = _otaAwaitMarker(perTryMs);
+        await sendLine(lineToSend, true);
+        for (;;) {
+          let m;
+          try { m = await w; }
+          catch (_) { break; }                               // timeout → resend (next attempt)
+          const a = parseAck(m);
+          if (!a) throw new Error('unexpected response during stream');
+          if (a.session === session && a.src === target) return a;   // ours
+          w = _otaAwaitMarker(perTryMs);                     // foreign/stale → keep waiting, no attempt spent
+        }
+      }
+      return null;
+    };
 
-    // DATA — ACK-paced; follow the target's authoritative contiguous cursor.
+    // BEGIN — the target erases its inactive slot (~1.2 MB; a few seconds) then ACKs.
+    // Resend on timeout (re-erase is harmless) and skip foreign/stale ACKs.
+    setStatus('OTA-WCB: begin (target erasing slot)…');
+    let ack = await otaSendAwaitAck(`?OTA,BEGIN,${target},${session},${size},1`, 25000, 2);
+    if (!ack || ack.status !== 0)
+      throw new Error('target rejected BEGIN (chip family / no OTA slot / offline / unreachable?)');
+
+    // DATA — ACK-paced; follow the target's authoritative contiguous cursor. A
+    // dropped DATA/ACK is resent from the cursor (idempotent) instead of aborting.
     setStatus('OTA-WCB: streaming…');
     let offset = 0, stalls = 0;
     while (offset < size) {
       const slice = bytes.subarray(offset, Math.min(offset + CHUNK, size));
-      wait = _otaAwaitMarker(12000);
-      await sendLine(`?OTA,DATA,${target},${session},${offset},${toB64(slice)}`, true);
-      ack = parseAck(await wait);
-      if (!ack) throw new Error('unexpected response during stream');
+      const got = await otaSendAwaitAck(`?OTA,DATA,${target},${session},${offset},${toB64(slice)}`, 3000, 8);
+      if (!got) throw new Error(`no ACK after retries at ${offset} — target unreachable`);
+      if (got.status !== 0) throw new Error(`target write error (status ${got.status}) at ${got.offset}`);
       const before = offset;
-      offset = ack.offset;                 // authoritative cursor (handles gaps/dups/rewind)
+      offset = got.offset;                 // authoritative cursor (handles gaps/dups/rewind)
       if (offset === before) { if (++stalls > 60) throw new Error(`stalled at ${offset} — target not advancing`); }
       else stalls = 0;
       setProgress(offset, size);
     }
 
-    // END — verify (SHA) + switch boot slot; the target reboots remotely.
+    // END — verify (SHA) + switch boot slot; the target reboots remotely. Resend
+    // on timeout (re-verify is idempotent) and skip foreign/stale ACKs.
     setStatus('OTA-WCB: verifying on target…');
     log('All chunks sent — verifying + switching boot slot on the target…');
-    wait = _otaAwaitMarker(20000);
-    await sendLine(`?OTA,END,${target},${session}`, true);
-    ack = parseAck(await wait);
-    if (!ack || ack.status !== 0) throw new Error('target verify/finalize failed');
+    ack = await otaSendAwaitAck(`?OTA,END,${target},${session}`, 20000, 2);
+    if (!ack || ack.status !== 0)
+      throw new Error('target verify/finalize failed');
     log(`Verified. RC #${target} is rebooting into the new firmware — it will re-join the mesh shortly.`);
     setStatus('OTA over WCB complete ✓ — target rebooting.');
     // No USB reconnect: the relay WCB stayed connected; the Via-WCB session
@@ -12074,6 +12230,12 @@ function exportConfigCsv() {
     rows.push(csvRow(pad(['config','funcBinding_mode','','' + config.funcBindings.mode])));
   }
   rows.push(csvRow(pad(['config','boardType','','' + (config.boardType | 0)])));   // 0 = NaviCore v2, 1 = WCB 3.2
+  // Transmitter model + its X20 3-axis-gimbal flag + SBUS-out enable — without
+  // these a CSV taken from one device and imported onto a differently-configured
+  // session silently keeps the wrong TX model / gimbal / SBUS-out state.
+  rows.push(csvRow(pad(['config','txModel','','' + (config.txModel | 0)])));
+  rows.push(csvRow(pad(['config','threeAxisGimbals','','' + (config.threeAxisGimbals ? 1 : 0)])));
+  rows.push(csvRow(pad(['config','sbusOutEnabled','','' + (config.sbusOutEnabled ? 1 : 0)])));
 
   // WCB Network credentials — one row per field. MAC octets are exported as
   // uppercase 2-digit hex strings; the import parser uses parseInt(_, 16) to
@@ -12395,12 +12557,22 @@ function handleConfigImportFile(event) {
             imported.funcBindings.mode = Number(value || channel || imported.funcBindings.mode || 0);
           } else if (control === 'boardtype') {
             imported.boardType = Math.max(0, Math.min(1, parseInt(value || channel, 10) || 0));
+          } else if (control === 'txmodel') {
+            imported.txModel = parseInt(value || channel, 10) || 0;
+          } else if (control === 'threeaxisgimbals') {
+            const v = String(value || channel);
+            imported.threeAxisGimbals = (v === '1' || v.toLowerCase() === 'true');
+          } else if (control === 'sbusoutenabled') {
+            const v = String(value || channel);
+            imported.sbusOutEnabled = (v === '1' || v.toLowerCase() === 'true');
           } else if (control === 'wcbmacoct2' || control === 'wcbmacoct3' ||
                      control === 'wcbpassword' || control === 'wcbquantity' ||
                      control === 'wcbdeviceid') {
             imported.wcbNetwork = imported.wcbNetwork
               || { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20 };
-            const raw = value || channel || '';
+            const raw = value || cellStr(row, indexes.channel) || '';   // read the channel cell as a STRING —
+                        // these values (hex MAC octets, password, mp3 transport/port) are exported into the
+                        // channel column, and the numeric `channel` var is NaN for non-numeric text -> '' -> data loss
             if (control === 'wcbmacoct2') {
               imported.wcbNetwork.macOct2 = (parseInt(raw, 16) | 0) & 0xFF;
             } else if (control === 'wcbmacoct3') {
@@ -12416,7 +12588,9 @@ function handleConfigImportFile(event) {
                      control === 'mp3port') {
             imported.mp3Dest = imported.mp3Dest
               || { transport: 'wcb', target: '2', port: 'S3' };
-            const raw = value || channel || '';
+            const raw = value || cellStr(row, indexes.channel) || '';   // read the channel cell as a STRING —
+                        // these values (hex MAC octets, password, mp3 transport/port) are exported into the
+                        // channel column, and the numeric `channel` var is NaN for non-numeric text -> '' -> data loss
             if (control === 'mp3transport') {
               imported.mp3Dest.transport = (String(raw).toLowerCase() === 'serial') ? 'serial' : 'wcb';
             } else if (control === 'mp3target') {
@@ -12593,7 +12767,14 @@ function handleConfigImportFile(event) {
         if (type === 'knob') {
           const knobName = controlName;
           if (!knobName) continue;
-          const kn = newKnobs[knobName] || {};
+          // Seed from the live pre-import knob (this runs BEFORE `config = imported`,
+          // so config.knobs still holds the pre-import knobs) so the fields the flat
+          // CSV can't represent — Maestro-passthrough outputs/outputs2/outputs3, the
+          // reverse flag, mode-aware settings, smoothing profile — survive the
+          // round-trip instead of being wiped. The CSV then overwrites only the
+          // scalar fields it actually carries.
+          const prevKn = (config.knobs && config.knobs[knobName]) || {};
+          const kn = newKnobs[knobName] || { ...prevKn };
           if (Number.isFinite(channel)) kn.channel = Number(channel);
           if (value !== '') kn.function = Number(value);
           if (slot)      kn.maestroSlot = Number(slot);
@@ -12614,6 +12795,13 @@ function handleConfigImportFile(event) {
       config = imported;
       if (Object.keys(newSwitches).length) config.switches = newSwitches;
       if (Object.keys(newKnobs).length) config.knobs = newKnobs;
+      // Re-apply the transmitter model so activeTxModel + the model SVG, the
+      // 3-axis checkbox/body class, and the axes/switch renders reflect the
+      // imported txModel/threeAxisGimbals (the render helpers key off the module-
+      // level activeTxModel, not config.txModel directly). persist=false mirrors
+      // the CONFIG-load path — we don't bounce it back to the board.
+      applyTxModel(config.txModel | 0, false);
+      { const sb = document.getElementById('sbus-out-toggle'); if (sb) sb.checked = !!config.sbusOutEnabled; }
       _syncMaestroChFromConfig();   // mirror := config exactly (CSV is authoritative; stale mirror entries cleared)
       // hcrDest / maestros are already on `imported` (default from in-memory
       // config OR overwritten by the parser above). The csvHad* flags are
