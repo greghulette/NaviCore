@@ -106,6 +106,15 @@ uint32_t      g_peerFlashUntil = 0;   // millis(): show the new-peer LED pulse u
 struct RemoteTrigger { uint8_t mode, btn, tap; };
 QueueHandle_t remoteTriggerQueue = nullptr;
 
+// ── Forget-learned-peer → deferred dispatch (Core 0 → Core 1) ────────────────
+// A {"type":"FORGET_PEER"} arriving over the WCB bridge runs in onWCBCommand on
+// Core 0. forgetPeer()/clearLearnedPeers() do an esp_now_del_peer + an NVS write
+// that can't run on the small ESP-NOW callback stack, so the Via-WCB path enqueues
+// here and drainForgetPeer() (loop, Core 1) does the work. id 0 = clear ALL
+// learned peers; 1..WCB_MAX_BOARDS = forget that one. (USB + CLI are already on
+// Core 1, so they call doForgetPeer() directly.)
+QueueHandle_t forgetPeerQueue = nullptr;
+
 // =============================================================================
 //  Pin assignments — RUNTIME, selected by the active board profile
 // =============================================================================
@@ -1691,6 +1700,33 @@ void __attribute__((noinline)) queueRemoteTrigger(int mode, int btn, uint8_t tap
   xQueueSend(remoteTriggerQueue, &t, 0);   // non-blocking; drop under load
 }
 
+// Forget one learned peer (id 1..WCB_MAX_BOARDS) or ALL of them (id 0). MUST run
+// on Core 1 (loop): forgetPeer()/clearLearnedPeers() do esp_now_del_peer + NVS
+// writes. Uses isLearnedPeer() so the id path gives honest "nothing to forget"
+// feedback for a non-learned slot. Called directly from the USB JSON + CLI paths
+// (already Core 1) and from drainForgetPeer() for the deferred Via-WCB path.
+void doForgetPeer(uint8_t id) {
+  if (!wcb || !wcbReady) return;
+  if (id == 0) {
+    wcb->clearLearnedPeers();
+    Serial.println("[WCB] cleared all learned peers");
+  } else if (wcb->isLearnedPeer(id)) {
+    wcb->forgetPeer(id);
+    Serial.printf("[WCB] forgot learned WCB %u\n", id);
+  } else {
+    Serial.printf("[WCB] WCB %u is not a learned peer (nothing to forget)\n", id);
+  }
+}
+
+// Enqueue a forget request from the Core-0 ESP-NOW callback (Via-WCB FORGET_PEER);
+// drainForgetPeer() runs it on Core 1. noinline keeps the payload off the callback
+// frame (same discipline as queueRemoteTrigger). Non-static: rc_telemetry.h
+// forward-declares it. id 0 = clear all.
+void __attribute__((noinline)) queueForgetPeer(uint8_t id) {
+  if (!forgetPeerQueue) return;
+  xQueueSend(forgetPeerQueue, &id, 0);   // non-blocking; a dropped request can be re-issued
+}
+
 // =============================================================================
 //  WCB receive callback
 // =============================================================================
@@ -1896,6 +1932,20 @@ String serialInputBuf;
 bool execCliLine(const String& line) {
   if (line.startsWith("?OTALOCAL,")) { naviota::processOtaLocalCommand(line.substring(10)); return true; }
   if (line.startsWith("?OTA,"))      { naviota::processOtaRelayCommand(line.substring(5));  return true; }
+  // ?FORGET,<id>  — drop learned WCB <id> from the peer table + NVS
+  // ?FORGET,ALL   — drop every learned (auto-joined) peer
+  if (line.length() >= 7 && line.substring(0, 7).equalsIgnoreCase("?FORGET")) {
+    String arg = (line.length() > 8) ? line.substring(8) : "";   // after "?FORGET,"
+    arg.trim();
+    if (arg.equalsIgnoreCase("ALL")) {
+      doForgetPeer(0);
+    } else {
+      int id = arg.toInt();
+      if (id >= 1 && id <= WCB_MAX_BOARDS) doForgetPeer((uint8_t)id);
+      else Serial.println("[WCB] usage: ?FORGET,<id 1-20>  or  ?FORGET,ALL");
+    }
+    return true;
+  }
   // ── Direct Maestro control — drives the config-tool timeline editor's LIVE
   //    scrub/preview (servos follow the yellow cursor). Fire-and-forget, silent
   //    (a scrub streams many of these). Runs in loop()/Core-1 like the rest of
@@ -2305,6 +2355,27 @@ void handleSerialInput() {
             }
           }
 
+        } else if (strcmp(type,"FORGET_PEER")==0) {
+          // Drop a learned (auto-joined) peer from the ESP-NOW peer table + NVS.
+          //   {"id":N}      forget learned WCB N
+          //   {"all":true}  forget ALL learned peers
+          // USB path is Core 1, so call the worker directly. The panel re-polls
+          // GET_WCB_STATUS to refresh after this.
+          bool all = hdr["all"] | false;
+          int  id  = hdr["id"]  | 0;
+          if (!wcb || !wcbReady) {
+            Serial.println("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":false,\"msg\":\"WCB not ready\"}");
+          } else if (all) {
+            doForgetPeer(0);
+            Serial.println("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":true,\"all\":true}");
+          } else if (id >= 1 && id <= WCB_MAX_BOARDS) {
+            doForgetPeer((uint8_t)id);
+            Serial.printf("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":true,\"id\":%d}\n", id);
+          } else {
+            Serial.printf("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":false,\"msg\":\"id %d out of range (1-%d) or set all:true\"}\n",
+                          id, WCB_MAX_BOARDS);
+          }
+
         } else if (strcmp(type,"SET_DEBUG_FLAGS")==0) {
           // GUI debug chips drive this — bitmask of DBG_* categories to
           // enable. Default 0 silences every [DISPATCH] line.
@@ -2690,7 +2761,8 @@ void setup() {
     // ordering it first avoids losing the very first remote trigger).
     remoteTriggerQueue = xQueueCreate(8, sizeof(RemoteTrigger));
     remoteCliQueue     = xQueueCreate(3, sizeof(RemoteCliMsg));  // relayed CLI lines → drainRemoteCli()
-    wcb->onCommand(onWCBCommand);   // both queues must be live BEFORE the callback that feeds them
+    forgetPeerQueue    = xQueueCreate(4, sizeof(uint8_t));       // FORGET_PEER (Via-WCB) → drainForgetPeer()
+    wcb->onCommand(onWCBCommand);   // queues must be live BEFORE the callback that feeds them
     wcb->onRawPacket(naviota::otaRawPacketHook);   // OTA control/data structs (55/243 B) over the mesh
     // Create the OTA packet queue here (Core 1) instead of lazily inside the
     // Core-0 RX callback, so the very first OTA frame can't be lost to the
@@ -2879,6 +2951,13 @@ void drainRemoteTriggers() {
   }
 }
 
+// Run any forget-peer requests deferred from the Core-0 Via-WCB path (loop/Core 1).
+void drainForgetPeer() {
+  if (!forgetPeerQueue) return;
+  uint8_t id;
+  while (xQueueReceive(forgetPeerQueue, &id, 0) == pdTRUE) doForgetPeer(id);
+}
+
 void loop() {
   // WCB — heartbeats, ACKs, WCBStream flushes
   if (wcb && wcbReady) wcb->update();
@@ -2903,6 +2982,10 @@ void loop() {
   // local matrix press's single-core dispatch path (no cross-core Maestro/cache
   // race). Cheap no-op when nothing is pending.
   drainRemoteTriggers();
+
+  // Forget-learned-peer — run any FORGET_PEER deferred from the Core-0 Via-WCB
+  // path here on Core 1 (esp_now_del_peer + NVS write). Cheap no-op when idle.
+  drainForgetPeer();
 
   // Record/replay — drain captured events into the PSRAM clip (Core-1 sole
   // writer) and advance any active replay. Both cheap no-ops when idle.

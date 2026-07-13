@@ -81,6 +81,7 @@ extern bool          sbusFailsafe;       // SBUS failsafe flag (TX lost / disarm
 extern bool          wcbReady;           // true only after wcb->begin() succeeded (ESP-NOW usable)
 void                rcDispatch(int buttonId, uint8_t tapCount);
 void                queueRemoteTrigger(int mode, int btn, uint8_t tap);   // Core-0 → loop hop for remote TRIGGER (defined in .ino)
+void                queueForgetPeer(uint8_t id);   // Core-0 → loop hop for FORGET_PEER; id 0 = all (defined in .ino)
 void                resetModeAwareKnobs();   // re-arm mode-aware knobs on a mode change (defined in .ino)
 
 // Forward declarations from rc_config.h — needed for SET_CONFIG / GET_CONFIG
@@ -1102,6 +1103,18 @@ inline bool handle(uint8_t senderID, const char* command) {
     Serial.println("[RC] Remote REBOOT requested via WCB");
     delay(100);
     ESP.restart();
+    return true;
+  }
+
+  // ── FORGET_PEER — drop a learned (auto-joined) peer. {"id":N} forgets one,
+  //    {"all":true} forgets all. Deferred to Core 1 (drainForgetPeer) because
+  //    forgetPeer/clearLearnedPeers do esp_now_del_peer + an NVS write that can't
+  //    run on this Core-0 ESP-NOW callback stack.
+  if (!strcmp(type, "FORGET_PEER")) {
+    bool all = doc["all"] | false;
+    int  id  = doc["id"]  | 0;
+    if (all)                                 queueForgetPeer(0);
+    else if (id >= 1 && id <= WCB_MAX_BOARDS) queueForgetPeer((uint8_t)id);
     return true;
   }
 
