@@ -669,6 +669,13 @@
     overflow: hidden;
   }
   .terminal-panel.open { display: flex; }
+  /* When the drawer is open it overlays the bottom of the viewport. Reserve
+     matching space at the bottom of the scroll containers so their last rows can
+     scroll clear of it instead of hiding underneath. --term-h is kept in sync
+     (open/close + live resize) by the terminal JS; it's unset while closed, so
+     the padding falls back to normal. */
+  body.terminal-open .content { padding-bottom: calc(20px + var(--term-h, 0px)); }
+  body.terminal-open .sidebar { padding-bottom: var(--term-h, 0px); }
   /* Slim WCB-style top resize bar with triple-line grip. Overrides
      .resize-handle defaults from earlier so the drawer's top edge is the
      drag affordance. */
@@ -2273,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">131541QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">141213QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2319,8 +2326,8 @@
         <input type="checkbox" id="term-vis-cb-nc" checked onchange="updateTerminalSplit()">
         <span>NaviCore</span>
       </label>
-      <label class="term-vis-chip" id="term-vis-chip-wcb" title="Show/hide the WCB (bridge) terminal" style="display:none">
-        <input type="checkbox" id="term-vis-cb-wcb" checked onchange="updateTerminalSplit()">
+      <label class="term-vis-chip" id="term-vis-chip-wcb" title="Show/hide the relay / bridge-WCB terminal (for hand-sending ;w&lt;id&gt;, commands to other boards)" style="display:none">
+        <input type="checkbox" id="term-vis-cb-wcb" onchange="updateTerminalSplit()">
         <span>WCB</span>
       </label>
     </div>
@@ -4491,7 +4498,20 @@ function initTerminal() {
     if (!terminalPanel) return;
     terminalPanel.classList.toggle('open', open);
     if (terminalOpenBtn) terminalOpenBtn.classList.toggle('active', open);
+    // Reserve page space for the drawer so content can scroll clear of it
+    // instead of hiding underneath (see the body.terminal-open CSS + --term-h).
+    document.body.classList.toggle('terminal-open', open);
+    syncTerminalPad();
   }
+
+  // Keep --term-h equal to the open drawer's height so the reserved bottom
+  // padding tracks open/close AND live resize. (Hoisted; referenced above and
+  // from the resize handler.)
+  function syncTerminalPad() {
+    if (terminalPanel && terminalPanel.classList.contains('open'))
+      document.body.style.setProperty('--term-h', terminalPanel.offsetHeight + 'px');
+  }
+  window.addEventListener('resize', syncTerminalPad);
 
   let sidebarDrag = null;
   let terminalDrag = null;
@@ -4523,6 +4543,7 @@ function initTerminal() {
       const deltaY = terminalDrag.startY - ev.clientY;
       const newHeight = Math.max(100, Math.min(window.innerHeight * 0.7, terminalDrag.startHeight + deltaY));
       terminalPanel.style.height = newHeight + 'px';
+      syncTerminalPad();   // keep the reserved bottom space matched to the new height
     }
   }
 
