@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">141213QJUL26</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">141511QJUL26</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2597,7 +2597,7 @@
             <div class="wcb-send-row">
               <label>Matrix channel:</label>
               <input type="number" id="cfg-matrix-ch" min="1" max="24" value="7" style="width:60px"
-                     onchange="config.matrixChannel = +this.value;">
+                     onchange="config.matrixChannel = +this.value; _liveMatrixCh = config.matrixChannel;">
               <small style="color:var(--muted);font-size:10px">SBUS channel carrying the multiplexed buttons (Kyber default 7)</small>
             </div>
             <div class="wcb-send-row">
@@ -8292,6 +8292,11 @@ function updateChannelsGrid(channels) {
   for (let i = 0; i < n; i++) {
     const row = rows[i];
     if (!row) continue;
+    // Keep the amber matrix-channel highlight on the CURRENT matrix channel. The
+    // is-matrix class is seeded once when the row is built, but the matrix channel
+    // can be changed afterward — re-apply it every tick so the highlight follows,
+    // in lockstep with the "Matrix" control-name label (both read config.matrixChannel).
+    row.classList.toggle('is-matrix', (i + 1) === ((config.matrixChannel | 0) || 7));
     const v = +channels[i] || 0;
     const norm = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
     row.querySelector('.ch-bar').style.width = (norm * 100).toFixed(1) + '%';
