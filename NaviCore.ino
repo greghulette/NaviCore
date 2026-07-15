@@ -845,7 +845,10 @@ static String hcrFormatCommand(uint8_t fn, int chan, int track) {
     case 5:  inner = "SE,QT";          break;  // Overload
     case 6:  inner = "MM";             break;  // single Muse
     case 7:  inner = String("MN") + chan + ",MX" + track; break;  // Muse(min,max) gap
-    case 8:  inner = "PSV,PSA,PSB,QT"; break;  // Stop (all audio + emote)
+    case 8:  // Stop (all audio + emote). 4 frames = StopEmote + StopWAV V/A/B, matching the
+             // WCB's HCRVocalizer::Stop() BYTE-FOR-BYTE so local-serial == over-WCB. (Was a
+             // single <PSV,PSA,PSB,QT> frame — that diverged from the WCB relay path.)
+      return "<PSV,QT>\n<PSV,QPV>\n<PSA,QPA>\n<PSB,QPB>\n";
     case 9:  inner = "PSV,QT";         break;  // StopEmote
     case 10: inner = String("O") + chan + ",QO"; break;  // OverrideEmotions(v) — "O<v>" (digit, vs "O<HSMC>" for SetEmotion)
     case 11: inner = "OR,QE";          break;  // ResetEmotions
