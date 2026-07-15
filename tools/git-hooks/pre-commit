@@ -9,13 +9,17 @@
 # lock-step: both reflect the moment the commit was made, in the same
 # format used everywhere else in the project.
 #
-# Format:  DDHHMM<TZ>MMMYY   (e.g. 211520QMAY26)
-#   DD      day of month, local time, zero-padded
-#   HHMM    24-hour local time
-#   TZ      military timezone letter derived from UTC offset
-#           (R = UTC-5 EST, Q = UTC-4 EDT, etc.; falls back to 'R')
-#   MMM     three-letter month, uppercase
-#   YY      two-digit year
+# Formats:
+#   fw_version.h : DDHHMM<TZ>MMMYY        (e.g. 211520QMAY26) — compact, and
+#                  colon-free because this DTG is embedded in .bin filenames
+#                  (':' is illegal in Windows paths).
+#   UI footer    : DD.HH:MM.<TZ>.MMM.YYYY (e.g. 21.15:20.Q.MAY.2026) — readable.
+#   DD    day of month, local time, zero-padded
+#   HH:MM 24-hour local time
+#   TZ    military timezone letter derived from UTC offset
+#         (R = UTC-5 EST, Q = UTC-4 EDT, etc.; falls back to 'R')
+#   MMM   three-letter month, uppercase
+#   YY / YYYY  two- / four-digit year
 #
 # Uses /bin/sh (POSIX) instead of bash so GitHub Desktop on Windows can
 # run it via the Git-for-Windows MSYS shell without invoking WSL.
@@ -43,6 +47,7 @@ DAY=$(date +%d)
 HHMM=$(date +%H%M)
 MONTH=$(date +%b | tr '[:lower:]' '[:upper:]')
 YEAR=$(date +%y)
+YEAR4=$(date +%Y)
 
 # Map common UTC offsets → military TZ letter. Falls back to 'R' for any
 # offset not listed (matches user's firmware-version convention).
@@ -64,18 +69,24 @@ esac
 
 DTG="${DAY}${HHMM}${TZ_LETTER}${MONTH}${YEAR}"
 
+# Human-readable variant for the UI footer ONLY (e.g. 15.12:55.Q.JUL.2026).
+# fw_version.h keeps the compact colon-free DTG above — that value is embedded in
+# .bin filenames and ':' is illegal in Windows paths. HH/MM are split from HHMM
+# via POSIX parameter expansion (no extra date call, no minute-rollover risk).
+DTG_READABLE="${DAY}.${HHMM%??}:${HHMM#??}.${TZ_LETTER}.${MONTH}.${YEAR4}"
+
 # Helper: patch FILE in place by running sed-script EXPR; stage the file
 # only if it actually changed. Avoids leaving the working tree dirty when
 # the DTG happens to match (re-commit within the same minute).
 stamp_file() {
-  FILE="$1"; EXPR="$2"; LABEL="$3"
+  FILE="$1"; EXPR="$2"; LABEL="$3"; SHOWN="$4"
   [ -f "$FILE" ] || return 0
   TMP=$(mktemp 2>/dev/null || mktemp -t dtg)
   sed -E "$EXPR" "$FILE" > "$TMP" 2>/dev/null
   if [ -s "$TMP" ] && ! cmp -s "$FILE" "$TMP"; then
     mv "$TMP" "$FILE"
     git add "$FILE"
-    echo "[pre-commit] ${LABEL} DTG stamped: ${DTG}"
+    echo "[pre-commit] ${LABEL} DTG stamped: ${SHOWN}"
   else
     rm -f "$TMP"
   fi
@@ -83,14 +94,14 @@ stamp_file() {
 
 # ── Patch the UI footer (<span id="footer-dtg">…</span>) ────────────────
 stamp_file "$HTML_FILE" \
-  "s|(<span id=\"footer-dtg\">)[^<]*(</span>)|\\1${DTG}\\2|" \
-  "UI footer"
+  "s|(<span id=\"footer-dtg\">)[^<]*(</span>)|\\1${DTG_READABLE}\\2|" \
+  "UI footer" "${DTG_READABLE}"
 
 # ── Patch the firmware version (#define FW_VERSION_DTG  "…") ────────────
 # Match any whitespace between the macro name and the opening quote so the
 # format can be re-aligned without breaking the hook.
 stamp_file "$FWVER_FILE" \
   "s|(#define[[:space:]]+FW_VERSION_DTG[[:space:]]+\")[^\"]*(\")|\\1${DTG}\\2|" \
-  "FW version"
+  "FW version" "${DTG}"
 
 exit 0
