@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.14:26.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.14:36.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10690,16 +10690,34 @@ function buildSwitchTiers(sw) {
 
   const positions = +sw.positions || 3;
   const slots = positions === 2
-    ? [{idx:0,label:'Position DOWN'},{idx:2,label:'Position UP'}]
-    : [{idx:0,label:'Position DOWN'},{idx:1,label:'Position MID'},{idx:2,label:'Position UP'}];
+    ? [{idx:0,label:'Down'},{idx:2,label:'Up'}]
+    : [{idx:0,label:'Down'},{idx:1,label:'Mid'},{idx:2,label:'Up'}];
+
+  // Position tabs — show ONE position at a time (like the button tap-tiers and the
+  // knob mode tabs), so it's obvious which actions belong to Down / Mid / Up. All
+  // cards stay in the DOM (Save reads them all); each tab shows a count so a
+  // configured-but-hidden position can't hide (the trap that put an "Off" easing
+  // action on Mid without the user noticing).
+  const tabBar = document.createElement('div');
+  tabBar.className = 'tier-tabs';
+  for (const slot of slots) {
+    const tierKey = 'p' + slot.idx;
+    const tb = document.createElement('button');
+    tb.type = 'button'; tb.className = 'tier-tab'; tb.dataset.tier = tierKey;
+    tb.onclick = () => setSwitchTier(tierKey);
+    tb.title = `Actions fired when the switch is ${slot.label.toUpperCase()}`;
+    tb.innerHTML = `${slot.label}<span class="tier-tab-count empty" id="tier-tab-count-${tierKey}"></span>`;
+    tabBar.appendChild(tb);
+  }
+  container.appendChild(tabBar);
+
   for (const slot of slots) {
     const acts = sw['p' + slot.idx] || [];
     const tierKey = 'p' + slot.idx;
 
     const card = document.createElement('div');
     card.className = 'tier-card';
-    card.id = `tier-card-${tierKey}`;
-    card.innerHTML = `<div class="tier-title">${slot.label}</div>`;
+    card.id = `tier-card-${tierKey}`;   // no in-card title — the tab above IS the label
 
     const rows = document.createElement('div');
     rows.id = `rows-${tierKey}`;
@@ -10722,6 +10740,18 @@ function buildSwitchTiers(sw) {
     container.appendChild(card);
     refreshTierState(tierKey);
   }
+  setSwitchTier('p' + slots[0].idx);   // start on the first position (Down)
+}
+
+// Show one switch-position card; hide the others; highlight its tab. Mirrors
+// setActionTier (button modal) — cards stay in the DOM so Save reads them all.
+function setSwitchTier(tierKey) {
+  document.querySelectorAll('#tiers-container .tier-tab')
+          .forEach(t => t.classList.toggle('active', t.dataset.tier === tierKey));
+  ['p0','p1','p2'].forEach(k => {
+    const card = document.getElementById(`tier-card-${k}`);
+    if (card) card.style.display = (k === tierKey) ? '' : 'none';
+  });
 }
 
 function rebuildSwitchTiers() {
