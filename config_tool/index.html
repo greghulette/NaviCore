@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.09:34.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.10:18.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8649,16 +8649,24 @@ function _maestroCmdSummary(slot, cmd) {
   if (p[0] === 'setTarget')     return `${chName(+p[1] || 0)} → ${Math.round((+p[2] || 0) / 4)}µs`;
   if (p[0] === 'goHome')        return 'home';
   if (p[0] === 'stopScript')    return 'stop script';
-  if (p[0] === 'restartScript') return `run script ${p[1] || 0}`;
+  if (p[0] === 'restartScript') {
+    let ease = '';
+    if (/^p\d+$/.test(p[2] || '')) {
+      const i = +String(p[2]).slice(1);
+      ease = ` · ease ${escH(_smoothProfiles()[i]?.name || 'P' + (i + 1))}${(String(p[3] || '')[0] === 'o') ? ' (switch may override)' : ''}`;
+    }
+    return `run script ${p[1] || 0}${ease}`;
+  }
   if (p[0] === 'setSpeed')      return `${chName(+p[1] || 0)} speed ${p[2] || 0}`;
   if (p[0] === 'setAccel')      return `${chName(+p[1] || 0)} accel ${p[2] || 0}`;
   if (p[0] === 'setSpeedAccel') return `${chName(+p[1] || 0)} spd ${p[2] || 0} / acc ${p[3] || 0}`;
-  if (p[0] === 'snappy') {
-    const s = String(p[1] || 'on').toLowerCase();
-    return `snappy → ${s === 'off' ? 'Off (easing)' : s === 'toggle' ? 'Toggle' : 'On (full speed)'}`;
-  }
-  if (p[0] === 'applyProfile') {   // legacy — shown as its Snappy equivalent (u→On, else→Off)
-    return `snappy → ${(String(p[1] || '')[0] === 'u') ? 'On (full speed)' : 'Off (easing)'}`;
+  if (p[0] === 'setEasing' || p[0] === 'applyProfile' || p[0] === 'snappy') {
+    // the switch's active-easing action (legacy applyProfile/snappy shown in the new terms)
+    let spec = String(p[1] || '');
+    if (p[0] === 'applyProfile') spec = (spec[0] === 'p' || spec[0] === 'P') ? spec.toLowerCase() : (spec[0] === 'u' || spec[0] === 'U') ? 'off' : 'release';
+    else if (p[0] === 'snappy')  spec = (spec.toLowerCase() === 'off' || spec === '0') ? 'release' : 'off';
+    if (/^p\d+$/.test(spec)) { const i = +spec.slice(1); return `active easing → ${escH(_smoothProfiles()[i]?.name || 'Profile ' + (i + 1))}`; }
+    return `active easing → ${spec === 'off' ? 'Off (full speed)' : 'Release'}`;
   }
   return escH(cmd || '');
 }
@@ -9145,25 +9153,30 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
       warn.textContent = `⚠ ${posUs}µs outside ${lo}–${hi}µs`;
       argWrap.appendChild(warn);
     }
-  } else if (cmd === 'snappy') {
-    // Snappy = full-speed toggle for the WHOLE Maestro. On = ignore easing
-    // (joysticks AND scripts); Off = normal profile easing; Toggle = flip each press.
-    // Legacy "applyProfile,<spec>" actions render here too, mapped: u(Off)→On, else→Off.
-    let prevState = 'on';
+  } else if (cmd === 'setEasing') {
+    // The SWITCH sets this Maestro's active easing — the FALLBACK the priority uses.
+    // A knob/script with its OWN easing ignores this by default (unless it opts in via
+    // "allow switch to override"). Legacy "applyProfile" (u→Off, r/pN) and "snappy"
+    // (on→Off, off→Release) render here too.
+    let prevSpec = 'release';
     if (parts) {
-      if (parts[0] === 'applyProfile') prevState = (String(parts[1] || '')[0] === 'u') ? 'on' : 'off';   // legacy map
-      else if (parts[1] !== undefined)  prevState = String(parts[1]);
-    } else if (document.getElementById(fid + '-maesnap')) {
-      prevState = document.getElementById(fid + '-maesnap').value;
+      const s = String(parts[1] || '');
+      if (parts[0] === 'applyProfile')
+        prevSpec = (s[0] === 'p' || s[0] === 'P') ? s.toLowerCase() : (s[0] === 'u' || s[0] === 'U') ? 'off' : 'release';
+      else if (parts[0] === 'snappy')
+        prevSpec = (s.toLowerCase() === 'off' || s === '0') ? 'release' : 'off';   // on/toggle → Off (full speed)
+      else if (parts[1] !== undefined) prevSpec = s;
+    } else if (document.getElementById(fid + '-maeease')) {
+      prevSpec = document.getElementById(fid + '-maeease').value;
     }
     const pWrap = document.createElement('div'); pWrap.className = 'field-group';
-    const pLab = document.createElement('label'); pLab.style.cssText = 'font-size:11px'; pLab.textContent = 'Snappy →';
-    pLab.title = "Full-speed toggle for this whole Maestro. On = servos ignore easing and snap (joysticks AND scripts). Off = normal profile easing. Toggle = flip each press. Easing itself comes from your smoothing profiles + each knob's assigned profile.";
-    const pSel = document.createElement('select'); pSel.id = fid + '-maesnap';
+    const pLab = document.createElement('label'); pLab.style.cssText = 'font-size:11px'; pLab.textContent = 'Set active easing →';
+    pLab.title = "The switch sets this Maestro's active easing — it's the FALLBACK. A knob or script that has its own easing ignores this (unless you tick 'Allow switch to override' there). Off = full speed. Release = impose nothing (local-only).";
+    const pSel = document.createElement('select'); pSel.id = fid + '-maeease';
     pSel.innerHTML =
-      `<option value="on"${prevState === 'on' ? ' selected' : ''}>On — full speed (ignore easing)</option>` +
-      `<option value="off"${prevState === 'off' ? ' selected' : ''}>Off — normal easing</option>` +
-      `<option value="toggle"${prevState === 'toggle' ? ' selected' : ''}>Toggle — flip each press</option>`;
+      _smoothProfiles().map((p, i) => `<option value="p${i}"${prevSpec === 'p' + i ? ' selected' : ''}>${escH(p.name || 'Profile ' + (i + 1))}</option>`).join('') +
+      `<option value="off"${prevSpec === 'off' ? ' selected' : ''}>Off — full speed</option>` +
+      `<option value="release"${prevSpec === 'release' ? ' selected' : ''}>Release — local only</option>`;
     pWrap.appendChild(pLab); pWrap.appendChild(pSel);
     argWrap.appendChild(pWrap);
   } else if (cmd === 'setSpeedAccel') {
@@ -9190,21 +9203,30 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
     // input's max attribute does NOT clamp when set programmatically.
     const prevSub = parts ? (+parts[1] || 0) : (document.getElementById(fid + '-maeval') ? +document.getElementById(fid + '-maeval').value : 0);
     numField('Subroutine #', fid + '-maeval', 0, 127, Math.max(0, Math.min(127, prevSub || 0)));
-    // Smoothing to load before the script runs. parts[2]: absent = leave as-is,
-    // "pN" = apply that profile so the sequence eases. (Legacy "u"/"1" per-script
-    // "unlimited" is dropped — the Snappy toggle covers full-speed now.)
+    // This sequence's OWN easing (parts[2]="pN" or absent). It WINS over the switch's
+    // active easing by default; "Allow switch to override" (parts[3]="o") flips that.
     let prevSpec = parts ? (parts[2] !== undefined ? String(parts[2]) : '') : (document.getElementById(fid + '-maesm') ? document.getElementById(fid + '-maesm').value : '');
     if (!/^p\d+$/.test(prevSpec)) prevSpec = '';   // only "pN" is kept; legacy u/1/anything → leave as-is
     const smWrap = document.createElement('div'); smWrap.className = 'field-group';
     const smLab = document.createElement('label'); smLab.style.cssText = 'font-size:11px';
     smLab.textContent = 'Ease with profile';
-    smLab.title = "Apply a smoothing profile before the script runs so the sequence eases. Leave as-is = don't touch the channels. (For full speed, use a Snappy action — it overrides script easing too.)";
+    smLab.title = "This sequence's OWN easing, applied before the script runs. It WINS over a switch's active easing by default. Leave as-is = don't touch the channels (then the switch's easing applies if one is set).";
     const smSel = document.createElement('select'); smSel.id = fid + '-maesm';
     smSel.innerHTML =
       `<option value=""${prevSpec === '' ? ' selected' : ''}>Leave as-is</option>` +
       _smoothProfiles().map((p, i) => `<option value="p${i}"${prevSpec === 'p' + i ? ' selected' : ''}>${escH(p.name || 'Profile ' + (i + 1))}</option>`).join('');
     smWrap.appendChild(smLab); smWrap.appendChild(smSel);
     argWrap.appendChild(smWrap);
+    // NEW: let a switch's "Set active easing" override this sequence's own easing (default off).
+    const ovrPrev = parts ? (String(parts[3] || '')[0] === 'o')
+                          : (document.getElementById(fid + '-maeovr') ? document.getElementById(fid + '-maeovr').checked : false);
+    const ovrWrap = document.createElement('div'); ovrWrap.className = 'field-group';
+    const ovrLab = document.createElement('label'); ovrLab.style.cssText = 'font-size:11px;display:flex;align-items:center;gap:5px;align-self:center';
+    ovrLab.title = "Off (default): this sequence's easing above always wins. On: a switch's 'Set active easing' overrides it.";
+    const ovrCb = document.createElement('input'); ovrCb.type = 'checkbox'; ovrCb.id = fid + '-maeovr'; ovrCb.checked = ovrPrev;
+    ovrLab.appendChild(ovrCb); ovrLab.appendChild(document.createTextNode('Allow switch to override'));
+    ovrWrap.appendChild(ovrLab);
+    argWrap.appendChild(ovrWrap);
   } else {
     const note = document.createElement('span');
     note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
@@ -9816,9 +9838,9 @@ function appendActionFields(container, action) {
     cmdSel.id = fid + '-maecmd';
     cmdSel.style.minWidth = '160px';
     const parts = (action.cmd || 'setTarget,0,6000').split(',').map(s => s.trim());
-    const curCmd = (parts[0] === 'applyProfile') ? 'snappy' : (parts[0] || 'setTarget');   // legacy applyProfile → Snappy
+    const curCmd = (parts[0] === 'applyProfile' || parts[0] === 'snappy') ? 'setEasing' : (parts[0] || 'setTarget');   // legacy applyProfile/snappy → Set active easing
     [['setTarget', 'Set servo position'], ['goHome', 'Send all servos home'], ['stopScript', 'Stop the script'],
-     ['restartScript', 'Run a script'], ['snappy', 'Snappy — full-speed toggle'],
+     ['restartScript', 'Run a script'], ['setEasing', 'Set active easing (switch)'],
      ['setSpeedAccel', 'Set speed + accel (manual)'],
      ['setSpeed', 'Set a speed limit'], ['setAccel', 'Set an acceleration limit']
     ].forEach(([v, lbl]) => { const o = document.createElement('option'); o.value = v; o.textContent = lbl; if (v === curCmd) o.selected = true; cmdSel.appendChild(o); });
@@ -10000,8 +10022,12 @@ function readActionFromFid(fid, type, extras) {
       const acc = clamp(+(document.getElementById(fid + '-maeacc')?.value || 0), 0, 255);
       cmd = `setSpeedAccel,${ch},${spd},${acc}`;
     }
-    else if (mcmd === 'snappy') { const st = document.getElementById(fid + '-maesnap')?.value || 'on'; cmd = `snappy,${st}`; }
-    else if (mcmd === 'restartScript') { const spec = document.getElementById(fid + '-maesm')?.value || ''; cmd = spec ? `restartScript,${clamp(val, 0, 127)},${spec}` : `restartScript,${clamp(val, 0, 127)}`; }
+    else if (mcmd === 'setEasing') { const sp = document.getElementById(fid + '-maeease')?.value || 'release'; cmd = `setEasing,${sp}`; }
+    else if (mcmd === 'restartScript') {
+      const spec = document.getElementById(fid + '-maesm')?.value || '';
+      const ovr  = (spec && document.getElementById(fid + '-maeovr')?.checked) ? ',o' : '';   // override only meaningful with a profile
+      cmd = spec ? `restartScript,${clamp(val, 0, 127)},${spec}${ovr}` : `restartScript,${clamp(val, 0, 127)}`;
+    }
     else if (mcmd === 'stopScript')    cmd = 'stopScript';
     else                               cmd = 'goHome';
     return { type: 'maestro', target: String(target), cmd, ...extras };
@@ -10157,6 +10183,7 @@ function openKnobModal(name) {
   // (default), else a switch index 0-7 (SA-SH) so the knob is gated on its own.
   k.modeSwitchOverride = Number.isInteger(d.modeSwitchOverride) ? d.modeSwitchOverride : -1;
   k.smoothProfile      = Number.isInteger(d.smoothProfile)      ? d.smoothProfile      : -1;
+  k.easeSwitchOverride = !!d.easeSwitchOverride;   // false = this knob's own profile wins over the switch
   // null = the mode was NEVER configured (key absent) → seed it from mode 1 as a
   // convenience. [] = the user intentionally emptied it → KEEP it empty (silent in
   // that mode; see the 'Mode from' tooltip). Conflating the two reseeded an emptied
@@ -10202,8 +10229,13 @@ function openKnobModal(name) {
             </select>
           </div>
           <div class="field-group">
-            <label style="font-size:11px" title="For Maestro passthrough knobs: which smoothing profile these servos use. Build profiles per-Maestro in the Maestro Locations tab. 'None' = instant (no smoothing).">Smoothing profile</label>
+            <label style="font-size:11px" title="For Maestro passthrough knobs: which smoothing profile these servos use. Build profiles per-Maestro in the Maestro Locations tab. 'None' = instant (no smoothing). This WINS over a switch's active easing by default.">Smoothing profile</label>
             <select id="kn-smprof">${_smoothProfileOptions(k.smoothProfile ?? -1, true, false)}</select>
+          </div>
+          <div class="field-group">
+            <label style="font-size:11px;display:flex;align-items:center;gap:5px" title="Off (default): this knob's smoothing profile above always wins. On: a switch's 'Set active easing' overrides it.">
+              <input type="checkbox" id="kn-easeovr"${k.easeSwitchOverride ? ' checked' : ''}> Allow switch to override
+            </label>
           </div>
         </div>
         <div style="display:flex; flex-wrap:wrap; gap:12px 22px; align-items:center; padding-top:12px; border-top:1px solid var(--border)">
@@ -10545,6 +10577,7 @@ function saveKnobModal() {
     modeAware: modeAware,
     modeSwitchOverride: (modeAware && modeSrc >= 0 && modeSrc <= 7) ? modeSrc : -1,
     smoothProfile: (fn === KF_MAESTRO_PASSTHROUGH) ? (+(document.getElementById('kn-smprof')?.value ?? -1)) : -1,
+    easeSwitchOverride: (fn === KF_MAESTRO_PASSTHROUGH) ? !!document.getElementById('kn-easeovr')?.checked : false,
     outputs:   fn === KF_NONE ? [] : clean(byMode[0]),   // mode 1 (+ all modes when !modeAware)
   };
   if (modeAware && fn !== KF_NONE) {                      // per-mode sets only when opted in

@@ -231,6 +231,9 @@ struct RcKnob {
                        // Each passthrough output's Maestro speed/accel come from
                        // rcConfig.smoothProfiles[smoothProfile].entries[mid-1][ch]
                        // (replaces the retired per-output smoothSpeed/smoothAccel).
+  bool    easeSwitchOverride;  // false (default): this knob's own profile wins over the
+                       // switch's active easing. true: the switch's "Set active easing"
+                       // action overrides this knob's profile. See resolveKnobEasing().
   uint8_t outputCount; // mode-1 outputs (and ALL modes when !modeAware)
   RcKnobOutput outputs[RC_KNOB_MAX_OUTPUTS];
   uint8_t outputCount2[2];                       // modes 2 & 3 (only when modeAware)
@@ -629,6 +632,7 @@ void rcConfigLoadDefaults() {
     rcConfig.knobs[i].modeAware   = false;
     rcConfig.knobs[i].modeSwitchOverride = -1;   // follow the global mode switch
     rcConfig.knobs[i].smoothProfile = -1;        // no smoothing profile
+    rcConfig.knobs[i].easeSwitchOverride = false; // knob's own profile wins over the switch
     rcConfig.knobs[i].outputCount = 0;
     memset(rcConfig.knobs[i].outputs, 0, sizeof(rcConfig.knobs[i].outputs));
     rcConfig.knobs[i].outputCount2[0] = rcConfig.knobs[i].outputCount2[1] = 0;
@@ -964,6 +968,7 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
     kObj["modeAware"] = kn.modeAware;
     kObj["modeSwitchOverride"] = kn.modeSwitchOverride;   // -1 = global mode switch
     if (kn.smoothProfile != -1) kObj["smoothProfile"] = kn.smoothProfile;   // -1 = none (omitted)
+    if (kn.easeSwitchOverride)  kObj["easeSwitchOverride"] = true;          // false = omitted (knob wins)
     rcWriteKnobOuts(kObj.createNestedArray("outputs"), kn.outputCount, kn.outputs);  // mode 1
     if (kn.modeAware) {   // per-mode sets only when opted in
       rcWriteKnobOuts(kObj.createNestedArray("outputs2"), kn.outputCount2[0], kn.outputs2[0]);
@@ -1171,6 +1176,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       kn.modeAware = kObj["modeAware"] | false;
       kn.modeSwitchOverride = kObj.containsKey("modeSwitchOverride") ? (int8_t)kObj["modeSwitchOverride"].as<int>() : -1;
       kn.smoothProfile      = kObj.containsKey("smoothProfile")      ? (int8_t)kObj["smoothProfile"].as<int>()      : -1;
+      kn.easeSwitchOverride = kObj["easeSwitchOverride"] | false;
       kn.outputCount = 0; memset(kn.outputs, 0, sizeof(kn.outputs));
       kn.outputCount2[0] = kn.outputCount2[1] = 0; memset(kn.outputs2, 0, sizeof(kn.outputs2));
       if (kObj.containsKey("outputs"))                       // mode 1 (also loads legacy configs)

@@ -543,20 +543,26 @@ static uint16_t g_maeSpeed[RC_NUM_MAESTROS][32] = {};
 static uint16_t g_maeAccel[RC_NUM_MAESTROS][32] = {};
 static const uint16_t MAE_SMOOTH_UNKNOWN = 0xFFFF;   // sentinel: force re-apply on next move (out of the 0-16383/0-255 range)
 
-// Per-Maestro "Snappy" runtime toggle — the ONE live control over easing. A
-// switch's "Snappy" action sets it. When ON, every servo on that Maestro runs at
-// full speed (0 speed/accel) — joysticks AND scripts — overriding all profile
-// easing. When OFF (boot default), normal profile easing applies. Not persisted;
-// boot = OFF (easing on). Every change is logged to the terminal ("Maestro N
-// snappy → ON/OFF", DBG_MAESTRO) so a stuck-Snappy Maestro is visible — no more
-// silently-stuck "Off" latch to hunt for.
-static bool g_snappy[RC_NUM_MAESTROS] = { false };
+// Per-Maestro "active easing" the SWITCH sets (a "Set active easing" action). It is
+// the FALLBACK, not the boss: local easing (a knob's own profile / a script action's
+// profile) wins by default; the switch only applies where local has NONE — unless a
+// per-context "allow switch to override" opt-in flips it. Not persisted; boot =
+// EASE_RELEASED; every change logs (DBG_MAESTRO) so what's in effect is visible.
+#define EASE_RELEASED (-1)   // switch imposes nothing → local-only (also = "leave alone")
+#define EASE_OFF      (-2)   // switch imposes "no easing" = full speed (drive 0)
+static int8_t g_switchEasing[RC_NUM_MAESTROS] = { EASE_RELEASED, EASE_RELEASED, EASE_RELEASED, EASE_RELEASED,
+                                                  EASE_RELEASED, EASE_RELEASED, EASE_RELEASED, EASE_RELEASED };
 
-// Resolve the EFFECTIVE smoothing profile for a passthrough knob on Maestro `mid`:
-// Snappy → -1 (no easing = full speed); otherwise the knob's own assigned profile.
-static int8_t resolveKnobSmoothProfile(const RcKnob& kn, uint8_t mid) {
-  if (mid >= 1 && mid <= RC_NUM_MAESTROS && g_snappy[mid - 1]) return -1;   // snappy → full speed
-  return kn.smoothProfile;                                                  // else knob's own (-1 = none)
+// Resolve the EFFECTIVE easing for a passthrough knob on Maestro `mid`. PRIORITY:
+//   knob has its OWN profile  →  that profile wins, UNLESS the knob opts in
+//                                (easeSwitchOverride) AND the switch is active
+//   knob has NO profile       →  follow the switch (EASE_RELEASED = none/leave alone)
+// Returns a profile 0-5, EASE_OFF (-2 = force full speed), or EASE_RELEASED (-1 = leave alone).
+static int8_t resolveKnobEasing(const RcKnob& kn, uint8_t mid) {
+  const int8_t sw  = (mid >= 1 && mid <= RC_NUM_MAESTROS) ? g_switchEasing[mid - 1] : EASE_RELEASED;
+  const int8_t own = kn.smoothProfile;                     // -1 = none, 0-5 = the knob's own profile
+  if (own >= 0) return (kn.easeSwitchOverride && sw != EASE_RELEASED) ? sw : own;  // local wins unless opted-in override
+  return sw;                                               // no local easing → follow the switch
 }
 
 // Invalidate a whole slot's smoothing cache so the next passthrough stick move
@@ -644,19 +650,27 @@ static void maestroApplySmoothProfile(uint8_t id, int8_t prof) {
   }
 }
 
-// Re-drive every passthrough channel on Maestro `id` to its target easing —
-// 0 (full speed) when the Maestro is Snappy (resolveKnobSmoothProfile returns -1),
-// else the channel's assigned-profile speed/accel. Called when Snappy toggles so
-// the change takes effect immediately (and channels snap back to full speed the
-// instant Snappy turns on). Steady-state stick moves only RE-apply a positive
-// limit (see processKnobs) so scripts/EEPROM on unmanaged channels are left
-// alone; this is the one place that actively drives 0.
+// Apply an EFFECTIVE easing to a Maestro's channels imperatively (used before a
+// script runs): a profile 0-5 → its speed/accel; EASE_OFF → full speed (reset);
+// EASE_RELEASED/none → leave the channels as-is.
+static void applyScriptEasing(uint8_t id, int8_t easing) {
+  if      (easing >= 0 && easing < RC_NUM_SMOOTH_PROFILES) maestroApplySmoothProfile(id, easing);
+  else if (easing == EASE_OFF)                             maestroResetSmoothedChannels(id);
+}
+
+// Re-drive every passthrough channel on Maestro `id` to its EFFECTIVE easing —
+// the profile's speed/accel, or 0 (full speed) when the effective easing is
+// EASE_OFF or none (resolveKnobEasing < 0). Called when the SWITCH's active easing
+// changes so it takes effect immediately AND channels snap back when the switch
+// releases / goes Off. Steady-state stick moves only RE-apply a positive limit (see
+// processKnobs) so scripts/EEPROM on unmanaged channels are left alone; this is the
+// one place that actively drives 0.
 static void reapplyMaestroEasing(uint8_t id) {
   if (id < 1 || id > RC_NUM_MAESTROS) return;
   for (int i = 0; i < RC_NUM_KNOBS; i++) {
     const RcKnob& kn = rcConfig.knobs[i];
     if (kn.function != KF_MAESTRO_PASSTHROUGH) continue;
-    const int8_t eff = resolveKnobSmoothProfile(kn, id);
+    const int8_t eff = resolveKnobEasing(kn, id);
     for (int m = 1; m <= 3; m++) {
       const uint8_t       cnt  = rcKnobOutCount(kn, m);
       const RcKnobOutput* outs = rcKnobOuts(kn, m);
@@ -677,16 +691,15 @@ static void reapplyMaestroEasing(uint8_t id) {
 }
 
 // Parse and execute a Maestro action command string against slot `id` (1-8).
-// cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,pN]"
+// cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,pN][,o]"
 //      | "setSpeed,ch,spd" | "setAccel,ch,acc" | "setSpeedAccel,ch,spd,acc"
-//      | "snappy,<on|off|toggle>"  — full-speed toggle for the WHOLE Maestro:
-//        ON = ignore easing (joysticks AND scripts); OFF = normal profile easing.
-//   restartScript's optional 3rd arg "pN" applies smoothing profile N before the
-//   script runs (script easing); absent = leave channels as-is. When the Maestro is
-//   Snappy the script runs full speed regardless. (Legacy "applyProfile,<spec>" still
-//   parses — it maps to Snappy: u→on, r/pN→off.)
+//      | "setEasing,<pN|off|release>" — the SWITCH sets this Maestro's ACTIVE easing
+//        (the fallback the profile priority uses; see resolveKnobEasing).
+//   restartScript: "pN" = the action's OWN easing (wins by default); ",o" = allow the
+//   switch's active easing to override it. No pN = follow the switch; nothing = leave
+//   as-is. (Legacy "applyProfile,<spec>" and "snappy,<state>" still parse → setEasing.)
 static void executeMaestroCmd(uint8_t id, const char* cmd) {
-  char buf[32];
+  char buf[36];
   strlcpy(buf, cmd, sizeof(buf));
   char* tok = strtok(buf, ",");
   if (!tok) return;
@@ -714,41 +727,53 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
       maestroSetAccel(id, ch, (uint8_t) atoi(sAcc));
     }
   }
-  else if (strcmp(tok, "snappy") == 0) {          // Snappy runtime toggle for the WHOLE Maestro
-    char* s = strtok(nullptr, ",");               // "on" | "off" | "toggle"  (bare "snappy" → on)
+  else if (strcmp(tok, "setEasing") == 0) {       // the SWITCH sets this Maestro's active easing (the fallback)
+    char* s = strtok(nullptr, ",");               // "pN" = profile | "off" = full speed | "release"/absent = local-only
     if (id >= 1 && id <= RC_NUM_MAESTROS) {
-      bool want;
-      if      (!s)                          want = true;
-      else if (s[0] == 't' || s[0] == 'T')  want = !g_snappy[id - 1];            // toggle
-      else if (s[0] == 'o' || s[0] == 'O')  want = !(s[1] == 'f' || s[1] == 'F'); // "on"→true / "off"→false
-      else if (s[0] == '0')                 want = false;
-      else                                  want = true;                          // "1" / anything else → on
-      g_snappy[id - 1] = want;
-      reapplyMaestroEasing(id);                   // apply full-speed / restore easing immediately
-      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u snappy → %s\n", id, want ? "ON (full speed)" : "OFF (easing)");
+      int8_t v = EASE_RELEASED;
+      if (s) {
+        if      (s[0] == 'p' || s[0] == 'P') { int p = atoi(s + 1); if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) v = (int8_t)p; }
+        else if (s[0] == 'o' || s[0] == 'O')   v = EASE_OFF;        // "off" → full speed
+        // "release" / anything else → EASE_RELEASED (switch imposes nothing)
+      }
+      g_switchEasing[id - 1] = v;
+      reapplyMaestroEasing(id);
+      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u active easing → %s\n", id,
+           v == EASE_RELEASED ? "Release (local-only)" : v == EASE_OFF ? "Off (full speed)" : "profile");
     }
   }
-  else if (strcmp(tok, "applyProfile") == 0) {    // LEGACY (pre-Snappy configs): map the old master latch to Snappy
-    char* s = strtok(nullptr, ",");               //   u (Off) → snappy ON;  r (Release) / pN (profile) → snappy OFF
+  else if (strcmp(tok, "applyProfile") == 0) {    // LEGACY master latch → setEasing (pN→profile, u→Off, r/absent→Release)
+    char* s = strtok(nullptr, ",");
     if (id >= 1 && id <= RC_NUM_MAESTROS) {
-      g_snappy[id - 1] = (s && (s[0] == 'u' || s[0] == 'U'));
-      reapplyMaestroEasing(id);
-      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u snappy (from legacy applyProfile) → %s\n",
-           id, g_snappy[id - 1] ? "ON" : "OFF");
+      int8_t v = EASE_RELEASED;
+      if (s) { if (s[0]=='p'||s[0]=='P') { int p=atoi(s+1); if (p>=0 && p<RC_NUM_SMOOTH_PROFILES) v=(int8_t)p; }
+               else if (s[0]=='u'||s[0]=='U') v = EASE_OFF; }
+      g_switchEasing[id - 1] = v; reapplyMaestroEasing(id);
+    }
+  }
+  else if (strcmp(tok, "snappy") == 0) {          // LEGACY snappy toggle → setEasing (on/bare→Off full speed, off→Release)
+    char* s = strtok(nullptr, ",");
+    if (id >= 1 && id <= RC_NUM_MAESTROS) {
+      int8_t v = EASE_OFF;                                                         // bare / "on" / "1" → full speed
+      if (s && ((((s[0]=='o'||s[0]=='O') && (s[1]=='f'||s[1]=='F'))) || s[0]=='0')) v = EASE_RELEASED;  // "off"/"0" → local-only
+      g_switchEasing[id - 1] = v; reapplyMaestroEasing(id);
     }
   }
   else if (strcmp(tok, "restartScript") == 0) {
     char* sN    = strtok(nullptr, ",");
-    char* sSpec = strtok(nullptr, ",");   // optional "p<N>" = apply profile N before the script (script easing)
+    char* sSpec = strtok(nullptr, ",");   // optional "p<N>" = the ACTION's OWN easing (local — wins by default)
+    char* sOvr  = strtok(nullptr, ",");   // optional "o"    = allow the switch's active easing to override the action's
     uint8_t sub = sN ? (uint8_t)atoi(sN) : 0;
-    // Load easing before the script runs. Snappy wins (run the script full speed too);
-    // otherwise apply the named profile so the sequence eases. Absent spec = leave as-is.
-    if (id >= 1 && id <= RC_NUM_MAESTROS && g_snappy[id - 1]) {
-      maestroResetSmoothedChannels(id);                    // snappy → full speed for the script
-    } else if (sSpec && (sSpec[0] == 'p' || sSpec[0] == 'P')) {
-      int p = atoi(sSpec + 1);
-      if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) maestroApplySmoothProfile(id, (int8_t)p);
-    }
+    // PRIORITY (mirrors the joystick rule): the action's own easing wins; the switch's
+    // active easing is the fallback when the action has none — or overrides when the
+    // action opts in (",o"). Nothing set anywhere = leave the channels as-is.
+    int8_t local = EASE_RELEASED;
+    if (sSpec && (sSpec[0] == 'p' || sSpec[0] == 'P')) { int p = atoi(sSpec + 1); if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) local = (int8_t)p; }
+    const bool allowOvr = (sOvr && (sOvr[0] == 'o' || sOvr[0] == 'O'));
+    const int8_t sw = (id >= 1 && id <= RC_NUM_MAESTROS) ? g_switchEasing[id - 1] : EASE_RELEASED;
+    const int8_t use = (local >= 0) ? ((allowOvr && sw != EASE_RELEASED) ? sw : local)   // has local: local wins unless override
+                                    : sw;                                                // no local: follow the switch
+    applyScriptEasing(id, use);
     maestroRestartScript(id, sub);
   }
 }
@@ -1519,13 +1544,13 @@ void processKnobs() {
       if (kn.function == KF_MAESTRO_PASSTHROUGH) {
         // out.target is the Maestro slot ID (1-8)
         const uint8_t mid = out.target, mch = out.maestroCh;
-        // Smoothing comes from the knob's assigned profile (resolveKnobSmoothProfile) —
-        // unless the Maestro is Snappy, which returns -1 (full speed). No effective
-        // profile (-1) or an unset channel (0/0) = untouched here, so scripts/EEPROM
+        // Easing comes from resolveKnobEasing (the knob's own profile wins; the
+        // switch's active easing is the fallback / opt-in override). No effective
+        // profile (<0) or an unset channel (0/0) = untouched here, so scripts/EEPROM
         // stand; a managed channel re-applies its speed/accel via the g_maeSpeed/
-        // g_maeAccel cache (self-heals after a script). Snappy toggles reset channels
-        // via reapplyMaestroEasing() — the one place that drives 0.
-        const int8_t eff = resolveKnobSmoothProfile(kn, mid);
+        // g_maeAccel cache (self-heals after a script). A switch-easing change resets
+        // channels via reapplyMaestroEasing() — the one place that drives 0.
+        const int8_t eff = resolveKnobEasing(kn, mid);
         if (eff >= 0 && eff < RC_NUM_SMOOTH_PROFILES &&
             mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
           const RcSmoothEntry& e = rcConfig.smoothProfiles[eff].entries[mid - 1][mch];
