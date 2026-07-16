@@ -2316,6 +2316,14 @@ void handleSerialInput() {
               if (rcConfig.boardType == appliedBoardType) {
                 applySerialBauds(false);
                 applySbusOut(false);     // apply a flipped SBUS-OUT toggle live
+                // Re-apply Maestro easing so a changed smoothing profile / knob
+                // assignment / profile value takes effect IMMEDIATELY (matching the
+                // switch path) instead of waiting for a stick move — and resets any
+                // channel the new profile leaves uncovered (the steady-state hot path
+                // won't drive those down, so without this a re-assigned profile could
+                // leave the OLD easing stuck on the servo). Cache-gated, so a save that
+                // didn't touch easing is a no-op. See reapplyMaestroEasing().
+                for (uint8_t mid = 1; mid <= RC_NUM_MAESTROS; mid++) reapplyMaestroEasing(mid);
               } else {
                 Serial.println("{\"type\":\"INFO\",\"msg\":\"boardType changed — reboot to apply the new pin profile\"}");
               }
