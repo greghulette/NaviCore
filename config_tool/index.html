@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.14:36.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.14:56.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2768,6 +2768,12 @@
               <input type="number" id="wcb-deviceid" min="1" max="20" style="width:60px"
                      oninput="config.wcbNetwork.deviceId = Math.max(1, Math.min(20, +this.value || 1)); updateWcbDirtyBadge()">
               <small style="color:var(--muted);font-size:10px">1-19 or 20</small>
+            </div>
+            <div class="wcb-send-row">
+              <label>WiFi channel:</label>
+              <input type="number" id="wcb-channel" min="1" max="13" style="width:60px"
+                     oninput="config.wcbNetwork.channel = Math.max(1, Math.min(13, +this.value || 1)); updateWcbDirtyBadge()">
+              <small style="color:var(--muted);font-size:10px">1-13 — must match every WCB (?WCBCH)</small>
             </div>
             <div class="btn-row" style="margin-top:8px">
               <button class="btn btn-warn" id="btn-wcb-reboot" type="button" disabled
@@ -3447,7 +3453,7 @@ let config = {
   // WCB network credentials — populated from device's wcb_config.h on first
   // GET_CONFIG; user edits via the WCB Network sidebar section. Changes need
   // a reboot to take effect (WCBClient initialises once in setup()).
-  wcbNetwork:    { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20 },
+  wcbNetwork:    { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20, channel: 1 },
   peerEvent:     { alert: true, actions: [] },   // action(s) + passive alert fired when a NEW WCB peer is detected
   // Global MP3 Trigger destination — every "MP3 Trigger" action routes here.
   // transport 'serial' → local S3/S4 (port); 'wcb' → unicast WCB ID.
@@ -7814,6 +7820,7 @@ function snapshotWcbBaseline() {
     password: w.password || '',
     quantity: w.quantity | 0,
     deviceId: w.deviceId | 0,
+    channel:  (w.channel == null ? 1 : w.channel) | 0,
   };
   updateWcbDirtyBadge();
 }
@@ -7825,7 +7832,8 @@ function isWcbNetworkDirty() {
          (w.macOct3  | 0) !== wcbNetworkBaseline.macOct3  ||
          (w.password || '') !== wcbNetworkBaseline.password ||
          (w.quantity | 0) !== wcbNetworkBaseline.quantity ||
-         (w.deviceId | 0) !== wcbNetworkBaseline.deviceId;
+         (w.deviceId | 0) !== wcbNetworkBaseline.deviceId ||
+         ((w.channel == null ? 1 : w.channel) | 0) !== wcbNetworkBaseline.channel;
 }
 
 function updateWcbDirtyBadge() {
@@ -7837,17 +7845,20 @@ function updateWcbDirtyBadge() {
 // rendered as uppercase 2-digit strings; password and counts are plain values.
 function applyWcbNetworkUI() {
   const w = config.wcbNetwork
-    || (config.wcbNetwork = { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20 });
+    || (config.wcbNetwork = { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20, channel: 1 });
+  if (w.channel == null) w.channel = 1;   // back-compat: older configs have no channel
   const oct2 = document.getElementById('wcb-oct2');
   const oct3 = document.getElementById('wcb-oct3');
   const pw   = document.getElementById('wcb-password');
   const qty  = document.getElementById('wcb-quantity');
   const did  = document.getElementById('wcb-deviceid');
+  const chan = document.getElementById('wcb-channel');
   if (oct2) oct2.value = (w.macOct2 || 0).toString(16).toUpperCase().padStart(2, '0');
   if (oct3) oct3.value = (w.macOct3 || 0).toString(16).toUpperCase().padStart(2, '0');
   if (pw)   pw.value   = w.password || '';
   if (qty)  qty.value  = w.quantity || 4;
   if (did)  did.value  = w.deviceId || 20;
+  if (chan) chan.value = w.channel  || 1;
   renderPeerEventEditor();
   updateWcbDirtyBadge();
 }
@@ -11039,8 +11050,8 @@ async function saveConfigToBoard() {
   // lost silently).
   let wcbStrippedOverBridge = false;
   if (viaWcbActive && payload.wcbNetwork) {
-    const { deviceId, macOct2, macOct3, password, quantity, ...rest } = payload.wcbNetwork;
-    wcbStrippedOverBridge = [deviceId, macOct2, macOct3, password, quantity].some(v => v !== undefined);
+    const { deviceId, macOct2, macOct3, password, quantity, channel, ...rest } = payload.wcbNetwork;
+    wcbStrippedOverBridge = [deviceId, macOct2, macOct3, password, quantity, channel].some(v => v !== undefined);
     payload.wcbNetwork = rest;   // preserve any non-transport fields
     // If everything was transport-related, drop the empty object entirely
     if (Object.keys(payload.wcbNetwork).length === 0) delete payload.wcbNetwork;

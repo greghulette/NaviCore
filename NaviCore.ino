@@ -2805,6 +2805,9 @@ void setup() {
                       rcConfig.wcbNetwork.password,
                       rcConfig.wcbNetwork.quantity,
                       rcConfig.wcbNetwork.deviceId);
+  // Pin the ESP-NOW radio to the mesh channel every WCB is on BEFORE begin() — the
+  // ESP32 has one radio, so a mismatched channel makes this RC silently unreachable.
+  wcb->setMeshChannel(rcConfig.wcbNetwork.channel);
   if (!wcb->begin()) {
     Serial.println("[WCB] ERROR: wcb->begin() failed — check WCB Network settings in GUI");
     // Latch the fault for the LED arbiter: updateStatusLed() (loop) displays a

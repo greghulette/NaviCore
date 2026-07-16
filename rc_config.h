@@ -330,6 +330,10 @@ struct RcWcbNetwork {
                           // slot 20 so the config tool's "Via WCB" bridge
                           // has a single known target.  Field is left
                           // writable for unusual multi-RC deployments.
+  uint8_t channel;        // ESP-NOW mesh WiFi channel (1-13). The ESP32 has ONE radio,
+                          // so this MUST match the channel every WCB is on or this RC is
+                          // silently unreachable. Passed to wcb->setMeshChannel() before
+                          // begin(); a reboot is required to change it. Default 1.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -679,6 +683,7 @@ void rcConfigLoadDefaults() {
   strlcpy(rcConfig.wcbNetwork.password, WCB_PASSWORD, sizeof(rcConfig.wcbNetwork.password));
   rcConfig.wcbNetwork.quantity = WCB_QUANTITY;
   rcConfig.wcbNetwork.deviceId = WCB_DEVICE_ID;
+  rcConfig.wcbNetwork.channel  = 1;    // default ESP-NOW mesh channel (matches WCB_MESH_CHANNEL)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1014,6 +1019,7 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   wcbObj["password"] = rcConfig.wcbNetwork.password;
   wcbObj["quantity"] = rcConfig.wcbNetwork.quantity;
   wcbObj["deviceId"] = rcConfig.wcbNetwork.deviceId;
+  wcbObj["channel"]  = rcConfig.wcbNetwork.channel;
 
   // Global MP3 Trigger destination — every RA_MP3 action reads from here.
   JsonObject mp3Obj = doc.createNestedObject("mp3Dest");
@@ -1289,6 +1295,8 @@ bool rcConfigFromJSON(const JsonObject& doc) {
             sizeof(rcConfig.wcbNetwork.password));
     rcConfig.wcbNetwork.quantity = (uint8_t)(wcbObj["quantity"] | rcConfig.wcbNetwork.quantity);
     rcConfig.wcbNetwork.deviceId = (uint8_t)(wcbObj["deviceId"] | rcConfig.wcbNetwork.deviceId);
+    { int ch = wcbObj["channel"] | (int)rcConfig.wcbNetwork.channel;   // ESP-NOW mesh channel (1-13)
+      rcConfig.wcbNetwork.channel = (uint8_t)(ch < 1 ? 1 : ch > 13 ? 13 : ch); }
   }
 
   if (doc.containsKey("mp3Dest")) {
