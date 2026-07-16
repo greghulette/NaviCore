@@ -47,6 +47,8 @@
 #include "esp_ota_ops.h"        // esp_ota_get_bootloader_description (boot banner)
 #include "rom/rtc.h"            // rtc_get_reset_reason (low-level boot telemetry)
 #include <WCB_Client.h>   // header in greghulette/WCBClient is WCB_Client.h
+#include <WcbCmd.h>       // shared device-command translators (Maestro/MP3/WLED/HCR) —
+                          // ONE source of the device wire bytes across WCB + NaviCore
 #include <WCBStream.h>
 // HCR (Human Cyborg Relations Vocalizer): no library dependency — we format
 // the same byte string the upstream HCRVocalizer would have written and push
@@ -509,6 +511,20 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
 
   Stream* dest = (slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast;
   if (!dest) return false;              // remote slot but stream not yet up
+
+  // ;M subroutine-trigger (0xA7) frame bytes now come from the shared WcbCmd library,
+  // so the wire frame is one source of truth across the WCB firmware + NaviCore.
+  // Byte-identical to the generic path below — {0xAA, slot.device, 0x27, sub} — with the
+  // same flush-on-frame-boundary behaviour. NOTE the library arg is the POLOLU DEVICE
+  // number (slot.device), NOT NaviCore's slot id.
+  if (cmd_compact == 0xA7 && payload && plen == 1) {
+    uint8_t frame[4];
+    const size_t n = WcbMaestro::buildSubroutineFrame(slot.device, payload[0], frame);  // n == 4
+    if (slot.type != 1 && maestroBroadcast && maestroBroadcast->bytesFree() < n)
+      maestroBroadcast->flushNow();
+    return dest->write(frame, n) == n;
+  }
+
   uint8_t hdr[3] = { 0xAA, slot.device, (uint8_t)(cmd_compact & 0x7F) };
   const size_t frameLen = 3 + ((payload && plen) ? plen : 0);
   // Remote (broadcast WCBStream) path: if this whole Pololu frame won't fit in
@@ -828,101 +844,25 @@ void writeS5(const String& s) { if (s5) { s5->write((const uint8_t*)s.c_str(), s
 // never drift apart on what an action means. Returns false for an unknown fn
 // or out-of-range params (caller skips the action).
 static bool hcrNormalizeAction(uint8_t& fn, int& chan, int& track) {
-  switch (fn) {
-    case 2:   // SetEmotion(e, v)
-      return (chan >= 0 && chan <= 3 && track >= 0 && track <= 99);
-    case 3:   // Trigger — same payload as Stimulate
-    case 4:   // Stimulate(e, v)
-      if (chan < 0 || chan > 4 || track < 0 || track > 99) return false;
-      if (chan == 4) { fn = 5; chan = 0; track = 0; }   // emotion 4 = Overload shortcut
-      return true;
-    case 5: case 6: case 8: case 9: case 11:   // no-param functions
-      return true;
-    case 7:   // Muse(min, max) — auto-muse gap in seconds (min=chan, max=track)
-      return (chan >= 0 && chan <= 99 && track >= 0 && track <= 99);
-    case 10:  // OverrideEmotions(v) — v=chan (0/1); locks emotion normalization
-      return (chan >= 0 && chan <= 1);
-    case 13:  // SetMuse(v) — v=track (0/1); continuous idle musing on/off
-      return (track >= 0 && track <= 1);
-    case 14:  // PlayWAV(ch, track)
-      return (chan >= 0 && chan <= 2 && track >= 0 && track <= 9999);
-    case 16:  // StopWAV(ch)
-      return (chan >= 0 && chan <= 2);
-    case 17:  // SetVolume(ch, vol). chan 3 = ALL (V+A+B) in one message — see hcrFormat*.
-      return (chan >= 0 && chan <= 3 && track >= 0 && track <= 99);
-    case 18:  // VolumeUpAll(step)   — WCB ;H,VOLUP across V+A+B; track = step (0 = WCB default 5)
-    case 19:  // VolumeDownAll(step) — WCB ;H,VOLDN across V+A+B; chan unused
-      return (track >= 0 && track <= 99);
-    default:
-      return false;
-  }
+  // The parameter ranges AND the "emotion 4 = Overload" shortcut (fn 3/4 + chan 4
+  // → fn 5) now live in the shared WcbCmd HcrCodec (byte-identical extraction of
+  // this exact switch). Forwarding here keeps BOTH NaviCore transports — local
+  // serial (hcrFormatCommand) and WCB (hcrFormatWcbCommand) — and the WCB
+  // firmware validating against ONE source of truth, so they can never drift.
+  return HcrCodec::normalize(fn, chan, track);
 }
 
-// Local-serial HCR volume shadow for VolumeUp/DownAll (fn 18/19). The local
-// HCRVocalizer protocol has no relative-step command and no way to read back the
-// live volume, so NaviCore tracks the last volume it COMMANDED per channel
-// (V/A/B) and emits absolute <PVx..> sets stepped from there. Seeded to a mid
-// default until the first SetVolume; exact thereafter on this transport. (WCB
-// transport uses the WCB's own ;H,VOLUP/VOLDN step instead.)
-static int8_t hcrLocalVol[3] = { 50, 50, 50 };   // V, A, B (0-99)
+// Local-serial HCR device-wire formatter — a thin wrapper over the shared WcbCmd
+// HcrCodec, so the exact bytes an HCR consumes are IDENTICAL whether NaviCore
+// formats them here for a locally-wired UART or a WCB formats them off the mesh
+// (both compile the same WcbHcr.cpp). The per-channel commanded-volume shadow
+// for VolumeUp/DownAll (fn 18/19 — the local HCR protocol has no relative-step
+// command and no volume readback) lives inside g_hcr: seeded to a mid default,
+// exact after the first SetVolume on this transport. See WcbHcr.h.
+static HcrCodec g_hcr;
 
 static String hcrFormatCommand(uint8_t fn, int chan, int track) {
-  static const char emoteprefix[] = "HSMC";   // HAPPY / SAD / MAD / sCared
-  static const char audioprefix[] = "VAB";    // Vocalizer / A / B
-  if (!hcrNormalizeAction(fn, chan, track)) return "";   // ranges + Overload shortcut
-  String inner;
-  switch (fn) {
-    case 2:   // SetEmotion(e, v)
-      inner = String("O") + emoteprefix[chan] + String(track) + ",QE" + emoteprefix[chan];
-      break;
-    case 3:    // Trigger — same payload as Stimulate
-    case 4:    // Stimulate(e, v)  (chan==4 already normalized to fn 5 above)
-      inner = String("S") + emoteprefix[chan] + String(track) + ",QE" + emoteprefix[chan] + ",QT";
-      break;
-    case 5:  inner = "SE,QT";          break;  // Overload
-    case 6:  inner = "MM";             break;  // single Muse
-    case 7:  inner = String("MN") + chan + ",MX" + track; break;  // Muse(min,max) gap
-    case 8:  // Stop (all audio + emote). 4 frames = StopEmote + StopWAV V/A/B, matching the
-             // WCB's HCRVocalizer::Stop() BYTE-FOR-BYTE so local-serial == over-WCB. (Was a
-             // single <PSV,PSA,PSB,QT> frame — that diverged from the WCB relay path.)
-      return "<PSV,QT>\n<PSV,QPV>\n<PSA,QPA>\n<PSB,QPB>\n";
-    case 9:  inner = "PSV,QT";         break;  // StopEmote
-    case 10: inner = String("O") + chan + ",QO"; break;  // OverrideEmotions(v) — "O<v>" (digit, vs "O<HSMC>" for SetEmotion)
-    case 11: inner = "OR,QE";          break;  // ResetEmotions
-    case 13: inner = String("M") + track + ",QM"; break;  // SetMuse(v) — "M<v>" (digit, vs "MM" single muse)
-    case 14: {  // PlayWAV(ch, track) — file number is 0-padded to 4 digits
-      char file[8]; snprintf(file, sizeof(file), "%04d", track);
-      inner = String("C") + audioprefix[chan] + file + ",QP" + audioprefix[chan];
-      break;
-    }
-    case 16:  // StopWAV(ch)
-      inner = String("PS") + audioprefix[chan] + ",QP" + audioprefix[chan];
-      break;
-    case 17:  // SetVolume(ch, vol). chan 3 = ALL = V, A, B set in one serial write.
-      if (chan == 3) {
-        hcrLocalVol[0] = hcrLocalVol[1] = hcrLocalVol[2] = (int8_t)track;   // keep the shadow in sync
-        return String("<PVV") + track + ">\n<PVA" + track + ">\n<PVB" + track + ">\n";
-      }
-      hcrLocalVol[chan] = (int8_t)track;                                    // keep the shadow in sync
-      inner = String("PV") + audioprefix[chan] + String(track);
-      break;
-    case 18:  // VolumeUpAll(step) / VolumeDownAll(step) — RELATIVE step across V+A+B.
-    case 19:  // The local HCR protocol has no step command, so step the per-channel
-    {         // shadow (hcrLocalVol) and emit absolute <PVx..> sets for V/A/B.
-      int step = (track > 0) ? track : 5;          // track = step; 0 = default 5 (matches WCB)
-      if (fn == 19) step = -step;
-      String allCh;
-      for (int c = 0; c < 3; c++) {
-        int v = hcrLocalVol[c] + step;
-        if (v < 0) v = 0; else if (v > 99) v = 99;
-        hcrLocalVol[c] = (int8_t)v;
-        allCh += String("<PV") + audioprefix[c] + v + ">\n";
-      }
-      return allCh;
-    }
-    default: return "";   // unreachable — hcrNormalizeAction rejects unknown fn
-  }
-  return String("<") + inner + ">\n";
+  return g_hcr.format(fn, chan, track);
 }
 
 // Build the ";H,FN,<fn>,<chan>,<track>" command an HCR action sends over the
@@ -1055,14 +995,17 @@ static void executeHcrAction(const RcAction& a) {
   hcrSerial->print(payload);
 }
 
-// Build the WCB MP3 command string for an RA_MP3 action. Mirrors the WCB's
-// ";A,<CMD>" set (WCB_MP3.cpp). Returns "" for an unknown function code.
-// No trailing newline: this travels as a WCB command (the WCB strips the ';'
-// and routes 'A...' to its MP3 driver) — not a raw serial forward.
+// Build the ";A,<CMD>" MP3 verb for an RA_MP3 action — the SINGLE producer for
+// BOTH transports: sent verbatim to a WCB (remote), and ALSO fed to g_mp3.handle()
+// for the local-serial path (see executeMp3Action), so one command string drives
+// the MP3 Trigger identically over the mesh or on a local UART. Mirrors the WCB's
+// ";A,<CMD>" set (WCB_MP3.cpp). Returns "" for an unknown fn or out-of-range arg.
+// No trailing newline: as a WCB command the receiver strips the ';' and routes
+// 'A...' to its MP3 driver — not a raw serial forward.
 static String mp3FormatCommand(uint8_t fn, int16_t arg) {
-  // Validate arg with the SAME ranges mp3SendLocal enforces so both transports
-  // accept exactly the same set of actions — a WCB-routed MP3 command must not
-  // forward a garbage track/index/volume the local path would have rejected.
+  // One set of ranges for both transports (local g_mp3.handle + WCB relay), so an
+  // action that's valid locally is valid remotely and vice-versa — never forward
+  // a garbage track/index/volume one path would have rejected.
   switch (fn) {
     case MP3_PLAY:
       if (arg < 1 || arg > 255) return "";                // track 1-255
@@ -1084,50 +1027,18 @@ static String mp3FormatCommand(uint8_t fn, int16_t arg) {
 
 // ── Local MP3 Trigger (v2.x) serial driver ──────────────────────────────────
 // Used when rcConfig.mp3Dest.transport == 0 (MP3 Trigger wired to this board's
-// S3/S4). Mirrors the WCB's WCB_MP3.cpp byte protocol exactly:
-//   play track   : 'v' <vol>  then 't' <track>
+// S3/S4/S5). The native byte protocol —
+//   play track    : 'v' <vol>  then 't' <track>
 //   play file idx : 'v' <vol>  then 'p' <idx>
-//   stop toggle  : 'O'        next: 'F'   prev: 'R'
-//   set volume   : 'v' <vol>  (0=loudest .. 64=inaudible)
-// The pre-play volume byte is why we keep a local volume shadow, just like the
-// WCB driver (mp3Volume there).
-static uint8_t mp3LocalVolume = 20;
-
-static inline void mp3Raw(Stream* p, uint8_t b1, int16_t b2 = -1) {
-  p->write(b1);
-  if (b2 >= 0) p->write((uint8_t)b2);
-  // No flush(): on a bit-banged SoftwareSerial port flush() blocks until
-  // the TX shift-register drains (~1 byte-time/byte at the aux baud), which
-  // stalls loop() — and therefore SBUS read/dispatch/passthrough — on every
-  // MP3-local command.  The bytes are already queued in the port's buffer
-  // and clock out on their own; nothing here needs to wait for completion.
-}
-
-static void mp3SendLocal(Stream* p, const char* portName, uint8_t fn, int16_t arg) {
-  switch (fn) {
-    case MP3_PLAY:
-      if (arg < 1 || arg > 255) { dlog(DBG_MP3, "[DISPATCH] MP3-local: track %d out of 1-255 — skipped\n", arg); return; }
-      mp3Raw(p, 'v', mp3LocalVolume); mp3Raw(p, 't', arg); break;
-    case MP3_PLAYFS:
-      if (arg < 0 || arg > 255) { dlog(DBG_MP3, "[DISPATCH] MP3-local: index %d out of 0-255 — skipped\n", arg); return; }
-      mp3Raw(p, 'v', mp3LocalVolume); mp3Raw(p, 'p', arg); break;
-    case MP3_STOP:  mp3Raw(p, 'O'); break;
-    case MP3_NEXT:  mp3Raw(p, 'F'); break;
-    case MP3_PREV:  mp3Raw(p, 'R'); break;
-    case MP3_VOL:
-      if (arg < 0 || arg > 64) { dlog(DBG_MP3, "[DISPATCH] MP3-local: vol %d out of 0-64 — skipped\n", arg); return; }
-      mp3LocalVolume = (uint8_t)arg; mp3Raw(p, 'v', mp3LocalVolume); break;
-    case MP3_VOLUP:
-      mp3LocalVolume = (mp3LocalVolume <= 5) ? 0 : mp3LocalVolume - 5;
-      mp3Raw(p, 'v', mp3LocalVolume); break;
-    case MP3_VOLDN:
-      mp3LocalVolume = (mp3LocalVolume >= 59) ? 64 : mp3LocalVolume + 5;
-      mp3Raw(p, 'v', mp3LocalVolume); break;
-    default:
-      dlog(DBG_MP3, "[DISPATCH] MP3-local: bad fn=%u — skipped\n", fn); return;
-  }
-  dlog(DBG_MP3, "[DISPATCH] MP3→%s  fn=%u arg=%d vol=%u  OK\n", portName, fn, arg, mp3LocalVolume);
-}
+//   stop toggle   : 'O'        next: 'F'   prev: 'R'
+//   set volume    : 'v' <vol>  (0=loudest .. 64=inaudible)
+// — plus the pre-play volume shadow now live in the shared WcbCmd Mp3Codec, the
+// SAME parser a WCB runs on its receive side. executeMp3Action() formats the ;A
+// verb (mp3FormatCommand) and hands it to g_mp3.handle(), so a locally-wired MP3
+// Trigger and one reached over the mesh consume byte-identical serial (WcbMp3.h).
+// No g_mp3.poll(): the local path stays fire-and-forget — no ONFIN/RX — exactly
+// as the old direct driver did. The shadow seeds to 20, matching the old default.
+static Mp3Codec g_mp3;
 
 // Dispatch an RA_MP3 action. Destination is GLOBAL (rcConfig.mp3Dest).
 //   transport 0 = local serial (S3/S4) — drive the MP3 Trigger directly here.
@@ -1146,7 +1057,18 @@ static void executeMp3Action(const RcAction& a) {
       dlog(DBG_MP3, "[DISPATCH] MP3-local: unknown serial port '%s' — skipped\n", dest.target);
       return;
     }
-    mp3SendLocal(p, dest.target, a.fn, a.track);
+    // Format the ;A verb with the shared producer, then let g_mp3.handle() emit
+    // the MP3 Trigger's native bytes — the SAME shared codec a WCB runs on its
+    // receive side, so local and over-mesh drive the Trigger identically.
+    String cmd = mp3FormatCommand(a.fn, a.track);
+    if (cmd.length() == 0) {
+      dlog(DBG_MP3, "[DISPATCH] MP3-local: bad/out-of-range fn=%u arg=%d — skipped\n", a.fn, a.track);
+      return;
+    }
+    g_mp3.begin(*p);                          // rebind — the resolved port can change per action
+    bool ok = g_mp3.handle(cmd.c_str() + 1);  // skip leading ';' (handle tolerates the 'A' verb)
+    dlog(DBG_MP3, "[DISPATCH] MP3→%s  fn=%u arg=%d vol=%u  %s\n",
+          dest.target, a.fn, a.track, g_mp3.volume(), ok ? "OK" : "FAIL");
     return;
   }
 
