@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.10:18.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.10:22.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9179,6 +9179,10 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
       `<option value="release"${prevSpec === 'release' ? ' selected' : ''}>Release — local only</option>`;
     pWrap.appendChild(pLab); pWrap.appendChild(pSel);
     argWrap.appendChild(pWrap);
+    const eHint = document.createElement('div');
+    eHint.style.cssText = 'font-size:10px;color:var(--muted);flex-basis:100%;line-height:1.4;margin-top:2px';
+    eHint.innerHTML = "<b>Fallback only:</b> a knob or sequence that has its OWN easing ignores this &mdash; unless that knob/sequence ticks <b>Allow switch to override</b>. It applies where there's no local easing.";
+    argWrap.appendChild(eHint);
   } else if (cmd === 'setSpeedAccel') {
     // Both limits in one action, as sliders. Speed slider maxes at 500 (0=off;
     // the useful smoothing range — 500+ is effectively instant); accel 0-255 is
@@ -9227,6 +9231,10 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
     ovrLab.appendChild(ovrCb); ovrLab.appendChild(document.createTextNode('Allow switch to override'));
     ovrWrap.appendChild(ovrLab);
     argWrap.appendChild(ovrWrap);
+    const sHint = document.createElement('div');
+    sHint.style.cssText = 'font-size:10px;color:var(--muted);flex-basis:100%;line-height:1.4;margin-top:2px';
+    sHint.innerHTML = "<b>Easing priority:</b> this sequence's easing wins &rarr; if <b>Leave as-is</b>, it follows a switch's <b>Set active easing</b> action &rarr; tick <b>Allow switch to override</b> to let the switch win anyway.";
+    argWrap.appendChild(sHint);
   } else {
     const note = document.createElement('span');
     note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
@@ -10236,6 +10244,9 @@ function openKnobModal(name) {
             <label style="font-size:11px;display:flex;align-items:center;gap:5px" title="Off (default): this knob's smoothing profile above always wins. On: a switch's 'Set active easing' overrides it.">
               <input type="checkbox" id="kn-easeovr"${k.easeSwitchOverride ? ' checked' : ''}> Allow switch to override
             </label>
+          </div>
+          <div style="font-size:10px;color:var(--muted);flex-basis:100%;line-height:1.4;margin-top:2px">
+            <b>Easing priority:</b> this knob's profile wins &rarr; if <b>None</b>, the servo follows a switch's <b>Set active easing</b> action &rarr; tick <b>Allow switch to override</b> to let the switch win anyway.
           </div>
         </div>
         <div style="display:flex; flex-wrap:wrap; gap:12px 22px; align-items:center; padding-top:12px; border-top:1px solid var(--border)">
