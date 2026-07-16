@@ -543,21 +543,20 @@ static uint16_t g_maeSpeed[RC_NUM_MAESTROS][32] = {};
 static uint16_t g_maeAccel[RC_NUM_MAESTROS][32] = {};
 static const uint16_t MAE_SMOOTH_UNKNOWN = 0xFFFF;   // sentinel: force re-apply on next move (out of the 0-16383/0-255 range)
 
-// Per-Maestro "active smoothing profile" master — a switch's "Apply smoothing
-// profile" action sets it, and passthrough joysticks driving that Maestro FOLLOW
-// it (it wins over each knob's own profile). Runtime latch, not persisted; boot
-// = released. Values: -1 RELEASED (joysticks use their own profile); -2 OFF (force
-// no smoothing / snappy); 0..5 = that profile is the Maestro's master.
-#define SMOOTH_MASTER_OFF (-2)
-static int8_t g_activeSmoothProfile[RC_NUM_MAESTROS] = { -1, -1, -1, -1, -1, -1, -1, -1 };   // one per Maestro (RC_NUM_MAESTROS=8)
+// Per-Maestro "Snappy" runtime toggle — the ONE live control over easing. A
+// switch's "Snappy" action sets it. When ON, every servo on that Maestro runs at
+// full speed (0 speed/accel) — joysticks AND scripts — overriding all profile
+// easing. When OFF (boot default), normal profile easing applies. Not persisted;
+// boot = OFF (easing on). Every change is logged to the terminal ("Maestro N
+// snappy → ON/OFF", DBG_MAESTRO) so a stuck-Snappy Maestro is visible — no more
+// silently-stuck "Off" latch to hunt for.
+static bool g_snappy[RC_NUM_MAESTROS] = { false };
 
 // Resolve the EFFECTIVE smoothing profile for a passthrough knob on Maestro `mid`:
-// the Maestro's active master beats the knob's own; OFF = none.
+// Snappy → -1 (no easing = full speed); otherwise the knob's own assigned profile.
 static int8_t resolveKnobSmoothProfile(const RcKnob& kn, uint8_t mid) {
-  const int8_t act = (mid >= 1 && mid <= RC_NUM_MAESTROS) ? g_activeSmoothProfile[mid - 1] : -1;
-  if (act == SMOOTH_MASTER_OFF) return -1;   // Off → force no smoothing
-  if (act >= 0)                 return act;   // master profile wins over the knob's own
-  return kn.smoothProfile;                    // released → knob's own (-1 = none)
+  if (mid >= 1 && mid <= RC_NUM_MAESTROS && g_snappy[mid - 1]) return -1;   // snappy → full speed
+  return kn.smoothProfile;                                                  // else knob's own (-1 = none)
 }
 
 // Invalidate a whole slot's smoothing cache so the next passthrough stick move
@@ -645,14 +644,14 @@ static void maestroApplySmoothProfile(uint8_t id, int8_t prof) {
   }
 }
 
-// Re-drive every passthrough channel on Maestro `id` to its EFFECTIVE smoothing
-// (active master > knob's own > none), INCLUDING 0 to snap a channel back when
-// the master releases or turns smoothing Off. Called when the active profile
-// changes so the switch takes effect immediately (and channels that leave the
-// active profile reset to snappy). Steady-state stick moves only RE-apply a
-// positive limit (see processKnobs) so scripts/EEPROM on unmanaged channels are
-// left alone; this is the one place that actively drives 0.
-static void reapplyActiveSmoothing(uint8_t id) {
+// Re-drive every passthrough channel on Maestro `id` to its target easing —
+// 0 (full speed) when the Maestro is Snappy (resolveKnobSmoothProfile returns -1),
+// else the channel's assigned-profile speed/accel. Called when Snappy toggles so
+// the change takes effect immediately (and channels snap back to full speed the
+// instant Snappy turns on). Steady-state stick moves only RE-apply a positive
+// limit (see processKnobs) so scripts/EEPROM on unmanaged channels are left
+// alone; this is the one place that actively drives 0.
+static void reapplyMaestroEasing(uint8_t id) {
   if (id < 1 || id > RC_NUM_MAESTROS) return;
   for (int i = 0; i < RC_NUM_KNOBS; i++) {
     const RcKnob& kn = rcConfig.knobs[i];
@@ -678,14 +677,14 @@ static void reapplyActiveSmoothing(uint8_t id) {
 }
 
 // Parse and execute a Maestro action command string against slot `id` (1-8).
-// cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,sm]"
+// cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,pN]"
 //      | "setSpeed,ch,spd" | "setAccel,ch,acc" | "setSpeedAccel,ch,spd,acc"
-//      | "applyProfile,<spec>"  — sets this Maestro's ACTIVE smoothing master
-//        (joysticks follow it): "p0".."p5"=profile | "u"=off (no smoothing) | "r"=release
-//   restartScript's optional 3rd arg loads smoothing before the script runs:
-//   "u" = Unlimited (zero this Maestro's profile-managed channels); "p0".."p5" =
-//   apply that smoothing profile; absent = leave the channels as-is. (A legacy
-//   bare "1" reset flag is also treated as Unlimited.)
+//      | "snappy,<on|off|toggle>"  — full-speed toggle for the WHOLE Maestro:
+//        ON = ignore easing (joysticks AND scripts); OFF = normal profile easing.
+//   restartScript's optional 3rd arg "pN" applies smoothing profile N before the
+//   script runs (script easing); absent = leave channels as-is. When the Maestro is
+//   Snappy the script runs full speed regardless. (Legacy "applyProfile,<spec>" still
+//   parses — it maps to Snappy: u→on, r/pN→off.)
 static void executeMaestroCmd(uint8_t id, const char* cmd) {
   char buf[32];
   strlcpy(buf, cmd, sizeof(buf));
@@ -715,27 +714,40 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
       maestroSetAccel(id, ch, (uint8_t) atoi(sAcc));
     }
   }
-  else if (strcmp(tok, "applyProfile") == 0) {    // set this Maestro's ACTIVE smoothing master — joysticks follow it
-    char* sSpec = strtok(nullptr, ",");           // "p0".."p5" = profile | "u" = off (no smoothing) | "r" = release (per-knob)
-    if (sSpec && id >= 1 && id <= RC_NUM_MAESTROS) {
-      if      (sSpec[0] == 'p' || sSpec[0] == 'P') { int p = atoi(sSpec + 1); if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) g_activeSmoothProfile[id - 1] = (int8_t)p; }
-      else if (sSpec[0] == 'r' || sSpec[0] == 'R') g_activeSmoothProfile[id - 1] = -1;                // release → each knob's own
-      else                                         g_activeSmoothProfile[id - 1] = SMOOTH_MASTER_OFF;  // "u" → off (no smoothing)
-      reapplyActiveSmoothing(id);
-      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u active smoothing → %d\n", id, g_activeSmoothProfile[id - 1]);
+  else if (strcmp(tok, "snappy") == 0) {          // Snappy runtime toggle for the WHOLE Maestro
+    char* s = strtok(nullptr, ",");               // "on" | "off" | "toggle"  (bare "snappy" → on)
+    if (id >= 1 && id <= RC_NUM_MAESTROS) {
+      bool want;
+      if      (!s)                          want = true;
+      else if (s[0] == 't' || s[0] == 'T')  want = !g_snappy[id - 1];            // toggle
+      else if (s[0] == 'o' || s[0] == 'O')  want = !(s[1] == 'f' || s[1] == 'F'); // "on"→true / "off"→false
+      else if (s[0] == '0')                 want = false;
+      else                                  want = true;                          // "1" / anything else → on
+      g_snappy[id - 1] = want;
+      reapplyMaestroEasing(id);                   // apply full-speed / restore easing immediately
+      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u snappy → %s\n", id, want ? "ON (full speed)" : "OFF (easing)");
+    }
+  }
+  else if (strcmp(tok, "applyProfile") == 0) {    // LEGACY (pre-Snappy configs): map the old master latch to Snappy
+    char* s = strtok(nullptr, ",");               //   u (Off) → snappy ON;  r (Release) / pN (profile) → snappy OFF
+    if (id >= 1 && id <= RC_NUM_MAESTROS) {
+      g_snappy[id - 1] = (s && (s[0] == 'u' || s[0] == 'U'));
+      reapplyMaestroEasing(id);
+      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u snappy (from legacy applyProfile) → %s\n",
+           id, g_snappy[id - 1] ? "ON" : "OFF");
     }
   }
   else if (strcmp(tok, "restartScript") == 0) {
     char* sN    = strtok(nullptr, ",");
-    char* sSpec = strtok(nullptr, ",");   // optional: "u"=unlimited | "0".."5"=profile | absent=leave
+    char* sSpec = strtok(nullptr, ",");   // optional "p<N>" = apply profile N before the script (script easing)
     uint8_t sub = sN ? (uint8_t)atoi(sN) : 0;
-    if (sSpec) {
-      if (sSpec[0] == 'p' || sSpec[0] == 'P') {          // "p<N>" = apply profile N
-        int p = atoi(sSpec + 1);
-        if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) maestroApplySmoothProfile(id, (int8_t)p);
-      } else {                                            // "u" OR a legacy bare "1" reset flag → unlimited
-        maestroResetSmoothedChannels(id);
-      }
+    // Load easing before the script runs. Snappy wins (run the script full speed too);
+    // otherwise apply the named profile so the sequence eases. Absent spec = leave as-is.
+    if (id >= 1 && id <= RC_NUM_MAESTROS && g_snappy[id - 1]) {
+      maestroResetSmoothedChannels(id);                    // snappy → full speed for the script
+    } else if (sSpec && (sSpec[0] == 'p' || sSpec[0] == 'P')) {
+      int p = atoi(sSpec + 1);
+      if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) maestroApplySmoothProfile(id, (int8_t)p);
     }
     maestroRestartScript(id, sub);
   }
@@ -1507,12 +1519,12 @@ void processKnobs() {
       if (kn.function == KF_MAESTRO_PASSTHROUGH) {
         // out.target is the Maestro slot ID (1-8)
         const uint8_t mid = out.target, mch = out.maestroCh;
-        // Smoothing comes from the EFFECTIVE profile — the Maestro's active master
-        // (set by a switch) if any, else this knob's own (resolveKnobSmoothProfile).
-        // No effective profile (-1) or an unset channel (0/0) = untouched here, so
-        // scripts/EEPROM stand; a managed channel re-applies its speed/accel via the
-        // g_maeSpeed/g_maeAccel cache (self-heals after a script). Master changes
-        // reset channels via reapplyActiveSmoothing() — the one place that drives 0.
+        // Smoothing comes from the knob's assigned profile (resolveKnobSmoothProfile) —
+        // unless the Maestro is Snappy, which returns -1 (full speed). No effective
+        // profile (-1) or an unset channel (0/0) = untouched here, so scripts/EEPROM
+        // stand; a managed channel re-applies its speed/accel via the g_maeSpeed/
+        // g_maeAccel cache (self-heals after a script). Snappy toggles reset channels
+        // via reapplyMaestroEasing() — the one place that drives 0.
         const int8_t eff = resolveKnobSmoothProfile(kn, mid);
         if (eff >= 0 && eff < RC_NUM_SMOOTH_PROFILES &&
             mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32) {
@@ -2572,6 +2584,16 @@ void setup() {
   // Arm the boot guard FIRST so it covers all of setup() (PSRAM/WiFi/USB
   // bring-up). Disarmed at the very end once the board is confirmed healthy.
   bootGuardArm();
+
+  // Hold the local Maestro command line (Serial2 TX) idle-HIGH from the very first
+  // instant of boot. Until Serial2.begin() runs (~2 s from here — after the delay
+  // below + config load) the pin would otherwise float, and a floating/noisy
+  // command wire can feed the Maestro serial garbage it misreads as Set-Target /
+  // script commands — servos twitch with NO SBUS connected. A UART line idles HIGH,
+  // so driving it high = the Maestro sees "no data". MAESTRO_TX_PIN is 6 on both
+  // board profiles, so this is correct before applyBoardProfile() runs.
+  pinMode(MAESTRO_TX_PIN, OUTPUT);
+  digitalWrite(MAESTRO_TX_PIN, HIGH);
 
   // Bump the USB-CDC RX buffer well above the 256-byte default. The SBUS OUT
   // byte-streaming tee blocks the main loop for ~2.75 ms per SBUS frame while

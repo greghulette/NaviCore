@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">15.15:14.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.09:34.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8653,11 +8653,12 @@ function _maestroCmdSummary(slot, cmd) {
   if (p[0] === 'setSpeed')      return `${chName(+p[1] || 0)} speed ${p[2] || 0}`;
   if (p[0] === 'setAccel')      return `${chName(+p[1] || 0)} accel ${p[2] || 0}`;
   if (p[0] === 'setSpeedAccel') return `${chName(+p[1] || 0)} spd ${p[2] || 0} / acc ${p[3] || 0}`;
-  if (p[0] === 'applyProfile') {
-    if (p[1] === 'u') return 'active smoothing → Off';
-    if (p[1] === 'r') return 'active smoothing → release';
-    const i = +String(p[1] || '').replace(/^p/, '');
-    return `active smoothing → ${escH(_smoothProfiles()[i]?.name || 'Profile ' + (i + 1))} (master)`;
+  if (p[0] === 'snappy') {
+    const s = String(p[1] || 'on').toLowerCase();
+    return `snappy → ${s === 'off' ? 'Off (easing)' : s === 'toggle' ? 'Toggle' : 'On (full speed)'}`;
+  }
+  if (p[0] === 'applyProfile') {   // legacy — shown as its Snappy equivalent (u→On, else→Off)
+    return `snappy → ${(String(p[1] || '')[0] === 'u') ? 'On (full speed)' : 'Off (easing)'}`;
   }
   return escH(cmd || '');
 }
@@ -9144,19 +9145,25 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
       warn.textContent = `⚠ ${posUs}µs outside ${lo}–${hi}µs`;
       argWrap.appendChild(warn);
     }
-  } else if (cmd === 'applyProfile') {
-    // Set this Maestro's ACTIVE smoothing master — joysticks driving this Maestro
-    // FOLLOW it (it wins over each knob's own profile). "Off" forces snappy;
-    // "Release" hands control back to each knob's own profile.
-    const prevSpec = parts ? (parts[1] !== undefined ? String(parts[1]) : 'p0') : (document.getElementById(fid + '-maeprof') ? document.getElementById(fid + '-maeprof').value : 'p0');
+  } else if (cmd === 'snappy') {
+    // Snappy = full-speed toggle for the WHOLE Maestro. On = ignore easing
+    // (joysticks AND scripts); Off = normal profile easing; Toggle = flip each press.
+    // Legacy "applyProfile,<spec>" actions render here too, mapped: u(Off)→On, else→Off.
+    let prevState = 'on';
+    if (parts) {
+      if (parts[0] === 'applyProfile') prevState = (String(parts[1] || '')[0] === 'u') ? 'on' : 'off';   // legacy map
+      else if (parts[1] !== undefined)  prevState = String(parts[1]);
+    } else if (document.getElementById(fid + '-maesnap')) {
+      prevState = document.getElementById(fid + '-maesnap').value;
+    }
     const pWrap = document.createElement('div'); pWrap.className = 'field-group';
-    const pLab = document.createElement('label'); pLab.style.cssText = 'font-size:11px'; pLab.textContent = 'Set active →';
-    pLab.title = "Sets this Maestro's active smoothing master. Every joystick driving this Maestro follows it (overriding each knob's own profile). Off = force no smoothing (snappy). Release = back to each knob's own. Build profiles in the Smoothing tab.";
-    const pSel = document.createElement('select'); pSel.id = fid + '-maeprof';
+    const pLab = document.createElement('label'); pLab.style.cssText = 'font-size:11px'; pLab.textContent = 'Snappy →';
+    pLab.title = "Full-speed toggle for this whole Maestro. On = servos ignore easing and snap (joysticks AND scripts). Off = normal profile easing. Toggle = flip each press. Easing itself comes from your smoothing profiles + each knob's assigned profile.";
+    const pSel = document.createElement('select'); pSel.id = fid + '-maesnap';
     pSel.innerHTML =
-      _smoothProfiles().map((p, i) => `<option value="p${i}"${prevSpec === 'p' + i ? ' selected' : ''}>${escH(p.name || 'Profile ' + (i + 1))}</option>`).join('') +
-      `<option value="u"${prevSpec === 'u' ? ' selected' : ''}>Off — no smoothing</option>` +
-      `<option value="r"${prevSpec === 'r' ? ' selected' : ''}>Release — each knob's own</option>`;
+      `<option value="on"${prevState === 'on' ? ' selected' : ''}>On — full speed (ignore easing)</option>` +
+      `<option value="off"${prevState === 'off' ? ' selected' : ''}>Off — normal easing</option>` +
+      `<option value="toggle"${prevState === 'toggle' ? ' selected' : ''}>Toggle — flip each press</option>`;
     pWrap.appendChild(pLab); pWrap.appendChild(pSel);
     argWrap.appendChild(pWrap);
   } else if (cmd === 'setSpeedAccel') {
@@ -9184,17 +9191,17 @@ function _renderMaestroActionArgs(fid, parts, ctx) {
     const prevSub = parts ? (+parts[1] || 0) : (document.getElementById(fid + '-maeval') ? +document.getElementById(fid + '-maeval').value : 0);
     numField('Subroutine #', fid + '-maeval', 0, 127, Math.max(0, Math.min(127, prevSub || 0)));
     // Smoothing to load before the script runs. parts[2]: absent = leave as-is,
-    // "u" = unlimited (full speed), "0".."5" = apply that profile.
+    // "pN" = apply that profile so the sequence eases. (Legacy "u"/"1" per-script
+    // "unlimited" is dropped — the Snappy toggle covers full-speed now.)
     let prevSpec = parts ? (parts[2] !== undefined ? String(parts[2]) : '') : (document.getElementById(fid + '-maesm') ? document.getElementById(fid + '-maesm').value : '');
-    if (/^\d+$/.test(prevSpec)) prevSpec = 'u';   // legacy bare "1" reset flag → Unlimited
+    if (!/^p\d+$/.test(prevSpec)) prevSpec = '';   // only "pN" is kept; legacy u/1/anything → leave as-is
     const smWrap = document.createElement('div'); smWrap.className = 'field-group';
     const smLab = document.createElement('label'); smLab.style.cssText = 'font-size:11px';
-    smLab.textContent = 'Smoothing on run';
-    smLab.title = "What smoothing to load before the script starts. Leave as-is = don't touch; Unlimited = full speed; or apply a profile. Your knob's profile restores on the next stick move.";
+    smLab.textContent = 'Ease with profile';
+    smLab.title = "Apply a smoothing profile before the script runs so the sequence eases. Leave as-is = don't touch the channels. (For full speed, use a Snappy action — it overrides script easing too.)";
     const smSel = document.createElement('select'); smSel.id = fid + '-maesm';
     smSel.innerHTML =
       `<option value=""${prevSpec === '' ? ' selected' : ''}>Leave as-is</option>` +
-      `<option value="u"${prevSpec === 'u' ? ' selected' : ''}>Unlimited (full speed)</option>` +
       _smoothProfiles().map((p, i) => `<option value="p${i}"${prevSpec === 'p' + i ? ' selected' : ''}>${escH(p.name || 'Profile ' + (i + 1))}</option>`).join('');
     smWrap.appendChild(smLab); smWrap.appendChild(smSel);
     argWrap.appendChild(smWrap);
@@ -9809,11 +9816,12 @@ function appendActionFields(container, action) {
     cmdSel.id = fid + '-maecmd';
     cmdSel.style.minWidth = '160px';
     const parts = (action.cmd || 'setTarget,0,6000').split(',').map(s => s.trim());
+    const curCmd = (parts[0] === 'applyProfile') ? 'snappy' : (parts[0] || 'setTarget');   // legacy applyProfile → Snappy
     [['setTarget', 'Set servo position'], ['goHome', 'Send all servos home'], ['stopScript', 'Stop the script'],
-     ['restartScript', 'Run a script'], ['applyProfile', 'Set active smoothing (master)'],
+     ['restartScript', 'Run a script'], ['snappy', 'Snappy — full-speed toggle'],
      ['setSpeedAccel', 'Set speed + accel (manual)'],
      ['setSpeed', 'Set a speed limit'], ['setAccel', 'Set an acceleration limit']
-    ].forEach(([v, lbl]) => { const o = document.createElement('option'); o.value = v; o.textContent = lbl; if (v === (parts[0] || 'setTarget')) o.selected = true; cmdSel.appendChild(o); });
+    ].forEach(([v, lbl]) => { const o = document.createElement('option'); o.value = v; o.textContent = lbl; if (v === curCmd) o.selected = true; cmdSel.appendChild(o); });
     cmdSel.onchange = () => _renderMaestroActionArgs(fid, null);
 
     container.appendChild(makeFieldGroup('Maestro', slotSel));
@@ -9992,7 +10000,7 @@ function readActionFromFid(fid, type, extras) {
       const acc = clamp(+(document.getElementById(fid + '-maeacc')?.value || 0), 0, 255);
       cmd = `setSpeedAccel,${ch},${spd},${acc}`;
     }
-    else if (mcmd === 'applyProfile') { const spec = document.getElementById(fid + '-maeprof')?.value || 'p0'; cmd = `applyProfile,${spec}`; }
+    else if (mcmd === 'snappy') { const st = document.getElementById(fid + '-maesnap')?.value || 'on'; cmd = `snappy,${st}`; }
     else if (mcmd === 'restartScript') { const spec = document.getElementById(fid + '-maesm')?.value || ''; cmd = spec ? `restartScript,${clamp(val, 0, 127)},${spec}` : `restartScript,${clamp(val, 0, 127)}`; }
     else if (mcmd === 'stopScript')    cmd = 'stopScript';
     else                               cmd = 'goHome';
