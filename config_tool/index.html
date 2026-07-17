@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">16.15:42.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.11:07.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2346,6 +2346,7 @@
     <button class="dbg-chip" type="button" data-cat="wcb"     aria-pressed="false">WCB</button>
     <button class="dbg-chip" type="button" data-cat="hcr"     aria-pressed="false">HCR</button>
     <button class="dbg-chip" type="button" data-cat="mp3"     aria-pressed="false">MP3</button>
+    <button class="dbg-chip" type="button" data-cat="wled"    aria-pressed="false" title="WLED ;L&lt;id&gt; dispatch — local JSON out an aux port + remote forwards to a WCB">WLED</button>
     <button class="dbg-chip" type="button" data-cat="serial"  aria-pressed="false" title="Serial-port activity, both directions: outgoing Serial actions AND incoming bytes on S3/S4/S5 (shown as '[DISPATCH] Serial RX <port>')">Serial</button>
   </div>
   <div class="terminal-body" id="terminal-body">
@@ -2574,6 +2575,7 @@
         <button class="cfg-tab"        type="button" data-tab="hcr">HCR</button>
         <button class="cfg-tab"        type="button" data-tab="mp3">MP3 Trigger</button>
         <button class="cfg-tab"        type="button" data-tab="maestro">Maestro</button>
+        <button class="cfg-tab"        type="button" data-tab="wled">WLED</button>
         <button class="cfg-tab"        type="button" data-tab="smoothing">Smoothing</button>
         <button class="cfg-tab"        type="button" data-tab="serial">Baud Rates</button>
         <button class="cfg-tab"        type="button" data-tab="firmware">Firmware</button>
@@ -2872,6 +2874,25 @@
               <br><b>Import</b> a Maestro's saved settings file (📁 button <i>or drag-and-drop
               the file onto a row</i>) to pull in that Maestro's real per-channel endpoints
               and names — they drive the passthrough ranges and the timeline editor.
+            </div>
+          </div>
+        </section>
+
+        <!-- ════════════════════════════════════════════════════════════
+             WLED tab — per-id WLED routing table (mirror of the WCB's
+             wledConfigs). Each WLED ID → a local aux port or a remote WCB.
+             ════════════════════════════════════════════════════════════ -->
+        <section class="cfg-pane" id="cfg-pane-wled">
+          <h2 class="cfg-pane-title">WLED Lighting</h2>
+          <div class="sb-section" style="border-bottom:none">
+            <div id="wled-slots" style="display:flex;flex-direction:column;gap:6px"></div>
+            <div class="noconn" style="margin-top:6px">
+              One row per WLED. Give it an <b>ID (1-9)</b> — the same id your
+              <b>WLED Lighting</b> actions address with <code>;L&lt;id&gt;,VERB</code> — then route it to a
+              <b>Local port</b> (a WLED wired to this controller's Serial 1/2/3) or a
+              <b>Remote WCB</b> (a WLED hosted on another board; the command is forwarded over ESP-NOW).
+              WLED wants <b>115200 baud</b> — only <b>Serial 1 (S3, hardware UART)</b> is reliable that fast;
+              set the port's baud in the <b>Baud Rates</b> tab. A bare <code>;L,VERB</code> (no id) drives the lowest-id local WLED.
             </div>
           </div>
         </section>
@@ -3195,6 +3216,7 @@ const knobFunctions = {
 
 const KNOB_MAX_OUTPUTS  = 8;
 const NUM_MAESTRO_SLOTS = 8;
+const NUM_WLED_SLOTS = 4;   // must match firmware RC_NUM_WLED
 
 // Source entries must match firmware RC_KNOB_LABELS in rc_config.h.
 // The "kind" field drives the modal title — "Knob" / "Slider" / "Joystick axis".
@@ -3459,6 +3481,11 @@ let config = {
   // transport 'serial' → local S3/S4 (port); 'wcb' → unicast WCB ID.
   // (Serial baud is NOT here — it's per-port in auxBaud below.)
   mp3Dest:       { transport: 'wcb', target: '2', port: 'S3' },
+  // Per-id WLED routing table (mirror of firmware wledSlots[] / the WCB's
+  // wledConfigs). Each slot: id 1-9, port 3/4/5 (local aux) OR wcb 1-20 (remote),
+  // configured flag. All empty by default; edited in the WLED tab.
+  wledSlots:     Array.from({ length: NUM_WLED_SLOTS },
+                            () => ({ id: 0, port: 0, wcb: 0, configured: false })),
   // Aux SoftwareSerial port baud — single source of truth for S3/S4 line rate.
   // HCR-local, MP3-local, and Serial actions all use the port at this baud.
   auxBaud:       { S3: 9600, S4: 9600, S5: 9600, maestro: 115200 },
@@ -3536,6 +3563,7 @@ const actionTypeLabels = {
   'serial':        'Serial port',
   'hcr':           'HCR Vocalizer',
   'mp3':           'MP3 Trigger',
+  'wled':          'WLED Lighting',
   'record':        'Record (toggle)',
   'play':          'Play clip',
   'stop':          'Stop',
@@ -3588,7 +3616,10 @@ const HCR_EMOTIONS = [
   { v: 1, n: 'SAD' },
   { v: 2, n: 'MAD' },
   { v: 3, n: 'SCARED' },
-  { v: 4, n: 'OVERLOAD' },
+  // chan 4 'OVERLOAD' removed 2026-07-17: WcbCmd 0.5.0 rejects the chan-4 shortcut on
+  // Trigger/Stimulate (it diverged from the WCB). Use the fn 5 "Overload" function
+  // instead — HcrCodec::normalize now returns false for chan 4, so a chan-4 action is
+  // silently dropped. emotionName() still shows "chan 4" for any legacy config.
 ];
 const HCR_AUDIO_CHANS = [
   { v: 0, n: 'V (vocalizer)' },
@@ -4268,6 +4299,10 @@ const DEBUG_CATEGORIES = [
   { key: 'wcb',     bit: 1 << 1, match: t => /^\[DISPATCH\]\s*WCB/i.test(t)
                                             || (/^\[WCBStream\]/i.test(t)
                                                  && !/Kyber|sendRaw|\(Raw\)/i.test(t)) },
+  // WLED ;L<id> dispatch — local WcbWled::emit + remote forward (firmware DBG_WLED,
+  // 1<<2). "[DISPATCH] WLED …" never matches the WCB regex (anchored at 'WCB'), so
+  // even a WLED→WCB remote line is gated only by this chip.
+  { key: 'wled',    bit: 1 << 2, match: t => /^\[DISPATCH\]\s*WLED/i.test(t) },
   // HCR-over-WCB uses sendRaw (targetID 97 raw-serial forward), so group
   // those [WCBStream] sendRaw/Raw lines under HCR.
   { key: 'hcr',     bit: 1 << 3, match: t => /^\[(DISPATCH\]\s*HCR|HCR-DBG\]|HCR\s+TEST\])/i.test(t)
@@ -7185,6 +7220,7 @@ function handleBoardMessage(line) {
     }
     _syncMaestroChFromConfig();
     renderMaestroLocations();   // badges reflect the freshly-synced mirror
+    renderWledSlots();
     return;
   }
   if (msg.type === 'ACK') {
@@ -7299,6 +7335,12 @@ function applyConfig(data) {
   if (data.mp3Dest) {
     config.mp3Dest = { ...config.mp3Dest, ...data.mp3Dest };
   }
+  if (Array.isArray(data.wledSlots)) {
+    // Pad / truncate to NUM_WLED_SLOTS so the array length stays stable.
+    config.wledSlots = data.wledSlots.slice(0, NUM_WLED_SLOTS);
+    while (config.wledSlots.length < NUM_WLED_SLOTS)
+      config.wledSlots.push({ id: 0, port: 0, wcb: 0, configured: false });
+  }
   if (data.auxBaud) {
     config.auxBaud = { ...config.auxBaud, ...data.auxBaud };
   }
@@ -7315,6 +7357,7 @@ function applyConfig(data) {
   // was constructed with — snapshot them as the baseline for dirty tracking.
   snapshotWcbBaseline();
   renderMaestroLocations();
+  renderWledSlots();
   renderLogicalButtons();
   const mcEl = document.getElementById('cfg-matrix-ch');
   if (mcEl && config.matrixChannel) mcEl.value = config.matrixChannel;
@@ -7712,6 +7755,67 @@ function renderMaestroLocations() {
   });
   wrap.querySelectorAll('[data-mae-clearimp]').forEach(btn => {
     btn.addEventListener('click', () => _clearMaestroImport(+btn.dataset.maeClearimp));
+  });
+}
+
+// ── WLED routing table (WLED tab) ─────────────────────────────────────────
+// Per-id table mirroring the firmware's wledSlots[] / the WCB's wledConfigs.
+// Each row: WLED ID (1-9, 0=unused) → Local port (S3/S4/S5) or Remote WCB (1-20).
+// Handlers read the whole row and write the derived slot {id,port,wcb,configured}.
+function renderWledSlots() {
+  const wrap = document.getElementById('wled-slots');
+  if (!wrap) return;
+  if (!Array.isArray(config.wledSlots) || config.wledSlots.length !== NUM_WLED_SLOTS) {
+    config.wledSlots = Array.from({ length: NUM_WLED_SLOTS },
+                                  () => ({ id: 0, port: 0, wcb: 0, configured: false }));
+  }
+  wrap.innerHTML = '';
+  for (let i = 0; i < NUM_WLED_SLOTS; i++) {
+    const s = config.wledSlots[i] || (config.wledSlots[i] = { id: 0, port: 0, wcb: 0, configured: false });
+    const mode = !s.configured ? 'off' : (s.wcb > 0 ? 'remote' : 'local');
+    const portOpts = [3, 4, 5].map(p =>
+      `<option value="${p}" ${(+s.port === p) ? 'selected' : ''}>${_serialPortLabel('S' + p)} (S${p})</option>`).join('');
+    const row = document.createElement('div');
+    row.style.cssText = 'display:grid;grid-template-columns:auto auto auto auto auto;align-items:center;gap:6px;font-size:12px';
+    row.innerHTML = `
+      <span style="color:var(--muted);min-width:44px">Slot ${i + 1}</span>
+      <span style="color:var(--muted);font-size:10px">ID</span>
+      <input type="number" min="0" max="9" value="${s.id || 0}" data-wled-idx="${i}" data-wled-field="id"
+             style="font-size:11px;padding:2px 4px;width:48px"
+             title="WLED ID 1-9 — the ;L<id> your actions address. 0 = slot unused.">
+      <select data-wled-idx="${i}" data-wled-field="mode" style="font-size:11px;padding:2px 4px">
+        <option value="off"    ${mode === 'off' ? 'selected' : ''}>Off</option>
+        <option value="local"  ${mode === 'local' ? 'selected' : ''}>Local port</option>
+        <option value="remote" ${mode === 'remote' ? 'selected' : ''}>Remote WCB</option>
+      </select>
+      <span style="display:flex;gap:4px;align-items:center">
+        <select data-wled-idx="${i}" data-wled-field="port"
+                style="font-size:11px;padding:2px 4px;${mode === 'local' ? '' : 'display:none'}">${portOpts}</select>
+        <input type="number" min="1" max="20" value="${s.wcb || 2}" data-wled-idx="${i}" data-wled-field="wcb"
+               style="font-size:11px;padding:2px 4px;width:56px;${mode === 'remote' ? '' : 'display:none'}"
+               title="Host WCB ID (1-20) this WLED is wired to.">
+      </span>
+    `;
+    wrap.appendChild(row);
+  }
+  // Change handler: read the whole row, write the derived slot. Re-render only on
+  // a mode change (to toggle the Local-port vs Remote-WCB field visibility).
+  wrap.querySelectorAll('[data-wled-idx]').forEach(el => {
+    el.addEventListener('change', () => {
+      const idx = +el.dataset.wledIdx;
+      const q = f => wrap.querySelector(`[data-wled-idx="${idx}"][data-wled-field="${f}"]`);
+      const id   = Math.max(0, Math.min(9,  parseInt(q('id')?.value, 10)   || 0));
+      const mode = q('mode')?.value || 'off';
+      const port = Math.max(3, Math.min(5,  parseInt(q('port')?.value, 10) || 3));
+      const wcb  = Math.max(1, Math.min(20, parseInt(q('wcb')?.value, 10)  || 2));
+      config.wledSlots[idx] = {
+        id,
+        port: mode === 'local'  ? port : 0,
+        wcb:  mode === 'remote' ? wcb  : 0,
+        configured: (id >= 1 && mode !== 'off'),
+      };
+      if (el.dataset.wledField === 'mode') renderWledSlots();   // port/WCB visibility changed
+    });
   });
 }
 
@@ -8729,6 +8833,7 @@ function actionSummary(a) {
   else if (a.type === 'record') core = a.cmd ? `Record "${escH(a.cmd)}"` : 'Record (toggle)';
   else if (a.type === 'play')   core = `Play${(+a.fn) ? ' ⟳' : ''}${a.cmd ? ' "' + escH(a.cmd) + '"' : ''}`;
   else if (a.type === 'stop')   core = 'Stop';
+  else if (a.type === 'wled')   core = `WLED: ${escH(a.cmd)}`;
   else core = a.type;
   if (a.note && a.note.length)
     core += ` <span style="color:#888;font-style:italic">"${escH(a.note)}"</span>`;
@@ -9379,7 +9484,7 @@ function renderMp3ArgField(container, fn, curVal) {
 // window.NC_COMMAND_LIBRARY.
 const NC_CMDLIB_SEED = {
   schema: 'navicore-command-library/v1',
-  version: '0.3.0-wled-maestro',
+  version: '0.4.0-wled-id',
   // HCR + MP3 removed 2026-07-10: the vendored DroidNet library (auto-loaded) is a
   // firmware-accurate SUPERSET for both, so it is the single source of truth for them
   // (see cmdlib/droidnet/NOTICE.md). What remains is ONLY what DroidNet doesn't cover:
@@ -9390,15 +9495,41 @@ const NC_CMDLIB_SEED = {
   enums: {},
   boards: [
     { id:'wcb-wled', name:'WLED Lighting', kind:'wcb-verb', commands: [
-      { id:'wled.on', name:'Lights on', category:'Power', template:';L,ON', examples:[';L,ON'] },
-      { id:'wled.off', name:'Lights off', category:'Power', template:';L,OFF', examples:[';L,OFF'] },
-      { id:'wled.toggle', name:'Toggle', category:'Power', template:';L,TOGGLE', examples:[';L,TOGGLE'] },
-      { id:'wled.bri', name:'Set brightness', category:'Lighting', template:';L,BRI,{level}',
-        params:[ {name:'level', label:'Brightness (0-255)', type:'int', min:0, max:255, default:128, required:true} ], examples:[';L,BRI,128'] },
-      { id:'wled.preset', name:'Recall preset', category:'Lighting', template:';L,PS,{preset}',
-        params:[ {name:'preset', label:'Preset #', type:'int', min:0, max:250, default:1, required:true} ], examples:[';L,PS,3'] },
-      { id:'wled.color', name:'Set color', category:'Lighting', template:';L,COL,{color}',
-        params:[ {name:'color', label:'Color (RRGGBB)', default:'FF0000', pattern:'^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$', required:true} ], examples:[';L,COL,FF0000'] },
+      // ;L<id>,<verb> — <id> (1-9) selects the WLED; the WCB (WCB_WLED.cpp
+      // processWLEDRuntimeCommand) / NaviCore route that id to its slot (a local UART
+      // OR a remote WCB), then the shared WcbWled::build turns the verb into WLED JSON.
+      // The id is digits RIGHT AFTER 'L' with no comma (";L3,PS,2"); a bare ";L,…" (no
+      // id) means the host board's own lowest-id local WLED. Verbs/args mirror
+      // WcbWled.cpp exactly. wledId param = the {wledId} placeholder on every template.
+      { id:'wled.on', name:'Lights on', category:'Power', template:';L{wledId},ON',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true} ], examples:[';L1,ON'] },
+      { id:'wled.off', name:'Lights off', category:'Power', template:';L{wledId},OFF',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true} ], examples:[';L1,OFF'] },
+      { id:'wled.toggle', name:'Toggle', category:'Power', template:';L{wledId},TOGGLE',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true} ], examples:[';L1,TOGGLE'] },
+      { id:'wled.bri', name:'Set brightness', category:'Lighting', template:';L{wledId},BRI,{level}',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
+                 {name:'level', label:'Brightness (0-255)', type:'int', min:0, max:255, default:128, required:true} ], examples:[';L1,BRI,128'] },
+      { id:'wled.preset', name:'Recall preset', category:'Lighting', template:';L{wledId},PS,{preset}',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
+                 {name:'preset', label:'Preset #', type:'int', min:0, max:250, default:1, required:true} ], examples:[';L1,PS,3'] },
+      { id:'wled.color', name:'Set color', category:'Lighting', template:';L{wledId},COL,{color}',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
+                 {name:'color', label:'Color (RRGGBB or RRGGBBWW)', default:'FF0000', pattern:'^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$', required:true} ], examples:[';L1,COL,FF0000'] },
+      { id:'wled.fx', name:'Set effect', category:'Lighting', template:';L{wledId},FX,{index}',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
+                 {name:'index', label:'Effect #', type:'int', min:0, max:255, default:0, required:true} ], examples:[';L1,FX,9'] },
+      { id:'wled.fxfull', name:'Set effect + speed/intensity', category:'Lighting', template:';L{wledId},FX,{index},{speed},{intensity}',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
+                 {name:'index', label:'Effect #', type:'int', min:0, max:255, default:0, required:true},
+                 {name:'speed', label:'Speed (0-255)', type:'int', min:0, max:255, default:128, required:true},
+                 {name:'intensity', label:'Intensity (0-255)', type:'int', min:0, max:255, default:128, required:true} ], examples:[';L1,FX,9,128,200'] },
+      { id:'wled.pal', name:'Set palette', category:'Lighting', template:';L{wledId},PAL,{index}',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
+                 {name:'index', label:'Palette #', type:'int', min:0, max:255, default:0, required:true} ], examples:[';L1,PAL,5'] },
+      { id:'wled.json', name:'Raw JSON (escape hatch)', category:'Advanced', template:';L{wledId},JSON,{payload}',
+        params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
+                 {name:'payload', label:'WLED /json/state document', default:'{"bri":128}', required:true} ], examples:[';L1,JSON,{"bri":128}'] },
     ]},
     { id:'wcb-maestro', name:'Maestro (via WCB)', kind:'wcb-verb', commands: [
       { id:'maestro.run', name:'Run script', category:'Servo', template:';M{maestroId}{sequence}',
@@ -9943,6 +10074,22 @@ function appendActionFields(container, action) {
     fnSel.onchange = () => renderMp3ArgField(container, +fnSel.value, undefined);
     container.appendChild(makeFieldGroup('Function', fnSel));
     renderMp3ArgField(container, +(action.fn || 1), action.track);
+  } else if (type === 'wled') {
+    // Routing (per WLED ID → local aux port | remote WCB) is GLOBAL — set in the
+    // WLED tab (config.wledSlots). The action only carries the ";L<id>,VERB"
+    // command, authored via 📚 Browse Command Library (WLED Lighting board).
+    const cmdInput = document.createElement('input');
+    cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
+    cmdInput.placeholder = ';L1,PS,2';
+    cmdInput.style.width = '200px';
+    cmdInput.maxLength = 95;
+    cmdInput.value = action.cmd || '';
+    container.appendChild(makeFieldGroup('WLED cmd', cmdInput));
+    container.appendChild(_makeCmdLibraryButton(fid));
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center;max-width:230px';
+    note.textContent = 'Routing by WLED ID is set in the WLED tab. ";L,VERB" (no id) = the lowest-id local WLED.';
+    container.appendChild(note);
   } else if (type === 'record') {
     // Record/replay control — toggles capture. Clip name = which saved clip this
     // records into. Combo: pick a known clip from the dropdown or type a new name.
@@ -10086,6 +10233,13 @@ function readActionFromFid(fid, type, extras) {
     const trackEl  = document.getElementById(fid + '-track');
     const track    = trackEl ? +(trackEl.value || 0) : 0;
     return { type, fn, track, ...extras };
+  }
+  if (type === 'wled') {
+    // Routing is global (config.wledSlots, WLED tab). The action carries only the
+    // ";L<id>,VERB" command string (authored via the command library).
+    const cmd = document.getElementById(fid + '-cmd')?.value || '';
+    if (!cmd.trim()) return null;
+    return { type, cmd, ...extras };
   }
   if (type === 'record') {
     // Sanitize to the device's clip-name charset/length so what the action
@@ -11147,6 +11301,7 @@ function openHwSetup() {
   applyMp3DestUI();
   applyAuxBaudUI();
   renderMaestroLocations();
+  renderWledSlots();
   { const el = document.getElementById('matrix-debounce-input');
     if (el) el.value = config.matrixDebounceFrames ?? 1; }
   // Sync the transmitter-model dropdown to the currently active model.
@@ -12518,6 +12673,21 @@ function exportConfigCsv() {
     });
   }
 
+  // WLED routing table — one 'wled' row per slot. Columns (mirroring the maestro
+  // rows): slot=local serial port (0/3/4/5), maestroCh=remote WCB (0-20), posMin=
+  // WLED id (0-9), posMax=configured flag. Round-trips via the 'wled' import parser.
+  if (Array.isArray(config.wledSlots)) {
+    config.wledSlots.forEach((s, i) => {
+      const r = Array(header.length).fill('');
+      r[0] = 'wled'; r[1] = 'W' + (i + 1); r[2] = String(i + 1);   // type, control, buttonId(=slot idx)
+      r[12] = String(s.port || 0);           // slot col = local serial port (0/3/4/5)
+      r[13] = String(s.wcb || 0);            // maestroCh col = remote WCB (0-20)
+      r[14] = String(s.id || 0);             // posMin col = wledID (0-9)
+      r[15] = String(s.configured ? 1 : 0);  // posMax col = configured flag
+      rows.push(csvRow(r));
+    });
+  }
+
   // Smoothing profiles — a 'smoothprofile' row carries a profile's name at its
   // index (buttonId col), and a 'smoothchan' row per channel entry
   // (slot=Maestro id, maestroCh=channel, posMin=speed, posMax=accel). Profiles
@@ -12672,6 +12842,10 @@ function handleConfigImportFile(event) {
                       : { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20 },
         mp3Dest: config.mp3Dest ? { ...config.mp3Dest }
                                  : { transport: 'wcb', target: '2', port: 'S3' },
+        // Preserve the in-memory WLED routing table unless the CSV carries 'wled' rows.
+        wledSlots: Array.isArray(config.wledSlots)
+                     ? config.wledSlots.map(s => ({ ...s }))
+                     : Array.from({ length: NUM_WLED_SLOTS }, () => ({ id: 0, port: 0, wcb: 0, configured: false })),
         auxBaud: config.auxBaud ? { ...config.auxBaud } : { S3: 9600, S4: 9600, maestro: 115200 },
       };
       let csvHadHcrDest = false;
@@ -12714,6 +12888,7 @@ function handleConfigImportFile(event) {
       // row. The first touch replaces the inherited profiles with 6 empties, so a
       // file silent about smoothing keeps whatever is on the board.
       let _smoothCleared = false;
+      let _wledCleared = false;   // first 'wled' row makes the CSV authoritative for wledSlots
       const ensureSmoothProfiles = () => {
         if (!_smoothCleared) {
           imported.smoothProfiles = Array.from({ length: 6 }, () => ({ name: '', entries: [] }));
@@ -12885,6 +13060,25 @@ function handleConfigImportFile(event) {
           continue;
         }
 
+        // WLED routing slot — buttonId col = slot index (1-based), slot col = local
+        // serial port (0/3/4/5), maestroCh = remote WCB (0-20), posMin = WLED id
+        // (0-9), posMax = configured. First 'wled' row makes the CSV authoritative.
+        if (type === 'wled') {
+          if (!_wledCleared) {
+            imported.wledSlots = Array.from({ length: NUM_WLED_SLOTS }, () => ({ id: 0, port: 0, wcb: 0, configured: false }));
+            _wledCleared = true;
+          }
+          if (!Number.isFinite(buttonId) || buttonId < 1 || buttonId > NUM_WLED_SLOTS) continue;
+          const idx = buttonId - 1;
+          imported.wledSlots[idx] = {
+            id:   Math.max(0, Math.min(9,  parseInt(posMin, 10) || 0)),      // posMin col = wledID
+            port: [3, 4, 5].includes(parseInt(slot, 10)) ? parseInt(slot, 10) : 0,   // slot col = local port (3/4/5 valid; else not-local)
+            wcb:  Math.max(0, Math.min(20, parseInt(maestroCh, 10) || 0)),   // maestroCh col = remote WCB
+            configured: (posMax === '1' || posMax.toLowerCase() === 'true'), // posMax col = configured
+          };
+          continue;
+        }
+
         function buildAction() {
           if (!actionType) return null;
           const a = { type: actionType };
@@ -13032,6 +13226,7 @@ function handleConfigImportFile(event) {
         if (bsel) bsel.value = String(config.boardType | 0); }   // reflect imported board profile
       applyBaudRateLabels();
       renderMaestroLocations();
+      renderWledSlots();
       renderSmoothingPane();
     } catch (err) {
       alert('Import failed: ' + err.message);
@@ -13199,6 +13394,7 @@ applyWcbNetworkUI();
 applyMp3DestUI();
 applyAuxBaudUI();
 renderMaestroLocations();
+renderWledSlots();
 renderAssignmentList();
 updateButtonHighlights();
 </script>

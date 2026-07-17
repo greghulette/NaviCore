@@ -399,6 +399,7 @@ bool          calibrationActive = false;
 static uint32_t g_dbgFlags = 0;
 #define DBG_MAESTRO    (1u << 0)
 #define DBG_WCB        (1u << 1)   // covers both unicast and broadcast sends
+#define DBG_WLED       (1u << 2)   // WLED ;L<id> dispatch (local WcbWled::emit + remote forward)
 #define DBG_HCR        (1u << 3)
 #define DBG_MP3        (1u << 4)
 #define DBG_SERIAL     (1u << 5)
@@ -1090,6 +1091,70 @@ static void executeMp3Action(const RcAction& a) {
   dlog(DBG_MP3, "[DISPATCH] MP3→WCB%u  %s  %s\n", target, cmd.c_str(), ok ? "OK" : "FAIL");
 }
 
+// Dispatch an RA_WLED action. The ";L<id>,<verb>" command in a.cmd (authored via
+// the command library) selects a slot in the GLOBAL wledSlots[] routing table —
+// NaviCore's mirror of the WCB's wledConfigs. Routing follows the WCB
+// (WCB_WLED.cpp processWLEDRuntimeCommand):
+//   • id 0 (bare ";L,")             → the lowest-id configured LOCAL slot
+//   • local slot (serialPort 3/4/5) → WcbWled::emit(port, verb-body) — the SAME
+//                                     shared translator a WCB runs, so a WLED on a
+//                                     NaviCore aux port sees byte-identical JSON
+//   • remote slot (remoteWCB 1-20)  → wcb->send(remoteWCB, full ";L<id>,…"); the
+//                                     host WCB's own router drives its WLED
+static void executeWledAction(const RcAction& a) {
+  // ── Parse the id: digits immediately after 'L' (";L3,PS,2"→3; ";L,ON"→0) ──
+  const char* s = a.cmd;
+  while (*s == ' ' || *s == '\t') s++;      // tolerate leading whitespace (matches the WCB's body.trim())
+  if (*s == ';') s++;                       // optional leading command char
+  if (*s != 'L' && *s != 'l') {
+    dlog(DBG_WLED, "[DISPATCH] WLED: '%s' is not a ;L command — skipped\n", a.cmd);
+    return;
+  }
+  s++;                                      // past 'L'
+  int id = 0;
+  while (*s >= '0' && *s <= '9') { if (id < 100) id = id * 10 + (*s - '0'); s++; }  // cap: no int overflow on a corrupt cmd
+  if (id > 9) {                             // valid WLED ids are 1-9 (0 = bare) — mirror the WCB's range check
+    dlog(DBG_WLED, "[DISPATCH] WLED: id %d out of range (1-9) — skipped\n", id);
+    return;
+  }
+  if (*s == ',') s++;                       // past the id/verb separator
+  const char* body = s;                     // id-stripped verb body ("PS,2" / "ON")
+
+  // ── Find the slot ──
+  int slot = -1;
+  if (id == 0) {
+    // Bare ;L, — act on this board's lowest-id LOCAL WLED (mirror of the WCB).
+    for (int i = 0; i < RC_NUM_WLED; i++) {
+      const RcWledSlot& w = rcConfig.wledSlots[i];
+      if (w.configured && w.remoteWCB == 0 && w.serialPort >= 3 && w.serialPort <= 5)
+        if (slot < 0 || w.wledID < rcConfig.wledSlots[slot].wledID) slot = i;
+    }
+    if (slot < 0) { dlog(DBG_WLED, "[DISPATCH] WLED: bare ;L but no LOCAL WLED configured — skipped\n"); return; }
+  } else {
+    for (int i = 0; i < RC_NUM_WLED; i++)
+      if (rcConfig.wledSlots[i].configured && rcConfig.wledSlots[i].wledID == (uint8_t)id) { slot = i; break; }
+    if (slot < 0) { dlog(DBG_WLED, "[DISPATCH] WLED %d not configured — skipped\n", id); return; }
+  }
+  const RcWledSlot& w = rcConfig.wledSlots[slot];
+
+  // ── Route ──
+  if (w.remoteWCB == 0 && w.serialPort >= 3 && w.serialPort <= 5) {
+    Stream* port = (w.serialPort == 3) ? s3 : (w.serialPort == 4) ? s4 : s5;
+    if (!port) {
+      dlog(DBG_WLED, "[DISPATCH] WLED %u: local S%u not available on this board — skipped\n", w.wledID, w.serialPort);
+      return;
+    }
+    bool ok = WcbWled::emit(*port, body, &Serial);   // build ;L verb → WLED JSON, newline-framed
+    dlog(DBG_WLED, "[DISPATCH] WLED %u→S%u  %s  %s\n", w.wledID, w.serialPort, body, ok ? "OK" : "no-op");
+  } else if (w.remoteWCB >= 1 && w.remoteWCB <= WCB_MAX_BOARDS) {
+    if (!wcb || !wcbReady) { dlog(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
+    bool ok = wcb->send(w.remoteWCB, a.cmd);          // forward the full ";L<id>,…" string
+    dlog(DBG_WLED, "[DISPATCH] WLED %u→WCB%u  %s  %s\n", w.wledID, w.remoteWCB, a.cmd, ok ? "OK" : "FAIL");
+  } else {
+    dlog(DBG_WLED, "[DISPATCH] WLED %u: slot has no valid destination — skipped\n", w.wledID);
+  }
+}
+
 // =============================================================================
 //  rcExecuteAction — single-action dispatcher
 // =============================================================================
@@ -1171,6 +1236,9 @@ static void rcExecuteActionNow(const RcAction& a) {
       break;
     case RA_MP3:
       executeMp3Action(a);
+      break;
+    case RA_WLED:
+      executeWledAction(a);
       break;
     case RA_RECORD:
       // Toggle recording; save to a.cmd (clip name) on stop. Deferred to loop()

@@ -70,6 +70,7 @@ jobs:
         #   ArduinoJson, Adafruit NeoPixel, EspSoftwareSerial — Library Manager
         #   PololuMaestro                                    — Library Manager
         #   WCBClient + WCBStream (single repo)              — greghulette GitHub
+        #   WcbCmd (Maestro/MP3/WLED/HCR translators)        — greghulette GitHub
         # WiFi and Preferences come bundled with the ESP32 core.
         # HCRVocalizer is intentionally NOT a dependency — NaviCore
         # formats its own HCR command strings via hcrFormatCommand() and
@@ -90,6 +91,7 @@ jobs:
           arduino-cli lib install "Adafruit NeoPixel@1.15.4"
           arduino-cli lib install "PololuMaestro"
           arduino-cli lib install --git-url https://github.com/greghulette/WCBClient.git
+          arduino-cli lib install --git-url https://github.com/greghulette/WcbCmd.git
 
       - name: Build firmware
         run: |

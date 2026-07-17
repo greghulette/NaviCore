@@ -52,6 +52,10 @@ enum RcActionType : uint8_t {
                                //   switch can set speed/accel that supersede every
                                //   passthrough knob's own). cmd = "set,<spd>,<acc>"
                                //   | "clear". Runtime only — not a servo output.
+  RA_WLED              = 12,  // WLED LED controller. cmd = ";L<id>,<verb>" string,
+                              // authored via the command library. Per-id routing lives
+                              // in RcConfig::wledSlots: id 1-9 → a local aux port OR a
+                              // remote WCB; bare ";L," (id 0) = lowest-id LOCAL slot.
 };
 
 // MP3 Trigger function codes, stored in RcAction::fn for RA_MP3 actions.
@@ -102,7 +106,7 @@ struct RcAction {
                           //   10=OverrideEmotions, 11=ResetEmotions, 13=SetMuse,
                           //   14=PlayWAV, 16=StopWAV, 17=SetVolume) — matches the BC
                           //   HCRFunction() convention. OR, for RA_MP3, an RcMp3Fn code (1-8).
-  int8_t  chan;           // emotion (0=H,1=S,2=M,3=C,4=Overload) or audio chan (0=V,1=A,2=B);
+  int8_t  chan;           // emotion (0=H,1=S,2=M,3=C — chan 4 rejected by WcbCmd 0.5.0, use fn 5 for Overload) or audio chan (0=V,1=A,2=B);
                           //   fn 7 = Muse min-gap (s); fn 10 = Override 0/1 — unused for RA_MP3.
   int16_t track;          // PlayWAV track number, SetVolume value, Trigger level, etc.;
                           //   fn 7 = Muse max-gap (s); fn 13 = SetMuse 0/1.
@@ -315,6 +319,27 @@ struct RcMp3Dest {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  WLED destinations (RC_NUM_WLED slots) — NaviCore's per-id WLED routing table,
+//  mirroring the WCB's wledConfigs[]. Buttons/switches fire an RA_WLED action
+//  carrying a ";L<id>,<verb>" string; executeWledAction() looks the id up here and
+//  routes it to a LOCAL aux serial port (WcbWled::emit) or a REMOTE WCB (wcb->send).
+//  One physical WLED per id.
+//    configured == false                       : empty slot (ignored)
+//    remoteWCB == 0 && serialPort in {3,4,5}    : LOCAL — wired to s3/s4/s5 here
+//    remoteWCB in 1-20                          : REMOTE — the ;L<id> is forwarded
+//  (No baud here — a local WLED runs at its port's RcConfig::auxBaud. WLED wants
+//   115200, which only S3 = hardware UART0 does reliably; S4/S5 are SoftwareSerial.)
+// ─────────────────────────────────────────────────────────────────────────────
+#define RC_NUM_WLED 4   // WLED destination slots (wledID 1-9 addressable; a controller needs only a few)
+
+struct RcWledSlot {
+  uint8_t wledID;      // 1-9 (0 = empty)
+  uint8_t serialPort;  // 3/4/5 = local aux port (s3/s4/s5); 0 = not local
+  uint8_t remoteWCB;   // 1-20 = remote host WCB; 0 = local
+  bool    configured;  // false = slot unused
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  WCB network credentials — formerly compile-time #defines in wcb_config.h.
 //  Now NVS-backed and runtime-editable via the GUI. The values in wcb_config.h
 //  are used only as factory defaults on a fresh device with no stored NVS data.
@@ -466,6 +491,7 @@ struct RcConfig {
   RcMaestroSlot  maestros[RC_NUM_MAESTROS];  // ID 1-8 → maestros[0..7]
   RcWcbNetwork   wcbNetwork;
   RcMp3Dest      mp3Dest;
+  RcWledSlot     wledSlots[RC_NUM_WLED];  // per-id WLED routing table (id 1-9 → local port | remote WCB)
   // Aux serial port baud — [0]=S3 (hardware UART0), [1]=S4, [2]=S5 (S4/S5
   // SoftwareSerial). One source of truth for the port line rate; HCR / MP3-local /
   // Serial actions all just use the port at this baud (the firmware opens S3/S4/S5
@@ -654,6 +680,11 @@ void rcConfigLoadDefaults() {
   rcConfig.mp3Dest.transport = 1;
   strlcpy(rcConfig.mp3Dest.target, "2", sizeof(rcConfig.mp3Dest.target));
 
+  // Default WLED slots — all empty (no WLED configured). The user maps id→dest in
+  // the config tool's WLED panel. All-zero ⇒ configured=false, wledID=0 (mirrors the
+  // WCB's cleared wledConfigs state).
+  memset(rcConfig.wledSlots, 0, sizeof(rcConfig.wledSlots));
+
   // Aux serial port baud — S3, S4. 9600 default (HCR's rate). Raise per port
   // for faster peripherals (e.g. an MP3 Trigger v2 on that port wants 38400).
   rcConfig.auxBaud[0] = 9600;   // S3
@@ -741,6 +772,13 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["track"] = a.track;
       if (a.delayMs) obj["delay"] = a.delayMs;
       break;
+    case RA_WLED:
+      // Routing (per-id → local port | remote WCB) is GLOBAL — RcConfig::wledSlots.
+      // The action only carries the ";L<id>,<verb>" command string.
+      obj["type"] = "wled";
+      obj["cmd"]  = a.cmd;
+      if (a.delayMs) obj["delay"] = a.delayMs;
+      break;
     case RA_RECORD:
       obj["type"] = "record";
       obj["cmd"]  = a.cmd;   // clip name (library-ready; ignored by the single-clip build)
@@ -813,6 +851,13 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.type    = RA_MP3;
     a.fn      = (uint8_t)(obj["fn"]    | 0);
     a.track   = (int16_t)(obj["track"] | 0);
+    a.delayMs = obj["delay"] | 0;
+    ok = true;
+  } else if (strcmp(type, "wled") == 0) {
+    // WLED routing is a global config (RcConfig::wledSlots). The action only
+    // carries the ";L<id>,<verb>" command string.
+    a.type = RA_WLED;
+    strlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
     a.delayMs = obj["delay"] | 0;
     ok = true;
   } else if (strcmp(type, "record") == 0) {
@@ -1028,6 +1073,18 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
     mp3Obj["target"] = rcConfig.mp3Dest.target;        // WCB ID string
   } else {
     mp3Obj["port"]   = rcConfig.mp3Dest.target;        // "S3"/"S4"
+  }
+
+  // Per-id WLED routing table — dense array (index 0..RC_NUM_WLED-1) so slot
+  // positions stay stable across round-trips. Every RA_WLED action routes through
+  // this by the ;L<id> in its command.
+  JsonArray wledArr = doc.createNestedArray("wledSlots");
+  for (int i = 0; i < RC_NUM_WLED; i++) {
+    JsonObject wObj = wledArr.createNestedObject();
+    wObj["id"]         = rcConfig.wledSlots[i].wledID;      // 1-9 (0 = empty)
+    wObj["port"]       = rcConfig.wledSlots[i].serialPort;  // 3/4/5 local, 0 = not local
+    wObj["wcb"]        = rcConfig.wledSlots[i].remoteWCB;   // 1-20 remote, 0 = local
+    wObj["configured"] = rcConfig.wledSlots[i].configured;
   }
 
   // Aux serial port baud rates — one source of truth for S3/S4 line rate.
@@ -1310,6 +1367,26 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       strlcpy(rcConfig.mp3Dest.target, mp3Obj["port"] | "S3",
               sizeof(rcConfig.mp3Dest.target));
     }
+  }
+
+  // Per-id WLED routing table. Guarded by containsKey so a diff-save that omits
+  // "wledSlots" can't wipe it. Numeric fields use presence checks, not '|': id/
+  // port/wcb 0 is a legal value that '|' (0 is falsy) would silently drop.
+  if (doc.containsKey("wledSlots")) {
+    JsonArray wledArr = doc["wledSlots"];
+    int i = 0;
+    for (JsonObject wObj : wledArr) {
+      if (i >= RC_NUM_WLED) break;
+      rcConfig.wledSlots[i].wledID     = (uint8_t)(wObj["id"].as<int>()   & 0xFF);
+      rcConfig.wledSlots[i].serialPort = (uint8_t)(wObj["port"].as<int>() & 0xFF);
+      rcConfig.wledSlots[i].remoteWCB  = (uint8_t)(wObj["wcb"].as<int>()  & 0xFF);
+      rcConfig.wledSlots[i].configured = wObj["configured"] | false;
+      i++;
+    }
+    // A dense array always carries RC_NUM_WLED entries; a shorter (legacy/hand-
+    // authored) array leaves trailing slots as-is — clear them so a shrink can't
+    // leave a stale slot configured.
+    for (; i < RC_NUM_WLED; i++) memset(&rcConfig.wledSlots[i], 0, sizeof(rcConfig.wledSlots[i]));
   }
 
   if (doc.containsKey("auxBaud")) {
