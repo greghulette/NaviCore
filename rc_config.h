@@ -104,10 +104,17 @@ struct RcAction {
   uint8_t fn;             // HCR function number (2=SetEmotion, 3=Trigger, 4=Stimulate,
                           //   5=Overload, 6=Muse, 7=Muse-gap, 8=Stop, 9=StopEmote,
                           //   10=OverrideEmotions, 11=ResetEmotions, 13=SetMuse,
-                          //   14=PlayWAV, 16=StopWAV, 17=SetVolume) — matches the BC
-                          //   HCRFunction() convention. OR, for RA_MP3, an RcMp3Fn code (1-8).
+                          //   14=PlayWAV, 16=StopWAV, 17=SetVolume, 18=VolumeUp, 19=VolumeDown,
+                          //   12=FadeIn, 15=FadeOut) — matches the BC HCRFunction() convention.
+                          //   fn 12/15 (Fade) are handled by HcrFade in executeHcrAction, NOT by
+                          //   HcrCodec::format (which rejects them). OR, for RA_MP3, an RcMp3Fn (1-8).
   int8_t  chan;           // emotion (0=H,1=S,2=M,3=C — chan 4 rejected by WcbCmd 0.5.0, use fn 5 for Overload) or audio chan (0=V,1=A,2=B);
                           //   fn 7 = Muse min-gap (s); fn 10 = Override 0/1 — unused for RA_MP3.
+                          //   fn 12/15 (Fade): chan = 1=A, 2=B (V is not faded, matches the WCB); track = seconds.
+                          //   fn 18/19 (Vol +/-): chan = 0 ALL (legacy default), 1=V, 2=A, 3=B; track = step (0 = default 5).
+                          //   NOTE the fn 18/19 chan encoding (0=ALL) DELIBERATELY differs from the fn 14/16/17
+                          //   audio enum (0=V, 3=ALL): legacy Volume actions carry chan=0 meaning ALL, so 0 stays
+                          //   ALL and V/A/B shift to 1/2/3. Do NOT "fix" this to match the audio enum.
   int16_t track;          // PlayWAV track number, SetVolume value, Trigger level, etc.;
                           //   fn 7 = Muse max-gap (s); fn 13 = SetMuse 0/1.
                           //   — for RA_MP3: track #, file index, or volume value.

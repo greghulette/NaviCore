@@ -862,6 +862,23 @@ static bool hcrNormalizeAction(uint8_t& fn, int& chan, int& track) {
 // exact after the first SetVolume on this transport. See WcbHcr.h.
 static HcrCodec g_hcr;
 
+// Non-blocking per-channel audio-volume fade (shared WcbCmd HcrFade). Drives the
+// LOCAL HCR: a FadeIn/FadeOut action calls g_hcrFade.start(...) and loop() ticks it —
+// the same ramp a WCB runs for a ;H,FADEIN/FADEOUT, so a locally-wired HCR fades
+// identically. Every step writes through g_hcr (fn 17 SetVolume) so the volume shadow
+// stays authoritative.
+static HcrFade g_hcrFade;
+
+// Resolve the LOCAL HCR aux-serial port (S3/S4/S5) from the global HCR destination,
+// or nullptr if unbound. Shared by executeHcrAction and the loop() fade tick so both
+// resolve the same port.
+static Stream* hcrLocalSerial() {
+  if      (!strcmp(rcConfig.hcrDest.target, "S3")) return s3;
+  else if (!strcmp(rcConfig.hcrDest.target, "S4")) return s4;
+  else if (!strcmp(rcConfig.hcrDest.target, "S5")) return s5;
+  return nullptr;
+}
+
 static String hcrFormatCommand(uint8_t fn, int chan, int track) {
   return g_hcr.format(fn, chan, track);
 }
@@ -893,11 +910,17 @@ static String hcrFormatWcbCommand(uint8_t fn, int chan, int track) {
     // field as the value and loops V/A/B (WCB_HCR.cpp, ch<0 → all). Works end-to-end.
     case 17: return (chan == 3) ? (String(";H,VOL,") + track)
                                 : (String(";H,FN,17,") + chan + "," + track);
-    // Volume Up/Down across ALL channels (V+A+B) in ONE message: the WCB's
-    // ;H,VOLUP/VOLDN with the channel omitted loops V/A/B itself (WCB_HCR.cpp
-    // processHCRRuntimeCommand). track = step (0 → the WCB's default of 5).
-    case 18: return (track > 0) ? (String(";H,VOLUP,") + track) : String(";H,VOLUP");
-    case 19: return (track > 0) ? (String(";H,VOLDN,") + track) : String(";H,VOLDN");
+    // Volume Up/Down. chan 0 = ALL (V+A+B) in ONE message — the WCB's ;H,VOLUP/VOLDN
+    // with the channel omitted loops V/A/B itself (WCB_HCR.cpp). chan 1/2/3 = a single
+    // V/A/B channel → ;H,VOLUP,<V|A|B>[,step] (the WCB reads a named field-1 as the
+    // channel; a numeric field-1 is the step). track = step (0 → the WCB's default 5).
+    case 18:
+    case 19: {
+      String out = String(";H,") + (fn == 18 ? "VOLUP" : "VOLDN");
+      if (chan >= 1 && chan <= 3) out += String(",") + (char)(chan == 1 ? 'V' : chan == 2 ? 'A' : 'B');
+      if (track > 0) out += String(",") + track;
+      return out;
+    }
     default: return String(";H,FN,") + (int)fn + "," + chan + "," + track;
   }
 }
@@ -950,7 +973,18 @@ static void executeHcrAction(const RcAction& a) {
     // MP3-over-WCB pattern (";A,..." → processMP3AudioCommand). Broadcast is
     // unsupported — an HCR vocalizer is a single device at a known WCB.
     if (!wcb || !wcbReady) { dlog(DBG_HCR, "[DISPATCH] HCR-WCB: WCB not ready — skipped\n"); return; }
-    String cmd = hcrFormatWcbCommand(a.fn, a.chan, a.track);
+    String cmd;
+    if (a.fn == 12 || a.fn == 15) {
+      // Fade over the mesh — the WCB runs its own HcrFade. Readable verb (NOT the
+      // numeric ;H,FN; the WCB's numeric switch has no fade). A/B channels only.
+      if (a.chan != 1 && a.chan != 2) {
+        dlog(DBG_HCR, "[DISPATCH] HCR-WCB: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
+        return;
+      }
+      cmd = String(";H,") + (a.fn == 12 ? "FADEIN" : "FADEOUT") + "," + (char)(a.chan == 1 ? 'A' : 'B') + "," + (int)a.track;
+    } else {
+      cmd = hcrFormatWcbCommand(a.fn, a.chan, a.track);
+    }
     if (cmd.length() == 0) {
       dlog(DBG_HCR, "[DISPATCH] HCR-WCB: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
             a.fn, a.chan, a.track);
@@ -976,16 +1010,52 @@ static void executeHcrAction(const RcAction& a) {
   // mirrors HCRVocalizer's protocol.  S3/S4/S5 are all valid local HCR
   // destinations; an unbound/unknown port falls through to the "unknown
   // port" log below.
-  Stream* hcrSerial = nullptr;
-  if      (!strcmp(dest.target, "S3")) hcrSerial = s3;
-  else if (!strcmp(dest.target, "S4")) hcrSerial = s4;
-  else if (!strcmp(dest.target, "S5")) hcrSerial = s5;   // both boards (v2 GPIO38/47, WCB 3.2 GPIO9/10)
+  Stream* hcrSerial = hcrLocalSerial();
   if (!hcrSerial) {
     dlog(DBG_HCR, "[DISPATCH] HCR: unknown serial port '%s' — skipped\n", dest.target);
     return;
   }
 
-  String payload = hcrFormatCommand(a.fn, a.chan, a.track);
+  // ── Fade (fn 12/15): drive the shared HcrFade on THIS board; loop() ticks it. ──
+  if (a.fn == 12 || a.fn == 15) {
+    if (a.chan != 1 && a.chan != 2) {
+      dlog(DBG_HCR, "[DISPATCH] HCR-Serial: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
+      return;
+    }
+    const int ch = a.chan, sec = a.track;
+    if (a.fn == 12) g_hcrFade.start(g_hcr, *hcrSerial, ch, 0, g_hcr.getVol(ch), sec, false, 0);   // FadeIn: 0 → current level
+    else { const int cur = g_hcr.getVol(ch); g_hcrFade.start(g_hcr, *hcrSerial, ch, cur, 0, sec, true, cur); }  // FadeOut: cur → 0, StopWAV, restore
+    dlog(DBG_HCR, "[DISPATCH] HCR→%s  Fade%s ch=%d %ds\n", dest.target, a.fn == 12 ? "In" : "Out", a.chan, sec);
+    return;
+  }
+
+  // A manual audio command supersedes any in-flight fade on the channel(s) it touches —
+  // mirror the WCB (WCB_HCR.cpp calls hcrCancelFade in PLAY/STOPWAV/VOL/VOLUP/VOLDN),
+  // else loop()'s fade tick would overwrite the manual change within STEP_MS.
+  if (a.fn == 14 || a.fn == 16 || a.fn == 17 || a.fn == 18 || a.fn == 19) {
+    if (a.fn == 18 || a.fn == 19) {              // Vol chan: 0=ALL, 1/2/3=V/A/B
+      if (a.chan == 0) { g_hcrFade.cancel(0); g_hcrFade.cancel(1); g_hcrFade.cancel(2); }
+      else             { g_hcrFade.cancel(a.chan - 1); }
+    } else if (a.chan == 3) {                    // fn 14/16/17 audio enum: 0=V,1=A,2=B; fn 17 chan 3 = ALL
+      g_hcrFade.cancel(0); g_hcrFade.cancel(1); g_hcrFade.cancel(2);
+    } else if (a.chan >= 0 && a.chan <= 2) {
+      g_hcrFade.cancel(a.chan);
+    }
+  }
+
+  // ── Per-channel Vol +/- (fn 18/19, chan 1/2/3 = V/A/B): HcrCodec's 18/19 are
+  //    ALL-channel, so synthesize one channel from the shadow + an absolute SetVolume. ──
+  String payload;
+  if ((a.fn == 18 || a.fn == 19) && a.chan >= 1 && a.chan <= 3) {
+    const int ch = a.chan - 1;                          // 1/2/3 → V/A/B (0/1/2)
+    int step = (a.track > 0) ? a.track : 5;
+    if (a.fn == 19) step = -step;
+    int nv = g_hcr.getVol(ch) + step;
+    if (nv < 0) nv = 0; else if (nv > 99) nv = 99;
+    payload = g_hcr.format(17, ch, nv);                 // SetVolume(ch, nv) — updates the shadow
+  } else {
+    payload = hcrFormatCommand(a.fn, a.chan, a.track);  // chan 0 = ALL + every other fn (byte-identical to today)
+  }
   if (payload.length() == 0) {
     dlog(DBG_HCR, "[DISPATCH] HCR-Serial: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
           a.fn, a.chan, a.track);
@@ -3073,6 +3143,18 @@ void loop() {
   // Aux-serial RX monitor — drain S3/S4/S5 and echo incoming lines under the
   // "Serial" debug chip (write-only ports otherwise; groundwork for acting on it).
   pollAuxSerialRx();
+
+  // HCR audio fades (fn 12/15) on a LOCALLY-wired HCR: advance any in-flight ramp
+  // and emit the next SetVolume step. Cheap no-op when nothing is fading. A remote
+  // HCR fades on its own WCB, so this only runs on the local transport.
+  if (rcConfig.hcrDest.transport == 0) {
+    Stream* hp = hcrLocalSerial();
+    if (hp) g_hcrFade.tick(g_hcr, *hp);
+  } else if (g_hcrFade.active(0) || g_hcrFade.active(1) || g_hcrFade.active(2)) {
+    // HCR moved to a WCB while a local fade was in flight — it can't be ticked here,
+    // so cancel it rather than leave the ramp frozen at a partial level.
+    g_hcrFade.cancel(0); g_hcrFade.cancel(1); g_hcrFade.cancel(2);
+  }
 
   // FPS counter
   trackSbusFps();

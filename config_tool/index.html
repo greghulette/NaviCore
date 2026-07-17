@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.11:07.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.15:41.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3603,8 +3603,10 @@ const hcrFnLabels = {
   14: 'PlayWAV',
   16: 'StopWAV',
   17: 'SetVolume',
-  18: 'Volume Up (all)',
-  19: 'Volume Down (all)',
+  18: 'Volume Up',
+  19: 'Volume Down',
+  12: 'Fade In',
+  15: 'Fade Out',
 };
 // The "chan" param is an EMOTION enum for SetEmotion/Trigger/Stimulate (fn 2/3/4)
 // and an AUDIO CHANNEL enum for PlayWAV/StopWAV/SetVolume (fn 14/16/17). fn 7
@@ -3628,8 +3630,16 @@ const HCR_AUDIO_CHANS = [
 ];
 const HCR_FN_USES_EMOTION    = new Set([2, 3, 4]);
 const HCR_FN_USES_AUDIO_CHAN = new Set([14, 16, 17]);
+// Volume Up/Down (fn 18/19) chan is DELIBERATELY offset from the audio enum: 0 = ALL
+// (the legacy default — existing configs carry chan 0), then V/A/B = 1/2/3. Legacy
+// Volume actions must keep meaning ALL, so 0 can't be V. (See rc_config.h.)
+const HCR_VOL_CHANS  = [[0, 'All (V+A+B)'], [1, 'V'], [2, 'A'], [3, 'B']];
+// Fade (fn 12/15) is A/B only — the vocalizer channel V is not faded (matches the WCB).
+const HCR_FADE_CHANS = [[1, 'A'], [2, 'B']];
 function emotionName(v) { return (HCR_EMOTIONS.find(e=>e.v===+v)||{}).n || `chan ${v}`; }
 function audioChanName(v) { return (+v === 3) ? 'All (V+A+B)' : ((HCR_AUDIO_CHANS.find(e=>e.v===+v)||{}).n || `chan ${v}`); }
+function volChanName(v)  { return (HCR_VOL_CHANS.find(c => c[0] === +v)  || [, `chan ${v}`])[1]; }
+function fadeChanName(v) { return (HCR_FADE_CHANS.find(c => c[0] === +v) || [, `chan ${v}`])[1]; }
 
 // MP3 Trigger (SparkFun v2.x via WCB ";A,..." commands). fn codes match the
 // firmware RcMp3Fn enum and the WCB MP3 driver's command set.
@@ -8817,7 +8827,8 @@ function actionSummary(a) {
     if (+a.fn === 7)        core = `HCR ${fnLbl}(${a.chan ?? 0}-${a.track ?? 0}s)`;
     else if (+a.fn === 10)  core = `HCR ${fnLbl}(${(+a.chan) ? 'On' : 'Off'})`;
     else if (+a.fn === 13)  core = `HCR ${fnLbl}(${(+a.track) ? 'On' : 'Off'})`;
-    else if (+a.fn === 18 || +a.fn === 19) core = `HCR ${fnLbl}(step ${(+a.track) > 0 ? a.track : 5})`;
+    else if (+a.fn === 18 || +a.fn === 19) core = `HCR ${fnLbl}(${volChanName(a.chan)}, step ${(+a.track) > 0 ? a.track : 5})`;
+    else if (+a.fn === 12 || +a.fn === 15) core = `HCR ${fnLbl}(${fadeChanName(a.chan)}, ${a.track ?? 0}s)`;
     else {
       let chanLbl;
       if (HCR_FN_USES_EMOTION.has(+a.fn))         chanLbl = emotionName(a.chan);
@@ -9416,9 +9427,15 @@ function renderHcrParamFields(container, fn, curChan, curTrack) {
     chanW = mkSelect('-chan', [[0, 'Off'], [1, 'On']], curChan); chanL = 'Override';
   } else if (fn === 13) {         // SetMuse(v) — v=track (0/1); chan unused
     trackW = mkSelect('-track', [[0, 'Off'], [1, 'On']], curTrack); trackL = 'Auto-muse';
-  } else if (fn === 18 || fn === 19) {   // Volume Up/Down (ALL channels) — no chan; optional step
+  } else if (fn === 18 || fn === 19) {   // Volume Up/Down — chan 0=ALL (default), 1/2/3=V/A/B; optional step
+    chanW  = mkSelect('-chan', HCR_VOL_CHANS, curChan === undefined ? 0 : curChan); chanL = 'Audio chan';
     trackW = mkNum('-track', curTrack, 99); trackL = 'Step (0 = 5)';
-    trackTitle = 'Volume step per trigger across V + A + B (1-99). 0 or blank uses the WCB default of 5.';
+    trackTitle = 'Volume step per trigger (1-99). 0 or blank uses the WCB default of 5.';
+  } else if (fn === 12 || fn === 15) {   // Fade In/Out — audio chan A/B, seconds
+    chanW  = mkSelect('-chan', HCR_FADE_CHANS, (curChan === 1 || curChan === 2) ? curChan : 1); chanL = 'Audio chan';
+    // Default seconds to 2 (not 0) — HcrFade treats 0 as an instant jump, a surprising "fade".
+    trackW = mkNum('-track', (curTrack === undefined || curTrack === null || +curTrack === 0) ? 2 : curTrack, 99); trackL = 'Seconds';
+    trackTitle = 'Fade duration in seconds (0 = instant).';
   } else {                        // the original 11 fns — behavior unchanged
     if (HCR_FN_USES_EMOTION.has(fn)) {
       chanW = mkSelect('-chan', HCR_EMOTIONS.map(e => [e.v, e.n]), curChan); chanL = 'Emotion';
@@ -10044,7 +10061,7 @@ function appendActionFields(container, action) {
     fnSel.style.minWidth = '140px';
     [[14,'PlayWAV'],[16,'StopWAV'],[9,'StopEmote'],[8,'Stop All'],[4,'Stimulate'],
      [3,'Trigger'],[2,'SetEmotion'],[17,'SetVolume'],
-     [18,'Volume Up (all)'],[19,'Volume Down (all)'],
+     [18,'Volume Up'],[19,'Volume Down'],[12,'Fade In'],[15,'Fade Out'],
      [5,'Overload'],[10,'Override Emotions'],
      [6,'Muse'],[7,'Muse Gap'],[13,'Auto-Muse On/Off'],[11,'ResetEmotions']
     ].forEach(([v,lbl]) => {
