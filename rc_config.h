@@ -194,7 +194,7 @@ static const uint8_t RC_SWITCH_DEFAULT_POS[RC_NUM_SWITCHES] = {  3,   3,   3,   
 //  knob's function.
 // ─────────────────────────────────────────────────────────────────────────────
 #define RC_NUM_KNOBS         11  // 8 X18 knobs (S1/S2 + LS/RS + J1-J4) + 3 X20 additions (MS slider + J5/J6 gimbal 3rd axes)
-#define RC_KNOB_MAX_OUTPUTS  8
+#define RC_KNOB_MAX_OUTPUTS  10   // max Maestro-passthrough / HCR-volume outputs a single knob/joystick drives
 
 enum RcKnobFunction : uint8_t {
   KF_NONE               = 0,
