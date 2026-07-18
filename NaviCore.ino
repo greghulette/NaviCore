@@ -476,6 +476,23 @@ static inline uint16_t sbusToRange(int sbusVal, uint16_t outMin, uint16_t outMax
   return (uint16_t)mapped;
 }
 
+// Like sbusToRange, but only the UPPER HALF of stick travel is used: the joystick
+// CENTER (rest) maps to outMin and full-deflection to outMax; anything at or below
+// center pins to outMin. Lets a passthrough servo rest CLOSED at stick-center (no
+// half-open panels) at the cost of the lower half of the stick — see
+// RcKnobOutput.midClosed. SBUS center = (172+1811)/2. Order-independent clamp so a
+// reversed (outMin > outMax) endpoint pair still ramps correctly.
+static inline uint16_t sbusToRangeMidClosed(int sbusVal, uint16_t outMin, uint16_t outMax) {
+  const int center = (172 + 1811) / 2;          // ≈ 991 — joystick rest position
+  if (sbusVal <= center) return outMin;         // lower half → closed (outMin)
+  long mapped = (long)(sbusVal - center) * (outMax - outMin) / (1811 - center) + outMin;
+  long lo = outMin < outMax ? outMin : outMax;
+  long hi = outMin < outMax ? outMax : outMin;
+  if (mapped < lo) mapped = lo;
+  if (mapped > hi) mapped = hi;
+  return (uint16_t)mapped;
+}
+
 // =============================================================================
 //  Maestro byte-level dispatcher
 //
@@ -1600,7 +1617,12 @@ void processKnobs() {
 
     for (uint8_t o = 0; o < cnt && o < RC_KNOB_MAX_OUTPUTS; o++) {
       const RcKnobOutput& out = outs[o];
-      uint16_t mapped = sbusToRange(raw, out.posMin, out.posMax);
+      // midClosed only reshapes the Maestro-passthrough mapping — never HCR volume.
+      // (The tool checkbox is Maestro-only; this gate also stops a hand-edited config
+      // from hijacking an HCR-volume output's mapping.)
+      uint16_t mapped = (out.midClosed && kn.function == KF_MAESTRO_PASSTHROUGH)
+                          ? sbusToRangeMidClosed(raw, out.posMin, out.posMax)
+                          : sbusToRange(raw, out.posMin, out.posMax);
       if (kn.function == KF_MAESTRO_PASSTHROUGH) {
         // out.target is the Maestro slot ID (1-8)
         const uint8_t mid = out.target, mch = out.maestroCh;

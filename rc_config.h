@@ -220,6 +220,12 @@ struct RcKnobOutput {
   // the channel (see g_maeSpeed/g_maeAccel cache in NaviCore.ino).
   uint16_t smoothSpeed;   // Maestro Set Speed units (0.25µs / 10ms); 0-16383; 0 = unmanaged
   uint8_t  smoothAccel;   // Maestro Set Accel 0-255; 0 = unmanaged
+  // KF_MAESTRO_PASSTHROUGH only: when true, the joystick CENTER maps to posMin
+  // (closed) and only the UPPER HALF of travel (center→full) sweeps posMin→posMax;
+  // the lower half rests at posMin. Keeps a servo CLOSED at stick rest (no half-open
+  // panels), at the cost of the lower half of stick range. Default false. See
+  // sbusToRangeMidClosed() in NaviCore.ino.
+  bool     midClosed;
 };
 
 struct RcKnob {
@@ -897,6 +903,7 @@ static void rcWriteKnobOuts(JsonArray arr, uint8_t count, const RcKnobOutput* ou
     oObj["maestroCh"] = outs[o].maestroCh;
     oObj["posMin"]    = outs[o].posMin;
     oObj["posMax"]    = outs[o].posMax;
+    if (outs[o].midClosed) oObj["midClosed"] = true;   // center-of-stick = posMin (upper-half mapping)
     // NOTE: per-output smoothSpeed/smoothAccel are RETIRED — smoothing now lives
     // in smoothing profiles (RcKnob.smoothProfile). We no longer emit them; the
     // parser still reads them from legacy configs to migrate into profile 0.
@@ -917,6 +924,7 @@ static uint8_t rcReadKnobOuts(JsonArray arr, RcKnobOutput* outs) {
     out.posMax    = (uint16_t)(oObj["posMax"]    | 8000);
     out.smoothSpeed = (uint16_t)(oObj["smoothSpeed"] | 0);   // legacy — migrated into profile 0, then ignored
     out.smoothAccel = (uint8_t) (oObj["smoothAccel"] | 0);
+    out.midClosed   = oObj["midClosed"] | false;             // center = posMin (upper-half passthrough mapping)
     n++;
   }
   return n;
@@ -1646,6 +1654,9 @@ bool rcConfigSaveNVS() {
         oObj["maestroCh"] = kn.outputs[o].maestroCh;
         oObj["posMin"]    = kn.outputs[o].posMin;
         oObj["posMax"]    = kn.outputs[o].posMax;
+        // (midClosed is NOT written here: this NVS "kn" path is legacy/migration-only
+        //  and its reader doesn't parse it — config.json (rcWriteKnobOuts) is the live
+        //  path that round-trips midClosed. Keep the two NVS halves symmetric.)
       }
     }
     ok &= _nvsPutJson(prefs, "kn", doc);

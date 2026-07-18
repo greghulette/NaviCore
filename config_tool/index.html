@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.19:04.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.22:44.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7605,6 +7605,7 @@ function _smoothChanRow(mid, entry) {
     const lab = document.createElement('span'); lab.style.cssText = 'font-size:11px;color:var(--muted);min-width:42px'; lab.textContent = label;
     const less = document.createElement('span'); less.style.cssText = 'font-size:9px;color:var(--muted)'; less.textContent = 'less';
     const s = document.createElement('input'); s.type = 'range'; s.min = 0; s.max = 100; s.step = 1;
+    s.dataset.sk = key;   // 'spd'/'acc' — lets the "All channels" master move this slider live
     s.value = rawToEase(entry[key] || 0, rawMax); s.style.width = '110px';
     s.title = `Right = more ${label.toLowerCase()} easing (slower / gentler). Far left = off (snappy).`;
     const more = document.createElement('span'); more.style.cssText = 'font-size:9px;color:var(--muted)'; more.textContent = 'more';
@@ -7655,6 +7656,43 @@ function renderSmoothingPane() {
   wrap.appendChild(bar);
 
   const prof = _smoothProfiles()[_editSmoothProfile];
+
+  // "All channels" master — one Speed/Accel pair that latches every VISIBLE
+  // (enabled-Maestro) configured channel in this profile together so they match.
+  // Dragging writes the same raw value to those entries AND moves their sliders
+  // live (no full re-render → keyboard focus is kept); the per-channel rows below
+  // still allow individual tweaks afterward. (Config-only: entries stay per-channel.)
+  {
+    const enabledMids = new Set((Array.isArray(config.maestros) ? config.maestros : [])
+      .map((s, i) => (s && s.type !== 0) ? i + 1 : 0).filter(Boolean));
+    const visible = prof.entries.filter(e => enabledMids.has(+e.mid));   // only channels that actually render below
+    if (visible.length) {
+      const m = document.createElement('div');
+      m.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:2px 0 8px;margin-bottom:6px;border-bottom:1px dashed var(--border)';
+      m.appendChild(Object.assign(document.createElement('span'), { textContent: `All channels (${visible.length}):`, style: 'font-size:12px;color:var(--accent2);font-weight:600;min-width:130px' }));
+      const mkMaster = (label, rawMax, key) => {
+        const box = document.createElement('div'); box.style.cssText = 'display:flex;align-items:center;gap:5px';
+        box.appendChild(Object.assign(document.createElement('span'), { textContent: label, style: 'font-size:11px;color:var(--muted);min-width:42px' }));
+        box.appendChild(Object.assign(document.createElement('span'), { textContent: 'less', style: 'font-size:9px;color:var(--muted)' }));
+        const s = document.createElement('input'); s.type = 'range'; s.min = 0; s.max = 100; s.step = 1;
+        s.value = rawToEase(visible[0][key] || 0, rawMax); s.style.width = '110px';
+        s.title = `Set ${label.toLowerCase()} easing on ALL ${visible.length} configured channel(s) at once.`;
+        s.oninput = () => {
+          const raw = easeToRaw(+s.value, rawMax);
+          visible.forEach(e => { e[key] = raw; });   // latch every visible channel's entry
+          // Move the matching per-channel sliders live (they share the 0-100 easing scale).
+          wrap.querySelectorAll(`input[type=range][data-sk="${key}"]`).forEach(el => { el.value = s.value; });
+        };
+        box.appendChild(s);
+        box.appendChild(Object.assign(document.createElement('span'), { textContent: 'more', style: 'font-size:9px;color:var(--muted)' }));
+        return box;
+      };
+      m.appendChild(mkMaster('Speed', 500, 'spd'));
+      m.appendChild(mkMaster('Accel', 255, 'acc'));
+      wrap.appendChild(m);
+    }
+  }
+
   let anyEnabled = false;
   (Array.isArray(config.maestros) ? config.maestros : []).forEach((slot, i) => {
     if (!slot || slot.type === 0) return;
@@ -10663,6 +10701,10 @@ function renderKnobOutputFields(idx, o, fn) {
       <label>Pos max (µs)</label>
       <input type="number" id="kn-out-${idx}-max" min="500" max="2500" step="1" value="${Math.round((o.posMax ?? 8000) / 4)}" style="width:75px">
     </div>
+    <div class="field-group">
+      <label title="Stick CENTER = Pos min (closed); only the upper half of stick travel opens it (Pos min→max). Avoids a half-open servo at stick rest. Loses the lower half of stick range.">Center = closed</label>
+      <input type="checkbox" id="kn-out-${idx}-midclosed" ${o.midClosed ? 'checked' : ''} style="align-self:center;width:auto">
+    </div>
     ${maeHint}
   `;
 }
@@ -10723,7 +10765,8 @@ function syncKnobOutputsFromDom(fnOverride) {
     const px     = toStore(+(document.getElementById(`kn-out-${idx}-max`)?.value || 0));
     // (Smoothing is no longer per-output — it lives in smoothing profiles,
     //  referenced per-knob via editingKnobDraft.smoothProfile.)
-    next.push({ target, maestroCh: ch, posMin: pn, posMax: px });
+    const mc = document.getElementById(`kn-out-${idx}-midclosed`)?.checked || false;   // Maestro passthrough only (null → false for HCR rows)
+    next.push({ target, maestroCh: ch, posMin: pn, posMax: px, midClosed: mc });
   });
   editingKnobDraft.outputs = next;
   // Keep the active mode's array in the per-mode source-of-truth in sync.
@@ -10772,6 +10815,7 @@ function saveKnobModal() {
       maestroCh: +o.maestroCh || 0,
       posMin:    +o.posMin || 0,
       posMax:    +o.posMax || 0,
+      midClosed: !!o.midClosed,
     };
   });
   const modeAware = !!document.getElementById('kn-modeaware')?.checked;
