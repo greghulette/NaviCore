@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.22:44.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.00:24.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2855,7 +2855,7 @@
               </select>
             </div>
             <div class="wcb-send-row" id="mp3-dest-fields"></div>
-            <div class="noconn" style="margin-top:4px">All MP3 Trigger actions route here. <b>Serial</b> = MP3 Trigger wired to this controller's S3/S4. <b>WCB</b> = wired to a WCB (configured there with <b>?MP3,S&lt;port&gt;</b>). Set once, save to board.</div>
+            <div class="noconn" style="margin-top:4px">All MP3 Trigger actions route here. <b>Serial</b> = MP3 Trigger wired to this controller's S3/S4/S5. <b>WCB</b> = wired to a WCB (configured there with <b>?MP3,S&lt;port&gt;</b>). Set once, save to board.</div>
           </div>
         </section>
 
@@ -2889,9 +2889,9 @@
             <div class="noconn" style="margin-top:6px">
               One row per WLED. Give it an <b>ID (1-9)</b> — the same id your
               <b>WLED Lighting</b> actions address with <code>;L&lt;id&gt;,VERB</code> — then route it to a
-              <b>Local port</b> (a WLED wired to this controller's Serial 1/2/3) or a
+              <b>Local port</b> (a WLED wired to one of this controller's aux serial ports, S3/S4/S5) or a
               <b>Remote WCB</b> (a WLED hosted on another board; the command is forwarded over ESP-NOW).
-              WLED wants <b>115200 baud</b> — only <b>Serial 1 (S3, hardware UART)</b> is reliable that fast;
+              WLED wants <b>115200 baud</b> — only <b>S3 (the hardware UART)</b> is reliable that fast;
               set the port's baud in the <b>Baud Rates</b> tab. A bare <code>;L,VERB</code> (no id) drives the lowest-id local WLED.
             </div>
           </div>

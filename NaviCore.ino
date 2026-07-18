@@ -1129,7 +1129,7 @@ static String mp3FormatCommand(uint8_t fn, int16_t arg) {
 static Mp3Codec g_mp3;
 
 // Dispatch an RA_MP3 action. Destination is GLOBAL (rcConfig.mp3Dest).
-//   transport 0 = local serial (S3/S4) — drive the MP3 Trigger directly here.
+//   transport 0 = local serial (S3/S4/S5) — drive the MP3 Trigger directly here.
 //   transport 1 = WCB unicast — ";A,..." command to one WCB whose own MP3
 //                 driver (configured there via ?MP3,S<port>) does the serial.
 static void executeMp3Action(const RcAction& a) {
@@ -1271,7 +1271,9 @@ static void scheduleAction(const RcAction& action, unsigned long delayMs) {
 // so a delayed action's real effect never ran.
 static void rcExecuteActionNow(const RcAction& a) {
   // Record/replay capture tap. Gated internally (no-op unless recording), and a
-  // non-blocking queue hop — this runs on Core 0 too (remote ESP-NOW TRIGGER).
+  // non-blocking queue hop. All dispatch now lands on Core 1 (remote ESP-NOW
+  // TRIGGERs are deferred here via drainRemoteTriggers); the queue hop stays as a
+  // cheap cross-core safeguard for the capture buffer.
   navirec::captureAction(a);
   switch (a.type) {
     case RA_WCB_UNICAST: {
@@ -1329,7 +1331,7 @@ static void rcExecuteActionNow(const RcAction& a) {
       break;
     case RA_RECORD:
       // Toggle recording; save to a.cmd (clip name) on stop. Deferred to loop()
-      // (this can run on Core 0 for a remote TRIGGER). Mode = clip context.
+      // so the flash I/O never runs inline in a dispatch path. Mode = clip context.
       navirec::requestRecordToggle((uint8_t)FunctionSwState, a.cmd);
       break;
     case RA_PLAY:
@@ -3171,7 +3173,13 @@ void loop() {
   // HCR fades on its own WCB, so this only runs on the local transport.
   if (rcConfig.hcrDest.transport == 0) {
     Stream* hp = hcrLocalSerial();
-    if (hp) g_hcrFade.tick(g_hcr, *hp);
+    if (hp) {
+      g_hcrFade.tick(g_hcr, *hp);
+    } else if (g_hcrFade.active(0) || g_hcrFade.active(1) || g_hcrFade.active(2)) {
+      // Local transport but no resolvable serial port (e.g. an out-of-range dest) —
+      // can't tick, so cancel any in-flight fade rather than freeze the ramp.
+      g_hcrFade.cancel(0); g_hcrFade.cancel(1); g_hcrFade.cancel(2);
+    }
   } else if (g_hcrFade.active(0) || g_hcrFade.active(1) || g_hcrFade.active(2)) {
     // HCR moved to a WCB while a local fade was in flight — it can't be ticked here,
     // so cancel it rather than leave the ramp frozen at a partial level.
