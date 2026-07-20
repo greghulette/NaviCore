@@ -226,6 +226,15 @@ struct RcKnobOutput {
   // panels), at the cost of the lower half of stick range. Default false. See
   // sbusToRangeMidClosed() in NaviCore.ino.
   bool     midClosed;
+  // KF_MAESTRO_PASSTHROUGH only: auto-release (de-energize) the servo after this
+  // many milliseconds with NO stick movement. The passthrough only writes on
+  // movement, so a resting servo holds its last target and can buzz/hunt; when
+  // >0, the loop() idle tick sends Set Target 0 (Maestro stops pulses → servo
+  // goes limp + silent) once the channel has been idle this long, and the next
+  // stick move re-energizes it automatically. 0 = never release (default).
+  // NOTE: a released servo has NO holding torque — for panels/doors held by
+  // gravity/friction/magnets, NOT a servo bearing load. See maestroIdleReleaseTick().
+  uint16_t releaseIdleMs;
 };
 
 struct RcKnob {
@@ -904,6 +913,7 @@ static void rcWriteKnobOuts(JsonArray arr, uint8_t count, const RcKnobOutput* ou
     oObj["posMin"]    = outs[o].posMin;
     oObj["posMax"]    = outs[o].posMax;
     if (outs[o].midClosed) oObj["midClosed"] = true;   // center-of-stick = posMin (upper-half mapping)
+    if (outs[o].releaseIdleMs) oObj["releaseIdleMs"] = outs[o].releaseIdleMs;   // auto-release servo after N ms idle
     // NOTE: per-output smoothSpeed/smoothAccel are RETIRED — smoothing now lives
     // in smoothing profiles (RcKnob.smoothProfile). We no longer emit them; the
     // parser still reads them from legacy configs to migrate into profile 0.
@@ -925,6 +935,7 @@ static uint8_t rcReadKnobOuts(JsonArray arr, RcKnobOutput* outs) {
     out.smoothSpeed = (uint16_t)(oObj["smoothSpeed"] | 0);   // legacy — migrated into profile 0, then ignored
     out.smoothAccel = (uint8_t) (oObj["smoothAccel"] | 0);
     out.midClosed   = oObj["midClosed"] | false;             // center = posMin (upper-half passthrough mapping)
+    out.releaseIdleMs = (uint16_t)(oObj["releaseIdleMs"] | 0);   // 0 = never auto-release the servo
     n++;
   }
   return n;

@@ -577,6 +577,46 @@ static uint16_t g_maeSpeed[RC_NUM_MAESTROS][32] = {};
 static uint16_t g_maeAccel[RC_NUM_MAESTROS][32] = {};
 static const uint16_t MAE_SMOOTH_UNKNOWN = 0xFFFF;   // sentinel: force re-apply on next move (out of the 0-16383/0-255 range)
 
+// ── Auto-release (idle servo de-energize) runtime state, per Maestro channel ──
+// A KF_MAESTRO_PASSTHROUGH output with releaseIdleMs>0 opts a servo channel into
+// auto-release: the passthrough only writes a target on stick MOVEMENT, so a
+// resting servo holds its last target and can buzz/hunt. maestroIdleReleaseTick()
+// (loop, Core 1) sends Set Target 0 — the Maestro stops pulsing that channel, so
+// the servo goes limp and silent — once it has been idle releaseIdleMs long. The
+// next stick move writes a real target (re-energizing) and clears the flag.
+//   g_maeReleaseMs   = the active output's releaseIdleMs, copied on each dispatch
+//                      (0 = channel not opted in; nothing to release).
+//   g_maeLastMoveMs  = millis() of the last movement-driven target write.
+//   g_maeReleased    = the channel is currently de-energized (Set Target 0 sent).
+// All three are (id-1, ch)-keyed like g_maeSpeed. Not persisted; boot = zeroed.
+static uint16_t g_maeReleaseMs [RC_NUM_MAESTROS][32] = {};
+static uint32_t g_maeLastMoveMs[RC_NUM_MAESTROS][32] = {};
+static bool     g_maeReleased  [RC_NUM_MAESTROS][32] = {};
+
+// Wipe ALL auto-release runtime state (per-channel policy, idle timers, released
+// flags). Call after a live config apply / reset: SET_CONFIG applies to RAM without a
+// reboot, so a just-disabled or remapped releaseIdleMs would otherwise leave a STALE
+// non-zero policy that fires one spurious idle release. Cleared → the policy re-derives
+// from the fresh config on the next passthrough dispatch (mirrors reapplyMaestroEasing).
+static void resetMaestroReleaseState() {
+  memset(g_maeReleaseMs,  0, sizeof(g_maeReleaseMs));
+  memset(g_maeLastMoveMs, 0, sizeof(g_maeLastMoveMs));
+  memset(g_maeReleased,   0, sizeof(g_maeReleased));
+}
+
+// A whole-slot servo-state change happened OUTSIDE the passthrough setTarget path
+// (goHome / stopScript re-pose or re-energize channels). Treat it as a "move" for
+// auto-release: clear the released flags and re-arm the idle timers, so a channel that
+// had been de-energized is considered energized again and only auto-releases after a
+// fresh idle period — instead of leaving a stale "released" flag that would keep the
+// tick from ever re-releasing it. Only release-enabled channels (g_maeReleaseMs>0) are
+// ever acted on by the tick, so this is a no-op for channels that never opted in.
+static void maeReleaseArmSlot(uint8_t id) {
+  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  const uint32_t now = millis();
+  for (uint8_t ch = 0; ch < 32; ch++) { g_maeReleased[id - 1][ch] = false; g_maeLastMoveMs[id - 1][ch] = now; }
+}
+
 // Per-Maestro "active easing" the SWITCH sets (a "Set active easing" action). It is
 // the FALLBACK, not the boss: local easing (a knob's own profile / a script action's
 // profile) wins by default; the switch only applies where local has NONE — unless a
@@ -621,7 +661,26 @@ static void maestroSetTarget(uint8_t id, uint8_t ch, uint16_t pos) {
                                   // is capped, not wrapped to its low 14 bits (wrong servo pos)
   uint8_t p[3] = { ch, (uint8_t)(pos & 0x7F), (uint8_t)((pos >> 7) & 0x7F) };
   maestroWrite(id, 0x84, p, 3);
-  navirec::shadowSetTarget(id, ch, pos);   // record/replay last-position shadow (all moves)
+  if (pos == 0) {
+    // Target 0 = the Maestro stops pulsing this channel → servo goes limp, so its TRUE
+    // pose is now UNKNOWN. Invalidate the record/replay pose shadow (NOT a shadow of 0,
+    // which would make a later replay anchor at the min extreme and sweep the servo up
+    // from there). This is the auto-release path (or an explicit disable) — do NOT re-arm
+    // the idle timer here (that is what the release IS).
+    navirec::shadowInvalidate(id, ch);
+  } else {
+    navirec::shadowSetTarget(id, ch, pos);   // record/replay last-position shadow (all real moves)
+    // Auto-release idle-timer re-arm. ANY real (non-zero) move — passthrough stick,
+    // scene/trigger setTarget action, remote, or replay step — restarts the timer and
+    // re-energizes a released channel. Centralized here so EVERY mover re-arms, not just
+    // passthrough (a scene action holding a servo must not be dropped by a stale stick
+    // timer). The per-output releaseIdleMs POLICY is still set at the passthrough
+    // dispatch (only it knows the timeout). See maestroIdleReleaseTick().
+    if (id >= 1 && id <= RC_NUM_MAESTROS && ch < 32) {
+      g_maeLastMoveMs[id - 1][ch] = millis();
+      g_maeReleased  [id - 1][ch] = false;
+    }
+  }
 }
 static void maestroSetSpeed(uint8_t id, uint8_t ch, uint16_t spd) {
   if (!maestroChanOk(id, ch)) return;
@@ -646,8 +705,8 @@ static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
     dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u ch %u  SetAccel %u\n", id, ch, accel);
   }
 }
-static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); }
-static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); maeSmoothInvalidateSlot(id); }
+static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); maeReleaseArmSlot(id); }
+static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); maeSmoothInvalidateSlot(id); maeReleaseArmSlot(id); }
 static void maestroRestartScript(uint8_t id, uint8_t sub) {
   maestroWrite(id, 0xA7, &sub, 1);
   maeSmoothInvalidateSlot(id);   // a device-side script may change speed/accel we can't see — re-apply on next stick move
@@ -1647,6 +1706,12 @@ void processKnobs() {
         }
         maestroSetTarget(mid, mch, mapped);
         navirec::captureMaestroKf(mid, mch, mapped);   // knob keyframe
+        // Carry THIS output's auto-release policy (the idle timeout) to the channel —
+        // only the passthrough output knows releaseIdleMs. The idle-timer re-arm +
+        // released-clear happen inside maestroSetTarget() above, which fires for every
+        // real move regardless of source (mapped is a servo position, never 0).
+        if (mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32)
+          g_maeReleaseMs[mid - 1][mch] = out.releaseIdleMs;
       } else if (kn.function == KF_HCR_VOLUME) {
         // out.target is the HCR audio chan (0/1/2/3 = V/A/B/All); mapped is volume 0-99.
         // Clamp before the uint8 cast: a posMin/posMax above 255 would otherwise
@@ -1665,6 +1730,39 @@ void processKnobs() {
 void resetModeAwareKnobs() {
   for (int i = 0; i < RC_NUM_KNOBS; i++)
     if (rcConfig.knobs[i].modeAware) lastKnobRaw[i] = 0xFFFF;
+}
+
+// De-energize idle passthrough servos. A Maestro-passthrough output with
+// releaseIdleMs>0 (see RcKnobOutput) opts its channel into auto-release: the
+// passthrough only writes on stick MOVEMENT, so a resting servo keeps its last
+// target and can buzz/hunt against it. Once a channel has been idle its
+// releaseIdleMs, send Set Target 0 — the Maestro stops pulsing it, so the servo
+// goes limp and silent (NO holding torque; opt-in per channel for a reason). The
+// next stick move writes a real target (re-energizing) and clears the flag in the
+// dispatch loop above. Runs in loop() on Core 1 — the SAME core as the passthrough
+// dispatch and maestroWrite, so there is no cross-core race on the Maestro UART.
+// Scans at ~20 Hz (the timeout is coarse, 100s-1000s of ms), keeping loop() cheap.
+void maestroIdleReleaseTick() {
+  // Replay owns the servos while a clip plays (processKnobs bails at its own isReplaying
+  // gate). Without this, the tick would de-energize a channel the clip is actively
+  // driving — and a recorded HOLD emits no keyframes, so it would stay limp for the rest
+  // of the show. maestroSetTarget re-arms the timer on every replay step, so when
+  // playback ends the idle countdown restarts cleanly from the last driven frame.
+  if (navirec::isReplaying()) return;
+  static uint32_t lastScan = 0;
+  const uint32_t now = millis();
+  if (now - lastScan < 50) return;
+  lastScan = now;
+  for (uint8_t id = 1; id <= RC_NUM_MAESTROS; id++)
+    for (uint8_t ch = 0; ch < 32; ch++) {
+      const uint16_t idle = g_maeReleaseMs[id - 1][ch];
+      if (!idle || g_maeReleased[id - 1][ch]) continue;          // not opted in, or already released
+      if ((uint32_t)(now - g_maeLastMoveMs[id - 1][ch]) >= idle) {
+        maestroSetTarget(id, ch, 0);                             // Set Target 0 → stop pulses → servo limp + silent
+        g_maeReleased[id - 1][ch] = true;
+        dlog(DBG_MAESTRO, "[RELEASE] Maestro %u ch %u idle %ums → servo off\n", id, ch, idle);
+      }
+    }
 }
 
 // =============================================================================
@@ -2408,6 +2506,7 @@ void handleSerialInput() {
                 // leave the OLD easing stuck on the servo). Cache-gated, so a save that
                 // didn't touch easing is a no-op. See reapplyMaestroEasing().
                 for (uint8_t mid = 1; mid <= RC_NUM_MAESTROS; mid++) reapplyMaestroEasing(mid);
+                resetMaestroReleaseState();   // re-derive auto-release policy from the fresh config (no stale idle release)
               } else {
                 Serial.println("{\"type\":\"INFO\",\"msg\":\"boardType changed — reboot to apply the new pin profile\"}");
               }
@@ -2449,6 +2548,7 @@ void handleSerialInput() {
 
         } else if (strcmp(type,"RESET_DEFAULTS")==0) {
           rcConfigLoadDefaults();
+          resetMaestroReleaseState();   // clear stale auto-release state so defaults take effect live
           Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
         } else if (strcmp(type,"REBOOT")==0) {
@@ -3185,6 +3285,10 @@ void loop() {
     // so cancel it rather than leave the ramp frozen at a partial level.
     g_hcrFade.cancel(0); g_hcrFade.cancel(1); g_hcrFade.cancel(2);
   }
+
+  // Auto-release idle passthrough servos (RcKnobOutput.releaseIdleMs) — de-energize a
+  // resting servo so it stops buzzing/hunting; the next stick move re-energizes it.
+  maestroIdleReleaseTick();
 
   // FPS counter
   trackSbusFps();

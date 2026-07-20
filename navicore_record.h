@@ -131,6 +131,16 @@ inline void shadowInvalidateSlot(uint8_t slot) {            // goHome/stopScript
     if (_state == ST_REPLAYING) _curve[slot - 1][c].reanchor = true;
   }
 }
+// Single-channel pose-unknown: one channel just went limp (auto-release Set Target 0 —
+// the Maestro stopped pulsing it, so its true pose is unknown). Same effect as
+// shadowInvalidateSlot but for ONE channel, so a later replay reanchors + snaps to the
+// next keyframe instead of sweeping the servo up from a stale/zero anchor. Lock-free
+// single 16-bit store like shadowSetTarget.
+inline void shadowInvalidate(uint8_t slot, uint8_t ch) {
+  if (slot < 1 || slot > 8 || ch >= 32) return;
+  _lastPos[slot - 1][ch] = LASTPOS_NONE;
+  if (_state == ST_REPLAYING) _curve[slot - 1][ch].reanchor = true;
+}
 
 // ── Capture taps (noinline + small POD: keep the event off the Core-0 ESP-NOW
 //    callback frame, exactly the queueRemoteCli lesson). Non-blocking, drop-if-
