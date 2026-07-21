@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.00:24.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.11:10.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10705,6 +10705,15 @@ function renderKnobOutputFields(idx, o, fn) {
       <label title="Stick CENTER = Pos min (closed); only the upper half of stick travel opens it (Pos min→max). Avoids a half-open servo at stick rest. Loses the lower half of stick range.">Center = closed</label>
       <input type="checkbox" id="kn-out-${idx}-midclosed" ${o.midClosed ? 'checked' : ''} style="align-self:center;width:auto">
     </div>
+    <div class="field-group">
+      <label title="After this many ms with no stick movement, cut power to the servo (Set Target 0) so it stops buzzing/hunting at rest — the next stick move re-energizes it. WARNING: a released servo has NO holding torque, so use only where gravity, friction, or a magnet holds the mechanism, never a servo bearing load.">Release when idle</label>
+      <input type="checkbox" id="kn-out-${idx}-release" ${o.releaseIdleMs ? 'checked' : ''} style="align-self:center;width:auto"
+             onchange="{const m=document.getElementById('kn-out-${idx}-releasems'); if(m) m.disabled=!this.checked;}">
+    </div>
+    <div class="field-group">
+      <label>Idle (ms)</label>
+      <input type="number" id="kn-out-${idx}-releasems" min="100" max="60000" step="100" value="${o.releaseIdleMs || 1500}" ${o.releaseIdleMs ? '' : 'disabled'} style="width:75px">
+    </div>
     ${maeHint}
   `;
 }
@@ -10766,7 +10775,12 @@ function syncKnobOutputsFromDom(fnOverride) {
     // (Smoothing is no longer per-output — it lives in smoothing profiles,
     //  referenced per-knob via editingKnobDraft.smoothProfile.)
     const mc = document.getElementById(`kn-out-${idx}-midclosed`)?.checked || false;   // Maestro passthrough only (null → false for HCR rows)
-    next.push({ target, maestroCh: ch, posMin: pn, posMax: px, midClosed: mc });
+    // Auto-release: checkbox gates it; the ms field is the idle timeout. Off → 0 (never release).
+    const relOn = document.getElementById(`kn-out-${idx}-release`)?.checked || false;
+    let relMs = 0;
+    if (relOn) { relMs = Math.round(+(document.getElementById(`kn-out-${idx}-releasems`)?.value || 1500));
+                 if (relMs < 100) relMs = 100; else if (relMs > 60000) relMs = 60000; }
+    next.push({ target, maestroCh: ch, posMin: pn, posMax: px, midClosed: mc, releaseIdleMs: relMs });
   });
   editingKnobDraft.outputs = next;
   // Keep the active mode's array in the per-mode source-of-truth in sync.
@@ -10816,6 +10830,7 @@ function saveKnobModal() {
       posMin:    +o.posMin || 0,
       posMax:    +o.posMax || 0,
       midClosed: !!o.midClosed,
+      releaseIdleMs: Math.max(0, Math.min(60000, +o.releaseIdleMs || 0)),
     };
   });
   const modeAware = !!document.getElementById('kn-modeaware')?.checked;
