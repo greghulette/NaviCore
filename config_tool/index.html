@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.11:18.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.12:14.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9830,6 +9830,49 @@ function _cmdlibConfigDest(board, mode) {
   return { target: (Number.isFinite(t) && t >= 1) ? String(Math.min(20, t)) : '1' };
 }
 
+// Predefined device labels (the WCB Wizard's device-labels.js vocabulary) that each
+// command-library board corresponds to. When a WCB advertises one of these on a serial
+// port (WDP portLabels), a freshly-authored command from that board auto-routes THERE —
+// the data-driven twin of _cmdlibConfigDest's HCR/MP3 home, and the only auto-route for
+// raw-serial devices (Magic Panel, PSI, R-Series…) that have no native WCB routing. Add a
+// `board-id: [labels]` entry to extend it; an unmapped board or unlabeled mesh just falls
+// back to the previous default. Matched normalized (case/punctuation-insensitive).
+const NC_BOARD_DEVICE_LABELS = {
+  'wcb-hcr': ['H-CR'], 'hcr-native': ['H-CR'],
+  'wcb-mp3': ['MP3 Trigger'],
+  'ia-magic-panel': ['Magic Panel(IA)'], 'pd-magic-panel': ['Magic Panel(PRINTDRD)'],
+  'rseries-logic': ['R-Series Logics'],
+  'maestro': ['Maestro'], 'wcb-maestro': ['Maestro'], 'nc-maestro': ['Maestro'],
+  'psi-pro': ['PSI Front', 'PSI Rear'],
+  'r2uppityspinner-alt': ['Uppity Spinner'],
+  'roam-a-dome': ['Roam-A-Dome'],
+  'astropixels-plus': ['AstroPixels'], 'astropixels-sound': ['AstroPixels'],
+  'astropixels-psi': ['AstroPixels'], 'astropixels-logics': ['AstroPixels'],
+  'astropixels-holo': ['AstroPixels'], 'astropixels-servo': ['AstroPixels'],
+  'wcb-wled': ['WLED'],
+  'flthy-hps': ['Flthy HP Controller', 'HP Controller'],
+  'navicore': ['NaviCore'],
+};
+function _ncLabelNorm(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+// The first WCB · serial port whose live WDP label matches one of this board's device
+// labels → { wcb, port, label }, or null. First match wins (two of the same device →
+// the lower WCB/port; the user can still change the row). port is 1-5 (portLabels omit
+// the USB console at port 0), so it drops straight into a ";W<wcb>;S<port>" route.
+function _cmdlibLabelDest(board) {
+  const labels = (board && NC_BOARD_DEVICE_LABELS[board.id]) || [];
+  if (!labels.length || typeof wcbPortLabels === 'undefined' || !Array.isArray(wcbPortLabels)) return null;
+  const want = labels.map(_ncLabelNorm);
+  for (let w = 0; w < wcbPortLabels.length; w++) {
+    const ports = wcbPortLabels[w];
+    if (!Array.isArray(ports)) continue;
+    for (let p = 0; p < ports.length; p++) {
+      const lbl = String(ports[p] || '').trim();
+      if (lbl && want.includes(_ncLabelNorm(lbl))) return { wcb: w + 1, port: p + 1, label: lbl };
+    }
+  }
+  return null;
+}
+
 // Encode a command template + param values → the wire string the WCB receives.
 function ncEncodeCommand(cmd, values) {
   let out = cmd.template || '';
@@ -10294,9 +10337,12 @@ function _cmdlibUse() {
     action = { type: 'wled', cmd: wire };
   } else if (mode === 'device') {
     // A raw device string must egress a serial port. Keep the row's existing port
-    // routing on a re-edit; otherwise default to the first WCB · Serial 1.
+    // routing on a re-edit; else auto-route to where a WCB advertises this device's
+    // label over WDP; else default to the first WCB · Serial 1.
+    const ld = rowHadCmd ? null : _cmdlibLabelDest(board);
     if (rowHadCmd && mWS)                         action = { type: 'wcb_broadcast', cmd: `;W${mWS[1]};S${mWS[2]}` + wire };
     else if (rowHadCmd && /^S\d$/.test(destsel)) action = { type: 'serial', port: destsel, cmd: wire };
+    else if (ld)                                 action = { type: 'wcb_broadcast', cmd: `;W${ld.wcb};S${ld.port}` + wire };
     else                                         action = { type: 'wcb_broadcast', cmd: `;W${_firstKnownWcb()};S1` + wire };
   } else {
     // A ';'-prefixed WCB verb (the WCB auto-routes it). Preserve the row's chosen
@@ -10307,8 +10353,10 @@ function _cmdlibUse() {
     else if (rowHadCmd && /^S\d$/.test(destsel)) action = { type: 'serial', port: destsel, cmd: wire };
     else if (rowHadCmd && /^\d+$/.test(destsel)) action = { type: 'wcb_unicast', target: destsel, cmd: wire };
     else {
-      const cfg = _cmdlibConfigDest(board, 'wcb');   // HCR/MP3 → their configured WCB
-      if (cfg && cfg.target) action = { type: 'wcb_unicast', target: cfg.target, cmd: wire };
+      const ld  = _cmdlibLabelDest(board);           // a WCB advertising this device's label (WDP)
+      const cfg = _cmdlibConfigDest(board, 'wcb');   // else HCR/MP3 → their configured WCB
+      if (ld)                     action = { type: 'wcb_unicast', target: String(ld.wcb), cmd: wire };
+      else if (cfg && cfg.target) action = { type: 'wcb_unicast', target: cfg.target, cmd: wire };
       else {
         const curT = document.getElementById(fid + '-target')?.value;
         action = { type: 'wcb_unicast', target: String((curT && /^\d+$/.test(curT)) ? curT : '1'), cmd: wire };
