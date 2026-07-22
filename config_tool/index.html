@@ -991,6 +991,7 @@
     <button class="btn btn-ghost" id="btn-hwsetup" type="button">Config</button>
     <button class="btn btn-ghost" id="btn-export-cfg" type="button">Export</button>
     <button class="btn btn-ghost" id="btn-import-cfg" type="button">Import</button>
+    <button class="btn btn-ghost" id="btn-cheatsheet" type="button" title="Printable control cheat sheet — what every button / switch / knob does (HTML or PDF)">📋 Cheat Sheet</button>
     <button class="btn btn-ghost" id="btn-terminal" type="button" title="Open terminal">⌨ Terminal</button>
     <button class="btn btn-ghost" id="btn-clips" type="button" title="Record/replay clip library" onclick="openClipsModal()">🎬 Clips</button>
     <button class="btn btn-ghost" id="btn-theme" type="button" title="Toggle light / dark theme" aria-label="Toggle theme" style="min-width:36px;justify-content:center;font-size:15px">☾</button>
@@ -2280,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.12:14.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.13:27.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -12080,6 +12081,7 @@ document.getElementById('btn-defaults').addEventListener('click', async () => {
 
 document.getElementById('btn-export-cfg').addEventListener('click', exportConfigCsv);
 document.getElementById('btn-import-cfg').addEventListener('click', () => document.getElementById('cfg-import-file').click());
+document.getElementById('btn-cheatsheet').addEventListener('click', openCheatSheet);
 // Launching from inside Config: close the Config modal first so calibration
 // gets the foreground cleanly instead of stacking modal on top of modal.
 document.getElementById('btn-calibrate').addEventListener('click', () => {
@@ -14112,6 +14114,130 @@ function downloadCsv(text, filename) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// ── Cheat sheet ──────────────────────────────────────────────────────────────
+// A printable "what does what" reference of every configured trigger, reusing
+// actionSummary() so each description matches the assignment UI exactly. Pure
+// function of `config` (works offline). Opens as a self-contained page whose own
+// toolbar offers Save-as-PDF (print) and Save-HTML (download).
+
+// One-line summary of a single knob/slider/joystick output (see renderKnobOutputFields).
+function _knobOutputSummary(o, fn) {
+  if (fn === KF_HCR_VOLUME) {
+    const ch = ['V', 'A', 'B'][+o.target] || ('ch' + (o.target ?? 0));
+    return `${ch} vol ${o.posMin ?? 0}–${o.posMax ?? 99}`;
+  }
+  const us = v => Math.round((+v || 0) / 4);   // stored quarter-µs → µs
+  return `Maestro ${o.target ?? 1} · Ch${o.maestroCh ?? 0} · ${us(o.posMin ?? 4000)}–${us(o.posMax ?? 8000)}µs`;
+}
+
+function _buildCheatSheetHtml() {
+  const dash = '<span style="color:#bbb">—</span>';
+  const tierHtml = arr => (Array.isArray(arr) && arr.length)
+    ? arr.map(actionSummary).join(' <span style="color:#c0392b;font-weight:700">+</span> ') : '';
+
+  // Buttons, grouped by mode (mappings key = mode*100 + button).
+  let buttonsHtml = '';
+  for (let mode = 1; mode <= 3; mode++) {
+    let rows = '';
+    for (let btn = 1; btn <= RC_TOTAL_SLOTS; btn++) {
+      const m = config.mappings[String(mode * 100 + btn)];
+      if (!m || !mappingHasActions(m)) continue;
+      rows += `<tr><td class="trig">${escH(getBtnLabel(btn))}</td><td>${tierHtml(m.t1) || dash}</td><td>${tierHtml(m.t2) || dash}</td><td>${tierHtml(m.t3) || dash}</td></tr>`;
+    }
+    if (!rows) continue;
+    buttonsHtml += `<div class="mblock"><h3>${escH(modeLabels[mode])}</h3><table><thead><tr><th>Button</th><th>Single tap</th><th>Double tap</th><th>Triple tap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+  const buttonsSection = buttonsHtml ? `<section><h2>Buttons</h2>${buttonsHtml}</section>` : '';
+
+  // Switches (global across modes) — positions Down / Mid / Up.
+  let swRows = '';
+  for (const name of Object.keys(config.switches || {})) {
+    const s = config.switches[name]; if (!s) continue;
+    const p0 = tierHtml(s.p0), p1 = tierHtml(s.p1), p2 = tierHtml(s.p2);
+    if (!p0 && !p1 && !p2) continue;
+    swRows += `<tr><td class="trig">${escH(name)}</td><td>${p0 || dash}</td><td>${p1 || dash}</td><td>${p2 || dash}</td></tr>`;
+  }
+  const switchesSection = swRows ? `<section><h2>Switches</h2><table><thead><tr><th>Switch</th><th>Down</th><th>Mid</th><th>Up</th></tr></thead><tbody>${swRows}</tbody></table></section>` : '';
+
+  // Knobs / sliders / joysticks — function + per-output ranges (per mode if mode-aware).
+  let knobRows = '';
+  for (const name of Object.keys(config.knobs || {})) {
+    const k = config.knobs[name]; if (!k || !k.function) continue;   // KF_NONE skipped
+    const fnLbl = knobFunctions[k.function] || ('fn' + k.function);
+    const fmt = outs => (Array.isArray(outs) && outs.length) ? outs.map(o => escH(_knobOutputSummary(o, k.function))).join('; ') : dash;
+    const outCell = k.modeAware
+      ? [['M1', k.outputs], ['M2', k.outputs2], ['M3', k.outputs3]].map(([lbl, o]) => `<div><b>${lbl}:</b> ${fmt(o)}</div>`).join('')
+      : fmt(k.outputs);
+    const rev = k.reverse ? ' <span style="color:#888">(reversed)</span>' : '';
+    knobRows += `<tr><td class="trig">${escH(sourceTitleFor(name))}</td><td>${escH(fnLbl)}${rev}</td><td>${outCell}</td></tr>`;
+  }
+  const knobsSection = knobRows ? `<section><h2>Knobs · Sliders · Joysticks</h2><table><thead><tr><th>Control</th><th>Function</th><th>Outputs</th></tr></thead><tbody>${knobRows}</tbody></table></section>` : '';
+
+  // New-peer event.
+  const pe = config.peerEvent;
+  const peerSection = (pe && Array.isArray(pe.actions) && pe.actions.length)
+    ? `<section><h2>New-peer event</h2><p class="note">Fires when a new WCB joins the mesh${pe.alert === false ? '' : ' (with on-screen alert)'}:</p><div class="peeracts">${tierHtml(pe.actions)}</div></section>` : '';
+
+  // Sequences / animations — reverse index of clip name → where it's triggered.
+  const clipTriggers = {};
+  const addClip = (a, label) => { if (a && (a.type === 'play' || a.type === 'record') && a.cmd) (clipTriggers[a.cmd] = clipTriggers[a.cmd] || []).push(label); };
+  for (let mode = 1; mode <= 3; mode++) for (let btn = 1; btn <= RC_TOTAL_SLOTS; btn++) {
+    const m = config.mappings[String(mode * 100 + btn)]; if (!m) continue;
+    ['t1', 't2', 't3'].forEach((tk, ti) => (m[tk] || []).forEach(a => addClip(a, `${modeLabels[mode]} · ${getBtnLabel(btn)} · ${tierNames[ti + 1]}`)));
+  }
+  for (const name of Object.keys(config.switches || {})) {
+    const s = config.switches[name]; if (!s) continue;
+    [['p0', 'Down'], ['p1', 'Mid'], ['p2', 'Up']].forEach(([pk, pl]) => (s[pk] || []).forEach(a => addClip(a, `Switch ${name} · ${pl}`)));
+  }
+  ((pe && pe.actions) || []).forEach(a => addClip(a, 'New-peer event'));
+  const clipNames = Object.keys(clipTriggers).sort((a, b) => a.localeCompare(b));
+  const seqSection = clipNames.length
+    ? `<section><h2>Sequences · Animations</h2><p class="note">Recorded clips and where they're triggered:</p><table><thead><tr><th>Clip</th><th>Triggered by</th></tr></thead><tbody>${clipNames.map(n => `<tr><td class="trig">${escH(n)}</td><td>${clipTriggers[n].map(escH).join('<br>')}</td></tr>`).join('')}</tbody></table></section>` : '';
+
+  const body = (buttonsSection || switchesSection || knobsSection || peerSection || seqSection) || '<p class="note">No triggers configured yet.</p>';
+  const when = new Date().toLocaleString();
+  // Inline downloader for the printed page's toolbar. Assembled from split literals
+  // so this source can't contain a "</scr"+"ipt>" that would end index.html's script.
+  const script = '<scr' + 'ipt>function dlHtml(){var h="<!doctype html>\\n"+document.documentElement.outerHTML;var b=new Blob([h],{type:"text/html"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download="NaviCore_CheatSheet.html";document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},1000);}</scr' + 'ipt>';
+
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NaviCore Control Cheat Sheet</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;background:#f4f4f5;margin:0;padding:0 0 40px}
+.toolbar{position:sticky;top:0;display:flex;gap:8px;padding:10px 16px;background:#222;box-shadow:0 1px 4px rgba(0,0,0,.3);z-index:10}
+.toolbar button{font:inherit;font-size:14px;padding:7px 14px;border:0;border-radius:6px;background:#c0392b;color:#fff;cursor:pointer}
+.toolbar button.alt{background:#555}
+.wrap{max-width:900px;margin:0 auto;padding:20px 16px}
+h1{font-size:22px;margin:6px 0 2px}
+.meta{color:#666;font-size:12px;margin-bottom:18px}
+section{background:#fff;border:1px solid #e2e2e5;border-radius:8px;padding:14px 16px;margin:0 0 16px;break-inside:avoid}
+h2{font-size:16px;margin:0 0 10px;padding-bottom:6px;border-bottom:2px solid #c0392b}
+h3{font-size:13px;margin:14px 0 6px;color:#c0392b;text-transform:uppercase;letter-spacing:.04em}
+.mblock:first-child h3{margin-top:0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;background:#f0f0f2;padding:6px 8px;border:1px solid #e2e2e5;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:#555}
+td{padding:6px 8px;border:1px solid #eaeaec;vertical-align:top}
+td.trig{font-weight:600;white-space:nowrap;background:#fafafb}
+tr{break-inside:avoid}
+.note{color:#666;font-size:12px;margin:0 0 8px}
+.peeracts{font-size:13px}
+@media print{body{background:#fff}.toolbar{display:none}.wrap{max-width:none;padding:0}section{border:1px solid #ccc;box-shadow:none;padding:8px 10px}}
+</style></head>
+<body>
+<div class="toolbar"><button onclick="window.print()">\u{1F5A8} Save as PDF</button><button class="alt" onclick="dlHtml()">↓ Save HTML</button></div>
+<div class="wrap"><h1>NaviCore — Control Cheat Sheet</h1><div class="meta">Generated ${escH(when)}</div>${body}</div>
+${script}
+</body></html>`;
+}
+
+// Open the cheat sheet in a new tab (Blob URL; its own toolbar handles PDF/HTML).
+function openCheatSheet() {
+  const url = URL.createObjectURL(new Blob([_buildCheatSheetHtml()], { type: 'text/html' }));
+  const w = window.open(url, '_blank');
+  if (!w) alert('Pop-up blocked — allow pop-ups for this page to open the cheat sheet.');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
