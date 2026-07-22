@@ -26,5 +26,5 @@
 #pragma once
 
 #define FW_VERSION_BASE  "v0.2.0"
-#define FW_VERSION_DTG   "212234QJUL26"
+#define FW_VERSION_DTG   "220834QJUL26"
 #define FW_VERSION       FW_VERSION_BASE "_" FW_VERSION_DTG

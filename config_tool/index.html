@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.22:34.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.08:34.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9105,6 +9105,7 @@ function addActionRow(tier) {
 
   rows.appendChild(buildActionRow(tier, ai, { type: 'wcb_unicast' }));
   refreshTierState(tier);
+  if (tier === 'peer') _peerEventDirty = true;   // structural edit; no input event fires
 }
 
 function removeActionRow(tier, ai) {
@@ -9112,6 +9113,7 @@ function removeActionRow(tier, ai) {
   if (!row) return;
   row.remove();
   refreshTierState(tier);
+  if (tier === 'peer') _peerEventDirty = true;   // a click, not an input event — mark dirty explicitly
 }
 
 function refreshTierState(tier) {
@@ -9506,8 +9508,10 @@ function renderHcrParamFields(container, fn, curChan, curTrack) {
     trackTitle = 'Volume step per trigger (1-99). 0 or blank uses the WCB default of 5.';
   } else if (fn === 12 || fn === 15) {   // Fade In/Out — audio chan A/B, seconds
     chanW  = mkSelect('-chan', HCR_FADE_CHANS, (curChan === 1 || curChan === 2) ? curChan : 1); chanL = 'Audio chan';
-    // Default seconds to 2 (not 0) — HcrFade treats 0 as an instant jump, a surprising "fade".
-    trackW = mkNum('-track', (curTrack === undefined || curTrack === null || +curTrack === 0) ? 2 : curTrack, 99); trackL = 'Seconds';
+    // Default seconds to 2 only for a NEW action (undefined) — HcrFade treats 0 as an
+    // instant jump, a surprising "fade". A STORED 0 is intentional (see the tooltip),
+    // so preserve it; coercing it to 2 would rewrite an untouched action on re-open.
+    trackW = mkNum('-track', (curTrack === undefined || curTrack === null) ? 2 : curTrack, 99); trackL = 'Seconds';
     trackTitle = 'Fade duration in seconds (0 = instant).';
   } else {                        // the original 11 fns — behavior unchanged
     if (HCR_FN_USES_EMOTION.has(fn)) {
@@ -10245,6 +10249,14 @@ function _cmdlibUse() {
   const board = _cmdlibSel.board, cmd = _cmdlibSel.cmd, fid = _cmdlibFid;
   const mode = _cmdlibDestMode(board, cmd);
   let action;
+  // On a re-edit (📚 Change of a row that already holds a command) the row already
+  // carries the destination the user chose — preserve it; only DEFAULT the
+  // destination for fresh authoring from a blank row (empty command field). The
+  // row's -destsel encodes it: 'S3'.. = local serial, '0' = broadcast,
+  // '<wcbNum>' = WCB unicast, 'W<w>S<p>' = a WCB serial port.
+  const rowHadCmd = !!((document.getElementById(fid + '-cmd')?.value) || '').trim();
+  const destsel   = document.getElementById(fid + '-destsel')?.value || '';
+  const mWS       = /^W(\d+)S(\d)$/.exec(destsel);
   if (mode === 'local') {
     // Controller-local action — record / play / stop. No destination; params are
     // the clip name (record/play) and a loop flag (play).
@@ -10262,13 +10274,26 @@ function _cmdlibUse() {
   } else if (mode === 'wled') {
     action = { type: 'wled', cmd: wire };
   } else if (mode === 'device') {
-    action = { type: 'wcb_broadcast', cmd: `;W${_firstKnownWcb()};S1` + wire };   // default: first WCB · Serial 1
+    // A raw device string must egress a serial port. Keep the row's existing port
+    // routing on a re-edit; otherwise default to the first WCB · Serial 1.
+    if (rowHadCmd && mWS)                         action = { type: 'wcb_broadcast', cmd: `;W${mWS[1]};S${mWS[2]}` + wire };
+    else if (rowHadCmd && /^S\d$/.test(destsel)) action = { type: 'serial', port: destsel, cmd: wire };
+    else                                         action = { type: 'wcb_broadcast', cmd: `;W${_firstKnownWcb()};S1` + wire };
   } else {
-    const cfg = _cmdlibConfigDest(board, 'wcb');   // HCR/MP3 → their configured WCB
-    if (cfg && cfg.target) action = { type: 'wcb_unicast', target: cfg.target, cmd: wire };
+    // A ';'-prefixed WCB verb (the WCB auto-routes it). Preserve the row's chosen
+    // destination on a re-edit; else auto-fill from the device's configured home
+    // (HCR/MP3), falling back to a unicast to the row's target / WCB 1.
+    if (rowHadCmd && destsel === '0')            action = { type: 'wcb_broadcast', cmd: wire };
+    else if (rowHadCmd && mWS)                    action = { type: 'wcb_broadcast', cmd: `;W${mWS[1]};S${mWS[2]}` + wire };
+    else if (rowHadCmd && /^S\d$/.test(destsel)) action = { type: 'serial', port: destsel, cmd: wire };
+    else if (rowHadCmd && /^\d+$/.test(destsel)) action = { type: 'wcb_unicast', target: destsel, cmd: wire };
     else {
-      const curT = document.getElementById(fid + '-target')?.value;
-      action = { type: 'wcb_unicast', target: String((curT && /^\d+$/.test(curT)) ? curT : '1'), cmd: wire };
+      const cfg = _cmdlibConfigDest(board, 'wcb');   // HCR/MP3 → their configured WCB
+      if (cfg && cfg.target) action = { type: 'wcb_unicast', target: cfg.target, cmd: wire };
+      else {
+        const curT = document.getElementById(fid + '-target')?.value;
+        action = { type: 'wcb_unicast', target: String((curT && /^\d+$/.test(curT)) ? curT : '1'), cmd: wire };
+      }
     }
   }
   _applyResolvedActionToRow(fid, action);
@@ -10283,7 +10308,13 @@ function _applyResolvedActionToRow(fid, action) {
   if (typeSel) typeSel.value = action.type;
   if (fieldsDiv) appendActionFields(fieldsDiv, action);
   const m = /^fields-(.+)-(\d+)$/.exec(fid);
-  if (m) refreshTierState(m[1]);
+  if (m) {
+    refreshTierState(m[1]);
+    // The Command Builder mutates the row programmatically (sets .value + re-renders)
+    // and fires no input/change event, so the peer editor's dirty flag would stay
+    // false and syncPeerEventFromDom would silently drop this edit on Save.
+    if (m[1] === 'peer') _peerEventDirty = true;
+  }
 }
 
 // Merge ONE parsed library-shaped object (our {boards:[...]} or a DroidNet
@@ -10859,9 +10890,12 @@ function readActionFromFid(fid, type, extras) {
     let cmd = document.getElementById(fid + '-cmd')?.value || '';
     if (!cmd.trim()) return null;
     // A WCB serial-port destination prefixes ";W<wcb>;S<port>" (the select carries it).
+    // Skip it if the user hand-typed their own ";W..." routing into the command field
+    // (render strips the prefix, so a bare command never starts with ";W") — otherwise
+    // the two would stack into a malformed ";W1;S1;W2;S3..." double prefix.
     const dv = document.getElementById(fid + '-destsel')?.value || '';
     const m = /^W(\d+)S(\d)$/.exec(dv);
-    if (m) cmd = `;W${m[1]};S${m[2]}` + cmd;
+    if (m && !/^;W/i.test(cmd)) cmd = `;W${m[1]};S${m[2]}` + cmd;
     return { type, cmd, ...extras };
   }
   if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
@@ -11361,8 +11395,6 @@ const US_TO_QUS = 4;
 
 function syncKnobOutputsFromDom(fnOverride) {
   if (!editingKnobDraft) return;
-  const rows = document.querySelectorAll('#kn-outputs-rows .action-row');
-  const next = [];
   // Maestro Pass-Through pos fields are shown in µs but stored in quarter-µs;
   // HCR Volume fields are a raw 0-99 and pass through unchanged. The unit
   // conversion must use the function the DOM fields were RENDERED for —
@@ -11371,6 +11403,12 @@ function syncKnobOutputsFromDom(fnOverride) {
   // e.g. a 99 volume would be read as µs → ×4 → 396, which coerce then misses).
   const fn = (fnOverride != null) ? fnOverride
            : +(document.getElementById('kn-function')?.value ?? editingKnobDraft.function ?? KF_NONE);
+  // KF_NONE renders a "disabled" note, NOT output rows — there is nothing to
+  // collect, and reading the empty container would wipe the stored outputs that
+  // must survive a NONE → real-function toggle. Leave the draft untouched.
+  if (fn === KF_NONE) return;
+  const rows = document.querySelectorAll('#kn-outputs-rows .action-row');
+  const next = [];
   const toStore = (fn === KF_MAESTRO_PASSTHROUGH) ? (v => Math.round(v * US_TO_QUS)) : (v => v);
   rows.forEach(r => {
     const idx = r.dataset.idx;

@@ -2674,8 +2674,22 @@ void handleSerialInput() {
           for (int i = 1; i <= hi; i++) {
             const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
             Serial.printf("%s[", (i > 1) ? "," : "");
-            for (int p = 0; p < 5; p++)
-              Serial.printf("%s\"%s\"", p ? "," : "", (nb && !nb->isClient) ? nb->portLabels[p] : "");
+            for (int p = 0; p < 5; p++) {
+              // Port labels are EXTERNAL input — a device's own @WDP1 announce, copied
+              // verbatim into portLabels[] by WCB_Client with no filtering. Sanitize the
+              // same JSON-hostile chars setWcbAlias() strips for aliases; otherwise a '"'
+              // or '\' would break this hand-built JSON and drop the whole WCB_STATUS
+              // line at the tool's JSON.parse (silently freezing the status panel).
+              const char* lbl = (nb && !nb->isClient) ? nb->portLabels[p] : "";
+              char safe[25]; size_t j = 0;
+              for (int k = 0; k < 24 && lbl[k]; k++) {
+                char c = lbl[k];
+                if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;   // JSON-hostile
+                safe[j++] = c;
+              }
+              safe[j] = '\0';
+              Serial.printf("%s\"%s\"", p ? "," : "", safe);
+            }
             Serial.print("]");
           }
           Serial.println("]}");
