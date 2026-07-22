@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.09:11.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.10:06.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9630,7 +9630,7 @@ const NC_CMDLIB_SEED = {
         params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
                  {name:'sequence', label:'Sequence #', type:'int', min:0, max:99, default:1, required:true} ], examples:[';M11'] },
     ]},
-    // Local Pololu Maestro (servo) command set. These are NOT WCB wire commands —
+    // Local Pololu Maestro (raw protocol) command set. These are NOT WCB wire commands —
     // `local:'maestro'` makes the composer author a `maestro` firmware action whose
     // DESTINATION is a Maestro slot (1-8, wiring set in the Maestro Locations tab),
     // and whose cmd is the comma-delimited verb the firmware parses (executeMaestroCmd
@@ -9638,7 +9638,7 @@ const NC_CMDLIB_SEED = {
     // protocol also has Set PWM (0x8A), Set Multiple Targets (0x9F), Restart-with-
     // Parameter (0xA8), and the Get* queries (0x90/0x93/0xA1/0xA9, need 2-way serial)
     // — model those here too when the firmware PR lands to implement them.
-    { id:'nc-maestro', name:'Maestro (servo)', kind:'maestro', local:'maestro', commands: [
+    { id:'nc-maestro', name:'Maestro (Pololu Protocol)', kind:'maestro', local:'maestro', commands: [
       { id:'maestro.setTarget', name:'Set servo position', category:'Servo', template:'setTarget,{channel},{position}',
         params:[ {name:'channel',  label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
                  {name:'position', label:'Position', type:'int', unit:'servoPulse', min:0, max:16383, default:6000, required:true} ], examples:['setTarget,0,6000'] },
@@ -10713,7 +10713,7 @@ function _appendCommandView(container, action) {
 
   // (Maestro / Record / Play / Stop used to live here as "or:" shortcuts — they
   // are now authored from the library like every other command via 📚 Build:
-  // Maestro (servo) and the NaviCore Controller board.)
+  // Maestro (Pololu Protocol) and the NaviCore Controller board.)
 
   // Decoded command name, shown under the row once it's a known library command.
   const hint = document.createElement('div');
