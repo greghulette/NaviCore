@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.08:34.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.09:11.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9791,7 +9791,15 @@ function _portOptionsHtml(wcbVal, selected) {
     return `<option value="auto"${sel === 'auto' ? ' selected' : ''}>— (broadcast)</option>`;
   }
   let html = `<option value="auto"${sel === 'auto' ? ' selected' : ''}>Auto-route (by type)</option>`;
-  for (let p = 0; p <= 5; p++) html += `<option value="${p}"${sel === String(p) ? ' selected' : ''}>${esc(_wcbPortLabel(+wcbVal, p))}</option>`;
+  // A client (mesh monitor / relay / other controller) has no serial passthrough —
+  // the firmware withholds its port labels, so offer auto-route only. A previously
+  // saved client serial port is still kept as its own option so an existing action
+  // round-trips instead of being silently rewritten to auto-route.
+  const isClient = !!(typeof wcbClients !== 'undefined' && wcbClients && wcbClients[+wcbVal - 1]);
+  for (let p = 0; p <= 5; p++) {
+    if (isClient && sel !== String(p)) continue;
+    html += `<option value="${p}"${sel === String(p) ? ' selected' : ''}>${esc(_wcbPortLabel(+wcbVal, p))}</option>`;
+  }
   return html;
 }
 
@@ -10677,7 +10685,15 @@ function _appendCommandView(container, action) {
       if (typeSel) typeSel.value = tp;
       const m = /^fields-(.+)-(\d+)$/.exec(fid); if (m) refreshTierState(m[1]);
     };
-    wcbSel.onchange  = () => { const prevP = portSel.value; portSel.innerHTML = _portOptionsHtml(wcbSel.value, prevP); sync(); };
+    wcbSel.onchange  = () => {
+      // Don't carry a serial port across a switch TO a client (it has no ports) —
+      // reset to auto-route so we don't inherit a phantom port from the old target.
+      const nw = wcbSel.value;
+      const toClient = /^\d+$/.test(nw) && !!(typeof wcbClients !== 'undefined' && wcbClients && wcbClients[+nw - 1]);
+      const prevP = toClient ? 'auto' : portSel.value;
+      portSel.innerHTML = _portOptionsHtml(nw, prevP);
+      sync();
+    };
     portSel.onchange = sync;
     sync();   // initialise the hidden inputs to match the shown dropdowns
 
