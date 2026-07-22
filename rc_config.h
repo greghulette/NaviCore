@@ -124,6 +124,7 @@ struct RcAction {
 
 struct RcTier {
   uint8_t  count;
+  char     note[20];   // per-tier caption (single/double/triple tap · switch position); 19 chars + null
   RcAction a[RC_ACTIONS_PER_TIER];
 };
 
@@ -1001,19 +1002,21 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
       int idx = rcMapIndex(mode, btn);
       const RcMapping& m = rcConfig.mappings[idx];
       bool hasAny = false;
-      for (int ti = 0; ti < 3 && !hasAny; ti++) if (m.t[ti].count > 0) hasAny = true;
+      for (int ti = 0; ti < 3 && !hasAny; ti++) if (m.t[ti].count > 0 || m.t[ti].note[0]) hasAny = true;
       if (!hasAny && !m.exclusive) continue;
 
       String key = String(mode * 100 + btn);
       JsonObject mObj = mapObj.createNestedObject(key);
       mObj["exclusive"] = m.exclusive;
       for (int ti = 0; ti < 3; ti++) {
-        if (m.t[ti].count == 0) continue;
-        String tierKey = String("t") + (ti + 1);
-        JsonArray acts = mObj.createNestedArray(tierKey);
-        for (int ai = 0; ai < m.t[ti].count; ai++) {
-          actionToJson(m.t[ti].a[ai], acts.createNestedObject());
+        if (m.t[ti].count > 0) {
+          String tierKey = String("t") + (ti + 1);
+          JsonArray acts = mObj.createNestedArray(tierKey);
+          for (int ai = 0; ai < m.t[ti].count; ai++) {
+            actionToJson(m.t[ti].a[ai], acts.createNestedObject());
+          }
         }
+        if (m.t[ti].note[0]) mObj[String("t") + (ti + 1) + "note"] = m.t[ti].note;
       }
     }
   }
@@ -1025,12 +1028,14 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
     sObj["channel"]   = s.channel;
     sObj["positions"] = s.positions;
     for (int pi = 0; pi < 3; pi++) {
-      if (s.t[pi].count == 0) continue;
-      String tierKey = String("p") + pi;
-      JsonArray acts = sObj.createNestedArray(tierKey);
-      for (int ai = 0; ai < s.t[pi].count; ai++) {
-        actionToJson(s.t[pi].a[ai], acts.createNestedObject());
+      if (s.t[pi].count > 0) {
+        String tierKey = String("p") + pi;
+        JsonArray acts = sObj.createNestedArray(tierKey);
+        for (int ai = 0; ai < s.t[pi].count; ai++) {
+          actionToJson(s.t[pi].a[ai], acts.createNestedObject());
+        }
       }
+      if (s.t[pi].note[0]) sObj[String("p") + pi + "note"] = s.t[pi].note;
     }
   }
 
@@ -1219,6 +1224,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       JsonObject mObj = kv.value().as<JsonObject>();
       m.exclusive = mObj["exclusive"] | false;
       for (int ti = 0; ti < 3; ti++) {
+        strlcpy(m.t[ti].note, mObj[String("t") + (ti + 1) + "note"] | "", sizeof(m.t[ti].note));
         String tierKey = String("t") + (ti + 1);
         if (!mObj.containsKey(tierKey)) continue;
         JsonArray acts = mObj[tierKey];
@@ -1241,6 +1247,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       s.channel   = sObj["channel"]   | RC_SWITCH_DEFAULT_CH[i];
       s.positions = sObj["positions"] | RC_SWITCH_DEFAULT_POS[i];
       for (int pi = 0; pi < 3; pi++) {
+        strlcpy(s.t[pi].note, sObj[String("p") + pi + "note"] | "", sizeof(s.t[pi].note));
         String tierKey = String("p") + pi;
         if (!sObj.containsKey(tierKey)) continue;
         JsonArray acts = sObj[tierKey];
