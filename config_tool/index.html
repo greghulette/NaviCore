@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.15:15.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.15:30.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14191,6 +14191,13 @@ function _cheatSheetTxSvg() {
     flatten(src, clone);
     const a = src.querySelectorAll('*'), b = clone.querySelectorAll('*');
     for (let i = 0; i < a.length && i < b.length; i++) flatten(a[i], b[i]);
+    // Make control zones clickable in the standalone doc: drop the tool's inline
+    // onclick (openModal/etc. don't exist there — a delegated handler in the generated
+    // page reads data-btn/data-sw/data-knob instead) and mark them as pointer targets.
+    clone.querySelectorAll('[data-btn],[data-sw],[data-knob]').forEach(z => {
+      z.removeAttribute('onclick');
+      z.setAttribute('style', (z.getAttribute('style') || '') + 'cursor:pointer;');
+    });
     clone.removeAttribute('width'); clone.removeAttribute('height');
     clone.setAttribute('style', (clone.getAttribute('style') || '') + 'width:100%;height:auto;max-width:620px;display:block;margin:0 auto;');
     return clone.outerHTML;
@@ -14272,18 +14279,67 @@ function _buildCheatSheetHtml() {
   const seqSection = clipNames.length
     ? `<section><h2>Sequences · Animations</h2><p class="note">Recorded clips and where they're triggered:</p><table><thead><tr><th>Clip</th><th>Triggered by</th></tr></thead><tbody>${clipNames.map(n => `<tr><td class="trig">${escH(n)}</td><td>${clipTriggers[n].map(escH).join('<br>')}</td></tr>`).join('')}</tbody></table></section>` : '';
 
-  // Transmitter control-label diagram — a self-contained snapshot of the live TX SVG.
+  // Transmitter diagram — a self-contained snapshot of the live TX SVG; its control
+  // zones keep data-btn/data-sw/data-knob so the page can make them clickable.
   const tx = _cheatSheetTxSvg();
-  const txSection = tx ? `<section><h2>Transmitter — control labels</h2><p class="note">Where each button, switch, trim, and knob sits on your transmitter (active model).</p>${tx}</section>` : '';
+
+  // Per-control info popups (interactive diagram): the HTML shown when a control is
+  // tapped, keyed b<btn> / s<switch> / k<knob>. Reuses cell() so it respects the
+  // notes/commands toggle. Built only for the controls the active SVG actually has.
+  const csBtnInfo = (btn) => {
+    let h = `<h3>${escH(getBtnLabel(btn))}</h3>`, any = false;
+    for (let mode = 1; mode <= 3; mode++) {
+      const m = config.mappings[String(mode * 100 + btn)];
+      if (!m || !mappingHasActions(m)) continue;
+      any = true;
+      let r = '';
+      for (let t = 1; t <= 3; t++) {
+        if (!(m['t' + t] && m['t' + t].length) && !m['t' + t + 'note']) continue;
+        r += `<tr><td class="cs-tl">${tapNames[t]}</td><td>${cell(m['t' + t], m['t' + t + 'note'])}</td></tr>`;
+      }
+      h += `<div class="cs-grp"><div class="cs-grp-h">${escH(modeLabels[mode])}</div><table>${r}</table></div>`;
+    }
+    return h + (any ? '' : '<p class="cs-empty">Nothing assigned.</p>');
+  };
+  const csSwInfo = (name) => {
+    const s = (config.switches || {})[name] || {};
+    let r = '', any = false;
+    [['p0', 'Down'], ['p1', 'Mid'], ['p2', 'Up']].forEach(([pk, pl]) => {
+      if (!(s[pk] && s[pk].length) && !s[pk + 'note']) return;
+      any = true;
+      r += `<tr><td class="cs-tl">${pl}</td><td>${cell(s[pk], s[pk + 'note'])}</td></tr>`;
+    });
+    return `<h3>Switch ${escH(name)}</h3>` + (any ? `<table>${r}</table>` : '<p class="cs-empty">Nothing assigned.</p>');
+  };
+  const csKnobInfo = (name) => {
+    const k = (config.knobs || {})[name];
+    let h = `<h3>${escH(sourceTitleFor(name))}</h3>`;
+    if (!k || !k.function) return h + '<p class="cs-empty">Disabled.</p>';
+    const fmt = outs => (Array.isArray(outs) && outs.length) ? outs.map(o => escH(_knobOutputSummary(o, k.function))).join('; ') : '—';
+    h += `<p><b>${escH(knobFunctions[k.function] || ('fn' + k.function))}</b>${k.reverse ? ' (reversed)' : ''}</p>`;
+    h += k.modeAware
+      ? [['Mode 1', k.outputs], ['Mode 2', k.outputs2], ['Mode 3', k.outputs3]].map(([l, o]) => `<div><b>${l}:</b> ${fmt(o)}</div>`).join('')
+      : `<div>${fmt(k.outputs)}</div>`;
+    return h;
+  };
+  const csInfo = {};
+  const txEl = document.querySelector('svg[viewBox="0 0 1000 830"]');
+  if (txEl) {
+    txEl.querySelectorAll('[data-btn]').forEach(z => { const v = z.getAttribute('data-btn'); csInfo['b' + v] = csBtnInfo(+v); });
+    txEl.querySelectorAll('[data-sw]').forEach(z => { const v = z.getAttribute('data-sw'); csInfo['s' + v] = csSwInfo(v); });
+    txEl.querySelectorAll('[data-knob]').forEach(z => { const v = z.getAttribute('data-knob'); csInfo['k' + v] = csKnobInfo(v); });
+  }
+  const txSection = tx ? `<section><h2>Transmitter</h2><p class="note">Tap any button, switch, or knob for its assignments.</p>${tx}</section>` : '';
+
   // Concatenate every trigger section (each is '' when empty); the "nothing yet" note
-  // shows only when they are ALL empty. (An earlier `||` chain wrongly rendered just the
-  // first non-empty section, dropping Switches / Knobs / Sequences.)
+  // shows only when they are ALL empty.
   const triggers = buttonsSection + switchesSection + knobsSection + peerSection + seqSection;
   const body = txSection + (triggers || '<p class="note">No triggers configured yet.</p>');
   const when = new Date().toLocaleString();
   // Inline downloader for the printed page's toolbar. Assembled from split literals
   // so this source can't contain a "</scr"+"ipt>" that would end index.html's script.
-  const script = '<scr' + 'ipt>function dlHtml(){var h="<!doctype html>\\n"+document.documentElement.outerHTML;var b=new Blob([h],{type:"text/html"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download="NaviCore_CheatSheet.html";document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},1000);}function toggleView(btn){var n=document.body.classList.toggle("view-note");btn.textContent=n?"Show commands":"Show notes";}</scr' + 'ipt>';
+  const csData = JSON.stringify(csInfo).split('<').join('\\u003c');   // escape < so the embedded data can't close this script block early
+  const script = '<scr' + 'ipt>var CS_INFO=' + csData + ';function dlHtml(){var h="<!doctype html>\\n"+document.documentElement.outerHTML;var b=new Blob([h],{type:"text/html"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download="NaviCore_CheatSheet.html";document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},1000);}function toggleView(btn){var n=document.body.classList.toggle("view-note");btn.textContent=n?"Show commands":"Show notes";}function csClose(){document.getElementById("cs-modal").style.display="none";}function csShow(k){var i=CS_INFO[k];if(!i)return;document.getElementById("cs-body").innerHTML=i;document.getElementById("cs-modal").style.display="flex";}document.addEventListener("click",function(e){var t=e.target,z=t&&t.closest?t.closest("[data-btn],[data-sw],[data-knob]"):null;if(!z)return;var k=z.hasAttribute("data-btn")?"b"+z.getAttribute("data-btn"):z.hasAttribute("data-sw")?"s"+z.getAttribute("data-sw"):"k"+z.getAttribute("data-knob");csShow(k);});document.addEventListener("keydown",function(e){if(e.key==="Escape")csClose();});</scr' + 'ipt>';
 
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NaviCore Control Cheat Sheet</title>
 <style>
@@ -14309,11 +14365,22 @@ tr{break-inside:avoid}
 .cs-note{display:none}
 body.view-note .cs-cmd{display:none}
 body.view-note .cs-note{display:inline}
-@media print{body{background:#fff}.toolbar{display:none}.wrap{max-width:none;padding:0}section{border:1px solid #ccc;box-shadow:none;padding:8px 10px}}
+#cs-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:100;align-items:flex-start;justify-content:center;padding:6vh 16px}
+.cs-box{background:#fff;border-radius:10px;max-width:520px;width:100%;max-height:86vh;overflow:auto;padding:16px 20px 20px;position:relative;box-shadow:0 12px 44px rgba(0,0,0,.4)}
+.cs-x{position:absolute;top:8px;right:12px;border:0;background:none;font-size:24px;line-height:1;cursor:pointer;color:#999}
+.cs-box h3{margin:2px 0 10px;font-size:17px;color:#1a1a1a;text-transform:none;letter-spacing:0;border:0;padding:0}
+.cs-grp{margin:0 0 6px}
+.cs-grp-h{font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:#c0392b;margin:8px 0 2px}
+.cs-box table{width:100%;font-size:13px;border-collapse:collapse}
+.cs-box td{padding:3px 6px;vertical-align:top;border:0}
+.cs-tl{font-weight:600;white-space:nowrap;color:#555;padding-right:12px}
+.cs-empty{color:#999;font-style:italic;font-size:13px}
+@media print{body{background:#fff}.toolbar,#cs-modal{display:none!important}.wrap{max-width:none;padding:0}section{border:1px solid #ccc;box-shadow:none;padding:8px 10px}}
 </style><\/head>
 <body class="${anyNote ? 'view-note' : ''}">
 <div class="toolbar"><button onclick="window.print()">\u{1F5A8} Save as PDF</button><button class="alt" onclick="dlHtml()">↓ Save HTML</button><button class="alt" onclick="toggleView(this)">${anyNote ? 'Show commands' : 'Show notes'}</button></div>
 <div class="wrap"><h1>NaviCore — Control Cheat Sheet</h1><div class="meta">Generated ${escH(when)}</div>${body}</div>
+<div id="cs-modal" onclick="if(event.target===this)csClose()"><div class="cs-box"><button class="cs-x" onclick="csClose()">×</button><div id="cs-body"></div></div></div>
 ${script}
 <\/body><\/html>`;
 }
