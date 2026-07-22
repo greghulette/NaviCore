@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.15:30.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.15:39.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14227,7 +14227,7 @@ function _buildCheatSheetHtml() {
     for (let btn = 1; btn <= RC_TOTAL_SLOTS; btn++) {
       const m = config.mappings[String(mode * 100 + btn)];
       if (!m || !mappingHasActions(m)) continue;
-      rows += `<tr><td class="trig">${escH(getBtnLabel(btn))}</td><td>${cell(m.t1, m.t1note)}</td><td>${cell(m.t2, m.t2note)}</td><td>${cell(m.t3, m.t3note)}</td></tr>`;
+      rows += `<tr><td class="trig">${escH(getBtnLabel(btn))}</td><td data-label="Single tap">${cell(m.t1, m.t1note)}</td><td data-label="Double tap">${cell(m.t2, m.t2note)}</td><td data-label="Triple tap">${cell(m.t3, m.t3note)}</td></tr>`;
     }
     if (!rows) continue;
     buttonsHtml += `<div class="mblock"><h3>${escH(modeLabels[mode])}</h3><table><thead><tr><th>Button</th><th>Single tap</th><th>Double tap</th><th>Triple tap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -14240,7 +14240,7 @@ function _buildCheatSheetHtml() {
     const s = config.switches[name]; if (!s) continue;
     const has = tierHtml(s.p0) || tierHtml(s.p1) || tierHtml(s.p2) || s.p0note || s.p1note || s.p2note;
     if (!has) continue;
-    swRows += `<tr><td class="trig">${escH(name)}</td><td>${cell(s.p0, s.p0note)}</td><td>${cell(s.p1, s.p1note)}</td><td>${cell(s.p2, s.p2note)}</td></tr>`;
+    swRows += `<tr><td class="trig">${escH(name)}</td><td data-label="Down">${cell(s.p0, s.p0note)}</td><td data-label="Mid">${cell(s.p1, s.p1note)}</td><td data-label="Up">${cell(s.p2, s.p2note)}</td></tr>`;
   }
   const switchesSection = swRows ? `<section><h2>Switches</h2><table><thead><tr><th>Switch</th><th>Down</th><th>Mid</th><th>Up</th></tr></thead><tbody>${swRows}</tbody></table></section>` : '';
 
@@ -14254,7 +14254,7 @@ function _buildCheatSheetHtml() {
       ? [['M1', k.outputs], ['M2', k.outputs2], ['M3', k.outputs3]].map(([lbl, o]) => `<div><b>${lbl}:</b> ${fmt(o)}</div>`).join('')
       : fmt(k.outputs);
     const rev = k.reverse ? ' <span style="color:#888">(reversed)</span>' : '';
-    knobRows += `<tr><td class="trig">${escH(sourceTitleFor(name))}</td><td>${escH(fnLbl)}${rev}</td><td>${outCell}</td></tr>`;
+    knobRows += `<tr><td class="trig">${escH(sourceTitleFor(name))}</td><td data-label="Function">${escH(fnLbl)}${rev}</td><td data-label="Outputs">${outCell}</td></tr>`;
   }
   const knobsSection = knobRows ? `<section><h2>Knobs · Sliders · Joysticks</h2><table><thead><tr><th>Control</th><th>Function</th><th>Outputs</th></tr></thead><tbody>${knobRows}</tbody></table></section>` : '';
 
@@ -14277,7 +14277,7 @@ function _buildCheatSheetHtml() {
   ((pe && pe.actions) || []).forEach(a => addClip(a, 'New-peer event'));
   const clipNames = Object.keys(clipTriggers).sort((a, b) => a.localeCompare(b));
   const seqSection = clipNames.length
-    ? `<section><h2>Sequences · Animations</h2><p class="note">Recorded clips and where they're triggered:</p><table><thead><tr><th>Clip</th><th>Triggered by</th></tr></thead><tbody>${clipNames.map(n => `<tr><td class="trig">${escH(n)}</td><td>${clipTriggers[n].map(escH).join('<br>')}</td></tr>`).join('')}</tbody></table></section>` : '';
+    ? `<section><h2>Sequences · Animations</h2><p class="note">Recorded clips and where they're triggered:</p><table><thead><tr><th>Clip</th><th>Triggered by</th></tr></thead><tbody>${clipNames.map(n => `<tr><td class="trig">${escH(n)}</td><td data-label="Triggered by">${clipTriggers[n].map(escH).join('<br>')}</td></tr>`).join('')}</tbody></table></section>` : '';
 
   // Transmitter diagram — a self-contained snapshot of the live TX SVG; its control
   // zones keep data-btn/data-sw/data-knob so the page can make them clickable.
@@ -14345,7 +14345,7 @@ function _buildCheatSheetHtml() {
 <style>
 *{box-sizing:border-box}
 body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;background:#f4f4f5;margin:0;padding:0 0 40px}
-.toolbar{position:sticky;top:0;display:flex;gap:8px;padding:10px 16px;background:#222;box-shadow:0 1px 4px rgba(0,0,0,.3);z-index:10}
+.toolbar{position:sticky;top:0;display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px;background:#222;box-shadow:0 1px 4px rgba(0,0,0,.3);z-index:10}
 .toolbar button{font:inherit;font-size:14px;padding:7px 14px;border:0;border-radius:6px;background:#c0392b;color:#fff;cursor:pointer}
 .toolbar button.alt{background:#555}
 .wrap{max-width:900px;margin:0 auto;padding:20px 16px}
@@ -14375,6 +14375,19 @@ body.view-note .cs-note{display:inline}
 .cs-box td{padding:3px 6px;vertical-align:top;border:0}
 .cs-tl{font-weight:600;white-space:nowrap;color:#555;padding-right:12px}
 .cs-empty{color:#999;font-style:italic;font-size:13px}
+@media (max-width:560px){
+  .wrap{padding:14px 10px}
+  section{padding:12px}
+  h1{font-size:19px}
+  .toolbar button{font-size:13px;padding:7px 11px}
+  .wrap thead{display:none}
+  .wrap table,.wrap tbody,.wrap tr,.wrap td{display:block;width:auto}
+  .wrap tr{border:1px solid #e2e2e5;border-radius:7px;margin:0 0 8px;background:#fff;overflow:hidden}
+  .wrap td{border:0;padding:5px 11px}
+  .wrap td.trig{background:#f4f4f5;border-bottom:1px solid #eaeaec;font-size:14px;padding:7px 11px;white-space:normal}
+  .wrap td[data-label]::before{content:attr(data-label);display:block;font-size:10px;text-transform:uppercase;letter-spacing:.03em;color:#999;font-weight:700;margin-bottom:1px}
+  .cs-box{padding:14px 14px 18px}
+}
 @media print{body{background:#fff}.toolbar,#cs-modal{display:none!important}.wrap{max-width:none;padding:0}section{border:1px solid #ccc;box-shadow:none;padding:8px 10px}}
 </style><\/head>
 <body class="${anyNote ? 'view-note' : ''}">
