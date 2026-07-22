@@ -2658,6 +2658,16 @@ void handleSerialInput() {
             bool client = nb ? nb->isClient : rcTelemetry::wcbIsClient(i);
             Serial.printf("%s%s", (i > 1) ? "," : "", client ? "1" : "0");
           }
+          // temporary[] — 1 = this board advertised the WDP "temporary" flag (a mgmt
+          // relay etc.). LIVE-neighbor-only, NO cache fallback (unlike clients[]): a temp
+          // peer is never learned/persisted, so once its advert ages out getNeighbor()
+          // returns null, this reads 0, and the board stops being "known" and drops off.
+          // Lets the tool tag it "· temp" and hide the ✕ Forget button (nothing to forget).
+          Serial.print("],\"temporary\":[");
+          for (int i = 1; i <= hi; i++) {
+            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+            Serial.printf("%s%s", (i > 1) ? "," : "", (nb && nb->temporary) ? "1" : "0");
+          }
           // Friendly names (from the ?WHOAMI replies); "" until a board answers
           // (a board must have ?SPECIAL,ON to unicast its reply back to us).
           Serial.print("],\"aliases\":[");

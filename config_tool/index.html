@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.10:06.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.11:18.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3892,6 +3892,7 @@ let wcbAliases     = [];   // per-board friendly names from WCB_STATUS replies (
 let wcbPortLabels  = [];   // per-board array of 5 serial-port device labels (ports 1-5) from WCB_STATUS (WDP portLabels)
 let wcbKnown       = null;  // per-board "render this slot" mask from WCB_STATUS (floor + auto-discovered); null = old fw
 let wcbClients     = [];   // per-board "this slot is a client device (not a WCB board)" flag from WCB_STATUS
+let wcbTemporary   = [];   // per-board "this slot advertised the WDP temporary flag" (live-only, never persisted)
 // After a forget, a WCB_STATUS reply the RC BUILT before it processed the forget
 // still carries known[id]=1. sendJSON is fire-and-forget (no response
 // correlation), so that stale reply can land just after we optimistically remove
@@ -3928,6 +3929,7 @@ function startWcbStatusPoll() {
   wcbPortLabels = [];
   wcbKnown    = null;               // drop the previous board's slot mask (else it lingers until the first reply)
   wcbClients  = [];
+  wcbTemporary = [];
   wcbForgetSuppress.clear();        // drop any pending forget-suppression from a prior session
   wcbRelay    = 0;
   wcbQuantity = 0;
@@ -3953,6 +3955,7 @@ function stopWcbStatusPoll() {
   wcbQuantity = 0;
   wcbKnown    = null;
   wcbClients  = [];
+  wcbTemporary = [];
   wcbPortLabels = [];
   wcbForgetSuppress.clear();
   const list = document.getElementById('wcb-status-list');
@@ -4020,22 +4023,27 @@ function renderWcbStatus(online) {
     const selfTag = (i === wcbSelfId) ? ' <small style="color:var(--muted);font-weight:400">(self)</small>' : '';
     const relayTag = (i === wcbRelay) ? ' <span title="Relay — this WCB is bridging the config tool to the RC over ESP-NOW" style="font-size:11px;cursor:default">📡</span>' : '';
     // A client device (mesh monitor / other controller) reported at this slot —
-    // not a WCB board. It's a permanent (learned) peer, so it stays listed even
+    // not a WCB board. A PERMANENT client is a learned peer, so it stays listed even
     // when off; its Online/Offline here reflects its WDP advert, not a heartbeat.
     const isClient = !!(wcbClients && wcbClients[i - 1]);
-    const clientTag = isClient ? ' <small title="Client device (mesh monitor / other controller) — a learned peer, shown even when off; Online = advertising on the mesh" style="color:var(--muted);font-weight:400">· client</small>' : '';
+    // A TEMPORARY peer advertised the WDP "temporary" flag (e.g. a management relay):
+    // live only while advertising, never persisted — so it is NOT shown when off and
+    // can't be forgotten. Its tag/behaviour differ from a permanent client.
+    const isTemp = !!(wcbTemporary && wcbTemporary[i - 1]);
+    const clientTag = (isClient && !isTemp) ? ' <small title="Client device (mesh monitor / other controller) — a learned peer, shown even when off; Online = advertising on the mesh" style="color:var(--muted);font-weight:400">· client</small>' : '';
+    const tempTag = isTemp ? ' <small title="Temporary peer — live only while it advertises on the mesh; never persisted, so it drops on silence (~3 min) or reboot and can\'t be forgotten" style="color:var(--accent);font-weight:400">· temp</small>' : '';
     // Boards above the pre-registered floor were auto-discovered on the mesh.
-    // (A client already carries its own tag, so don't also mark it "· auto".)
-    const autoTag = (!isClient && i > quantity) ? ' <small title="Auto-discovered beyond the Quantity floor" style="color:var(--accent);font-weight:400">· auto</small>' : '';
+    // (A client or temp peer carries its own tag, so don't also mark it "· auto".)
+    const autoTag = (!isClient && !isTemp && i > quantity) ? ' <small title="Auto-discovered beyond the Quantity floor" style="color:var(--accent);font-weight:400">· auto</small>' : '';
     const aliasRaw = (wcbAliases && wcbAliases[i - 1]) ? String(wcbAliases[i - 1]).trim() : '';
-    // ✕ forget — only for learned/auto-discovered peers (above the pre-registered
-    // floor); floor peers 1..quantity aren't learned and can't be forgotten.
-    const forgetBtn = (i > quantity)
+    // ✕ forget — only for learned/auto-discovered peers (above the pre-registered floor);
+    // floor peers 1..quantity and temporary peers aren't persisted, so they can't be forgotten.
+    const forgetBtn = (i > quantity && !isTemp)
       ? ` <button type="button" title="Forget this learned peer" onclick="forgetLearnedPeer(${i}, this)" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:2px 5px;border-radius:3px" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">✕</button>`
       : '';
     html += `<div class="wcb-chip">
       <span class="wcb-chip-dot${stateCls}"></span>
-      <span class="wcb-chip-name">WCB ${i}${aliasRaw ? ' · ' + escH(aliasRaw) : ''}${clientTag}${autoTag}${relayTag}${selfTag}</span>
+      <span class="wcb-chip-name">WCB ${i}${aliasRaw ? ' · ' + escH(aliasRaw) : ''}${clientTag}${tempTag}${autoTag}${relayTag}${selfTag}</span>
       <span class="wcb-chip-state${stateCls}">${stateLabel}</span>${forgetBtn}
     </div>`;
   }
@@ -7176,6 +7184,9 @@ function handleBoardMessage(line) {
     // clients[] = which slots are client devices (mesh monitors / other controllers)
     // rather than WCB boards; absent on older firmware → treat all as boards.
     wcbClients = Array.isArray(msg.clients) ? msg.clients : [];
+    // temporary[] = slots advertising the WDP "temporary" flag (live-only, never persisted);
+    // absent on older firmware → none.
+    wcbTemporary = Array.isArray(msg.temporary) ? msg.temporary : [];
     // Forget de-flicker: this reply may be one the RC BUILT before it processed a
     // FORGET_PEER (or a bridge-reordered one), still carrying known[id]=1. While an
     // id is inside its post-forget window, blank it in the mask so a stale/reordered
