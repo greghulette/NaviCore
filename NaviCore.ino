@@ -2664,6 +2664,20 @@ void handleSerialInput() {
           for (int i = 1; i <= hi; i++)
             Serial.printf("%s\"%s\"", (i > 1) ? "," : "",
                           (i == selfId) ? "" : rcTelemetry::wcbAlias(i));
+          // Per-serial-port device labels each board advertises over WDP (the
+          // WCB_Client library decodes them into WCBNeighbor.portLabels[5], filled
+          // from a device's own @WDP1 announce or a user-set label). One 5-element
+          // array (ports 1-5) per board; "" = unlabeled. USB path only — the
+          // Via-WCB bridge's 252-byte frame can't carry this, so the tool falls
+          // back to plain "Serial <n>" when bridged.
+          Serial.print("],\"portLabels\":[");
+          for (int i = 1; i <= hi; i++) {
+            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+            Serial.printf("%s[", (i > 1) ? "," : "");
+            for (int p = 0; p < 5; p++)
+              Serial.printf("%s\"%s\"", p ? "," : "", (nb && !nb->isClient) ? nb->portLabels[p] : "");
+            Serial.print("]");
+          }
           Serial.println("]}");
 
         } else {

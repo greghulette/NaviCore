@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.11:13.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.21:25.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3889,6 +3889,7 @@ function setConnected(v) {
 // so we poll/render regardless and lean on the firmware reply's own quantity.
 let wcbStatusTimer = null;
 let wcbAliases     = [];   // per-board friendly names from WCB_STATUS replies (index i-1)
+let wcbPortLabels  = [];   // per-board array of 5 serial-port device labels (ports 1-5) from WCB_STATUS (WDP portLabels)
 let wcbKnown       = null;  // per-board "render this slot" mask from WCB_STATUS (floor + auto-discovered); null = old fw
 let wcbClients     = [];   // per-board "this slot is a client device (not a WCB board)" flag from WCB_STATUS
 // After a forget, a WCB_STATUS reply the RC BUILT before it processed the forget
@@ -3924,6 +3925,7 @@ function startWcbStatusPoll() {
   wcbEverSeen = new Set();          // fresh per-session memory
   wcbSelfId   = 0;
   wcbAliases  = [];
+  wcbPortLabels = [];
   wcbKnown    = null;               // drop the previous board's slot mask (else it lingers until the first reply)
   wcbClients  = [];
   wcbForgetSuppress.clear();        // drop any pending forget-suppression from a prior session
@@ -3951,6 +3953,7 @@ function stopWcbStatusPoll() {
   wcbQuantity = 0;
   wcbKnown    = null;
   wcbClients  = [];
+  wcbPortLabels = [];
   wcbForgetSuppress.clear();
   const list = document.getElementById('wcb-status-list');
   if (list) list.innerHTML = '<div class="noconn">Connect board to see WCB status</div>';
@@ -6690,7 +6693,7 @@ function _tlOpenActionEditor(existing, defaultT) {
     typeSel.appendChild(o);
   });
   const action = existing ? existing.action : { type: typeSel.options[0].value };
-  typeSel.value = action.type || typeSel.options[0].value;
+  typeSel.value = _normActionType(action.type);   // legacy/unknown types → a valid option
   // For a NEW action, pre-fill the time with the next FREE slot at/after the
   // requested spot, so the field shows where it will actually land.
   document.getElementById('tl-action-time').value = existing ? existing.t : _tlFreeActionTime(defaultT);
@@ -6698,7 +6701,23 @@ function _tlOpenActionEditor(existing, defaultT) {
   document.getElementById('tl-action-note').value = action.note || '';
   const fields = document.getElementById('tl-action-fields');
   appendActionFields(fields, action);
-  typeSel.onchange = () => appendActionFields(fields, { type: typeSel.value });
+  // Preserve the already-typed command/target/port — and the WCB-serial routing
+  // (which lives in the "Send to" select as a ";W<wcb>;S<port>" prefix, not in the
+  // bare command field) — when switching among the wire command types via the Type
+  // dropdown, so it doesn't silently wipe the destination.
+  typeSel.onchange = () => {
+    const f = 'tl-action-fields';
+    let cmd = document.getElementById(f + '-cmd')?.value || '';
+    const dv = document.getElementById(f + '-destsel')?.value || '';
+    const mw = /^W(\d+)S(\d)$/.exec(dv);
+    if (mw) cmd = `;W${mw[1]};S${mw[2]}` + cmd;
+    appendActionFields(fields, {
+      type:   typeSel.value,
+      cmd,
+      target: document.getElementById(f + '-target')?.value,
+      port:   document.getElementById(f + '-port')?.value,
+    });
+  };
   document.getElementById('tl-action-delete').style.display = existing ? '' : 'none';
 }
 
@@ -7148,6 +7167,9 @@ function handleBoardMessage(line) {
     wcbRelay    = (typeof msg.relay === 'number') ? msg.relay : 0;
     wcbQuantity = (typeof msg.quantity === 'number') ? msg.quantity : 0;
     wcbAliases = Array.isArray(msg.aliases) ? msg.aliases : [];
+    // portLabels[] (newer firmware, USB only) = per-board array of 5 serial-port
+    // device labels (ports 1-5), advertised by each board over WDP; "" = unlabeled.
+    wcbPortLabels = Array.isArray(msg.portLabels) ? msg.portLabels : [];
     // known[] (newer firmware) = which slots to render: the floor + auto-
     // discovered boards. Absent on older firmware → fall back to 1..quantity.
     wcbKnown = Array.isArray(msg.known) ? msg.known : null;
@@ -9055,7 +9077,7 @@ function buildTierCard(tier, actions) {
 
   const startCount = Math.max(1, actions.length);
   for (let ai = 0; ai < startCount; ai++) {
-    const a = actions[ai] || { type: '' };
+    const a = actions[ai] || { type: 'wcb_unicast' };   // blank rows start as a (empty) command
     rows.appendChild(buildActionRow(tier, ai, a));
   }
 
@@ -9081,7 +9103,7 @@ function addActionRow(tier) {
   let ai = 0;
   while (used.has(ai)) ai++;
 
-  rows.appendChild(buildActionRow(tier, ai, { type: '' }));
+  rows.appendChild(buildActionRow(tier, ai, { type: 'wcb_unicast' }));
   refreshTierState(tier);
 }
 
@@ -9120,25 +9142,38 @@ function refreshTierState(tier) {
   }
 }
 
+// Normalize an action.type to a valid, non-empty actionTypeLabels key for the
+// hidden type <select> (the read-back source of truth). Legacy Maestro aliases
+// collapse to 'maestro'; an empty or unknown type becomes a blank wire command.
+function _normActionType(t) {
+  t = t || '';
+  if (t === 'maestro_local' || t === 'maestro_remote') return 'maestro';
+  if (t && Object.prototype.hasOwnProperty.call(actionTypeLabels, t)) return t;
+  return 'wcb_unicast';
+}
+
 function buildActionRow(tier, ai, action) {
   const row = document.createElement('div');
   row.className = 'action-row';
   row.id = `action-${tier}-${ai}`;
   row.dataset.ai = ai;
 
-  // Type selector
+  // Hidden action-type state — the single source of truth for read-back. The
+  // visible UI is command-first (see _appendCommandView / appendActionFields):
+  // the type is set by the library pick or the local-control buttons, never
+  // chosen from a device dropdown.
+  const normType = _normActionType(action.type);
   const typeSelect = document.createElement('select');
   typeSelect.id = `type-${tier}-${ai}`;
-  typeSelect.style.minWidth = '160px';
+  typeSelect.style.display = 'none';
   Object.entries(actionTypeLabels).forEach(([v, label]) => {
     const opt = document.createElement('option');
     opt.value = v; opt.textContent = label;
-    if (v === (action.type || '')) opt.selected = true;
+    if (v === normType) opt.selected = true;
     typeSelect.appendChild(opt);
   });
-  typeSelect.onchange = () => { updateActionFields(tier, ai); refreshTierState(tier); };
-
-  row.appendChild(makeFieldGroup('Action', typeSelect));
+  typeSelect.value = normType;   // set directly so it is valid even while detached
+  row.appendChild(typeSelect);
 
   // Type-specific fields
   const fieldsDiv = document.createElement('div');
@@ -9591,12 +9626,186 @@ const NC_CMDLIB_SEED = {
         params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
                  {name:'sequence', label:'Sequence #', type:'int', min:0, max:99, default:1, required:true} ], examples:[';M11'] },
     ]},
+    // Local Pololu Maestro (servo) command set. These are NOT WCB wire commands —
+    // `local:'maestro'` makes the composer author a `maestro` firmware action whose
+    // DESTINATION is a Maestro slot (1-8, wiring set in the Maestro Locations tab),
+    // and whose cmd is the comma-delimited verb the firmware parses (executeMaestroCmd
+    // in NaviCore.ino). This is the full set the firmware supports today; the Pololu
+    // protocol also has Set PWM (0x8A), Set Multiple Targets (0x9F), Restart-with-
+    // Parameter (0xA8), and the Get* queries (0x90/0x93/0xA1/0xA9, need 2-way serial)
+    // — model those here too when the firmware PR lands to implement them.
+    { id:'nc-maestro', name:'Maestro (servo)', kind:'maestro', local:'maestro', commands: [
+      { id:'maestro.setTarget', name:'Set servo position', category:'Servo', template:'setTarget,{channel},{position}',
+        params:[ {name:'channel',  label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
+                 {name:'position', label:'Position', type:'int', unit:'servoPulse', min:0, max:16383, default:6000, required:true} ], examples:['setTarget,0,6000'] },
+      { id:'maestro.goHome',      name:'Send all servos home', category:'Servo',  template:'goHome',     params:[], examples:['goHome'] },
+      { id:'maestro.stopScript',  name:'Stop the script',      category:'Script', template:'stopScript', params:[], examples:['stopScript'] },
+      { id:'maestro.restartScript', name:'Run a script (subroutine)', category:'Script', template:'restartScript,{sub}',
+        params:[ {name:'sub', label:'Subroutine # (0-127)', type:'int', min:0, max:127, default:0, required:true} ], examples:['restartScript,0'] },
+      { id:'maestro.setSpeed', name:'Set speed limit', category:'Motion', template:'setSpeed,{channel},{value}',
+        params:[ {name:'channel', label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
+                 {name:'value',   label:'Speed (0-16383, 0 = unlimited)', type:'int', min:0, max:16383, default:0, required:true} ], examples:['setSpeed,0,0'] },
+      { id:'maestro.setAccel', name:'Set acceleration limit', category:'Motion', template:'setAccel,{channel},{value}',
+        params:[ {name:'channel', label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
+                 {name:'value',   label:'Accel (0-255, 0 = unlimited)', type:'int', min:0, max:255, default:0, required:true} ], examples:['setAccel,0,0'] },
+      { id:'maestro.setSpeedAccel', name:'Set speed + acceleration', category:'Motion', template:'setSpeedAccel,{channel},{speed},{accel}',
+        params:[ {name:'channel', label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
+                 {name:'speed',   label:'Speed (0-16383)', type:'int', min:0, max:16383, default:0, required:true},
+                 {name:'accel',   label:'Accel (0-255)',   type:'int', min:0, max:255,   default:0, required:true} ], examples:['setSpeedAccel,0,0,0'] },
+      { id:'maestro.setEasing', name:'Set active easing', category:'Motion', template:'setEasing,{profile}',
+        params:[ {name:'profile', label:'Easing (release | off | p1..p8)', default:'release', required:true} ], examples:['setEasing,release'] },
+    ]},
   ],
 };
 
 // Active library = an imported/override library if present, else the seed.
 function ncCommandLibrary() { return window.NC_COMMAND_LIBRARY || NC_CMDLIB_SEED; }
 function _cmdlibEnum(id)    { return (ncCommandLibrary().enums || {})[id] || null; }
+
+// ── Destination model ───────────────────────────────────────────────────────
+// A picked library command already knows HOW it is transported; the composer's
+// "Send to" step reads this so the destination is chosen AFTER the command, not
+// baked into an action-type picked up front. Three transport modes:
+//   'serial' — a device-native angle-bracket protocol (e.g. HCR "<S0H>") that
+//              rides a direct aux-serial port (S3/S4/S5) → firmware `serial`.
+//   'wled'   — a ";L<id>,VERB" whose routing is by WLED id (WLED tab / wledSlots)
+//              → firmware `wled`; there is no per-action WCB destination to pick.
+//   'wcb'    — an ETM verb (";H,...", ";A,...", ";M...", etc.) sent to a WCB,
+//              either unicast (a WCB #) or broadcast (all) → `wcb_unicast`/`wcb_broadcast`.
+// The local firmware-action kind a command maps to, if any (e.g. 'maestro',
+// 'record'). Non-local commands are WCB wire commands (returns null).
+function _cmdlibLocalKind(board, cmd) {
+  return (cmd && cmd.local) || (board && board.local) || null;
+}
+
+function _cmdlibDestMode(board, cmd) {
+  const local = _cmdlibLocalKind(board, cmd);
+  if (local === 'maestro') return 'maestro';   // destination = a Maestro slot
+  if (local)               return 'local';     // record / play / stop — this controller
+  const t = String((cmd && cmd.template) || (cmd && cmd.examples && cmd.examples[0]) || '').trim();
+  if (/^;L/i.test(t) || (board && board.id === 'wcb-wled')) return 'wled';
+  if (t.charAt(0) === ';' || t.charAt(0) === '?')           return 'wcb';   // ETM verb / WCB query → the WCB auto-routes
+  return 'device';   // raw device string → a WCB serial port (;W<wcb>;S<port>) or the controller's own serial
+}
+
+// Human-readable destination label for a resolved action (the row's chip).
+function _cmdlibDestLabel(a) {
+  if (!a) return '';
+  if (a.type === 'wcb_broadcast') return 'All boards (broadcast)';
+  if (a.type === 'wcb_unicast')   return 'WCB #' + (a.target || '?');
+  if (a.type === 'serial')        return _serialPortLabel(a.port || 'S3');
+  if (a.type === 'wled')          return 'Routed by WLED id (WLED tab)';
+  return '';
+}
+
+// The row's "Send to" list — the REAL destinations, grouped per WCB. For each
+// known/configured WCB (floor 1..quantity plus learned peers from the live WCB
+// status, aliased, self excluded): the WCB itself (value "<id>" — a unicast the
+// WCB auto-routes by command type) AND its Serial 0-5 (value "W<id>S<port>",
+// emitted as a ";W<id>;S<port>" broadcast so the WCB relays the string out that
+// port — for devices with no auto-routing). Plus broadcast-to-all ("0") and the
+// controller's own serial ports (value "S3"…, a local serial write). The
+// currently-selected value is always kept even if that board is offline/unknown.
+function _firstKnownWcb() {
+  const quantity = wcbQuantity || (config.wcbNetwork && config.wcbNetwork.quantity) || 4;
+  const selfId   = wcbSelfId   || (config.wcbNetwork && config.wcbNetwork.deviceId) || 20;
+  const mask     = (typeof wcbKnown !== 'undefined') ? wcbKnown : null;
+  for (let i = 1; i <= Math.max(quantity, mask ? mask.length : 0); i++) {
+    if ((mask ? !!mask[i - 1] : (i <= quantity)) && i !== selfId) return i;
+  }
+  return 1;
+}
+function _wcbDestOptionsHtml(selected) {
+  const sel = String(selected == null ? '1' : selected);
+  const esc = s => escH(String(s));
+  const quantity = wcbQuantity || (config.wcbNetwork && config.wcbNetwork.quantity) || 4;
+  const selfId   = wcbSelfId   || (config.wcbNetwork && config.wcbNetwork.deviceId) || 20;
+  const mask     = (typeof wcbKnown !== 'undefined') ? wcbKnown : null;
+  const ids = [];
+  const scan = Math.max(quantity, mask ? mask.length : 0);
+  for (let i = 1; i <= scan; i++) { const known = mask ? !!mask[i - 1] : (i <= quantity); if (known && i !== selfId) ids.push(i); }
+  const mSel = /^W?(\d+)(?:S\d)?$/.exec(sel);   // keep an off-list WCB from "N" or "W N S p"
+  if (mSel && +mSel[1] >= 1 && +mSel[1] <= 20 && !ids.includes(+mSel[1])) ids.push(+mSel[1]);
+  ids.sort((a, b) => a - b);
+  let html = `<option value="0"${sel === '0' ? ' selected' : ''}>All boards (broadcast)</option>`;
+  ids.forEach(i => {
+    const alias = (typeof wcbAliases !== 'undefined' && wcbAliases && wcbAliases[i - 1]) ? ' · ' + wcbAliases[i - 1] : '';
+    html += `<optgroup label="WCB ${i}${esc(alias)}">`;
+    html += `<option value="${i}"${sel === String(i) ? ' selected' : ''}>WCB ${i} (auto-route)</option>`;
+    for (let p = 0; p <= 5; p++) {
+      const v = `W${i}S${p}`;
+      html += `<option value="${v}"${sel === v ? ' selected' : ''}>WCB ${i} · ${p === 0 ? 'Serial 0 (USB)' : 'Serial ' + p}</option>`;
+    }
+    html += `</optgroup>`;
+  });
+  html += `<optgroup label="This controller">`;
+  serialPorts.forEach(p => { html += `<option value="${esc(p.v)}"${sel === p.v ? ' selected' : ''}>${esc(_serialPortLabel(p.v))} (local)</option>`; });
+  html += `</optgroup>`;
+  return html;
+}
+
+// ── Split "Send to" — the WCB target dropdown + a dependent serial-port dropdown ──
+// Target values: "0" = broadcast to all; "<id>" = a WCB; "LOCAL" = this controller.
+function _wcbTargetOptionsHtml(selected) {
+  const sel = String(selected == null ? '0' : selected);
+  const esc = s => escH(String(s));
+  const quantity = wcbQuantity || (config.wcbNetwork && config.wcbNetwork.quantity) || 4;
+  const selfId   = wcbSelfId   || (config.wcbNetwork && config.wcbNetwork.deviceId) || 20;
+  const mask     = (typeof wcbKnown !== 'undefined') ? wcbKnown : null;
+  const ids = [];
+  const scan = Math.max(quantity, mask ? mask.length : 0);
+  for (let i = 1; i <= scan; i++) { const k = mask ? !!mask[i - 1] : (i <= quantity); if (k && i !== selfId) ids.push(i); }
+  if (/^\d+$/.test(sel) && +sel >= 1 && +sel <= 20 && !ids.includes(+sel)) ids.push(+sel);   // keep an off-list WCB
+  ids.sort((a, b) => a - b);
+  let html = `<option value="0"${sel === '0' ? ' selected' : ''}>All boards (broadcast)</option>`;
+  ids.forEach(i => {
+    const alias = (typeof wcbAliases !== 'undefined' && wcbAliases && wcbAliases[i - 1]) ? ' · ' + wcbAliases[i - 1] : '';
+    html += `<option value="${i}"${sel === String(i) ? ' selected' : ''}>WCB ${i}${esc(alias)}</option>`;
+  });
+  html += `<option value="LOCAL"${sel === 'LOCAL' ? ' selected' : ''}>This controller</option>`;
+  return html;
+}
+// A WCB serial port's label — the device the board advertises on that port over
+// WDP (WCB_STATUS.portLabels[board-1][port-1], filled from the device's own @WDP1
+// announce or a user-set label), else a plain "Serial <n>". Port 0 = USB console.
+function _wcbPortLabel(wcb, port) {
+  if (port === 0) return 'Serial 0 (USB)';
+  const labels = (typeof wcbPortLabels !== 'undefined' && wcbPortLabels && wcbPortLabels[wcb - 1]) || null;
+  const lbl = (labels && labels[port - 1] != null) ? String(labels[port - 1]).trim() : '';
+  return lbl ? `Serial ${port} · ${lbl}` : 'Serial ' + port;
+}
+// The serial-port dropdown, dependent on the chosen target. Values: "auto" =
+// let the WCB route by command type (no port); "0".."5" = that WCB serial port;
+// "S3"/"S4"/"S5" = a local aux port when the target is this controller.
+function _portOptionsHtml(wcbVal, selected) {
+  const sel = String(selected == null ? '' : selected);
+  const esc = s => escH(String(s));
+  if (wcbVal === 'LOCAL') {
+    return serialPorts.map(p => `<option value="${esc(p.v)}"${sel === p.v ? ' selected' : ''}>${esc(_serialPortLabel(p.v))}</option>`).join('');
+  }
+  if (wcbVal === '0') {
+    return `<option value="auto"${sel === 'auto' ? ' selected' : ''}>— (broadcast)</option>`;
+  }
+  let html = `<option value="auto"${sel === 'auto' ? ' selected' : ''}>Auto-route (by type)</option>`;
+  for (let p = 0; p <= 5; p++) html += `<option value="${p}"${sel === String(p) ? ' selected' : ''}>${esc(_wcbPortLabel(+wcbVal, p))}</option>`;
+  return html;
+}
+
+// Auto-fill the destination for a picked command from the global device config —
+// an HCR or MP3 command targets wherever that device is wired (config.hcrDest /
+// config.mp3Dest), so the user doesn't re-pick it every time. Returns { target }
+// for a WCB destination or { port } for a serial one, matching `mode`, or null
+// when the board has no configured home (a plain WCB / lighting command).
+function _cmdlibConfigDest(board, mode) {
+  const id = board && board.id;
+  const d = (id === 'wcb-hcr' || id === 'hcr-native') ? (config && config.hcrDest)
+          : (id === 'wcb-mp3')                        ? (config && config.mp3Dest)
+          : null;
+  if (!d) return null;
+  if (mode === 'serial') return { port: d.port || 'S3' };
+  const t = parseInt(d.target, 10);
+  return { target: (Number.isFinite(t) && t >= 1) ? String(Math.min(20, t)) : '1' };
+}
 
 // Encode a command template + param values → the wire string the WCB receives.
 function ncEncodeCommand(cmd, values) {
@@ -9683,7 +9892,11 @@ function ncDecodeCommand(wire) {
 
 let _cmdlibFid    = null;   // the action-row fields div id we write back into
 let _cmdlibSel    = null;   // { board, cmd } currently selected
-let _cmdlibValues = {};     // param name → current string value
+let _cmdlibValues = {};     // param name → current string value (WIRE value)
+
+// A param with `unit:'servoPulse'` carries its WIRE value in Maestro quarter-µs
+// (= pulse-width µs × 4). The composer shows two LINKED fields — µs (500-2500)
+// and ms — that update each other; the command stores µs × 4.
 
 // Opens on the LIST, unless the row's current command decodes to a known
 // library entry — then it jumps straight to the composer pre-filled with the
@@ -9717,7 +9930,9 @@ async function openCmdLibrary(fid) {
   }
 }
 function _cmdlibOpenView(fid) {
-  const curCmd  = document.getElementById(fid + '-cmd')?.value || '';
+  let curCmd = document.getElementById(fid + '-cmd')?.value || '';
+  const mW = /^;W\d+;S\d([\s\S]*)$/.exec(curCmd);   // strip a device ";W<wcb>;S<port>" prefix (port = one digit) so the command decodes
+  if (mW) curCmd = mW[1];
   const decoded = curCmd ? ncDecodeCommand(curCmd) : null;
   if (decoded) { _cmdlibSel = { board: decoded.board, cmd: decoded.cmd }; _cmdlibValues = decoded.values; _cmdlibShowComposer(); }
   else         { _cmdlibShowList(); }
@@ -9820,27 +10035,109 @@ function _cmdlibSelect(boardId, cmdId) {
   if (!cmd) return;
   _cmdlibSel = { board, cmd };
   _cmdlibValues = {};
-  (cmd.params || []).forEach(p => { _cmdlibValues[p.name] = (p.default !== undefined ? String(p.default) : ''); });
+  // Seed each param so the live preview matches what the fields SHOW on open.
+  // Critically, an enum with no explicit default takes its FIRST option's code
+  // (the option the <select> displays) — otherwise the value stays empty and the
+  // command reads e.g. ";H,STIM,,MOD" until you toggle the dropdown off and back.
+  (cmd.params || []).forEach(p => {
+    let v = (p.default !== undefined) ? String(p.default) : '';
+    if (v === '' && p.enum) {
+      const en = _cmdlibEnum(p.enum);
+      if (en && en.values && en.values.length) v = String(en.values[0].code);
+    }
+    _cmdlibValues[p.name] = v;
+  });
   _cmdlibShowComposer();
 }
 
-// Composer view: WCB target (unicast only) + param fields + live preview.
+// The action-row type <select> id for the fields div we're writing back into
+// (mapping tiers use "type-<tier>-<ai>"; the timeline popover uses "tl-action-type").
+function _cmdlibRowTypeSelId(fid) {
+  return (fid === 'tl-action-fields') ? 'tl-action-type' : String(fid || '').replace(/^fields-/, 'type-');
+}
+
+// Alias kept only so the now-unused composer "Send to" helpers below don't
+// reference an undefined function. They are DEAD — the destination is chosen on
+// the action row (see _appendCommandView / _wcbDestOptionsHtml), not the composer.
+function _wcbListOptionsHtml(sel) { return _wcbDestOptionsHtml(sel); }
+
+// DEAD (composer no longer has a Send-to step). Left in place to avoid a large
+// deletion; destination is chosen on the action row now.
+function _cmdlibDestFieldHtml(mode, board) {
+  const esc = s => escH(String(s == null ? '' : s));
+  const fid = _cmdlibFid;
+  const rowType = document.getElementById(_cmdlibRowTypeSelId(fid))?.value || '';
+  if (mode === 'maestro') {
+    const curTgt = document.getElementById(fid + '-target')?.value || 1;
+    return `<div class="field-group"><label>Send to (Maestro)</label><select id="cmdlib-dest-maestro">${maestroIdOptions(curTgt)}</select></div>`;
+  }
+  if (mode === 'local') {
+    return `<div class="field-group"><label>Send to</label><div style="font-size:12px;color:var(--muted)">This controller (local).</div></div>`;
+  }
+  if (mode === 'device') {
+    let cur = '';
+    const rowCmd = document.getElementById(fid + '-cmd')?.value || '';
+    const mW = /^;W(\d+);S(\d)/.exec(rowCmd);   // port is one digit
+    if (mW) cur = `W${mW[1]}S${mW[2]}`;
+    else if (rowType === 'serial') cur = document.getElementById(fid + '-port')?.value || 'S3';
+    if (!cur) cur = 'W1S1';
+    return `<div class="field-group"><label>Send to (device serial port)</label><select id="cmdlib-dest-device">${_deviceDestOptionsHtml(cur)}</select></div>`;
+  }
+  if (mode === 'serial') {
+    const cfg = _cmdlibConfigDest(board, 'serial');
+    const curPort = document.getElementById(fid + '-port')?.value || (cfg && cfg.port) || 'S3';
+    const opts = serialPorts.map(p => `<option value="${esc(p.v)}" ${p.v === curPort ? 'selected' : ''}>${esc(_serialPortLabel(p.v))}</option>`).join('');
+    return `<div class="field-group"><label>Send to (serial port)</label><select id="cmdlib-dest-port">${opts}</select>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">Device-native protocol on this controller's aux serial port.</div></div>`;
+  }
+  if (mode === 'wled') {
+    return `<div class="field-group"><label>Send to</label>
+      <div style="font-size:12px;color:var(--muted)">Routed automatically by WLED id — set the wiring for each id in the <b>WLED</b> tab.</div></div>`;
+  }
+  // wcb: unicast a WCB #, or broadcast to all (value 0). Default order:
+  //  · broadcast row → All;
+  //  · EDITING an existing command (row already has a wire string) → keep its target;
+  //  · FRESH pick of an HCR/MP3 command → auto-fill from the device's config home;
+  //  · else the command's own routing.class / the row's target / WCB #1.
+  const curCmd    = document.getElementById(fid + '-cmd')?.value || '';
+  const curTarget = document.getElementById(fid + '-target')?.value;
+  const cfg = _cmdlibConfigDest(board, 'wcb');
+  // Is the row already holding a command from the SAME board we just picked? Only
+  // then are we "editing" it — a different pick should re-default, not inherit the
+  // previous command's target (which would silently mis-target HCR/MP3).
+  let sameBoard = false;
+  if (curCmd.trim()) { try { const d = ncDecodeCommand(curCmd); sameBoard = !!(d && d.board && board && d.board.id === board.id); } catch (e) {} }
+  let sel;
+  if (rowType === 'wcb_broadcast')                                        sel = '0';
+  else if (sameBoard && curTarget != null && curTarget !== '')           sel = String(curTarget);
+  else if (cfg && cfg.target)                                             sel = cfg.target;
+  else if (board && board.routing && board.routing.class === 'broadcast') sel = '0';
+  else if (curTarget != null && curTarget !== '')                        sel = String(curTarget);
+  else                                                                    sel = '1';
+  return `<div class="field-group"><label>Send to</label><select id="cmdlib-dest">${_wcbListOptionsHtml(sel)}</select></div>`;
+}
+
+// Composer view: command params + live wire preview + a "Send to" destination
+// step (the destination is picked AFTER the command, from its routing).
 function _cmdlibShowComposer() {
   const body = document.getElementById('cmdlib-body');
   const { board, cmd } = _cmdlibSel;
-  const hasTarget = !!document.getElementById(_cmdlibFid + '-target');
   const esc = s => escH(String(s == null ? '' : s));
   let html = `<div style="padding:14px 16px;display:flex;flex-direction:column;gap:12px">`;
   html += `<button type="button" id="cmdlib-back" class="btn btn-ghost" style="align-self:flex-start;padding:4px 10px">← Back</button>`;
   html += `<div><div style="font-weight:600;font-size:15px">${esc(cmd.name)}</div><div style="font-size:12px;color:var(--muted)">${esc(board.name)}</div></div>`;
-  if (hasTarget) {
-    const curTarget = document.getElementById(_cmdlibFid + '-target')?.value || 1;
-    html += `<div class="field-group"><label>WCB # (destination board)</label><input type="number" id="cmdlib-target" min="1" max="20" value="${esc(curTarget)}" style="width:80px"></div>`;
-  }
   (cmd.params || []).forEach((p, i) => {
     const pid = 'cmdlib-p-' + i;
     let field;
-    if (p.enum) {
+    if (p.unit === 'servoPulse') {
+      // Two LINKED fields: PWM pulse width in µs (500-2500) and the raw Maestro
+      // target value (2000-10000 = µs × 4). The command carries the Maestro value.
+      const wire = +(_cmdlibValues[p.name]) || 0;   // Maestro value (¼µs)
+      const us = Math.round(wire / 4);
+      field = `<span style="display:inline-flex;gap:6px;align-items:center">
+        <input type="number" id="${pid}" data-pulseus="${esc(p.name)}" min="500" max="2500" step="1" value="${us}" style="width:80px" title="PWM pulse width in µs (500-2500)"><span style="font-size:11px;color:var(--muted)">PWM µs</span>
+        <input type="number" id="${pid}-mv" min="2000" max="10000" step="1" value="${wire}" style="width:80px" title="Maestro target value (2000-10000 = µs × 4)"><span style="font-size:11px;color:var(--muted)">Maestro</span></span>`;
+    } else if (p.enum) {
       const en = _cmdlibEnum(p.enum);
       const opts = ((en && en.values) || []).map(v =>
         `<option value="${esc(v.code)}" ${String(v.code) === String(_cmdlibValues[p.name]) ? 'selected' : ''}>${esc(v.label)} (${esc(v.code)})</option>`).join('');
@@ -9852,7 +10149,7 @@ function _cmdlibShowComposer() {
     }
     html += `<div class="field-group"><label>${esc(p.label || p.name)}</label>${field}</div>`;
   });
-  html += `<div><div style="font-size:11px;color:var(--muted)">Preview (sent to the WCB)</div>
+  html += `<div><div style="font-size:11px;color:var(--muted)">Command <span style="opacity:.8">— pick where to send it (WCB / serial port) on the action row</span></div>
     <div id="cmdlib-preview" style="font-family:monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);word-break:break-all"></div></div>`;
   html += `<div class="wcb-send-row" style="justify-content:flex-end;gap:8px">
     <button type="button" id="cmdlib-cancel2" class="btn btn-ghost">Cancel</button>
@@ -9861,6 +10158,27 @@ function _cmdlibShowComposer() {
   body.innerHTML = html;
   body.querySelectorAll('[data-pname]').forEach(el => {
     el.oninput = el.onchange = () => { _cmdlibValues[el.dataset.pname] = el.value; _cmdlibUpdatePreview(); };
+  });
+  // Servo-pulse params: two linked fields — PWM µs and the raw Maestro value
+  // (µs × 4) — that update each other; the stored wire value is the Maestro value.
+  // An empty/invalid field is a no-op so clearing to retype can't store 0.
+  body.querySelectorAll('[data-pulseus]').forEach(usEl => {
+    const pname = usEl.dataset.pulseus;
+    const mvEl = document.getElementById(usEl.id + '-mv');
+    usEl.oninput = usEl.onchange = () => {
+      if (usEl.value.trim() === '' || isNaN(+usEl.value)) return;
+      const mv = Math.round((+usEl.value) * 4);
+      _cmdlibValues[pname] = String(mv);
+      if (mvEl) mvEl.value = String(mv);
+      _cmdlibUpdatePreview();
+    };
+    if (mvEl) mvEl.oninput = mvEl.onchange = () => {
+      if (mvEl.value.trim() === '' || isNaN(+mvEl.value)) return;
+      const mv = Math.round(+mvEl.value);
+      _cmdlibValues[pname] = String(mv);
+      usEl.value = String(Math.round(mv / 4));
+      _cmdlibUpdatePreview();
+    };
   });
   document.getElementById('cmdlib-back').onclick    = _cmdlibShowList;
   document.getElementById('cmdlib-cancel2').onclick = closeCmdLibrary;
@@ -9873,18 +10191,46 @@ function _cmdlibUpdatePreview() {
   if (el && _cmdlibSel) el.textContent = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
 }
 
-// Write the composed command back into the action row's inputs, then close.
-// Set .value directly — do NOT call updateActionFields (it rebuilds/clears the
-// inputs) and no input event is needed (values are only read on Save).
+// Write the composed command into the action row, then close. Only the command's
+// WIRE string is set here — the DESTINATION (WCB / serial port) is chosen on the
+// row's "Send to" control (see _appendCommandView). We seed a sensible default
+// destination per command: a device command (no auto-routing) → a WCB serial port
+// (first known WCB · Serial 1); an HCR/MP3 command → its configured WCB; else WCB 1
+// (or the row's current target). Maestro/WLED keep their own destination control.
 function _cmdlibUse() {
   if (!_cmdlibSel || !_cmdlibFid) return;
   const wire = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
-  const cmdInput = document.getElementById(_cmdlibFid + '-cmd');
-  if (cmdInput) cmdInput.value = wire;
-  const tgt    = document.getElementById('cmdlib-target');
-  const rowTgt = document.getElementById(_cmdlibFid + '-target');
-  if (tgt && rowTgt && tgt.value) rowTgt.value = tgt.value;
+  const board = _cmdlibSel.board, cmd = _cmdlibSel.cmd, fid = _cmdlibFid;
+  const mode = _cmdlibDestMode(board, cmd);
+  let action;
+  if (mode === 'maestro') {
+    const cur = +(document.getElementById(fid + '-target')?.value) || 1;   // keep the row's slot if any
+    action = { type: 'maestro', target: String(cur >= 1 && cur <= NUM_MAESTRO_SLOTS ? cur : 1), cmd: wire };
+  } else if (mode === 'wled') {
+    action = { type: 'wled', cmd: wire };
+  } else if (mode === 'device') {
+    action = { type: 'wcb_broadcast', cmd: `;W${_firstKnownWcb()};S1` + wire };   // default: first WCB · Serial 1
+  } else {
+    const cfg = _cmdlibConfigDest(board, 'wcb');   // HCR/MP3 → their configured WCB
+    if (cfg && cfg.target) action = { type: 'wcb_unicast', target: cfg.target, cmd: wire };
+    else {
+      const curT = document.getElementById(fid + '-target')?.value;
+      action = { type: 'wcb_unicast', target: String((curT && /^\d+$/.test(curT)) ? curT : '1'), cmd: wire };
+    }
+  }
+  _applyResolvedActionToRow(fid, action);
   closeCmdLibrary();
+}
+
+// Switch a row's type <select> to match a resolved action, re-render its fields
+// from that action, and (for a mapping tier) refresh the saved-count badge.
+function _applyResolvedActionToRow(fid, action) {
+  const typeSel   = document.getElementById(_cmdlibRowTypeSelId(fid));
+  const fieldsDiv = document.getElementById(fid);
+  if (typeSel) typeSel.value = action.type;
+  if (fieldsDiv) appendActionFields(fieldsDiv, action);
+  const m = /^fields-(.+)-(\d+)$/.exec(fid);
+  if (m) refreshTierState(m[1]);
 }
 
 // Merge ONE parsed library-shaped object (our {boards:[...]} or a DroidNet
@@ -9907,7 +10253,13 @@ function _cmdlibMergeLibraryData(data) {
   let added = 0;
   incoming.forEach(b => {
     if (!b || !b.id) return;
-    const nb = { id: b.id, name: b.name || b.id, kind: b.kind || 'wcb-verb', commands: Array.isArray(b.commands) ? b.commands : [] };
+    // Keep `routing` (e.g. {class:'broadcast'|'wcb-verb'}) — the composer's
+    // "Send to" step reads it to default the destination for a picked command.
+    // It used to be dropped here, which is why the destination felt bolted on.
+    const nb = { id: b.id, name: b.name || b.id, kind: b.kind || 'wcb-verb',
+                 routing: (b.routing && typeof b.routing === 'object') ? b.routing : undefined,
+                 local: b.local || undefined,   // local firmware-action kind (e.g. 'maestro')
+                 commands: Array.isArray(b.commands) ? b.commands : [] };
     const idx = cur.boards.findIndex(x => x.id === nb.id);
     if (idx >= 0) cur.boards[idx] = nb; else cur.boards.push(nb);
     added++;
@@ -10008,40 +10360,285 @@ function _makeCmdLibraryButton(fid) {
   return btn;
 }
 
+// Set a row's action kind (firmware type) programmatically and re-render its
+// fields — used by the local-control buttons and the "change type" link. The
+// hidden type <select> stays the single source of truth for read-back.
+function _setRowKind(fid, type) {
+  const typeSel = document.getElementById(_cmdlibRowTypeSelId(fid));
+  if (typeSel) typeSel.value = type;
+  const fieldsDiv = document.getElementById(fid);
+  if (fieldsDiv) appendActionFields(fieldsDiv, { type });
+  const m = /^fields-(.+)-(\d+)$/.exec(fid);
+  if (m) refreshTierState(m[1]);
+}
+
+// A small "change type" link for the non-command kinds, so a row can be sent
+// back to a blank command (e.g. to switch a Record action into a library command).
+function _appendChangeTypeLink(container) {
+  const fid = container.id;
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.className = 'btn btn-ghost';
+  link.style.cssText = 'padding:2px 8px;font-size:11px;align-self:center';
+  link.textContent = '‹ change type';
+  link.title = 'Switch this action to a different type';
+  link.onclick = () => _setRowKind(fid, '');
+  container.appendChild(link);
+}
+
+// Destination options for a device-native command: each known WCB's serial ports
+// (0=USB, 1-5=device ports), grouped, then the controller's own aux serials. A
+// "W<wcb>S<port>" value → the command is broadcast as ";W<wcb>;S<port>…" so the
+// addressed WCB emits it out that port; a plain "S3" value → a local serial write.
+function _deviceDestOptionsHtml(selected) {
+  const sel = String(selected == null ? '' : selected);
+  const esc = s => escH(String(s));
+  const quantity = wcbQuantity || (config.wcbNetwork && config.wcbNetwork.quantity) || 4;
+  const selfId   = wcbSelfId   || (config.wcbNetwork && config.wcbNetwork.deviceId) || 20;
+  const mask     = (typeof wcbKnown !== 'undefined') ? wcbKnown : null;
+  const ids = [];
+  const scan = Math.max(quantity, mask ? mask.length : 0);
+  for (let i = 1; i <= scan; i++) { const known = mask ? !!mask[i - 1] : (i <= quantity); if (known && i !== selfId) ids.push(i); }
+  const mSel = /^W(\d+)S\d+$/.exec(sel);
+  if (mSel && !ids.includes(+mSel[1]) && +mSel[1] >= 1 && +mSel[1] <= 20) ids.push(+mSel[1]);   // keep an off-list WCB
+  ids.sort((a, b) => a - b);
+  let html = '';
+  ids.forEach(i => {
+    const alias = (typeof wcbAliases !== 'undefined' && wcbAliases && wcbAliases[i - 1]) ? ' · ' + wcbAliases[i - 1] : '';
+    html += `<optgroup label="WCB ${i}${esc(alias)}">`;
+    for (let p = 0; p <= 5; p++) {
+      const v = `W${i}S${p}`;
+      html += `<option value="${v}"${sel === v ? ' selected' : ''}>WCB ${i} · ${p === 0 ? 'Serial 0 (USB)' : 'Serial ' + p}</option>`;
+    }
+    html += `</optgroup>`;
+  });
+  html += `<optgroup label="This controller">`;
+  serialPorts.forEach(p => { html += `<option value="${esc(p.v)}"${sel === p.v ? ' selected' : ''}>${esc(_serialPortLabel(p.v))} (local)</option>`; });
+  html += `</optgroup>`;
+  return html;
+}
+
+// Which command-view layout a row uses. Device-native raw strings (either already
+// wrapped as a ";W…;S…" broadcast, or a plain serial write that DECODES to a
+// device-native board) get the device view; everything else the generic view.
+function _cmdViewMode(type, action) {
+  if (type === 'maestro') return 'maestro';
+  if (type === 'wled')    return 'wled';
+  // Device mode is ONLY for a WCB-serial-port command — broadcast ";W<wcb>;S<port>"
+  // + string (port is ONE digit 0-5, device string concatenated right after). A
+  // device sent to the CONTROLLER's own serial is a plain serial write and renders
+  // in the generic view; re-pick via Build to send it to a WCB. (Inferring device
+  // mode from a decode would mis-flag plain serial strings like "STOP".)
+  const raw = (action && action.cmd) || '';
+  if (type === 'wcb_broadcast' && /^;W\d+;S\d/.test(raw)) return 'device';
+  return 'wire';
+}
+
+// Device-native command view: the visible field is the raw DEVICE string; the
+// "Send to" picks a WCB serial port (broadcast ";W<wcb>;S<port>" + string) or a
+// local aux serial. A hidden -cmd holds the full wire string and -port the local
+// port, kept in sync so readActionFromFid is unchanged (wcb_broadcast → -cmd;
+// serial → -cmd + -port).
+function _appendDeviceView(container, action) {
+  const fid = container.id;
+  const raw = action.cmd || '';
+  const mW = /^;W(\d+);S(\d)([\s\S]*)$/.exec(raw);   // port is ONE digit (0-5); device string follows immediately
+  const devStr  = mW ? mW[3] : raw;
+  const curDest = mW ? `W${mW[1]}S${mW[2]}` : (action.type === 'serial' ? (action.port || 'S3') : 'W1S1');
+
+  const row1 = document.createElement('div');
+  row1.style.cssText = 'display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;flex-basis:100%';
+
+  const devInput = document.createElement('input');
+  devInput.type = 'text'; devInput.id = fid + '-devcmd';
+  devInput.maxLength = 90; devInput.value = devStr;
+  devInput.placeholder = 'pick or type a device command';
+  devInput.style.cssText = 'width:200px;font-family:monospace';
+  row1.appendChild(makeFieldGroup('Command', devInput));
+
+  const cmdHidden  = document.createElement('input'); cmdHidden.type  = 'hidden'; cmdHidden.id  = fid + '-cmd';  cmdHidden.value  = raw;
+  const portHidden = document.createElement('input'); portHidden.type = 'hidden'; portHidden.id = fid + '-port'; portHidden.value = (action.type === 'serial' ? (action.port || 'S3') : 'S3');
+  row1.appendChild(cmdHidden); row1.appendChild(portHidden);
+
+  const destSel = document.createElement('select');
+  destSel.id = fid + '-destsel';
+  destSel.innerHTML = _deviceDestOptionsHtml(curDest);
+  destSel.value = curDest;
+  const hint = document.createElement('div');
+  hint.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--muted)';
+  const sync = () => {
+    const dv = destSel.value, dev = devInput.value;
+    const typeSel = document.getElementById(_cmdlibRowTypeSelId(fid));
+    const m = /^W(\d+)S(\d+)$/.exec(dv);
+    if (m) { if (typeSel) typeSel.value = 'wcb_broadcast'; cmdHidden.value = `;W${m[1]};S${m[2]}` + dev; }
+    else   { if (typeSel) typeSel.value = 'serial'; portHidden.value = dv; cmdHidden.value = dev; }
+    let d = null; try { d = ncDecodeCommand(dev); } catch (e) {}
+    hint.textContent = d ? `\u{1F4DA} ${d.board.name} · ${d.cmd.name}` : '';
+    const mm = /^fields-(.+)-(\d+)$/.exec(fid); if (mm) refreshTierState(mm[1]);
+  };
+  devInput.oninput = sync; destSel.onchange = sync;
+  row1.appendChild(makeFieldGroup('Send to', destSel));
+  container.appendChild(row1);
+
+  const build = document.createElement('button');
+  build.type = 'button'; build.className = 'btn btn-ghost';
+  build.textContent = '\u{1F4DA} Change';
+  build.title = 'Pick a different device command';
+  build.style.alignSelf = 'flex-end';
+  build.onclick = () => openCmdLibrary(fid);
+  container.appendChild(build);
+
+  let d0 = null; try { d0 = ncDecodeCommand(devStr); } catch (e) {}
+  hint.textContent = d0 ? `\u{1F4DA} ${d0.board.name} · ${d0.cmd.name}` : '';
+  container.appendChild(hint);
+}
+
+// The command-first row view: [ command field ] [ destination ▾ ] [ 📚 builder ].
+// One look for every wire-command type (wcb_unicast / wcb_broadcast / serial /
+// wled). The destination control decides the firmware action TYPE (broadcast vs
+// unicast) and keeps the hidden type <select> + read-back inputs in sync, so
+// readActionFromFid() is unchanged. HCR/MP3 commands auto-fill their destination
+// from the device config. A blank row also offers the local controls; the 📚
+// builder (re)opens the library.
+function _appendCommandView(container, action) {
+  const fid = container.id;
+  const type = action.type;
+  const mode = (type === 'maestro') ? 'maestro' : (type === 'wled') ? 'wled' : 'wire';
+  // A device command bound to a WCB serial port is stored as a BROADCAST of
+  // ";W<wcb>;S<port>" + the device string. The command field shows the BARE
+  // string and the "Send to" select shows the port; read-back re-adds the prefix
+  // (below). Only split it for wcb_broadcast — read-back only re-adds it there, so
+  // stripping it off any other type would drop it on save.
+  const mWS = (type === 'wcb_broadcast') ? /^;W(\d+);S(\d)([\s\S]*)$/.exec(action.cmd || '') : null;
+  const cmd = mWS ? mWS[3] : (action.cmd || '');
+  const wsDest = mWS ? `W${mWS[1]}S${mWS[2]}` : null;
+
+  // Command string — editable; the builder fills it, or type it by hand.
+  const cmdInput = document.createElement('input');
+  cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
+  cmdInput.maxLength = 95; cmdInput.value = cmd;
+  cmdInput.placeholder = 'pick or type a command';
+  cmdInput.style.cssText = 'width:220px;font-family:monospace';
+  // Line 1: the command and its destination, side by side. The builder sits on
+  // the line BELOW (this row is full-width so everything after it wraps under).
+  const row1 = document.createElement('div');
+  row1.style.cssText = 'display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;flex-basis:100%';
+  row1.appendChild(makeFieldGroup('Command', cmdInput));
+  container.appendChild(row1);
+
+  // Destination — to the right of the command. WLED routes by id (no picker);
+  // everything else picks from ONE "Send to" list: broadcast, a real/known WCB,
+  // or a serial port. The chosen value drives the firmware action type
+  // (wcb_broadcast / wcb_unicast+target / serial+port) and syncs the hidden type
+  // <select> + the read-back inputs, so readActionFromFid is unchanged.
+  if (mode === 'maestro') {
+    // Servo command → destination is a Maestro slot (read back from -target).
+    const slotSel = document.createElement('select');
+    slotSel.id = fid + '-target';
+    slotSel.innerHTML = maestroIdOptions(action.target || 1);
+    row1.appendChild(makeFieldGroup('Send to', slotSel));
+  } else if (mode === 'wled') {
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center;max-width:200px';
+    note.textContent = 'Send to: routed by WLED id — wiring set in the WLED tab.';
+    row1.appendChild(note);
+  } else {
+    // TWO dropdowns: the WCB target and (dependent) the serial port. They fold into
+    // hidden read-back inputs so readActionFromFid is unchanged: -target (unicast),
+    // -port (serial), and -destsel (the combined value that carries the ;W;S prefix).
+    const targetInput = document.createElement('input'); targetInput.type = 'hidden'; targetInput.id = fid + '-target'; targetInput.value = action.target || 1;
+    const portInput   = document.createElement('input'); portInput.type   = 'hidden'; portInput.id   = fid + '-port';   portInput.value   = action.port || 'S3';
+    const destHidden  = document.createElement('input'); destHidden.type  = 'hidden'; destHidden.id  = fid + '-destsel';
+    row1.appendChild(targetInput); row1.appendChild(portInput); row1.appendChild(destHidden);
+
+    // Initial (WCB target, serial port) from the action.
+    let wcbVal, portVal;
+    if (wsDest)                        { const m = /^W(\d+)S(\d)$/.exec(wsDest); wcbVal = m[1]; portVal = m[2]; }
+    else if (type === 'serial')        { wcbVal = 'LOCAL'; portVal = action.port || 'S3'; }
+    else if (type === 'wcb_broadcast') { wcbVal = '0';     portVal = 'auto'; }
+    else                               { wcbVal = String(action.target || 1); portVal = 'auto'; }
+
+    const wcbSel = document.createElement('select'); wcbSel.id = fid + '-wcbsel';
+    wcbSel.innerHTML = _wcbTargetOptionsHtml(wcbVal); wcbSel.value = wcbVal;
+    const portSel = document.createElement('select'); portSel.id = fid + '-portsel';
+    portSel.innerHTML = _portOptionsHtml(wcbVal, portVal); portSel.value = portVal;
+
+    const sync = () => {
+      const w = wcbSel.value, p = portSel.value;
+      const typeSel = document.getElementById(_cmdlibRowTypeSelId(fid));
+      let dest, tp;
+      if (w === 'LOCAL')     { dest = p;            tp = 'serial';        portInput.value  = p; }
+      else if (w === '0')    { dest = '0';          tp = 'wcb_broadcast'; }
+      else if (p === 'auto') { dest = w;            tp = 'wcb_unicast';   targetInput.value = w; }
+      else                   { dest = `W${w}S${p}`; tp = 'wcb_broadcast'; }
+      destHidden.value = dest;
+      if (typeSel) typeSel.value = tp;
+      const m = /^fields-(.+)-(\d+)$/.exec(fid); if (m) refreshTierState(m[1]);
+    };
+    wcbSel.onchange  = () => { const prevP = portSel.value; portSel.innerHTML = _portOptionsHtml(wcbSel.value, prevP); sync(); };
+    portSel.onchange = sync;
+    sync();   // initialise the hidden inputs to match the shown dropdowns
+
+    row1.appendChild(makeFieldGroup('WCB', wcbSel));
+    row1.appendChild(makeFieldGroup('Serial', portSel));
+  }
+
+  // Builder — opens the library to (re)pick the command + destination.
+  const build = document.createElement('button');
+  build.type = 'button';
+  build.className = cmd.trim() ? 'btn btn-ghost' : 'btn btn-primary';
+  build.textContent = cmd.trim() ? '\u{1F4DA} Change' : '\u{1F4DA} Build';
+  build.title = 'Build this command from the library (HCR / MP3 / WLED / Maestro / WCB)';
+  build.style.alignSelf = 'flex-end';
+  build.onclick = () => openCmdLibrary(fid);
+  container.appendChild(build);
+
+  // On a blank WCB row, offer the local (non-library) controls too.
+  if (!cmd.trim() && mode === 'wire') {
+    const or = document.createElement('span');
+    or.style.cssText = 'font-size:11px;color:var(--muted);align-self:center;margin-left:6px';
+    or.textContent = 'or:';
+    container.appendChild(or);
+    [['maestro', 'Maestro'], ['record', 'Record'], ['play', 'Play'], ['stop', 'Stop']].forEach(([t, lbl]) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'btn btn-ghost';
+      b.style.cssText = 'padding:3px 8px;font-size:11px';
+      b.textContent = lbl;
+      b.onclick = () => _setRowKind(fid, t);
+      container.appendChild(b);
+    });
+  }
+
+  // Decoded command name, shown under the row once it's a known library command.
+  const hint = document.createElement('div');
+  hint.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--muted)';
+  const setHint = () => {
+    let d = null; try { d = ncDecodeCommand(cmdInput.value); } catch (e) {}
+    hint.textContent = d ? `\u{1F4DA} ${d.board.name} · ${d.cmd.name}` : '';
+  };
+  setHint();
+  cmdInput.oninput = setHint;
+  container.appendChild(hint);
+}
+
 function appendActionFields(container, action) {
   container.innerHTML = '';
-  const type = action.type || '';
+  let type = action.type || '';
   const fid = container.id;
 
-  if (type === 'wcb_unicast') {
-    const targetInput = document.createElement('input');
-    targetInput.type = 'number';
-    targetInput.id = fid + '-target';
-    targetInput.min = 1; targetInput.max = 20;
-    targetInput.value = action.target || 1;
-    targetInput.style.width = '60px';
-    targetInput.title = 'Destination WCB board ID (1-20)';
+  // Command-first: an unset row is a blank wire command (not "nothing"), so the
+  // hidden type is defaulted and read-back works the moment a command is typed.
+  if (type === '') {
+    type = 'wcb_unicast';
+    const typeSel = document.getElementById(_cmdlibRowTypeSelId(fid));
+    if (typeSel) typeSel.value = 'wcb_unicast';
+  }
+  if (type === 'maestro_local' || type === 'maestro_remote') type = 'maestro';   // canonical Maestro
 
-    const cmdInput = document.createElement('input');
-    cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-    cmdInput.placeholder = ';H,STIM,H,STRONG';
-    cmdInput.style.width = '180px';
-    cmdInput.maxLength = 95;
-    cmdInput.value = action.cmd || '';
-
-    container.appendChild(makeFieldGroup('WCB #', targetInput));
-    container.appendChild(makeFieldGroup('Command', cmdInput));
-    container.appendChild(_makeCmdLibraryButton(fid));
-  } else if (type === 'wcb_broadcast') {
-    const cmdInput = document.createElement('input');
-    cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-    cmdInput.placeholder = ';L,ON';
-    cmdInput.style.width = '220px';
-    cmdInput.maxLength = 95;
-    cmdInput.value = action.cmd || '';
-    container.appendChild(makeFieldGroup('Broadcast cmd', cmdInput));
-    container.appendChild(_makeCmdLibraryButton(fid));
-  } else if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
+  if (type === 'wcb_unicast' || type === 'wcb_broadcast' || type === 'serial' || type === 'wled' || type === 'maestro') {
+    // Authored from the command library — one look for every wire / servo command.
+    _appendCommandView(container, { ...action, type });
+  } else if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {   // dead (handled above); kept to avoid a large deletion
     // Friendly structured Maestro action: pick a Maestro, a plain-language command,
     // then a named channel + position (µs). We assemble the raw "setTarget,ch,pos"
     // string the firmware expects on read — see readActionFromFid.
@@ -10074,26 +10671,12 @@ function appendActionFields(container, action) {
     container.appendChild(argWrap);
     // Pass the elements directly — the row may still be detached from the DOM here.
     _renderMaestroActionArgs(fid, parts, { argWrap, slotSel, cmdSel });   // initial fill from the existing command
-  } else if (type === 'serial') {
-    const portSel = document.createElement('select');
-    portSel.id = fid + '-port';
-    serialPorts.forEach(p => {
-      const o = document.createElement('option');
-      o.value = p.v; o.textContent = _serialPortLabel(p.v);
-      if (p.v === action.port) o.selected = true;
-      portSel.appendChild(o);
-    });
-    const cmdInput = document.createElement('input');
-    cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-    cmdInput.placeholder = 'string to send';
-    cmdInput.style.width = '180px';
-    cmdInput.maxLength = 95;
-    cmdInput.value = action.cmd || '';
-    container.appendChild(makeFieldGroup('Port',    portSel));
-    container.appendChild(makeFieldGroup('Command', cmdInput));
+    _appendChangeTypeLink(container);
   } else if (type === 'hcr') {
-    // Destination is GLOBAL (sidebar HCR Destination panel) — actions only
-    // carry fn / chan / track.
+    // LEGACY editor, kept only so existing hcr actions still load/save unchanged.
+    // New HCR actions are authored from the command library (wcb-hcr board) as a
+    // wire command with an auto-filled destination — this fn/chan/track editor is
+    // no longer offered for new actions.
     const fnSel = document.createElement('select');
     fnSel.id = fid + '-fn';
     fnSel.style.minWidth = '140px';
@@ -10114,9 +10697,11 @@ function appendActionFields(container, action) {
 
     // Initial chan + track fields for the selected fn.
     renderHcrParamFields(container, +(action.fn || 14), action.chan, action.track);
+    _appendChangeTypeLink(container);
   } else if (type === 'mp3') {
-    // Destination is GLOBAL (sidebar MP3 Destination panel). The action only
-    // carries fn (MP3 function) + track (numeric arg for PLAY/PLAYFS/VOL).
+    // LEGACY editor, kept only so existing mp3 actions still load/save unchanged.
+    // New MP3 actions are authored from the command library (wcb-mp3 board) as a
+    // wire command with an auto-filled destination.
     const fnSel = document.createElement('select');
     fnSel.id = fid + '-fn';
     fnSel.style.minWidth = '140px';
@@ -10129,22 +10714,7 @@ function appendActionFields(container, action) {
     fnSel.onchange = () => renderMp3ArgField(container, +fnSel.value, undefined);
     container.appendChild(makeFieldGroup('Function', fnSel));
     renderMp3ArgField(container, +(action.fn || 1), action.track);
-  } else if (type === 'wled') {
-    // Routing (per WLED ID → local aux port | remote WCB) is GLOBAL — set in the
-    // WLED tab (config.wledSlots). The action only carries the ";L<id>,VERB"
-    // command, authored via 📚 Browse Command Library (WLED Lighting board).
-    const cmdInput = document.createElement('input');
-    cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-    cmdInput.placeholder = ';L1,PS,2';
-    cmdInput.style.width = '200px';
-    cmdInput.maxLength = 95;
-    cmdInput.value = action.cmd || '';
-    container.appendChild(makeFieldGroup('WLED cmd', cmdInput));
-    container.appendChild(_makeCmdLibraryButton(fid));
-    const note = document.createElement('div');
-    note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center;max-width:230px';
-    note.textContent = 'Routing by WLED ID is set in the WLED tab. ";L,VERB" (no id) = the lowest-id local WLED.';
-    container.appendChild(note);
+    _appendChangeTypeLink(container);
   } else if (type === 'record') {
     // Record/replay control — toggles capture. Clip name = which saved clip this
     // records into. Combo: pick a known clip from the dropdown or type a new name.
@@ -10161,6 +10731,7 @@ function appendActionFields(container, action) {
     hint.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
     hint.textContent = 'Toggles recording — fire to start, fire again to stop + save. Named = overwrite that clip; blank = auto-save as rec_N (never lost).';
     container.appendChild(hint);
+    _appendChangeTypeLink(container);
   } else if (type === 'play') {
     _ensureClipNamesFresh();
     const nameInput = document.createElement('input');
@@ -10180,11 +10751,13 @@ function appendActionFields(container, action) {
     loopLabel.appendChild(loopCb);
     loopLabel.appendChild(document.createTextNode('Loop'));
     container.appendChild(loopLabel);
+    _appendChangeTypeLink(container);
   } else if (type === 'stop') {
     const hint = document.createElement('div');
     hint.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
     hint.textContent = 'Stops recording (saves) or playback — no parameters.';
     container.appendChild(hint);
+    _appendChangeTypeLink(container);
   }
 }
 
@@ -10221,51 +10794,22 @@ function readActionFromFid(fid, type, extras) {
     return { type, target: String(target), cmd, ...extras };
   }
   if (type === 'wcb_broadcast') {
-    const cmd = document.getElementById(fid + '-cmd')?.value || '';
+    let cmd = document.getElementById(fid + '-cmd')?.value || '';
     if (!cmd.trim()) return null;
+    // A WCB serial-port destination prefixes ";W<wcb>;S<port>" (the select carries it).
+    const dv = document.getElementById(fid + '-destsel')?.value || '';
+    const m = /^W(\d+)S(\d)$/.exec(dv);
+    if (m) cmd = `;W${m[1]};S${m[2]}` + cmd;
     return { type, cmd, ...extras };
   }
   if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
-    // Reassemble the raw "setTarget,ch,pos" / "goHome" / … string the firmware
-    // parses, from the friendly structured fields. Position is entered in µs →
-    // ¼µs on the wire (×4), matching everything else.
+    // Authored from the command library (nc-maestro board): the verb string
+    // ("setTarget,ch,pos" / "goHome" / …) is in -cmd and the Maestro slot in
+    // -target — see _appendCommandView's maestro mode.
     let target = +(document.getElementById(fid + '-target')?.value || 1);
     if (target < 1 || target > NUM_MAESTRO_SLOTS) target = 1;
-    const mcmd = document.getElementById(fid + '-maecmd')?.value || 'setTarget';
-    const ch  = Math.max(0, Math.min(31, +(document.getElementById(fid + '-maech')?.value || 0)));
-    const val = +(document.getElementById(fid + '-maeval')?.value || 0);
-    // Clamp per command — input min/max attributes don't constrain
-    // programmatically-set or hand-typed out-of-range values.
-    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v) || 0));
-    let cmd;
-    if (mcmd === 'setTarget') {
-      // Preserve the exact stored ¼µs when the µs field wasn't changed. Displaying
-      // a non-multiple-of-4 ¼µs as round(¼µs/4) and re-emitting val*4 would quantize
-      // it (by up to 2 ¼µs) on every no-op save. If the field still shows the same
-      // µs as the stored value, re-emit the original ¼µs verbatim; otherwise the
-      // user edited it, so recompute val*4.
-      const inp = document.getElementById(fid + '-maeval');
-      const storedRaw = (inp && inp.dataset.rawArg != null) ? +inp.dataset.rawArg : null;
-      const pos = (storedRaw != null && Math.round(storedRaw / 4) === val)
-                    ? clamp(storedRaw, 0, 16383)
-                    : clamp(val * 4, 0, 16383);
-      cmd = `setTarget,${ch},${pos}`;   // µs → ¼µs, Maestro 14-bit cap
-    }
-    else if (mcmd === 'setSpeed')      cmd = `setSpeed,${ch},${clamp(val, 0, 16383)}`;
-    else if (mcmd === 'setAccel')      cmd = `setAccel,${ch},${clamp(val, 0, 255)}`;
-    else if (mcmd === 'setSpeedAccel') {
-      const spd = clamp(+(document.getElementById(fid + '-maespd')?.value || 0), 0, 16383);
-      const acc = clamp(+(document.getElementById(fid + '-maeacc')?.value || 0), 0, 255);
-      cmd = `setSpeedAccel,${ch},${spd},${acc}`;
-    }
-    else if (mcmd === 'setEasing') { const sp = document.getElementById(fid + '-maeease')?.value || 'release'; cmd = `setEasing,${sp}`; }
-    else if (mcmd === 'restartScript') {
-      const spec = document.getElementById(fid + '-maesm')?.value || '';
-      const ovr  = (spec && document.getElementById(fid + '-maeovr')?.checked) ? ',o' : '';   // override only meaningful with a profile
-      cmd = spec ? `restartScript,${clamp(val, 0, 127)},${spec}${ovr}` : `restartScript,${clamp(val, 0, 127)}`;
-    }
-    else if (mcmd === 'stopScript')    cmd = 'stopScript';
-    else                               cmd = 'goHome';
+    const cmd = document.getElementById(fid + '-cmd')?.value || '';
+    if (!cmd.trim()) return null;
     return { type: 'maestro', target: String(target), cmd, ...extras };
   }
   if (type === 'serial') {
@@ -10967,7 +11511,7 @@ function buildSwitchTiers(sw) {
 
     const startCount = Math.max(1, acts.length);
     for (let ai = 0; ai < startCount; ai++) {
-      const a = acts[ai] || { type: '' };
+      const a = acts[ai] || { type: 'wcb_unicast' };   // blank rows start as a (empty) command
       rows.appendChild(buildActionRow(tierKey, ai, a));
     }
 
