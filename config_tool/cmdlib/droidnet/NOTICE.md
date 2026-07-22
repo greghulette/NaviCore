@@ -12,8 +12,11 @@ GitHub.
   (the `;M` sequence-trigger verb) + `maestro-native` (device-native Pololu servo
   protocol), and added `wcb-wled` (the `;L` WLED verb set). Its WCB boards
   (wcb-hcr / wcb-mp3 / wcb-native) supersede NaviCore's small curated seed of the same
-  ids on merge; the inline seed now keeps only the file:// fallback + NaviCore-local
-  Maestro (`nc-maestro`, which routes to a NaviCore Maestro slot).
+  ids on merge. The reverse holds for the `;M` Maestro board: the vendored `maestro`'s
+  range is still narrow (id 0-2 / seq 0-9) vs the firmware's 0-9 / 0-99, so NaviCore's
+  `_cmdlibNormalize()` drops the vendored `maestro` in favor of the seed's accurate
+  `wcb-maestro`. The inline seed keeps the file:// fallback, that accurate `wcb-maestro`,
+  and NaviCore-local Maestro (`nc-maestro`, which routes to a NaviCore Maestro slot).
 - These files are used **as-is, unmodified** — read at runtime by NaviCore's
   command-library picker (`config_tool/index.html`, `_cmdlibImportFromManifest`),
   the same code path used for a live "check for updates" fetch. NaviCore's own

@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.16:42.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.19:39.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9617,8 +9617,9 @@ const NC_CMDLIB_SEED = {
   // (see cmdlib/droidnet/NOTICE.md). WLED + Maestro-;M are now ALSO upstream (wcb-wled,
   // maestro — our 4.2.0 PR) but kept inline as the file:// fallback, since fetch() of the
   // vendored library is blocked under file://. The vendored `maestro` ;M range is still
-  // narrow (id 0-2 / seq 0-9) vs the firmware's 0-9 / 0-99, so wcb-maestro below stays the
-  // accurate one until upstream widens it. nc-maestro is the LOCAL Pololu servo set
+  // narrow (id 0-2 / seq 0-9) vs the firmware's 0-9 / 0-99, so _cmdlibNormalize() drops the
+  // vendored `maestro` in favor of this accurate `wcb-maestro` until upstream widens it.
+  // nc-maestro is the LOCAL Pololu servo set
   // (local:'maestro' → a NaviCore Maestro slot); the vendored `maestro-native` is its
   // DEVICE-side twin (raw Pololu string out a WCB serial port), so the two coexist.
   enums: {},
@@ -9660,7 +9661,7 @@ const NC_CMDLIB_SEED = {
         params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
                  {name:'payload', label:'WLED /json/state document', default:'{"bri":128}', required:true} ], examples:[';L1,JSON,{"bri":128}'] },
     ]},
-    { id:'wcb-maestro', name:'Maestro (via WCB)', kind:'wcb-verb', commands: [
+    { id:'wcb-maestro', name:'Maestro (sequence trigger)', kind:'wcb-verb', commands: [
       { id:'maestro.run', name:'Run script', category:'Servo', template:';M{maestroId}{sequence}',
         params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
                  {name:'sequence', label:'Sequence #', type:'int', min:0, max:99, default:1, required:true} ], examples:[';M11'] },
@@ -10444,6 +10445,45 @@ function _cmdlibMergeLibraryData(data) {
   return added;
 }
 
+// ── Normalize the merged catalog for DISPLAY ───────────────────────────────
+// Runs after every load/merge (vendored startup, online "check for updates",
+// file import). Idempotent, so it survives a fetch that re-adds upstream boards.
+// Two jobs:
+//  (1) De-duplicate: drop a vendored board when the NaviCore seed board that
+//      supersedes it is also present. Today that's the narrow upstream `maestro`
+//      ;M board (id 0-2 / seq 0-9) losing to our firmware-accurate `wcb-maestro`
+//      (id 0-9 / seq 0-99) — same ;M verb, so the picker shows only one.
+//  (2) Order: apply NaviCore's preferred board order — NaviCore's own commands +
+//      sound/servo up top, lighting (WLED) and low-level WCB config pinned to the
+//      bottom. Unlisted boards (e.g. a new upstream one) sort into the middle in
+//      their natural manifest order (stable sort).
+const NC_CMDLIB_SUPERSEDE = { 'maestro': 'wcb-maestro' };   // vendored id -> seed id that replaces it when both present
+const NC_CMDLIB_ORDER_TOP = [
+  'navicore',
+  'wcb-hcr', 'hcr-native', 'wcb-mp3', 'chirp',
+  'wcb-maestro', 'maestro-native', 'nc-maestro',
+  'flthy-hps', 'psi-pro', 'rseries-logic', 'ia-magic-panel', 'pd-magic-panel',
+  'r2uppityspinner-alt', 'roam-a-dome',
+  'astropixels-plus', 'astropixels-sound', 'astropixels-psi',
+  'astropixels-logics', 'astropixels-holo', 'astropixels-servo',
+];
+const NC_CMDLIB_ORDER_BOTTOM = ['wcb-wled', 'wcb-native'];
+function _cmdlibBoardRank(id) {
+  const t = NC_CMDLIB_ORDER_TOP.indexOf(id);    if (t >= 0) return t;
+  const b = NC_CMDLIB_ORDER_BOTTOM.indexOf(id); if (b >= 0) return 100000 + b;
+  return 1000;   // unlisted — middle, natural order preserved by the stable sort below
+}
+function _cmdlibNormalize() {
+  const lib = window.NC_COMMAND_LIBRARY;
+  if (!lib || !Array.isArray(lib.boards)) return;
+  const ids = new Set(lib.boards.map(b => b && b.id).filter(Boolean));
+  lib.boards = lib.boards
+    .filter(b => { const sup = b && NC_CMDLIB_SUPERSEDE[b.id]; return !(sup && ids.has(sup)); })
+    .map((b, i) => ({ b, i }))
+    .sort((a, z) => (_cmdlibBoardRank(a.b.id) - _cmdlibBoardRank(z.b.id)) || (a.i - z.i))
+    .map(x => x.b);
+}
+
 // Import a library .json FILE at runtime: our schema (boards[]) OR a DroidNet
 // board file (components[] + top-level enums). We never ship DroidNet's MPL
 // data in this repo — the user brings it themselves (file or URL fetch).
@@ -10452,6 +10492,7 @@ function _cmdlibImport(file) {
   reader.onload = () => {
     try {
       const added = _cmdlibMergeLibraryData(JSON.parse(reader.result));
+      _cmdlibNormalize();
       _cmdlibShowList();
       if (!added) alert('No boards found in that file. Expected our schema (boards[]) or a DroidNet board file (components[]).');
     } catch (e) { alert('Could not import library: ' + e.message); }
@@ -10500,6 +10541,7 @@ async function _cmdlibImportFromManifest(manifestUrl, onLog) {
     }
   }
   log(`Done — ${added} board(s) imported${failed.length ? `, ${failed.length} failed` : ''}.`);
+  _cmdlibNormalize();
   return { added, failed };
 }
 
