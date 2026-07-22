@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.15:05.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.15:09.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14158,12 +14158,13 @@ function downloadCsv(text, filename) {
 
 // One-line summary of a single knob/slider/joystick output (see renderKnobOutputFields).
 function _knobOutputSummary(o, fn) {
+  // Cheat sheet wants WHAT a knob drives, not the configured endpoints — so no
+  // min/max µs / volume range here (that's setup detail, not field reference).
   if (fn === KF_HCR_VOLUME) {
     const ch = ['V', 'A', 'B'][+o.target] || ('ch' + (o.target ?? 0));
-    return `${ch} vol ${o.posMin ?? 0}–${o.posMax ?? 99}`;
+    return `${ch} volume`;
   }
-  const us = v => Math.round((+v || 0) / 4);   // stored quarter-µs → µs
-  return `Maestro ${o.target ?? 1} · Ch${o.maestroCh ?? 0} · ${us(o.posMin ?? 4000)}–${us(o.posMax ?? 8000)}µs`;
+  return `Maestro ${o.target ?? 1} · Ch${o.maestroCh ?? 0}`;
 }
 
 // Snapshot the live transmitter SVG (the model currently shown) into self-contained,
