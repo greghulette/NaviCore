@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.13:27.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.13:32.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14134,6 +14134,7 @@ function _knobOutputSummary(o, fn) {
 
 function _buildCheatSheetHtml() {
   const dash = '<span style="color:#bbb">—</span>';
+  const tapNames = ['', 'Single tap', 'Double tap', 'Triple tap'];   // local (the UI's tierNames is function-scoped)
   const tierHtml = arr => (Array.isArray(arr) && arr.length)
     ? arr.map(actionSummary).join(' <span style="color:#c0392b;font-weight:700">+</span> ') : '';
 
@@ -14185,7 +14186,7 @@ function _buildCheatSheetHtml() {
   const addClip = (a, label) => { if (a && (a.type === 'play' || a.type === 'record') && a.cmd) (clipTriggers[a.cmd] = clipTriggers[a.cmd] || []).push(label); };
   for (let mode = 1; mode <= 3; mode++) for (let btn = 1; btn <= RC_TOTAL_SLOTS; btn++) {
     const m = config.mappings[String(mode * 100 + btn)]; if (!m) continue;
-    ['t1', 't2', 't3'].forEach((tk, ti) => (m[tk] || []).forEach(a => addClip(a, `${modeLabels[mode]} · ${getBtnLabel(btn)} · ${tierNames[ti + 1]}`)));
+    ['t1', 't2', 't3'].forEach((tk, ti) => (m[tk] || []).forEach(a => addClip(a, `${modeLabels[mode]} · ${getBtnLabel(btn)} · ${tapNames[ti + 1]}`)));
   }
   for (const name of Object.keys(config.switches || {})) {
     const s = config.switches[name]; if (!s) continue;
@@ -14234,10 +14235,15 @@ ${script}
 
 // Open the cheat sheet in a new tab (Blob URL; its own toolbar handles PDF/HTML).
 function openCheatSheet() {
-  const url = URL.createObjectURL(new Blob([_buildCheatSheetHtml()], { type: 'text/html' }));
-  const w = window.open(url, '_blank');
-  if (!w) alert('Pop-up blocked — allow pop-ups for this page to open the cheat sheet.');
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  try {
+    const url = URL.createObjectURL(new Blob([_buildCheatSheetHtml()], { type: 'text/html' }));
+    const w = window.open(url, '_blank');
+    if (!w) alert('Pop-up blocked — allow pop-ups for this page to open the cheat sheet.');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    console.error('Cheat sheet build failed:', e);
+    alert('Cheat sheet failed to build: ' + ((e && e.message) || e));
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
