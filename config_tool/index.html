@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.14:35.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.14:49.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14132,6 +14132,36 @@ function _knobOutputSummary(o, fn) {
   return `Maestro ${o.target ?? 1} · Ch${o.maestroCh ?? 0} · ${us(o.posMin ?? 4000)}–${us(o.posMax ?? 8000)}µs`;
 }
 
+// Snapshot the live transmitter SVG (the model currently shown) into self-contained,
+// print-safe markup: deep-clone it and flatten each element's computed style inline so
+// it renders WITHOUT the tool's stylesheet. Hidden models keep their computed
+// display:none, so only the active TX shows. Gradient/filter url() refs are
+// de-absolutized back to bare "#id" fragments so they resolve inside the clone.
+// Returns '' if the SVG isn't present or anything goes wrong.
+function _cheatSheetTxSvg() {
+  try {
+    const src = document.querySelector('svg[viewBox="0 0 1000 830"]');
+    if (!src) return '';
+    const clone = src.cloneNode(true);
+    const PROPS = ['display','visibility','opacity','fill','fill-opacity','fill-rule',
+      'stroke','stroke-width','stroke-opacity','stroke-linecap','stroke-linejoin','stroke-dasharray',
+      'font-family','font-size','font-weight','font-style','text-anchor','dominant-baseline','letter-spacing'];
+    const deabs = v => v.indexOf('url(') < 0 ? v : v.replace(/url\(["']?[^)#]*#([^)"']*)["']?\)/g, 'url(#$1)');
+    const flatten = (from, to) => {
+      const cs = getComputedStyle(from);
+      let s = '';
+      for (const p of PROPS) { const v = cs.getPropertyValue(p); if (v) s += p + ':' + deabs(v) + ';'; }
+      to.setAttribute('style', s);
+    };
+    flatten(src, clone);
+    const a = src.querySelectorAll('*'), b = clone.querySelectorAll('*');
+    for (let i = 0; i < a.length && i < b.length; i++) flatten(a[i], b[i]);
+    clone.removeAttribute('width'); clone.removeAttribute('height');
+    clone.setAttribute('style', (clone.getAttribute('style') || '') + 'width:100%;height:auto;max-width:620px;display:block;margin:0 auto;');
+    return clone.outerHTML;
+  } catch (e) { return ''; }
+}
+
 function _buildCheatSheetHtml() {
   const dash = '<span style="color:#bbb">—</span>';
   const tapNames = ['', 'Single tap', 'Double tap', 'Triple tap'];   // local (the UI's tierNames is function-scoped)
@@ -14197,7 +14227,14 @@ function _buildCheatSheetHtml() {
   const seqSection = clipNames.length
     ? `<section><h2>Sequences · Animations</h2><p class="note">Recorded clips and where they're triggered:</p><table><thead><tr><th>Clip</th><th>Triggered by</th></tr></thead><tbody>${clipNames.map(n => `<tr><td class="trig">${escH(n)}</td><td>${clipTriggers[n].map(escH).join('<br>')}</td></tr>`).join('')}</tbody></table></section>` : '';
 
-  const body = (buttonsSection || switchesSection || knobsSection || peerSection || seqSection) || '<p class="note">No triggers configured yet.</p>';
+  // Transmitter control-label diagram — a self-contained snapshot of the live TX SVG.
+  const tx = _cheatSheetTxSvg();
+  const txSection = tx ? `<section><h2>Transmitter — control labels</h2><p class="note">Where each button, switch, trim, and knob sits on your transmitter (active model).</p>${tx}</section>` : '';
+  // Concatenate every trigger section (each is '' when empty); the "nothing yet" note
+  // shows only when they are ALL empty. (An earlier `||` chain wrongly rendered just the
+  // first non-empty section, dropping Switches / Knobs / Sequences.)
+  const triggers = buttonsSection + switchesSection + knobsSection + peerSection + seqSection;
+  const body = txSection + (triggers || '<p class="note">No triggers configured yet.</p>');
   const when = new Date().toLocaleString();
   // Inline downloader for the printed page's toolbar. Assembled from split literals
   // so this source can't contain a "</scr"+"ipt>" that would end index.html's script.
