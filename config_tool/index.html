@@ -2280,7 +2280,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.21:25.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.22:22.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9878,6 +9878,12 @@ function ncDecodeCommand(wire) {
   if (!s) return null;
   for (const board of (ncCommandLibrary().boards || [])) {
     for (const cmd of (board.commands || [])) {
+      // Clip-based local commands (record/play) carry a free-text arg that would
+      // match anything — never decode them (they'd hijack real wire commands and
+      // can't be uniquely recovered anyway). Maestro locals ARE decodable (unique
+      // verbs) so they're allowed through.
+      const lk = cmd.local || board.local;
+      if (lk && lk !== 'maestro') continue;
       const pat = _ncCommandPattern(cmd);
       if (!pat.regex) continue;   // ambiguous template — refuse to guess
       const m = pat.regex.exec(s);
@@ -9929,7 +9935,31 @@ async function openCmdLibrary(fid) {
     else _cmdlibOpenView(fid);
   }
 }
+// Find a library command that maps to a local action kind (record/play/stop).
+function _cmdlibFindLocal(kind) {
+  for (const board of (ncCommandLibrary().boards || [])) {
+    for (const cmd of (board.commands || [])) {
+      if (((cmd.local || board.local) === kind)) return { board, cmd };
+    }
+  }
+  return null;
+}
 function _cmdlibOpenView(fid) {
+  // A local action (record/play/stop) can't be decoded from its free-text clip —
+  // open its library command directly by type, pre-filled from the row's fields.
+  const rowType = document.getElementById(_cmdlibRowTypeSelId(fid))?.value || '';
+  if (rowType === 'record' || rowType === 'play' || rowType === 'stop') {
+    const found = _cmdlibFindLocal(rowType);
+    if (found) {
+      _cmdlibSel = found;
+      _cmdlibValues = {};
+      (found.cmd.params || []).forEach(p => { _cmdlibValues[p.name] = (p.default !== undefined ? String(p.default) : ''); });
+      const clipEl = document.getElementById(fid + '-clip'); if (clipEl) _cmdlibValues.clip = clipEl.value;
+      const loopEl = document.getElementById(fid + '-loop'); if (loopEl) _cmdlibValues.loop = loopEl.checked ? '1' : '';
+      _cmdlibShowComposer();
+      return;
+    }
+  }
   let curCmd = document.getElementById(fid + '-cmd')?.value || '';
   const mW = /^;W\d+;S\d([\s\S]*)$/.exec(curCmd);   // strip a device ";W<wcb>;S<port>" prefix (port = one digit) so the command decodes
   if (mW) curCmd = mW[1];
@@ -10137,6 +10167,9 @@ function _cmdlibShowComposer() {
       field = `<span style="display:inline-flex;gap:6px;align-items:center">
         <input type="number" id="${pid}" data-pulseus="${esc(p.name)}" min="500" max="2500" step="1" value="${us}" style="width:80px" title="PWM pulse width in µs (500-2500)"><span style="font-size:11px;color:var(--muted)">PWM µs</span>
         <input type="number" id="${pid}-mv" min="2000" max="10000" step="1" value="${wire}" style="width:80px" title="Maestro target value (2000-10000 = µs × 4)"><span style="font-size:11px;color:var(--muted)">Maestro</span></span>`;
+    } else if (p.type === 'bool') {
+      const on = _cmdlibValues[p.name] && _cmdlibValues[p.name] !== 'false' && _cmdlibValues[p.name] !== '0';
+      field = `<input type="checkbox" id="${pid}" data-pbool="${esc(p.name)}" ${on ? 'checked' : ''} style="width:auto">`;
     } else if (p.enum) {
       const en = _cmdlibEnum(p.enum);
       const opts = ((en && en.values) || []).map(v =>
@@ -10149,8 +10182,14 @@ function _cmdlibShowComposer() {
     }
     html += `<div class="field-group"><label>${esc(p.label || p.name)}</label>${field}</div>`;
   });
-  html += `<div><div style="font-size:11px;color:var(--muted)">Command <span style="opacity:.8">— pick where to send it (WCB / serial port) on the action row</span></div>
-    <div id="cmdlib-preview" style="font-family:monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);word-break:break-all"></div></div>`;
+  const _lk = _cmdlibLocalKind(board, cmd);
+  if (_lk && _lk !== 'maestro') {
+    // Controller-local action (record/play/stop) — no wire string, no destination.
+    html += `<div style="font-size:12px;color:var(--muted)">Runs on <b>this controller</b> (no destination to pick).</div>`;
+  } else {
+    html += `<div><div style="font-size:11px;color:var(--muted)">Command <span style="opacity:.8">— pick where to send it (WCB / serial port) on the action row</span></div>
+      <div id="cmdlib-preview" style="font-family:monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);word-break:break-all"></div></div>`;
+  }
   html += `<div class="wcb-send-row" style="justify-content:flex-end;gap:8px">
     <button type="button" id="cmdlib-cancel2" class="btn btn-ghost">Cancel</button>
     <button type="button" id="cmdlib-use" class="btn btn-blue">Use command →</button></div>`;
@@ -10158,6 +10197,9 @@ function _cmdlibShowComposer() {
   body.innerHTML = html;
   body.querySelectorAll('[data-pname]').forEach(el => {
     el.oninput = el.onchange = () => { _cmdlibValues[el.dataset.pname] = el.value; _cmdlibUpdatePreview(); };
+  });
+  body.querySelectorAll('[data-pbool]').forEach(el => {
+    el.onchange = () => { _cmdlibValues[el.dataset.pbool] = el.checked ? '1' : ''; _cmdlibUpdatePreview(); };
   });
   // Servo-pulse params: two linked fields — PWM µs and the raw Maestro value
   // (µs × 4) — that update each other; the stored wire value is the Maestro value.
@@ -10203,7 +10245,18 @@ function _cmdlibUse() {
   const board = _cmdlibSel.board, cmd = _cmdlibSel.cmd, fid = _cmdlibFid;
   const mode = _cmdlibDestMode(board, cmd);
   let action;
-  if (mode === 'maestro') {
+  if (mode === 'local') {
+    // Controller-local action — record / play / stop. No destination; params are
+    // the clip name (record/play) and a loop flag (play).
+    const lk = _cmdlibLocalKind(board, cmd);
+    // Match the record/play editor's read-back sanitize so the composer/row/saved
+    // value all agree (device clip names: [A-Za-z0-9_-], max 32 chars).
+    const clip = (_cmdlibValues.clip || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
+    const loopOn = !!(_cmdlibValues.loop && _cmdlibValues.loop !== '0' && _cmdlibValues.loop !== 'false');
+    if (lk === 'record')    action = { type: 'record', cmd: clip };
+    else if (lk === 'play') action = { type: 'play', cmd: clip, ...(loopOn ? { fn: 1 } : {}) };
+    else                    action = { type: 'stop' };
+  } else if (mode === 'maestro') {
     const cur = +(document.getElementById(fid + '-target')?.value) || 1;   // keep the row's slot if any
     action = { type: 'maestro', target: String(cur >= 1 && cur <= NUM_MAESTRO_SLOTS ? cur : 1), cmd: wire };
   } else if (mode === 'wled') {
@@ -10340,8 +10393,13 @@ async function _cmdlibImportFromManifest(manifestUrl, onLog) {
 // raw.githubusercontent.com. _cmdlibReady lets openCmdLibrary wait a beat on
 // a slow first load instead of showing a half-populated list.
 const NC_DROIDNET_LOCAL_MANIFEST = 'cmdlib/droidnet/manifest.json';
+// NaviCore's own controller-native commands (record/play/stop sequences), authored
+// in the DroidNet board schema so the file can be PR'd to that library verbatim.
+const NC_NAVICORE_LOCAL_MANIFEST = 'cmdlib/navicore/manifest.json';
 let _cmdlibReady = _cmdlibImportFromManifest(NC_DROIDNET_LOCAL_MANIFEST)
-  .catch(e => { console.warn('Command library: vendored snapshot failed to load —', e.message); return null; });
+  .catch(e => { console.warn('Command library: vendored snapshot failed to load —', e.message); return null; })
+  .then(() => _cmdlibImportFromManifest(NC_NAVICORE_LOCAL_MANIFEST))
+  .catch(e => { console.warn('Command library: NaviCore boards failed to load —', e.message); return null; });
 
 // A prominent, hard-to-miss entry point into the command library — a full-
 // width primary button (not a tiny icon) so it is the obvious next step once
@@ -10384,6 +10442,18 @@ function _appendChangeTypeLink(container) {
   link.title = 'Switch this action to a different type';
   link.onclick = () => _setRowKind(fid, '');
   container.appendChild(link);
+}
+// A "📚 Change" affordance for the local (record/play/stop) editors so they can be
+// re-opened in the library composer, matching the wire-command rows.
+function _appendLibBuild(container) {
+  const fid = container.id;
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'btn btn-ghost';
+  b.style.cssText = 'padding:2px 8px;font-size:11px;align-self:center';
+  b.textContent = '\u{1F4DA} Change';
+  b.title = 'Edit this via the command library';
+  b.onclick = () => openCmdLibrary(fid);
+  container.appendChild(b);
 }
 
 // Destination options for a device-native command: each known WCB's serial ports
@@ -10518,11 +10588,12 @@ function _appendCommandView(container, action) {
   cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
   cmdInput.maxLength = 95; cmdInput.value = cmd;
   cmdInput.placeholder = 'pick or type a command';
-  cmdInput.style.cssText = 'width:220px;font-family:monospace';
-  // Line 1: the command and its destination, side by side. The builder sits on
-  // the line BELOW (this row is full-width so everything after it wraps under).
+  cmdInput.style.cssText = 'width:200px;font-family:monospace';
+  // Line 1: the command and its two destination dropdowns, side by side on ONE
+  // line (nowrap). The builder sits on the line BELOW. If the row is too narrow
+  // for the (capped-width) controls it scrolls horizontally rather than wrapping.
   const row1 = document.createElement('div');
-  row1.style.cssText = 'display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;flex-basis:100%';
+  row1.style.cssText = 'display:flex;gap:8px;align-items:flex-end;flex-wrap:nowrap;flex-basis:100%;overflow-x:auto';
   row1.appendChild(makeFieldGroup('Command', cmdInput));
   container.appendChild(row1);
 
@@ -10559,9 +10630,9 @@ function _appendCommandView(container, action) {
     else                               { wcbVal = String(action.target || 1); portVal = 'auto'; }
 
     const wcbSel = document.createElement('select'); wcbSel.id = fid + '-wcbsel';
-    wcbSel.innerHTML = _wcbTargetOptionsHtml(wcbVal); wcbSel.value = wcbVal;
+    wcbSel.style.cssText = 'max-width:150px'; wcbSel.innerHTML = _wcbTargetOptionsHtml(wcbVal); wcbSel.value = wcbVal;
     const portSel = document.createElement('select'); portSel.id = fid + '-portsel';
-    portSel.innerHTML = _portOptionsHtml(wcbVal, portVal); portSel.value = portVal;
+    portSel.style.cssText = 'max-width:180px'; portSel.innerHTML = _portOptionsHtml(wcbVal, portVal); portSel.value = portVal;
 
     const sync = () => {
       const w = wcbSel.value, p = portSel.value;
@@ -10731,6 +10802,7 @@ function appendActionFields(container, action) {
     hint.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
     hint.textContent = 'Toggles recording — fire to start, fire again to stop + save. Named = overwrite that clip; blank = auto-save as rec_N (never lost).';
     container.appendChild(hint);
+    _appendLibBuild(container);
     _appendChangeTypeLink(container);
   } else if (type === 'play') {
     _ensureClipNamesFresh();
@@ -10751,12 +10823,14 @@ function appendActionFields(container, action) {
     loopLabel.appendChild(loopCb);
     loopLabel.appendChild(document.createTextNode('Loop'));
     container.appendChild(loopLabel);
+    _appendLibBuild(container);
     _appendChangeTypeLink(container);
   } else if (type === 'stop') {
     const hint = document.createElement('div');
     hint.style.cssText = 'font-size:11px;color:var(--muted);align-self:center';
     hint.textContent = 'Stops recording (saves) or playback — no parameters.';
     container.appendChild(hint);
+    _appendLibBuild(container);
     _appendChangeTypeLink(container);
   }
 }
