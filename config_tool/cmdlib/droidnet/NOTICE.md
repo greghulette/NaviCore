@@ -16,7 +16,12 @@ GitHub.
   range is still narrow (id 0-2 / seq 0-9) vs the firmware's 0-9 / 0-99, so NaviCore's
   `_cmdlibNormalize()` drops the vendored `maestro` in favor of the seed's accurate
   `wcb-maestro`. The inline seed keeps the file:// fallback, that accurate `wcb-maestro`,
-  and NaviCore-local Maestro (`nc-maestro`, which routes to a NaviCore Maestro slot).
+  and `nc-maestro` (the Pololu servo command set that routes to a NaviCore configured-
+  Maestro slot). `_cmdlibNormalize()` likewise drops the vendored `maestro-native`: its
+  commands are identical to `nc-maestro`'s, but it addresses a raw `;W<wcb>;S<port>` WCB
+  serial port, whereas `nc-maestro` targets a configured Maestro slot (1-8) that the
+  firmware resolves to a local Maestro (Serial2) or a remote one (ESP-NOW broadcast,
+  disambiguated by Pololu device #) — so the user never types WCB/port numbers.
 - These files are used **as-is, unmodified** — read at runtime by NaviCore's
   command-library picker (`config_tool/index.html`, `_cmdlibImportFromManifest`),
   the same code path used for a live "check for updates" fetch. NaviCore's own

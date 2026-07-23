@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.19:39.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.22:10.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9619,9 +9619,11 @@ const NC_CMDLIB_SEED = {
   // vendored library is blocked under file://. The vendored `maestro` ;M range is still
   // narrow (id 0-2 / seq 0-9) vs the firmware's 0-9 / 0-99, so _cmdlibNormalize() drops the
   // vendored `maestro` in favor of this accurate `wcb-maestro` until upstream widens it.
-  // nc-maestro is the LOCAL Pololu servo set
-  // (local:'maestro' → a NaviCore Maestro slot); the vendored `maestro-native` is its
-  // DEVICE-side twin (raw Pololu string out a WCB serial port), so the two coexist.
+  // nc-maestro is the Pololu servo command set (local:'maestro' → a NaviCore Maestro
+  // slot 1-8; the firmware routes Local→Serial2 or Remote→ESP-NOW broadcast-by-device#,
+  // so ONE board covers both local and remote Maestros). The vendored `maestro-native`
+  // has the SAME commands but addresses a raw `;W<wcb>;S<port>` WCB port, so
+  // _cmdlibNormalize() drops it in favor of nc-maestro (no WCB/port numbers to type).
   enums: {},
   boards: [
     { id:'wcb-wled', name:'WLED Lighting', kind:'wcb-verb', commands: [
@@ -9674,7 +9676,7 @@ const NC_CMDLIB_SEED = {
     // protocol also has Set PWM (0x8A), Set Multiple Targets (0x9F), Restart-with-
     // Parameter (0xA8), and the Get* queries (0x90/0x93/0xA1/0xA9, need 2-way serial)
     // — model those here too when the firmware PR lands to implement them.
-    { id:'nc-maestro', name:'Maestro (local servo)', kind:'maestro', local:'maestro', commands: [
+    { id:'nc-maestro', name:'Maestro (Pololu servo)', kind:'maestro', local:'maestro', commands: [
       { id:'maestro.setTarget', name:'Set servo position', category:'Servo', template:'setTarget,{channel},{position}',
         params:[ {name:'channel',  label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
                  {name:'position', label:'Position', type:'int', unit:'servoPulse', min:0, max:16383, default:6000, required:true} ], examples:['setTarget,0,6000'] },
@@ -10450,18 +10452,26 @@ function _cmdlibMergeLibraryData(data) {
 // file import). Idempotent, so it survives a fetch that re-adds upstream boards.
 // Two jobs:
 //  (1) De-duplicate: drop a vendored board when the NaviCore seed board that
-//      supersedes it is also present. Today that's the narrow upstream `maestro`
-//      ;M board (id 0-2 / seq 0-9) losing to our firmware-accurate `wcb-maestro`
-//      (id 0-9 / seq 0-99) — same ;M verb, so the picker shows only one.
+//      supersedes it is also present (see NC_CMDLIB_SUPERSEDE). Two cases today:
+//      the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9) loses to our
+//      firmware-accurate `wcb-maestro` (id 0-9 / seq 0-99); and the generic
+//      `maestro-native` (raw Pololu bytes to a `;W<wcb>;S<port>` WCB port) loses
+//      to `nc-maestro`, whose IDENTICAL commands instead target a NaviCore
+//      configured-Maestro slot (firmware picks Local Serial2 vs remote ESP-NOW
+//      broadcast by Pololu device#), so the author never types WCB/port numbers.
 //  (2) Order: apply NaviCore's preferred board order — NaviCore's own commands +
 //      sound/servo up top, lighting (WLED) and low-level WCB config pinned to the
 //      bottom. Unlisted boards (e.g. a new upstream one) sort into the middle in
 //      their natural manifest order (stable sort).
-const NC_CMDLIB_SUPERSEDE = { 'maestro': 'wcb-maestro' };   // vendored id -> seed id that replaces it when both present
+// vendored id -> NaviCore seed id that replaces it when both are present.
+const NC_CMDLIB_SUPERSEDE = {
+  'maestro':        'wcb-maestro',   // narrow upstream ;M board -> our firmware-accurate ;M board
+  'maestro-native': 'nc-maestro',    // raw-WCB-port Pololu board -> our configured-Maestro-slot board
+};
 const NC_CMDLIB_ORDER_TOP = [
   'navicore',
   'wcb-hcr', 'hcr-native', 'wcb-mp3', 'chirp',
-  'wcb-maestro', 'maestro-native', 'nc-maestro',
+  'wcb-maestro', 'nc-maestro',   // maestro-native is superseded by nc-maestro above, so it never renders
   'flthy-hps', 'psi-pro', 'rseries-logic', 'ia-magic-panel', 'pd-magic-panel',
   'r2uppityspinner-alt', 'roam-a-dome',
   'astropixels-plus', 'astropixels-sound', 'astropixels-psi',
