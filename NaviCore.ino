@@ -556,6 +556,55 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
   return wrote == frameLen;             // false if the sink dropped any byte (truncated)
 }
 
+// ── Maestro 2-way query (LOCAL slots only — Phase 1) ─────────────────────────
+// NaviCore is otherwise fire-and-forget; this is the ONE Maestro READ path. A Pololu
+// query (Get Position / Moving State / Errors) makes the Maestro reply with a fixed
+// number of RAW, header-less bytes on its TX line (Serial2 RX = GPIO7). The reply
+// carries NO address or echo, so we drain stale RX, send exactly ONE request, then
+// read exactly `nReply` bytes — the caller knows which query it issued. Only a LOCAL
+// slot (type 1, wired to Serial2) can answer synchronously; a Remote slot's reply
+// would have to be relayed back by its WCB (Phase 2, not yet built). Runs in
+// loop()/Core-1 (execCliLine) where Serial2 I/O is race-free; the ~25 ms deadline
+// bounds the stall so a missing Maestro or an unwired RX line can't starve SBUS.
+//   return: bytes read (== nReply on success, < nReply on timeout), or
+//           -1 = slot not Local (no reply path yet), -2 = send failed (disabled/bad device#).
+static int maestroLocalQuery(uint8_t id, uint8_t cmd_compact,
+                             const uint8_t* payload, size_t plen,
+                             uint8_t* reply, size_t nReply) {
+  if (id < 1 || id > RC_NUM_MAESTROS) return -2;
+  const uint8_t t = rcConfig.maestros[id - 1].type;
+  if (t == 0) return -2;                                   // disabled slot
+  if (t != 1) return -1;                                   // Remote (type 2) → no synchronous reply yet (Phase 2)
+  while (Serial2.available()) Serial2.read();              // drop stale RX so the decode aligns
+  if (!maestroWrite(id, cmd_compact, payload, plen)) return -2;
+  size_t got = 0; const uint32_t t0 = millis();
+  while (got < nReply && (millis() - t0) < 25) {
+    if (Serial2.available()) reply[got++] = (uint8_t)Serial2.read();
+  }
+  return (int)got;
+}
+
+// Emit a Maestro query result as a compact machine marker [MAE:<slot>]{…} — the
+// config tool intercepts it (handleBoardMessage → _maeReadFeed) to fill that slot's
+// inline readout and echo a friendly terminal line; a direct USB user just sees the
+// JSON. kind: 0=position (ch used), 1=moving-state, 2=errors. `n` = maestroLocalQuery()
+// return (bytes read, -1 remote, -2 disabled).
+static void maestroReportQuery(uint8_t slot, uint8_t kind, uint8_t ch, int n, uint16_t val) {
+  const int   want = (kind == 1) ? 1 : 2;
+  const char* qk   = (kind == 0) ? "pos" : (kind == 1) ? "mov" : "err";
+  const char* err  = (n == -1) ? "remote" : (n == -2) ? "disabled" : (n < want) ? "timeout" : nullptr;
+  if (err) {
+    if (kind == 0) Serial.printf("[MAE:%u]{\"q\":\"pos\",\"ch\":%u,\"err\":\"%s\"}\n", slot, ch, err);
+    else           Serial.printf("[MAE:%u]{\"q\":\"%s\",\"err\":\"%s\"}\n", slot, qk, err);
+  } else if (kind == 0) {
+    Serial.printf("[MAE:%u]{\"q\":\"pos\",\"ch\":%u,\"val\":%u}\n", slot, ch, val);
+  } else if (kind == 1) {
+    Serial.printf("[MAE:%u]{\"q\":\"mov\",\"val\":%u}\n", slot, val);
+  } else {
+    Serial.printf("[MAE:%u]{\"q\":\"err\",\"val\":%u}\n", slot, val);
+  }
+}
+
 // Valid Maestro channel guard (0-31 covers Micro/Mini Maestro 6/12/18/24).
 // An out-of-range channel is a config error; warn + skip so it isn't a silent
 // no-op the user has to debug by guessing the servo/wiring is broken.
@@ -2168,21 +2217,47 @@ bool execCliLine(const String& line) {
     }
     return true;
   }
-  // ── Direct Maestro control — drives the config-tool timeline editor's LIVE
-  //    scrub/preview (servos follow the yellow cursor). Fire-and-forget, silent
-  //    (a scrub streams many of these). Runs in loop()/Core-1 like the rest of
-  //    the CLI, so the Maestro serial write is safe.
+  // ── Direct Maestro control + 2-way queries. Fire-and-forget writes drive the
+  //    config-tool timeline editor's LIVE scrub/preview (servos follow the yellow
+  //    cursor); the GET/MOVING/ERR queries read a LOCAL Maestro's reply off Serial2
+  //    and print a [MAE:<slot>]{…} marker (see maestroLocalQuery/maestroReportQuery).
+  //    All run in loop()/Core-1 like the rest of the CLI, so the Maestro serial I/O
+  //    is safe; queries bound the read so a missing/unwired Maestro can't stall SBUS.
   //      ?MAE,<slot>,<ch>,<pos>   set target (¼µs) on logical Maestro slot 1-8, ch 0-31
   //      ?MAE,FREE,<slot>,<ch>    speed=0/accel=0 so the preview tracks the cursor snappily
+  //      ?MAE,GET,<slot>,<ch>     Get Position    → {"q":"pos",…}  (2-byte reply, ¼µs)
+  //      ?MAE,MOVING,<slot>       Get Moving State → {"q":"mov",…}  (1-byte reply, 0/1)
+  //      ?MAE,ERR,<slot>          Get Errors       → {"q":"err",…}  (2-byte reply; CLEARS errors on read)
+  //    Queries are LOCAL-slot only (a Remote reply would need WCB relay — Phase 2).
   if (line.length() >= 5 && line.substring(0, 5).equalsIgnoreCase("?MAE,")) {
     String a = line.substring(5); a.trim();
     int c1 = a.indexOf(','), c2 = (c1 >= 0) ? a.indexOf(',', c1 + 1) : -1;
-    if (a.substring(0, 4).equalsIgnoreCase("FREE")) {
+    String verb = (c1 >= 0) ? a.substring(0, c1) : a;   // first field: FREE/GET/MOVING/ERR, or a numeric slot
+    if (verb.equalsIgnoreCase("FREE")) {
       if (c1 > 0 && c2 > c1) {
         maestroSetSpeed((uint8_t)a.substring(c1 + 1, c2).toInt(), (uint8_t)a.substring(c2 + 1).toInt(), 0);
         maestroSetAccel((uint8_t)a.substring(c1 + 1, c2).toInt(), (uint8_t)a.substring(c2 + 1).toInt(), 0);
       }
-    } else if (c1 > 0 && c2 > c1) {
+    } else if (verb.equalsIgnoreCase("GET")) {          // ?MAE,GET,<slot>,<ch> — Get Position
+      if (c1 > 0 && c2 > c1) {
+        uint8_t slot = (uint8_t)a.substring(c1 + 1, c2).toInt();
+        uint8_t ch   = (uint8_t)a.substring(c2 + 1).toInt();
+        uint8_t rb[2]; int n = maestroLocalQuery(slot, 0x90, &ch, 1, rb, 2);
+        maestroReportQuery(slot, 0, ch, n, (n == 2) ? (uint16_t)(rb[0] | (rb[1] << 8)) : 0);
+      }
+    } else if (verb.equalsIgnoreCase("MOVING")) {       // ?MAE,MOVING,<slot> — Get Moving State
+      if (c1 > 0) {
+        uint8_t slot = (uint8_t)a.substring(c1 + 1).toInt();
+        uint8_t rb[1]; int n = maestroLocalQuery(slot, 0x93, nullptr, 0, rb, 1);
+        maestroReportQuery(slot, 1, 0, n, (n == 1) ? rb[0] : 0);
+      }
+    } else if (verb.equalsIgnoreCase("ERR")) {          // ?MAE,ERR,<slot> — Get Errors (clears on read)
+      if (c1 > 0) {
+        uint8_t slot = (uint8_t)a.substring(c1 + 1).toInt();
+        uint8_t rb[2]; int n = maestroLocalQuery(slot, 0xA1, nullptr, 0, rb, 2);
+        maestroReportQuery(slot, 2, 0, n, (n == 2) ? (uint16_t)(rb[0] | (rb[1] << 8)) : 0);
+      }
+    } else if (c1 > 0 && c2 > c1) {                     // ?MAE,<slot>,<ch>,<pos> — set target
       maestroSetTarget((uint8_t)a.substring(0, c1).toInt(),
                        (uint8_t)a.substring(c1 + 1, c2).toInt(),
                        (uint16_t)a.substring(c2 + 1).toInt());

@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.22:27.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">23.09:31.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6880,6 +6880,36 @@ function _gcExpiredFragments() {
   }
 }
 
+// A Maestro 2-way query reply from the firmware:
+//   [MAE:<slot>]{"q":"pos","ch":0,"val":6000} | {"q":"mov","val":0} | {"q":"err","val":0}
+//   or {"q":…,"err":"timeout"|"remote"|"disabled"}
+// Fills that slot's inline readout (#mae-read-<slot>) in the Maestro Locations panel
+// and echoes a friendly one-liner to the NaviCore terminal.
+function _maeReadFeed(line) {
+  const m = line.match(/^\[MAE:(\d+)\]([\s\S]*)$/);
+  if (!m) return;
+  const slot = m[1];
+  let d; try { d = JSON.parse(m[2]); } catch (e) { return; }
+  let inline, term;
+  if (d.err) {
+    inline = ({ timeout: 'no reply', remote: 'remote — N/A', disabled: 'slot off' })[d.err] || d.err;
+    term = `M${slot} ${d.q || 'read'}: ${inline}`;
+  } else if (d.q === 'pos') {
+    inline = `ch${d.ch} = ${d.val} ¼µs`;
+    term = `M${slot} ch${d.ch} position = ${d.val} ¼µs (≈${Math.round(d.val / 4)} µs)`;
+  } else if (d.q === 'mov') {
+    inline = d.val ? 'moving' : 'stopped';
+    term = `M${slot} moving = ${d.val ? 'yes' : 'no'}`;
+  } else if (d.q === 'err') {
+    const hex = '0x' + (d.val || 0).toString(16).toUpperCase().padStart(4, '0');
+    inline = hex;
+    term = `M${slot} errors = ${hex}${d.val ? '' : ' (none)'} — cleared on read`;
+  } else return;
+  const el = document.getElementById('mae-read-' + slot);
+  if (el) el.textContent = inline;
+  appendTerminalLine('< ' + term, 'rx', 'main');
+}
+
 function handleBoardMessage(line) {
   // OTA markers ([OTA:ACK,..]/[OTA:NAK,..]/[OTA:BEGIN,..]/[OTA:END,..]) are not
   // JSON — feed them to the OTA-over-USB orchestrator's marker resolver (when an
@@ -6894,6 +6924,10 @@ function handleBoardMessage(line) {
   // "Timeline editor" section below for _clipDlFeed / _tlFeedMarker.
   if (line.startsWith('[CLIPDL:')) { _clipDlFeed(null, line); return; }
   if (line.startsWith('[CLIPUL:')) { _tlFeedMarker(line); return; }
+  // Maestro 2-way query reply (?MAE,GET/MOVING/ERR): [MAE:<slot>]{…} — route to the
+  // Maestro Locations inline readout, not the terminal. Also re-dispatched below inside
+  // the [TERM:] unwrap so a Phase-2 remote reply relayed as [TERM:20][MAE:…] still works.
+  if (line.startsWith('[MAE:')) { _maeReadFeed(line); return; }
   // RTERM — a NaviCore CLI line the bridge WCB relayed to USB, formatted
   // "[TERM:<sourceWCB>]<text>".  This is the remote board's CLI output, so it
   // belongs in the primary (NaviCore) pane.  RC #20 lines show bare; any other
@@ -6908,6 +6942,7 @@ function handleBoardMessage(line) {
       if (_clipListFeed(m[1], m[2])) return;
       if (_clipDlFeed(m[1], m[2])) return;
       if (m[2].startsWith('[CLIPUL:')) { _tlFeedMarker(m[2]); return; }
+      if (m[2].startsWith('[MAE:')) { _maeReadFeed(m[2]); return; }
       appendTerminalLine((m[1] === String(RC_WCB_DEVICE_ID) ? '' : `[#${m[1]}] `) + m[2], 'rx', 'main');
     } else {
       appendTerminalLine(line, 'rx', 'main');
@@ -7806,6 +7841,23 @@ function renderMaestroLocations() {
       if (f) _importMaestroFile(slotNum, f);
     });
     wrap.appendChild(row);
+    // ── 2-way read (LOCAL slots only) — reads a live value off the Maestro and shows
+    //    it inline. Remote/disabled slots have no synchronous reply path yet (Phase 2),
+    //    so these controls appear only for Local slots. The firmware answers with a
+    //    [MAE:<slot>] marker that _maeReadFeed() routes into #mae-read-<slot>.
+    if (slot.type === 1) {
+      const diag = document.createElement('div');
+      diag.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11px;margin:0 0 8px 46px;color:var(--muted)';
+      diag.innerHTML = `
+        <span>Read live:</span>
+        <select data-mae-readch="${slotNum}" style="font-size:11px;padding:1px 3px">${_maestroChOptions(slotNum, 0)}</select>
+        <button type="button" class="btn btn-ghost" data-mae-read="GET"    data-mae-slot="${slotNum}" style="font-size:11px;padding:1px 8px" title="Get the selected channel's current position (¼µs)">Position</button>
+        <button type="button" class="btn btn-ghost" data-mae-read="MOVING" data-mae-slot="${slotNum}" style="font-size:11px;padding:1px 8px" title="Is any speed/accel-limited servo still moving?">Moving?</button>
+        <button type="button" class="btn btn-ghost" data-mae-read="ERR"    data-mae-slot="${slotNum}" style="font-size:11px;padding:1px 8px" title="Read AND CLEAR the Maestro's error flags">Errors ⚠</button>
+        <span id="mae-read-${slotNum}" style="font-family:monospace;color:var(--text)"></span>
+      `;
+      wrap.appendChild(diag);
+    }
   }
   // Wire change handlers — mutate config.maestros[i] directly, then refresh
   // any open knob modal's Maestro target dropdowns so labels stay in sync.
@@ -7821,6 +7873,8 @@ function renderMaestroLocations() {
       if (editingKnob && editingKnobDraft && +editingKnobDraft.function === KF_MAESTRO_PASSTHROUGH) {
         renderKnobOutputs();
       }
+      // Type toggled → re-render so the Local-only "Read live" controls show/hide now.
+      if (fld === 'type') renderMaestroLocations();
     });
   });
   // Import a Maestro settings file for a slot (one hidden <input> reused per click).
@@ -7837,6 +7891,24 @@ function renderMaestroLocations() {
   });
   wrap.querySelectorAll('[data-mae-clearimp]').forEach(btn => {
     btn.addEventListener('click', () => _clearMaestroImport(+btn.dataset.maeClearimp));
+  });
+  // 2-way read buttons (Local slots): fire the query CLI; the reply returns as a
+  // [MAE:<slot>] marker handled by _maeReadFeed. GET carries the picked channel.
+  wrap.querySelectorAll('[data-mae-read]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const slot = +btn.dataset.maeSlot;
+      const verb = btn.dataset.maeRead;
+      const out = document.getElementById('mae-read-' + slot);
+      // '…' until the [MAE:<slot>] reply lands; if none comes (not connected, or the
+      // CLI never reached the board) fall back so the readout doesn't hang forever.
+      if (out) { out.textContent = '…'; setTimeout(() => { if (out.textContent === '…') out.textContent = '(no response)'; }, 1500); }
+      if (verb === 'GET') {
+        const chSel = wrap.querySelector(`[data-mae-readch="${slot}"]`);
+        sendRcCli(`?MAE,GET,${slot},${chSel ? +chSel.value : 0}`);
+      } else {
+        sendRcCli(`?MAE,${verb},${slot}`);
+      }
+    });
   });
 }
 
