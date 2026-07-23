@@ -53,6 +53,15 @@ port numbers anywhere in the Maestro UX.**
 
 ## 2. Proposed change
 
+> **STATUS 2026-07-23 — DISCRETE writes: BUILT (commit `dea2220`).** The WCB side
+> (WcbMaestro verb parser) and NaviCore's discrete-write emit both shipped. NaviCore
+> auto-routes at dispatch: a **discrete** command (via `executeMaestroCmd`) to a
+> **Remote** slot is sent WCB-native; **passthrough / scrub / replay-keyframe streams
+> stay RAW** (a `g_maeDiscrete` flag scoped to `executeMaestroCmd` is the discriminator
+> — see `maestroWrite`). Addressing is **unicast-by-WDP, not broadcast** (§3b was
+> revised — see below). Remaining: the WCB-method **reads** (Phase 2, §10) and a
+> `stopScript`/`setEasing` WcbCmd verb (today `stopScript` falls back to the raw path).
+
 Move the **byte-building from NaviCore to the WCB**, so the mesh carries a **verb**,
 not raw Pololu bytes:
 
@@ -81,8 +90,18 @@ The verbs are identical to what `nc-maestro` already emits (`cmd` is
 - **WCB = executor.** It needs only the incoming verb + `device#` + a verb parser.
   **Do NOT** start storing channel names/limits on the WCB — that forks the config.
 
-### 3b. Addressing — RECOMMENDED: keep device#-broadcast semantics
-- **Option A (recommended, drop-in):** NaviCore broadcasts the verb frame tagged
+### 3b. Addressing — DECIDED: unicast-by-WDP (Option B, as built)
+> **Revised 2026-07-23.** We went with **Option B (unicast)**, NOT the broadcast in
+> Option A — but with **no schema change**, because WDP already carries the mapping:
+> the WCB advertises its local Maestro device#s (`WDP_TLV_MAESTRO 0x06`), NaviCore
+> decodes them into `WCBNeighbor.maestroIds[]`, and `wcbHostingMaestro(dev)` resolves
+> `device# → hosting WCB` from live neighbors at dispatch. So it self-heals if a
+> Maestro moves WCBs, and stays location-independent (you still address by device#, the
+> firmware finds the WCB). If no WCB advertises the device# yet (WDP not converged),
+> it falls back to the raw broadcast so the command still lands. The original Options
+> A/B text is kept below for context.
+
+- **Option A (drop-in, NOT chosen):** NaviCore broadcasts the verb frame tagged
   with the target `device#`. Every WCB builds the Pololu bytes (which embed that
   `device#`) and writes to its Maestro port; only the addressed Maestro obeys —
   **exactly today's semantics**, just with the byte-building moved to the WCB. This
