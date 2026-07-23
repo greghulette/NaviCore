@@ -50,6 +50,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0   # full history so the binary auto-commit can rebase onto a branch that moved mid-build
 
       - name: Install Arduino CLI
         run: |
@@ -99,11 +100,29 @@ jobs:
           tools/build-firmware.sh
 
       - name: Commit binaries
-        # The "[skip ci]" tag is GitHub's standard token to prevent this
-        # auto-commit from re-triggering the workflow into an infinite loop.
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Auto-build: update firmware binaries [skip ci]"
-          file_pattern: "firmware/*.bin"
-          commit_user_name:  "github-actions[bot]"
-          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
+        # Commit the freshly-built .bin back to firmware/ so the browser flasher
+        # (Config → Firmware) serves them. Rebase-and-retry on push: a commit that
+        # lands on the branch WHILE this ~2-min build runs (e.g. a quick follow-up
+        # docs push) must NOT fail the auto-commit on a non-fast-forward — that race
+        # silently dropped the dea2220 + fe8ecf4 binaries. "[skip ci]" keeps this
+        # auto-commit from re-triggering the workflow into a loop.
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add firmware/*.bin
+          if git diff --cached --quiet; then
+            echo "No binary changes to commit."
+            exit 0
+          fi
+          git commit -m "Auto-build: update firmware binaries [skip ci]"
+          for attempt in 1 2 3 4 5; do
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "Pushed binaries (attempt ${attempt})."
+              exit 0
+            fi
+            echo "Push rejected — rebasing on ${GITHUB_REF_NAME} (attempt ${attempt})…"
+            git fetch origin "${GITHUB_REF_NAME}"
+            git rebase "origin/${GITHUB_REF_NAME}" || { echo "Rebase failed."; exit 1; }
+          done
+          echo "Failed to push binaries after 5 attempts."
+          exit 1
