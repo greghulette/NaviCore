@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">23.09:35.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">23.13:09.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10188,6 +10188,59 @@ async function _cmdlibFetchClicked() {
   }
 }
 
+// Fold a cluster of related boards under ONE top-level picker entry that expands
+// to the individual boards — so e.g. the six AstroPixels libraries collapse into a
+// single "AstroPixels" menu instead of six flat rows. Prefix-matched; `sub()`
+// shortens each member's label inside the group (the shared name is now the group
+// header). Add more clusters here as the catalog grows.
+const NC_CMDLIB_GROUPS = [
+  { id:'astropixels', name:'AstroPixels', prefix:'astropixels-',
+    sub: name => { const s = String(name).replace(/^AstroPixelsPlus/i, '').replace(/[()]/g, '').trim(); return s || 'General'; } },
+];
+function _cmdlibBoardGroup(id) { return NC_CMDLIB_GROUPS.find(g => String(id).startsWith(g.prefix)) || null; }
+
+// Fold the flat board list into ordered entries: a plain {type:'board'} or a
+// {type:'group'} holding its member boards (kept in their existing order). A group
+// takes the position of its FIRST member — _cmdlibNormalize already keeps a cluster
+// contiguous, so the group lands where those boards were.
+function _cmdlibGroupEntries(boards) {
+  const out = [], at = {};
+  for (const board of boards) {
+    const g = _cmdlibBoardGroup(board.id);
+    if (!g) { out.push({ type: 'board', board }); continue; }
+    if (at[g.id] === undefined) { at[g.id] = out.length; out.push({ type: 'group', group: g, boards: [board] }); }
+    else out[at[g.id]].boards.push(board);
+  }
+  return out;
+}
+
+// Render ONE board as a collapsible <details> of its filter-matching commands.
+// Returns {html, count}; html is '' when nothing matches. `label` overrides the
+// summary text (used to shorten a member's name inside a group).
+function _cmdlibRenderBoard(board, f, esc, label) {
+  const matches = (board.commands || []).filter(c =>
+    !f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f));
+  if (!matches.length) return { html: '', count: 0 };
+  const cnt = matches.length;
+  const cntLabel = f ? (cnt + ' match' + (cnt === 1 ? '' : 'es')) : (cnt + ' cmd' + (cnt === 1 ? '' : 's'));
+  let html = `<details class="cmdlib-board"${f ? ' open' : ''}>
+      <summary style="cursor:pointer;display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);user-select:none">
+        <span class="cmdlib-caret" style="color:var(--muted);font-size:11px">&#9656;</span>
+        <span style="font-weight:600;flex:1">${esc(label || board.name)}</span>
+        <span style="font-size:11px;color:var(--muted)">${cntLabel}</span>
+      </summary>
+      <div style="padding:2px 0 4px">`;
+  matches.forEach(c => {
+    html += `<button type="button" class="cmdlib-item" data-board="${esc(board.id)}" data-cmd="${esc(c.id)}"
+        style="display:block;width:100%;text-align:left;margin-top:6px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);cursor:pointer">
+        <div style="font-weight:600">${esc(c.name)}</div>
+        <div style="font-size:11px;color:var(--muted);font-family:monospace">${esc(c.template || (c.examples && c.examples[0]) || '')}</div>
+      </button>`;
+  });
+  html += `</div></details>`;
+  return { html, count: cnt };
+}
+
 function _cmdlibRenderList(filter) {
   const list = document.getElementById('cmdlib-list');
   if (!list) return;
@@ -10195,32 +10248,33 @@ function _cmdlibRenderList(filter) {
   const f = (filter || '').trim().toLowerCase();
   const esc = s => escH(String(s == null ? '' : s));
   let html = '', any = false;
-  (lib.boards || []).forEach(board => {
-    const matches = (board.commands || []).filter(c =>
-      !f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f));
-    if (!matches.length) return;
+  // Boards render COLLAPSED by default (a tidy list of sections, not a wall of
+  // commands); a search auto-expands sections that have matches. Grouped clusters
+  // add one more collapse level — the group, then its member libraries, then commands.
+  for (const entry of _cmdlibGroupEntries(lib.boards || [])) {
+    if (entry.type === 'board') {
+      const r = _cmdlibRenderBoard(entry.board, f, esc);
+      if (r.html) { html += r.html; any = true; }
+      continue;
+    }
+    let inner = '', total = 0;
+    for (const b of entry.boards) {
+      const r = _cmdlibRenderBoard(b, f, esc, entry.group.sub ? entry.group.sub(b.name) : b.name);
+      if (r.html) { inner += r.html; total += r.count; }
+    }
+    if (!inner) continue;   // whole group filtered out
     any = true;
-    // Boards render COLLAPSED by default, so the picker opens as a tidy list of
-    // board sections rather than a wall of commands. A search auto-expands the
-    // boards that have matches so results are visible without clicking in.
-    const cnt = matches.length;
-    const cntLabel = f ? (cnt + ' match' + (cnt === 1 ? '' : 'es')) : (cnt + ' cmd' + (cnt === 1 ? '' : 's'));
+    const cntLabel = f ? (total + ' match' + (total === 1 ? '' : 'es'))
+                       : (total + ' cmd' + (total === 1 ? '' : 's') + ' · ' + entry.boards.length + ' libraries');
     html += `<details class="cmdlib-board"${f ? ' open' : ''}>
       <summary style="cursor:pointer;display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);user-select:none">
         <span class="cmdlib-caret" style="color:var(--muted);font-size:11px">&#9656;</span>
-        <span style="font-weight:600;flex:1">${esc(board.name)}</span>
+        <span style="font-weight:600;flex:1">${esc(entry.group.name)}</span>
         <span style="font-size:11px;color:var(--muted)">${cntLabel}</span>
       </summary>
-      <div style="padding:2px 0 4px">`;
-    matches.forEach(c => {
-      html += `<button type="button" class="cmdlib-item" data-board="${esc(board.id)}" data-cmd="${esc(c.id)}"
-        style="display:block;width:100%;text-align:left;margin-top:6px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);cursor:pointer">
-        <div style="font-weight:600">${esc(c.name)}</div>
-        <div style="font-size:11px;color:var(--muted);font-family:monospace">${esc(c.template || (c.examples && c.examples[0]) || '')}</div>
-      </button>`;
-    });
-    html += `</div></details>`;
-  });
+      <div style="padding:2px 0 6px 14px;border-left:2px solid var(--border);margin-left:8px">${inner}</div>
+    </details>`;
+  }
   if (!any) html += `<div style="color:var(--muted);padding:16px 4px">No commands match. Try Import to add a library.</div>`;
   list.innerHTML = html;
   list.querySelectorAll('.cmdlib-item').forEach(btn => btn.onclick = () => _cmdlibSelect(btn.dataset.board, btn.dataset.cmd));
