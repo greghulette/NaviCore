@@ -918,6 +918,16 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     applyScriptEasing(id, use);
     maestroRestartScript(id, sub);
   }
+  else if (strcmp(tok, "subParam") == 0) {   // Restart Script at Subroutine WITH parameter (Pololu 0x28)
+    char* sN = strtok(nullptr, ",");         // subroutine 0-127
+    char* sP = strtok(nullptr, ",");         // parameter 0-16383, pushed on the Maestro's script stack
+    if (sN && sP) {
+      uint16_t param = (uint16_t)atoi(sP); if (param > 16383) param = 16383;
+      uint8_t p[3] = { (uint8_t)atoi(sN), (uint8_t)(param & 0x7F), (uint8_t)((param >> 7) & 0x7F) };
+      maestroWrite(id, 0xA8, p, 3);          // 0xA8 & 0x7F = 0x28 → {0xAA,dev,0x28,sub,pl,ph} == WcbMaestro::buildSubParam
+      maeSmoothInvalidateSlot(id);           // a device-side script may change speed/accel we can't see
+    }
+  }
 }
 
 // =============================================================================
