@@ -172,3 +172,50 @@ export/import.
 - Option A vs B addressing (see §3b) — start with A.
 - Whether `nc-maestro` keeps slot-addressing or a new `wcb-maestro-servo` board is
   added (see §5) — decide after the WCB side lands.
+
+---
+
+## 10. Maestro query readback (2-way) — separate but related
+
+The shared `WcbMaestro` also builds the **query** verbs `getPosition` / `getMovingState`
+/ `getErrors`, which make the Maestro *reply* with bytes. The library builds only the
+REQUEST; reading the reply is the firmware's job.
+
+**Reply wire format (both hosts):** `getPosition` → 2 bytes **LOW then HIGH**, value
+`(hi<<8)|lo` in ¼µs. `getMovingState` → 1 byte (0/1). `getErrors` → 2 bytes LOW/HIGH,
+16-bit bitmask, **and reading CLEARS the Maestro's error register**. Replies are
+**anonymous** — no address, no channel, no sequence; `getPosition` and `getErrors` are
+both 2 bytes and indistinguishable except by knowing which query you sent. → **one
+query outstanding at a time.**
+
+### Phase 1 — LOCAL readback: DONE (commit `fe8ecf4`)
+NaviCore reads a local Maestro's reply off Serial2 (GPIO7) synchronously in
+`loop()`/Core-1: `maestroLocalQuery()` drains stale RX, sends one request via
+`maestroWrite()`, reads N bytes with a ~25 ms deadline. Surfaced via `?MAE,GET/MOVING/ERR`
+CLI → `[MAE:<slot>]{…}` marker → config-tool Maestro Locations inline readout
+(`_maeReadFeed`). Local slots only.
+
+### Phase 2 — REMOTE readback: TODO (WCB firmware + a WCB_Client reply type)
+The mechanism exists but the addressing does not:
+- **WCB already pumps Maestro RX back:** `forwardMaestroDataToRemoteKyber()` (WCB.ino
+  ~3861) drains the Maestro UART and re-broadcasts the bytes via `sendESPNowRaw()`
+  (WCB.ino ~2223) as an ESP-NOW frame with `structTargetID = "98"` (`WCB_TARGET_KYBER`),
+  a 2-byte LE length in `structCommand[0..1]`, raw bytes at `structCommand+2`. But it's
+  a **verbatim, untagged byte pump** — no query id, no channel, no source Maestro id.
+- **WCB_Client has NO reply message type** — only COMMAND/ACK/HEARTBEAT/WDP. Inbound
+  hooks are `onCommand(cb)` (252-B ETM text, CRC-checked) and `onRawPacket(cb)` (any
+  non-252-B packet, fires BEFORE password/addressing gates → must re-validate). Both run
+  in the WiFi RX task → must queue and defer to `loop()` (copy the MgmtRelay pattern).
+- **Recommended Phase-2 transport:** have the WCB **correlate the reply to its request on
+  the WCB side** (it knows which query/port/Maestro it just forwarded) and relay it as a
+  normal **text COMMAND** unicast to NaviCore (device id 20) carrying the context the raw
+  bytes lack — e.g. `:MQR,<maestroId>,<chan>,POS,<u16>` or small JSON. Rides the existing
+  CRC/ETM/ACK'd path, needs no new packed struct, lands in `onCommand`. NaviCore queues
+  it in the callback and matches it to the outstanding request in `loop()`. Ensure
+  `enableSpecialPeer(20)` + the relaying WCB has `?SPECIAL,ON,20`.
+- **NaviCore config tool is already Phase-2-ready:** the `[MAE:<slot>]` marker is
+  re-dispatched inside the `[TERM:]` unwrap, so a reply relayed as `[TERM:20][MAE:…]`
+  renders with no further UI work. The Maestro Locations "Read live" controls are gated
+  to Local slots today; enable them for Remote once the relay lands.
+- **Gotcha:** `getErrors` clears on read, so a dropped/duplicated remote relay silently
+  loses or double-consumes error state — correlate + treat as best-effort async.
