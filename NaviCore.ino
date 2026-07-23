@@ -516,6 +516,50 @@ static inline uint16_t sbusToRangeMidClosed(int sbusVal, uint16_t outMin, uint16
 // that cache channel state (passthrough smoothing) MUST gate their cache write
 // on this, else a dropped write (disabled/invalid slot, or a remote stream not
 // yet up) would poison the cache and defeat the self-healing re-apply.
+// ── WCB-native remote Maestro routing (smart auto-route) ─────────────────────
+// A DISCRETE Maestro command (button/switch/timeline/replayed ACTION → executeMaestroCmd)
+// aimed at a REMOTE slot is sent to the hosting WCB as a native ';M<dev>,verb' command —
+// the WCB parses it (WcbMaestro) and drives Pololu. STREAMS (passthrough, timeline scrub,
+// replay position keyframes, idle-release) bypass executeMaestroCmd and keep g_maeDiscrete
+// false, so they stay on the lightweight raw-Pololu path (Serial2 local / broadcast remote).
+// The flag is set ONLY around executeMaestroCmd's synchronous body (single-core loop, no
+// re-entrancy), so maestroWrite can tell a discrete command from a servo stream.
+static bool g_maeDiscrete = false;
+
+// Pololu device# D → the WCB id (1-20) currently advertising it as a LOCAL Maestro over WDP,
+// or 0 if none has (advert not converged / non-WDP host). First match wins deterministically.
+static uint8_t wcbHostingMaestro(uint8_t D) {
+  if (!wcb) return 0;
+  for (uint8_t id = 1; id <= WCB_MAX_BOARDS; id++) {   // getNeighbor keys on WCB NUMBER — scan 1..20
+    const WCBNeighbor* nb = wcb->getNeighbor(id);      // null = never heard / aged out
+    if (!nb) continue;
+    for (uint8_t m = 0; m < nb->maestroCount && m < 9; m++)
+      if (nb->maestroIds[m] == D) return id;
+  }
+  return 0;
+}
+
+// Reverse-map a compact Pololu command byte back to the shared ';M<dev>,verb' text and
+// UNICAST it (ETM-ensured) to the WCB hosting device# `dev`. Returns false — so maestroWrite
+// falls through to the raw path — when the verb has no ';M' form (stopScript 0xA4) or no WCB
+// currently advertises `dev` (WDP not converged). Values are already range-clamped by the
+// callers (maestroSetTarget/Speed/Accel), so they satisfy the WCB's WcbMaestro::build bounds.
+static bool maestroWriteRemoteVerb(uint8_t dev, uint8_t cmd_compact, const uint8_t* p, size_t plen) {
+  char verb[40];
+  switch (cmd_compact) {
+    case 0x84: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,setTarget,%u,%u", dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;
+    case 0x87: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,setSpeed,%u,%u",  dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;
+    case 0x89: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,setAccel,%u,%u",  dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;
+    case 0xA2: snprintf(verb, sizeof(verb), ";M%u,goHome", dev); break;
+    case 0xA7: if (plen < 1) return false; snprintf(verb, sizeof(verb), ";M%u,%u", dev, p[0]); break;                 // restart-at-subroutine (numeric comma form)
+    case 0xA8: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,sub,%u,%u", dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;   // subroutine + parameter
+    default:   return false;   // stopScript (0xA4) + anything else has no ';M' verb → caller uses the raw path
+  }
+  const uint8_t host = wcbHostingMaestro(dev);
+  if (!host || !wcb) return false;   // no WCB advertises this device# yet → caller falls back to raw broadcast
+  return wcb->send(host, verb);      // unicast, ETM ACK+retry (send()'s `ensured` defaults true)
+}
+
 static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
                          const uint8_t* payload, size_t plen) {
   if (id < 1 || id > RC_NUM_MAESTROS) return false;
@@ -526,6 +570,13 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
          id, slot.device);
     return false;
   }
+
+  // Smart auto-route: a DISCRETE command to a REMOTE slot goes WCB-native (;M<dev>,verb,
+  // unicast to the WCB that advertises this Maestro over WDP). If the verb has no ;M form
+  // or no WCB advertises it yet, this returns false and we fall through to the raw path
+  // below. Streams (g_maeDiscrete == false) and LOCAL slots never take this branch.
+  if (slot.type == 2 && g_maeDiscrete && maestroWriteRemoteVerb(slot.device, cmd_compact, payload, plen))
+    return true;
 
   Stream* dest = (slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast;
   if (!dest) return false;              // remote slot but stream not yet up
@@ -845,6 +896,7 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
   strlcpy(buf, cmd, sizeof(buf));
   char* tok = strtok(buf, ",");
   if (!tok) return;
+  g_maeDiscrete = true;   // discrete-command scope: a REMOTE slot routes WCB-native (see maestroWrite)
   if      (strcmp(tok, "goHome")        == 0) maestroGoHome(id);
   else if (strcmp(tok, "stopScript")    == 0) maestroStopScript(id);
   else if (strcmp(tok, "setTarget")     == 0) {
@@ -928,6 +980,7 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
       maeSmoothInvalidateSlot(id);           // a device-side script may change speed/accel we can't see
     }
   }
+  g_maeDiscrete = false;   // leave discrete scope — streams (passthrough/scrub/replay) below stay raw
 }
 
 // =============================================================================
