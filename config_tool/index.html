@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">23.22:55.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.00:02.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9779,27 +9779,35 @@ const NC_CMDLIB_SEED = {
       { id:'maestro.setEasing', name:'Set active easing', category:'Motion', template:'setEasing,{profile}',
         params:[ {name:'profile', label:'Easing (release | off | p1..p8)', default:'release', required:true} ], examples:['setEasing,release'] },
     ]},
-    // "Maestro (via WCB)" — same servo/script verbs as nc-maestro, but wcbverb:true makes the
-    // firmware route each command as a ;M<dev>,verb unicast to the WCB that WDP says hosts the
-    // Maestro (the WCB drives Pololu), instead of NaviCore building raw Pololu bytes. 6 verbs +
-    // stop; setSpeedAccel/setEasing stay on the raw board (setEasing is host-only; setSpeedAccel TBD).
-    { id:'nc-maestro-wcb', name:'Maestro (via WCB)', kind:'maestro', local:'maestro', wcbverb:true, commands: [
-      { id:'maestrowcb.setTarget', name:'Set servo position', category:'Servo', template:'setTarget,{channel},{position}',
-        params:[ {name:'channel',  label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
-                 {name:'position', label:'Position', type:'int', unit:'servoPulse', min:0, max:16383, default:6000, required:true} ], examples:['setTarget,0,6000'] },
-      { id:'maestrowcb.goHome', name:'Send all servos home', category:'Servo', template:'goHome', params:[], examples:['goHome'] },
-      { id:'maestrowcb.setSpeed', name:'Set speed limit', category:'Motion', template:'setSpeed,{channel},{value}',
-        params:[ {name:'channel', label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
-                 {name:'value',   label:'Speed (0-16383, 0 = unlimited)', type:'int', min:0, max:16383, default:0, required:true} ], examples:['setSpeed,0,0'] },
-      { id:'maestrowcb.setAccel', name:'Set acceleration limit', category:'Motion', template:'setAccel,{channel},{value}',
-        params:[ {name:'channel', label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
-                 {name:'value',   label:'Accel (0-255, 0 = unlimited)', type:'int', min:0, max:255, default:0, required:true} ], examples:['setAccel,0,0'] },
-      { id:'maestrowcb.restartScript', name:'Run a script (subroutine)', category:'Script', template:'restartScript,{sub}',
-        params:[ {name:'sub', label:'Subroutine # (0-127)', type:'int', min:0, max:127, default:0, required:true} ], examples:['restartScript,0'] },
-      { id:'maestrowcb.subParam', name:'Run subroutine + parameter', category:'Script', template:'subParam,{sub},{param}',
-        params:[ {name:'sub', label:'Subroutine # (0-127)', type:'int', min:0, max:127, default:0, required:true},
-                 {name:'param', label:'Parameter (0-16383)', type:'int', min:0, max:16383, default:0, required:true} ], examples:['subParam,0,1000'] },
-      { id:'maestrowcb.stopScript', name:'Stop the script', category:'Script', template:'stopScript', params:[], examples:['stopScript'] },
+    // "Maestro (via WCB)" — like the ;M sequence-trigger board (kind:'wcb-verb'), extended to the
+    // full Pololu servo/script verb set. Each command IS ;M<maestro>,verb — the WCB parses it
+    // (WcbMaestro) and drives Pololu. `maestroId` is the WCB Maestro id (0=all, 1-8=board, 9=local),
+    // the SAME field as the sequence trigger. Routed like any WCB verb (destination on the action
+    // row). No special firmware: the WCB understands the verb; stopScript needs the WcbMaestro verb.
+    { id:'nc-maestro-wcb', name:'Maestro (via WCB)', kind:'wcb-verb', commands: [
+      { id:'maestrowcb.setTarget', name:'Set servo position', category:'Servo', template:';M{maestroId},setTarget,{channel},{position}',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
+                 {name:'channel',  label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
+                 {name:'position', label:'Position', type:'int', unit:'servoPulse', min:0, max:16383, default:6000, required:true} ], examples:[';M1,setTarget,0,6000'] },
+      { id:'maestrowcb.goHome', name:'Send all servos home', category:'Servo', template:';M{maestroId},goHome',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true} ], examples:[';M1,goHome'] },
+      { id:'maestrowcb.setSpeed', name:'Set speed limit', category:'Motion', template:';M{maestroId},setSpeed,{channel},{value}',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
+                 {name:'channel', label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
+                 {name:'value',   label:'Speed (0-16383, 0 = unlimited)', type:'int', min:0, max:16383, default:0, required:true} ], examples:[';M1,setSpeed,0,0'] },
+      { id:'maestrowcb.setAccel', name:'Set acceleration limit', category:'Motion', template:';M{maestroId},setAccel,{channel},{value}',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
+                 {name:'channel', label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
+                 {name:'value',   label:'Accel (0-255, 0 = unlimited)', type:'int', min:0, max:255, default:0, required:true} ], examples:[';M1,setAccel,0,0'] },
+      { id:'maestrowcb.restartScript', name:'Run a script (subroutine)', category:'Script', template:';M{maestroId},sub,{sub}',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
+                 {name:'sub', label:'Subroutine # (0-127)', type:'int', min:0, max:127, default:0, required:true} ], examples:[';M1,sub,0'] },
+      { id:'maestrowcb.subParam', name:'Run subroutine + parameter', category:'Script', template:';M{maestroId},sub,{sub},{param}',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
+                 {name:'sub', label:'Subroutine # (0-127)', type:'int', min:0, max:127, default:0, required:true},
+                 {name:'param', label:'Parameter (0-16383)', type:'int', min:0, max:16383, default:0, required:true} ], examples:[';M1,sub,0,1000'] },
+      { id:'maestrowcb.stopScript', name:'Stop the script', category:'Script', template:';M{maestroId},stopScript',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true} ], examples:[';M1,stopScript'] },
     ]},
   ],
 };
