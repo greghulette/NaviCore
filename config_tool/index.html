@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.00:02.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.07:51.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9697,7 +9697,8 @@ const NC_CMDLIB_SEED = {
   // maestro — our 4.2.0 PR) but kept inline as the file:// fallback, since fetch() of the
   // vendored library is blocked under file://. The vendored `maestro` ;M range is still
   // narrow (id 0-2 / seq 0-9) vs the firmware's 0-9 / 0-99, so _cmdlibNormalize() drops the
-  // vendored `maestro` in favor of this accurate `wcb-maestro` until upstream widens it.
+  // vendored `maestro` in favor of the accurate `nc-maestro-wcb` (via-WCB) board, which now
+  // carries the ;M<id><seq> sequence trigger AND the ;M<id>,<verb> servo/script commands.
   // nc-maestro is the Pololu servo command set (local:'maestro' → a NaviCore Maestro
   // slot 1-8; the firmware routes Local→Serial2 or Remote→ESP-NOW broadcast-by-device#,
   // so ONE board covers both local and remote Maestros). The vendored `maestro-native`
@@ -9742,11 +9743,6 @@ const NC_CMDLIB_SEED = {
         params:[ {name:'wledId', label:'WLED ID (1-9)', type:'int', min:1, max:9, default:1, width:1, required:true},
                  {name:'payload', label:'WLED /json/state document', default:'{"bri":128}', required:true} ], examples:[';L1,JSON,{"bri":128}'] },
     ]},
-    { id:'wcb-maestro', name:'Maestro (sequence trigger)', kind:'wcb-verb', commands: [
-      { id:'maestro.run', name:'Run script', category:'Servo', template:';M{maestroId}{sequence}',
-        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
-                 {name:'sequence', label:'Sequence #', type:'int', min:0, max:99, default:1, required:true} ], examples:[';M11'] },
-    ]},
     // Local Pololu Maestro (raw protocol) command set. These are NOT WCB wire commands —
     // `local:'maestro'` makes the composer author a `maestro` firmware action whose
     // DESTINATION is a Maestro slot (1-8, wiring set in the Maestro Locations tab),
@@ -9785,6 +9781,9 @@ const NC_CMDLIB_SEED = {
     // the SAME field as the sequence trigger. Routed like any WCB verb (destination on the action
     // row). No special firmware: the WCB understands the verb; stopScript needs the WcbMaestro verb.
     { id:'nc-maestro-wcb', name:'Maestro (via WCB)', kind:'wcb-verb', commands: [
+      { id:'maestrowcb.run', name:'Run script (sequence)', category:'Script', template:';M{maestroId}{sequence}',
+        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
+                 {name:'sequence', label:'Sequence #', type:'int', min:0, max:99, default:1, required:true} ], examples:[';M11'] },
       { id:'maestrowcb.setTarget', name:'Set servo position', category:'Servo', template:';M{maestroId},setTarget,{channel},{position}',
         params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
                  {name:'channel',  label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
@@ -9799,9 +9798,6 @@ const NC_CMDLIB_SEED = {
         params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
                  {name:'channel', label:'Channel (0-31)', type:'int', min:0, max:31, default:0, required:true},
                  {name:'value',   label:'Accel (0-255, 0 = unlimited)', type:'int', min:0, max:255, default:0, required:true} ], examples:[';M1,setAccel,0,0'] },
-      { id:'maestrowcb.restartScript', name:'Run a script (subroutine)', category:'Script', template:';M{maestroId},sub,{sub}',
-        params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
-                 {name:'sub', label:'Subroutine # (0-127)', type:'int', min:0, max:127, default:0, required:true} ], examples:[';M1,sub,0'] },
       { id:'maestrowcb.subParam', name:'Run subroutine + parameter', category:'Script', template:';M{maestroId},sub,{sub},{param}',
         params:[ {name:'maestroId', label:'Maestro (0=all, 1-8=board, 9=local)', type:'int', min:0, max:9, default:1, width:1, required:true},
                  {name:'sub', label:'Subroutine # (0-127)', type:'int', min:0, max:127, default:0, required:true},
@@ -9981,7 +9977,7 @@ const NC_BOARD_DEVICE_LABELS = {
   'wcb-mp3': ['MP3 Trigger'],
   'ia-magic-panel': ['Magic Panel(IA)'], 'pd-magic-panel': ['Magic Panel(PRINTDRD)'],
   'rseries-logic': ['R-Series Logics'],
-  'maestro': ['Maestro'], 'maestro-native': ['Maestro'], 'wcb-maestro': ['Maestro'], 'nc-maestro': ['Maestro'],
+  'maestro': ['Maestro'], 'maestro-native': ['Maestro'], 'nc-maestro-wcb': ['Maestro'], 'nc-maestro': ['Maestro'],
   'psi-pro': ['PSI Front', 'PSI Rear'],
   'r2uppityspinner-alt': ['Uppity Spinner', 'Periscope'],
   'roam-a-dome': ['Roam-A-Dome'],
@@ -10633,7 +10629,7 @@ function _cmdlibMergeLibraryData(data) {
 //  (1) De-duplicate: drop a vendored board when the NaviCore seed board that
 //      supersedes it is also present (see NC_CMDLIB_SUPERSEDE). Two cases today:
 //      the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9) loses to our
-//      firmware-accurate `wcb-maestro` (id 0-9 / seq 0-99); and the generic
+//      firmware-accurate `nc-maestro-wcb` (id 0-9 / seq 0-99); and the generic
 //      `maestro-native` (raw Pololu bytes to a `;W<wcb>;S<port>` WCB port) loses
 //      to `nc-maestro`, whose IDENTICAL commands instead target a NaviCore
 //      configured-Maestro slot (firmware picks Local Serial2 vs remote ESP-NOW
@@ -10644,13 +10640,13 @@ function _cmdlibMergeLibraryData(data) {
 //      their natural manifest order (stable sort).
 // vendored id -> NaviCore seed id that replaces it when both are present.
 const NC_CMDLIB_SUPERSEDE = {
-  'maestro':        'wcb-maestro',   // narrow upstream ;M board -> our firmware-accurate ;M board
+  'maestro':        'nc-maestro-wcb', // narrow upstream ;M board -> our via-WCB board (;M sequence + verbs)
   'maestro-native': 'nc-maestro',    // raw-WCB-port Pololu board -> our configured-Maestro-slot board
 };
 const NC_CMDLIB_ORDER_TOP = [
   'navicore',
   'wcb-hcr', 'hcr-native', 'wcb-mp3', 'chirp',
-  'wcb-maestro', 'nc-maestro', 'nc-maestro-wcb',   // maestro-native is superseded by nc-maestro; via-WCB sits beside raw
+  'nc-maestro-wcb', 'nc-maestro',   // via-WCB (;M sequence + verbs) up top; raw Pololu beside it. Both upstream maestro boards superseded.
   'flthy-hps', 'psi-pro', 'rseries-logic', 'ia-magic-panel', 'pd-magic-panel',
   'r2uppityspinner-alt', 'roam-a-dome',
   'astropixels-plus', 'astropixels-sound', 'astropixels-psi',
