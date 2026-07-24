@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.14:31.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.14:41.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8960,8 +8960,8 @@ function _maestroCmdSummary(slot, cmd) {
 function actionSummary(a) {
   if (!a || !a.type) return '—';
   let core;
-  if (a.type === 'wcb_unicast')        core = `WCB${a.target}: ${escH(a.cmd)}`;
-  else if (a.type === 'wcb_broadcast') core = `WCB*: ${escH(a.cmd)}`;
+  if (a.type === 'wcb_unicast')        core = `WCB${a.target}: ${escH(a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
+  else if (a.type === 'wcb_broadcast') core = `WCB*: ${escH(a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
   else if (a.type === 'maestro' || a.type === 'maestro_remote' || a.type === 'maestro_local') {
     // "maestro_local" (legacy) implicitly targets Maestro 1
     const id = (a.type === 'maestro_local') ? 1 : (a.target || '?');
@@ -10551,6 +10551,12 @@ function _cmdlibUse() {
       }
     }
   }
+  // via-WCB Maestro verb → carry the "Skip if already running" gate across a re-pick
+  // (the row's checkbox persists it; a fresh pick starts unchecked and is read on Save).
+  if (action && (action.type === 'wcb_unicast' || action.type === 'wcb_broadcast')
+      && /;M\d/i.test(action.cmd || '') && document.getElementById(fid + '-skiprun')?.checked) {
+    action.skipRunning = 1;
+  }
   _applyResolvedActionToRow(fid, action);
   closeCmdLibrary();
 }
@@ -10999,6 +11005,13 @@ function _appendCommandView(container, action) {
 
     row1.appendChild(makeFieldGroup('WCB', wcbSel));
     row1.appendChild(makeFieldGroup('Serial', portSel));
+    // A via-WCB Maestro verb (;M…) offers the same "Skip if already running" gate as the raw
+    // board — the firmware checks the Maestro's getMovingState over the WCB (:MQR) first.
+    if (/;M\d/i.test(action.cmd || '')) {
+      const skipBox = document.createElement('input');
+      skipBox.type = 'checkbox'; skipBox.id = fid + '-skiprun'; skipBox.checked = !!action.skipRunning;
+      row1.appendChild(makeFieldGroup('Skip if already running', skipBox));
+    }
   }
 
   // Builder — opens the library to (re)pick the command + destination.
@@ -11200,7 +11213,8 @@ function readActionFromFid(fid, type, extras) {
     const target = +(document.getElementById(fid + '-target')?.value || 1);
     const cmd    = document.getElementById(fid + '-cmd')?.value || '';
     if (!cmd.trim()) return null;
-    return { type, target: String(target), cmd, ...extras };
+    const skipRunning = /;M\d/i.test(cmd) && !!document.getElementById(fid + '-skiprun')?.checked;
+    return { type, target: String(target), cmd, ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
   }
   if (type === 'wcb_broadcast') {
     let cmd = document.getElementById(fid + '-cmd')?.value || '';
@@ -11212,7 +11226,8 @@ function readActionFromFid(fid, type, extras) {
     const dv = document.getElementById(fid + '-destsel')?.value || '';
     const m = /^W(\d+)S(\d)$/.exec(dv);
     if (m && !/^;W/i.test(cmd)) cmd = `;W${m[1]};S${m[2]}` + cmd;
-    return { type, cmd, ...extras };
+    const skipRunning = /;M\d/i.test(cmd) && !!document.getElementById(fid + '-skiprun')?.checked;
+    return { type, cmd, ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
   }
   if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
     // Authored from the command library (nc-maestro board): the verb string

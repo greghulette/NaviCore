@@ -750,12 +750,14 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["type"]   = "wcb_unicast";
       obj["target"] = a.target;   // WCB board ID string
       obj["cmd"]    = a.cmd;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (a.delayMs)     obj["delay"]       = a.delayMs;
+      if (a.skipRunning) obj["skipRunning"] = true;   // via-WCB Maestro verb: skip-if-running gate
       break;
     case RA_WCB_BROADCAST:
       obj["type"] = "wcb_broadcast";
       obj["cmd"]  = a.cmd;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (a.delayMs)     obj["delay"]       = a.delayMs;
+      if (a.skipRunning) obj["skipRunning"] = true;   // via-WCB Maestro verb: skip-if-running gate
       break;
     case RA_MAESTRO_LOCAL:
       obj["type"] = "maestro_local";
@@ -833,12 +835,14 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.type = RA_WCB_UNICAST;
     strlcpy(a.target, obj["target"] | "", sizeof(a.target));
     strlcpy(a.cmd,    obj["cmd"]    | "", sizeof(a.cmd));
-    a.delayMs = obj["delay"] | 0;
+    a.delayMs     = obj["delay"]       | 0;
+    a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "wcb_broadcast") == 0) {
     a.type = RA_WCB_BROADCAST;
     strlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
-    a.delayMs = obj["delay"] | 0;
+    a.delayMs     = obj["delay"]       | 0;
+    a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "maestro_local") == 0) {
     a.type = RA_MAESTRO_LOCAL;

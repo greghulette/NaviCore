@@ -676,6 +676,34 @@ static bool maestroSequenceBusy(uint8_t id) {
   return false;                                             // disabled → never "busy"
 }
 
+// Extract the mesh Maestro id from a ;M verb for the skip-if-running gate: the comma form
+// ;M<id>,verb uses the digits before the comma; the short form ;M<id><seq> uses the FIRST
+// digit. Returns 0 when it's not a ;M verb or the id is 0/9/out-of-range (all/local — not a
+// single gate-able Maestro).
+static uint8_t maeVerbDeviceId(const char* cmd) {
+  if (!cmd) return 0;
+  const char* p = cmd;
+  while (*p && *p != 'M' && *p != 'm') p++;                 // ;M… → the 'M'
+  if (!*p) return 0; p++;
+  if (*p < '0' || *p > '9') return 0;
+  const char* d = p; while (*d >= '0' && *d <= '9') d++;    // run of digits
+  int id = (*d == ',') ? atoi(p) : (*p - '0');              // comma form: full number ; short: first digit
+  return (id >= 1 && id <= RC_NUM_MAESTROS) ? (uint8_t)id : 0;
+}
+
+// Skip-if-running gate for a via-WCB Maestro verb (RA_WCB_UNICAST/BROADCAST). Reads the mesh
+// reply cache for the verb's Maestro; if stale, warms it by sending getMovingState to the same
+// WCB (wcbId, or broadcast when wcbId==0) and FAILS OPEN. True only on a fresh "moving" reply.
+static bool maestroVerbBusy(const char* cmd, uint8_t wcbId) {
+  const uint8_t id = maeVerbDeviceId(cmd);
+  if (!id || !wcb) return false;                            // not a single gate-able Maestro → never skip
+  const MaeRemoteCache& c = g_maeRemote[id - 1];
+  if (c.valid && (millis() - c.ms) <= MAE_CACHE_FRESH_MS) return c.moving != 0;
+  char q[24]; snprintf(q, sizeof(q), ";M%u,getMovingState", id);
+  if (wcbId) wcb->send(wcbId, q); else wcb->broadcast(q);   // warm the cache (async :MQR) …
+  return false;                                             // … and fail open right now
+}
+
 // Valid Maestro channel guard (0-31 covers Micro/Mini Maestro 6/12/18/24).
 // An out-of-range channel is a config error; warn + skip so it isn't a silent
 // no-op the user has to debug by guessing the servo/wiring is broken.
@@ -1469,6 +1497,7 @@ static void rcExecuteActionNow(const RcAction& a) {
       uint8_t boardId = (uint8_t)atoi(a.target);
       if (boardId >= 1 && boardId <= WCB_MAX_BOARDS) {
         if (!wcb || !wcbReady) { dlog(DBG_WCB, "[DISPATCH] WCB→%d skipped — WCB not ready\n", boardId); break; }
+        if (a.skipRunning && maestroVerbBusy(a.cmd, boardId)) { dlog(DBG_MAESTRO, "[DISPATCH] WCB→%d Maestro skipped — already running  %s\n", boardId, a.cmd); break; }
         dlog(DBG_WCB, "[DISPATCH] WCB→%d  %s\n", boardId, a.cmd);
         wcb->send(boardId, a.cmd);
       }
@@ -1476,6 +1505,7 @@ static void rcExecuteActionNow(const RcAction& a) {
     }
     case RA_WCB_BROADCAST:
       if (!wcb || !wcbReady) { dlog(DBG_WCB, "[DISPATCH] WCB broadcast skipped — WCB not ready\n"); break; }
+      if (a.skipRunning && maestroVerbBusy(a.cmd, 0)) { dlog(DBG_MAESTRO, "[DISPATCH] WCB broadcast Maestro skipped — already running  %s\n", a.cmd); break; }
       dlog(DBG_WCB, "[DISPATCH] WCB broadcast  %s\n", a.cmd);
       wcb->broadcast(a.cmd);
       break;
