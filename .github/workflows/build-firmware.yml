@@ -109,7 +109,12 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add firmware/*.bin
+          # -A (not firmware/*.bin): build-firmware.sh deletes the previous DTG-tagged
+          # bins before writing the new ones, but a bare glob only stages files that still
+          # EXIST — so those deletions were never committed and old bins piled up in the
+          # repo forever (and the flasher's alphabetical .find() then locked onto the
+          # oldest). -A stages the additions AND the deletions.
+          git add -A firmware/
           if git diff --cached --quiet; then
             echo "No binary changes to commit."
             exit 0
