@@ -561,20 +561,23 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
 // query (Get Position / Moving State / Errors) makes the Maestro reply with a fixed
 // number of RAW, header-less bytes on its TX line (Serial2 RX = GPIO7). The reply
 // carries NO address or echo, so we drain stale RX, send exactly ONE request, then
-// read exactly `nReply` bytes — the caller knows which query it issued. Only a LOCAL
-// slot (type 1, wired to Serial2) can answer synchronously; a Remote slot's reply
-// would have to be relayed back by its WCB (Phase 2, not yet built). Runs in
+// read exactly `nReply` bytes — the caller knows which query it issued. A LOCAL slot
+// (type 1, Serial2) answers synchronously; a REMOTE slot (type 2) instead broadcasts the
+// query and its WCB relays the reply back over the mesh as :MQR (consumed async). Runs in
 // loop()/Core-1 (execCliLine) where Serial2 I/O is race-free; the ~25 ms deadline
 // bounds the stall so a missing Maestro or an unwired RX line can't starve SBUS.
 //   return: bytes read (== nReply on success, < nReply on timeout), or
-//           -1 = slot not Local (no reply path yet), -2 = send failed (disabled/bad device#).
+//           -2 = send failed (disabled/bad device#), -3 = REMOTE query sent (reply async).
 static int maestroLocalQuery(uint8_t id, uint8_t cmd_compact,
                              const uint8_t* payload, size_t plen,
                              uint8_t* reply, size_t nReply) {
   if (id < 1 || id > RC_NUM_MAESTROS) return -2;
   const uint8_t t = rcConfig.maestros[id - 1].type;
   if (t == 0) return -2;                                   // disabled slot
-  if (t != 1) return -1;                                   // Remote (type 2) → no synchronous reply yet (Phase 2)
+  if (t == 2) {                                            // Remote → broadcast the query; the hosting WCB relays
+    return maestroWrite(id, cmd_compact, payload, plen)    // the reply back over the mesh as :MQR (async)
+             ? -3 : -2;                                    // -3 = sent (maeConsumeRemoteReply handles the reply)
+  }
   while (Serial2.available()) Serial2.read();              // drop stale RX so the decode aligns
   if (!maestroWrite(id, cmd_compact, payload, plen)) return -2;
   size_t got = 0; const uint32_t t0 = millis();
@@ -590,6 +593,7 @@ static int maestroLocalQuery(uint8_t id, uint8_t cmd_compact,
 // JSON. kind: 0=position (ch used), 1=moving-state, 2=errors. `n` = maestroLocalQuery()
 // return (bytes read, -1 remote, -2 disabled).
 static void maestroReportQuery(uint8_t slot, uint8_t kind, uint8_t ch, int n, uint16_t val) {
+  if (n == -3) return;                                      // Remote query sent async — the :MQR reply emits later
   const int   want = (kind == 1) ? 1 : 2;
   const char* qk   = (kind == 0) ? "pos" : (kind == 1) ? "mov" : "err";
   const char* err  = (n == -1) ? "remote" : (n == -2) ? "disabled" : (n < want) ? "timeout" : nullptr;
@@ -610,7 +614,10 @@ static void maestroReportQuery(uint8_t slot, uint8_t kind, uint8_t ch, int n, ui
 // synchronously — it comes back over the mesh via the WCB relay (see
 // docs/WCB_NATIVE_MAESTRO_DESIGN.md §10). onWCBCommand parses the relayed ":MQR,…"
 // text into this per-slot cache, which the skip-if-running gate reads.
-struct MaeRemoteCache { uint16_t pos; uint8_t moving; uint16_t err; uint32_t ms; bool valid; };
+// pendMask bits (1=pos, 2=mov, 4=err) flag a just-arrived reply for maePumpRemoteEmits()
+// to surface as a [MAE:] marker on Core 1; pendCh carries the channel a POS reply is for.
+struct MaeRemoteCache { uint16_t pos; uint8_t moving; uint16_t err; uint32_t ms; bool valid;
+                        uint8_t pendMask; uint8_t pendCh; };
 static MaeRemoteCache g_maeRemote[RC_NUM_MAESTROS] = {};
 static const uint32_t MAE_CACHE_FRESH_MS = 250;   // a busy-state older than this = "unknown" → the gate fails open
 
@@ -620,14 +627,31 @@ static void maeConsumeRemoteReply(const char* body) {
   int id = atoi(body);                                      // body = "<id>,<chan>,<KIND>,<value>"
   if (id < 1 || id > RC_NUM_MAESTROS) return;
   const char* p = strchr(body, ','); if (!p) return; p++;   // → chan
-  p = strchr(p, ',');                if (!p) return; p++;   // → KIND
-  const char* v = strchr(p, ',');    if (!v) return;        // v points at the comma before value
+  int chan = atoi(p);
+  const char* k = strchr(p, ',');    if (!k) return; k++;   // → KIND
+  const char* v = strchr(k, ',');    if (!v) return;        // v points at the comma before value
   long val = atol(v + 1);
   MaeRemoteCache& c = g_maeRemote[id - 1];
-  if      (strncmp(p, "MOV", 3) == 0) c.moving = (uint8_t)(val != 0);
-  else if (strncmp(p, "POS", 3) == 0) c.pos    = (uint16_t)val;
-  else if (strncmp(p, "ERR", 3) == 0) c.err    = (uint16_t)val;
+  if      (strncmp(k, "MOV", 3) == 0) { c.moving = (uint8_t)(val != 0);                  c.pendMask |= 0x02; }
+  else if (strncmp(k, "POS", 3) == 0) { c.pos = (uint16_t)val; c.pendCh = (uint8_t)chan; c.pendMask |= 0x01; }
+  else if (strncmp(k, "ERR", 3) == 0) { c.err = (uint16_t)val;                           c.pendMask |= 0x04; }
+  else return;
   c.ms = millis(); c.valid = true;
+}
+
+// Core-1 pump (loop): surface any just-arrived remote reply (flagged by pendMask in
+// maeConsumeRemoteReply on Core 0) as a [MAE:<slot>] marker for the config tool's
+// "Read live" readout — kept off Core 0 because it does Serial I/O. No-op when idle.
+static void maePumpRemoteEmits() {
+  for (uint8_t i = 0; i < RC_NUM_MAESTROS; i++) {
+    MaeRemoteCache& c = g_maeRemote[i];
+    const uint8_t m = c.pendMask;
+    if (!m) continue;
+    c.pendMask &= ~m;                                        // clear only the bits we're emitting now
+    if (m & 0x01) maestroReportQuery(i + 1, 0, c.pendCh, 2, c.pos);
+    if (m & 0x02) maestroReportQuery(i + 1, 1, 0,        1, c.moving);
+    if (m & 0x04) maestroReportQuery(i + 1, 2, 0,        2, c.err);
+  }
 }
 
 // Is Maestro `id` mid-movement (a servo still moving)? The skip-if-running gate uses this.
@@ -639,12 +663,15 @@ static bool maestroSequenceBusy(uint8_t id) {
   if (id < 1 || id > RC_NUM_MAESTROS) return false;
   const RcMaestroSlot& slot = rcConfig.maestros[id - 1];
   if (slot.type == 1) {                                     // LOCAL — ask now (bounded raw Serial2 read)
-    uint8_t rb[1];
-    return maestroLocalQuery(id, 0x93, nullptr, 0, rb, 1) == 1 && rb[0] != 0;   // 0x93 = getMovingState
+    uint8_t rb[1]; uint16_t mv = 0;                         // 0x93 = getMovingState (1-byte reply)
+    int n = maestroLocalQuery(id, 0x93, nullptr, 0, rb, WcbMaestro::replyLen(WcbMaestro::ReplyKind::MOV));
+    return WcbMaestro::decodeReply(WcbMaestro::ReplyKind::MOV, rb, (n > 0) ? (size_t)n : 0, mv) && mv != 0;
   }
-  if (slot.type == 2) {                                     // REMOTE — read the relayed cache
+  if (slot.type == 2) {                                     // REMOTE — read the mesh-relayed cache
     const MaeRemoteCache& c = g_maeRemote[id - 1];
-    return c.valid && (millis() - c.ms) <= MAE_CACHE_FRESH_MS && c.moving != 0;
+    if (c.valid && (millis() - c.ms) <= MAE_CACHE_FRESH_MS) return c.moving != 0;   // fresh → trust it
+    maestroWrite(id, 0x93, nullptr, 0);                     // stale/unknown → warm the cache (async :MQR) …
+    return false;                                           // … and fail open right now
   }
   return false;                                             // disabled → never "busy"
 }
@@ -2289,7 +2316,8 @@ bool execCliLine(const String& line) {
   //      ?MAE,GET,<slot>,<ch>     Get Position    → {"q":"pos",…}  (2-byte reply, ¼µs)
   //      ?MAE,MOVING,<slot>       Get Moving State → {"q":"mov",…}  (1-byte reply, 0/1)
   //      ?MAE,ERR,<slot>          Get Errors       → {"q":"err",…}  (2-byte reply; CLEARS errors on read)
-  //    Queries are LOCAL-slot only (a Remote reply would need WCB relay — Phase 2).
+  //    LOCAL slots reply synchronously off Serial2; REMOTE slots broadcast the query and
+  //    the hosting WCB relays the reply back as :MQR → [MAE:] (async).
   if (line.length() >= 5 && line.substring(0, 5).equalsIgnoreCase("?MAE,")) {
     String a = line.substring(5); a.trim();
     int c1 = a.indexOf(','), c2 = (c1 >= 0) ? a.indexOf(',', c1 + 1) : -1;
@@ -2303,20 +2331,26 @@ bool execCliLine(const String& line) {
       if (c1 > 0 && c2 > c1) {
         uint8_t slot = (uint8_t)a.substring(c1 + 1, c2).toInt();
         uint8_t ch   = (uint8_t)a.substring(c2 + 1).toInt();
-        uint8_t rb[2]; int n = maestroLocalQuery(slot, 0x90, &ch, 1, rb, 2);
-        maestroReportQuery(slot, 0, ch, n, (n == 2) ? (uint16_t)(rb[0] | (rb[1] << 8)) : 0);
+        uint8_t rb[2]; uint16_t val = 0;
+        int n = maestroLocalQuery(slot, 0x90, &ch, 1, rb, WcbMaestro::replyLen(WcbMaestro::ReplyKind::POS));
+        if (n > 0) WcbMaestro::decodeReply(WcbMaestro::ReplyKind::POS, rb, (size_t)n, val);
+        maestroReportQuery(slot, 0, ch, n, val);
       }
     } else if (verb.equalsIgnoreCase("MOVING")) {       // ?MAE,MOVING,<slot> — Get Moving State
       if (c1 > 0) {
         uint8_t slot = (uint8_t)a.substring(c1 + 1).toInt();
-        uint8_t rb[1]; int n = maestroLocalQuery(slot, 0x93, nullptr, 0, rb, 1);
-        maestroReportQuery(slot, 1, 0, n, (n == 1) ? rb[0] : 0);
+        uint8_t rb[1]; uint16_t val = 0;
+        int n = maestroLocalQuery(slot, 0x93, nullptr, 0, rb, WcbMaestro::replyLen(WcbMaestro::ReplyKind::MOV));
+        if (n > 0) WcbMaestro::decodeReply(WcbMaestro::ReplyKind::MOV, rb, (size_t)n, val);
+        maestroReportQuery(slot, 1, 0, n, val);
       }
     } else if (verb.equalsIgnoreCase("ERR")) {          // ?MAE,ERR,<slot> — Get Errors (clears on read)
       if (c1 > 0) {
         uint8_t slot = (uint8_t)a.substring(c1 + 1).toInt();
-        uint8_t rb[2]; int n = maestroLocalQuery(slot, 0xA1, nullptr, 0, rb, 2);
-        maestroReportQuery(slot, 2, 0, n, (n == 2) ? (uint16_t)(rb[0] | (rb[1] << 8)) : 0);
+        uint8_t rb[2]; uint16_t val = 0;
+        int n = maestroLocalQuery(slot, 0xA1, nullptr, 0, rb, WcbMaestro::replyLen(WcbMaestro::ReplyKind::ERR));
+        if (n > 0) WcbMaestro::decodeReply(WcbMaestro::ReplyKind::ERR, rb, (size_t)n, val);
+        maestroReportQuery(slot, 2, 0, n, val);
       }
     } else if (c1 > 0 && c2 > c1) {                     // ?MAE,<slot>,<ch>,<pos> — set target
       maestroSetTarget((uint8_t)a.substring(0, c1).toInt(),
@@ -3393,6 +3427,10 @@ void loop() {
   // Serial output tee'd back to the bridge as RTERM packets. Cheap no-op when
   // nothing is pending.
   drainRemoteCli();
+
+  // Surface any mesh-relayed Maestro read reply (:MQR) as a [MAE:] marker for the
+  // config tool's Read-live readout — deferred here from the Core-0 consumer.
+  maePumpRemoteEmits();
 
   // New WCB peer detected on the mesh → fire the configured action + passive
   // alert (deferred here from the Core-0 onNeighbor callback). Cheap no-op idle.

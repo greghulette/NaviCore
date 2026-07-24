@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.11:05.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.11:36.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7841,11 +7841,11 @@ function renderMaestroLocations() {
       if (f) _importMaestroFile(slotNum, f);
     });
     wrap.appendChild(row);
-    // ── 2-way read (LOCAL slots only) — reads a live value off the Maestro and shows
-    //    it inline. Remote/disabled slots have no synchronous reply path yet (Phase 2),
-    //    so these controls appear only for Local slots. The firmware answers with a
-    //    [MAE:<slot>] marker that _maeReadFeed() routes into #mae-read-<slot>.
-    if (slot.type === 1) {
+    // ── 2-way read — reads a live value off the Maestro and shows it inline. LOCAL slots
+    //    reply synchronously off Serial2; REMOTE slots broadcast the query and the hosting
+    //    WCB relays the reply back over the mesh (:MQR → [MAE:], needs the WCB relay). Both
+    //    surface as a [MAE:<slot>] marker that _maeReadFeed() routes into #mae-read-<slot>.
+    if (slot.type === 1 || slot.type === 2) {
       const diag = document.createElement('div');
       diag.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11px;margin:0 0 8px 46px;color:var(--muted)';
       diag.innerHTML = `
@@ -7873,7 +7873,7 @@ function renderMaestroLocations() {
       if (editingKnob && editingKnobDraft && +editingKnobDraft.function === KF_MAESTRO_PASSTHROUGH) {
         renderKnobOutputs();
       }
-      // Type toggled → re-render so the Local-only "Read live" controls show/hide now.
+      // Type toggled → re-render so the "Read live" controls (Local + Remote) show/hide now.
       if (fld === 'type') renderMaestroLocations();
     });
   });
@@ -7892,16 +7892,18 @@ function renderMaestroLocations() {
   wrap.querySelectorAll('[data-mae-clearimp]').forEach(btn => {
     btn.addEventListener('click', () => _clearMaestroImport(+btn.dataset.maeClearimp));
   });
-  // 2-way read buttons (Local slots): fire the query CLI; the reply returns as a
+  // 2-way read buttons (Local + Remote): fire the query CLI; the reply returns as a
   // [MAE:<slot>] marker handled by _maeReadFeed. GET carries the picked channel.
   wrap.querySelectorAll('[data-mae-read]').forEach(btn => {
     btn.addEventListener('click', () => {
       const slot = +btn.dataset.maeSlot;
       const verb = btn.dataset.maeRead;
       const out = document.getElementById('mae-read-' + slot);
-      // '…' until the [MAE:<slot>] reply lands; if none comes (not connected, or the
-      // CLI never reached the board) fall back so the readout doesn't hang forever.
-      if (out) { out.textContent = '…'; setTimeout(() => { if (out.textContent === '…') out.textContent = '(no response)'; }, 1500); }
+      const isRemote = !!(config.maestros && config.maestros[slot - 1] && config.maestros[slot - 1].type === 2);
+      // '…' until the [MAE:<slot>] reply lands; if none comes (not connected, or the CLI
+      // never reached the board) fall back so the readout doesn't hang forever. Remote reads
+      // round-trip the mesh and need the WCB :MQR relay, so give them longer.
+      if (out) { out.textContent = '…'; setTimeout(() => { if (out.textContent === '…') out.textContent = '(no response)'; }, isRemote ? 3000 : 1500); }
       if (verb === 'GET') {
         const chSel = wrap.querySelector(`[data-mae-readch="${slot}"]`);
         sendRcCli(`?MAE,GET,${slot},${chSel ? +chSel.value : 0}`);

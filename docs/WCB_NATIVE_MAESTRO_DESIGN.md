@@ -221,7 +221,7 @@ NaviCore reads a local Maestro's reply off Serial2 (GPIO7) synchronously in
 CLI → `[MAE:<slot>]{…}` marker → config-tool Maestro Locations inline readout
 (`_maeReadFeed`). Local slots only.
 
-### Phase 2 — REMOTE readback: TODO (WCB firmware + a WCB_Client reply type)
+### Phase 2 — REMOTE readback: NaviCore side DONE; WCB relay is the remaining TODO
 The mechanism exists but the addressing does not:
 - **WCB already pumps Maestro RX back:** `forwardMaestroDataToRemoteKyber()` (WCB.ino
   ~3861) drains the Maestro UART and re-broadcasts the bytes via `sendESPNowRaw()`
@@ -241,9 +241,16 @@ The mechanism exists but the addressing does not:
   new packed struct, lands in `onCommand`. NaviCore queues
   it in the callback and matches it to the outstanding request in `loop()`. Ensure
   `enableSpecialPeer(20)` + the relaying WCB has `?SPECIAL,ON,20`.
-- **NaviCore config tool is already Phase-2-ready:** the `[MAE:<slot>]` marker is
-  re-dispatched inside the `[TERM:]` unwrap, so a reply relayed as `[TERM:20][MAE:…]`
-  renders with no further UI work. The Maestro Locations "Read live" controls are gated
-  to Local slots today; enable them for Remote once the relay lands.
+- **NaviCore side is now implemented (this commit):** a REMOTE `?MAE,GET/MOVING/ERR`
+  (and the skip-if-running gate) broadcasts the Pololu query frame via `maestroWrite()`;
+  the relayed `:MQR,<id>,<chan>,<KIND>,<value>` is parsed by `maeConsumeRemoteReply()`
+  (Core 0) into `g_maeRemote[]` and flagged, then `maePumpRemoteEmits()` (Core 1, loop)
+  surfaces it as the existing `[MAE:<slot>]` marker — so the Maestro Locations "Read live"
+  controls are now ungated for Remote slots and render with no further UI work (a reply
+  relayed as `[TERM:20][MAE:…]` still unwraps). The skip-if-running gate warms
+  `g_maeRemote[]` with a fresh `getMovingState` when the cache is stale and fails open until
+  the reply lands. **All that remains is the WCB relay above** — read the reply bytes,
+  `WcbMaestro::formatReply()`, unicast to id 20; until it ships, remote reads show
+  `(no response)`.
 - **Gotcha:** `getErrors` clears on read, so a dropped/duplicated remote relay silently
   loses or double-consumes error state — correlate + treat as best-effort async.
