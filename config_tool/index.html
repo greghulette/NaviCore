@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.14:41.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.14:47.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -11006,11 +11006,18 @@ function _appendCommandView(container, action) {
     row1.appendChild(makeFieldGroup('WCB', wcbSel));
     row1.appendChild(makeFieldGroup('Serial', portSel));
     // A via-WCB Maestro verb (;M…) offers the same "Skip if already running" gate as the raw
-    // board — the firmware checks the Maestro's getMovingState over the WCB (:MQR) first.
+    // board — the firmware checks the Maestro's getMovingState over the WCB (:MQR) first. Put it
+    // on its OWN line under the (nowrap) Command/WCB/Serial row so it stays inside the card.
     if (/;M\d/i.test(action.cmd || '')) {
+      const skipRow = document.createElement('div');
+      skipRow.style.cssText = 'display:flex;align-items:center;gap:6px;flex-basis:100%;margin-top:4px';
       const skipBox = document.createElement('input');
       skipBox.type = 'checkbox'; skipBox.id = fid + '-skiprun'; skipBox.checked = !!action.skipRunning;
-      row1.appendChild(makeFieldGroup('Skip if already running', skipBox));
+      const skipLbl = document.createElement('label');
+      skipLbl.htmlFor = skipBox.id; skipLbl.textContent = 'Skip if already running';
+      skipLbl.style.cssText = 'font-size:12px;color:var(--muted);cursor:pointer';
+      skipRow.appendChild(skipBox); skipRow.appendChild(skipLbl);
+      container.appendChild(skipRow);
     }
   }
 
