@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.14:55.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:01.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2867,6 +2867,12 @@
           <h2 class="cfg-pane-title">Maestro Locations</h2>
           <div class="sb-section" style="border-bottom:none">
             <div id="maestro-locations" style="display:flex;flex-direction:column;gap:6px"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;flex-wrap:wrap">
+              <label for="mae-gate-ms">Skip-if-running timeout (ms):</label>
+              <input id="mae-gate-ms" type="number" min="50" max="5000" step="10" style="width:80px"
+                     oninput="config.maeGateMs = Math.max(50, Math.min(5000, parseInt(this.value,10)||250))">
+              <span style="font-size:11px;color:var(--muted)">How long a remote / via-WCB Maestro "busy" reply stays valid before the "Skip if already running" gate gives up and fires anyway.</span>
+            </div>
             <div class="noconn" style="margin-top:6px">
               Defines where each logical Maestro lives. Buttons/knobs only pick
               "Maestro 1-8" and don't care about the wiring. Every physical Maestro
@@ -3458,6 +3464,7 @@ let config = {
   txModel:          0,        // TX_MODEL_X18 default
   threeAxisGimbals: false,    // X20 hardware option (off by default)
   sbusOutEnabled:   false,    // SBUS-OUT passthrough (off by default — saves CPU when unused)
+  maeGateMs:        250,      // remote/via-WCB skip-if-running fail-open window (ms)
   boardType:        0,        // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   tapWindowMs:   500,
   matrixChannel: 7,
@@ -7353,6 +7360,7 @@ function applyConfig(data) {
     applyTxModel(config.txModel, false);
   }
   if (data.sbusOutEnabled !== undefined) config.sbusOutEnabled = !!data.sbusOutEnabled;
+  if (data.maeGateMs      !== undefined) config.maeGateMs = Math.max(50, Math.min(5000, +data.maeGateMs || 250));
   if (data.boardType      !== undefined) config.boardType      = +data.boardType | 0;
   if (data.tapWindowMs   !== undefined) {
     const t = +data.tapWindowMs;                    // coerce: a string here would show
@@ -7424,6 +7432,7 @@ function applyConfig(data) {
     config.auxBaud = { ...config.auxBaud, ...data.auxBaud };
   }
   document.getElementById('tapwin-input').value = config.tapWindowMs;
+  { const g = document.getElementById('mae-gate-ms'); if (g) g.value = config.maeGateMs ?? 250; }
   { const sb = document.getElementById('sbus-out-toggle'); if (sb) sb.checked = !!config.sbusOutEnabled; }
   { const bd = document.getElementById('board-select'); if (bd) bd.value = String(config.boardType ?? 0); }
   { const el = document.getElementById('matrix-debounce-input');

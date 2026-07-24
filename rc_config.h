@@ -525,6 +525,10 @@ struct RcConfig {
   // Maestro's Serial Settings (or its "Detect baud" mode). Remote/Kyber
   // Maestros are unaffected — that path is binary over ESP-NOW.
   uint32_t       maestroBaud;
+  // Remote skip-if-running gate: how long a mesh-relayed Maestro "busy" (:MQR moving-state)
+  // reply stays valid. If the last reply is older than this — or none has arrived (e.g. the
+  // WCB relay isn't up yet) — the gate FAILS OPEN and the action fires anyway. Default 250.
+  uint16_t       maeGateMs;
   // 6 smoothing profiles (see RcSmoothProfile). ~4.6 KB total; lives in the
   // PSRAM-heap RcConfig, so it costs no DRAM.
   RcSmoothProfile smoothProfiles[RC_NUM_SMOOTH_PROFILES];
@@ -612,6 +616,7 @@ void rcConfigLoadDefaults() {
   rcConfig.txModel          = TX_MODEL_X18;  // GUI default; user picks via Config → Transmitter
   rcConfig.threeAxisGimbals = false;         // X20 hardware option, off by default
   rcConfig.sbusOutEnabled   = false;         // SBUS-OUT passthrough off by default (saves CPU when unused)
+  rcConfig.maeGateMs        = 250;           // remote skip-if-running fail-open window (ms)
   rcConfig.boardType        = 0;             // 0 = NaviCore v2 PCB (default pinout); 1 = WCB HW 3.2
   rcConfig.tapWindowMs      = 500;
   rcConfig.matrixChannel    = 7;            // button matrix on CH7
@@ -979,6 +984,7 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   doc["txModel"]              = rcConfig.txModel;          // RcTxModel — GUI uses this to swap SVG / labels
   doc["threeAxisGimbals"]     = rcConfig.threeAxisGimbals; // X20 hardware option (shows/hides J5/J6 + stick-click matrix slots)
   doc["sbusOutEnabled"]       = rcConfig.sbusOutEnabled;   // SBUS-OUT passthrough enable
+  doc["maeGateMs"]            = rcConfig.maeGateMs;         // remote skip-if-running fail-open window (ms)
   doc["boardType"]            = rcConfig.boardType;        // hardware pin profile (0=NaviCore v2, 1=WCB 3.2)
   doc["tapWindowMs"]          = rcConfig.tapWindowMs;
   doc["matrixChannel"]        = rcConfig.matrixChannel;
@@ -1174,6 +1180,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   if (doc.containsKey("txModel"))       rcConfig.txModel       = (uint8_t)(doc["txModel"] | (int)TX_MODEL_X18);
   if (doc.containsKey("threeAxisGimbals")) rcConfig.threeAxisGimbals = doc["threeAxisGimbals"] | false;
   if (doc.containsKey("sbusOutEnabled"))   rcConfig.sbusOutEnabled   = doc["sbusOutEnabled"]   | false;
+  if (doc.containsKey("maeGateMs"))        rcConfig.maeGateMs        = doc["maeGateMs"]         | 250;
   if (doc.containsKey("boardType"))        rcConfig.boardType        = (uint8_t)(doc["boardType"] | 0);
   if (doc.containsKey("tapWindowMs"))   rcConfig.tapWindowMs   = doc["tapWindowMs"];
   // A sub-100 ms window makes the multi-tap test (now - lastTap < tapWindowMs)

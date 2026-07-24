@@ -619,7 +619,9 @@ static void maestroReportQuery(uint8_t slot, uint8_t kind, uint8_t ch, int n, ui
 struct MaeRemoteCache { uint16_t pos; uint8_t moving; uint16_t err; uint32_t ms; bool valid;
                         uint8_t pendMask; uint8_t pendCh; };
 static MaeRemoteCache g_maeRemote[RC_NUM_MAESTROS] = {};
-static const uint32_t MAE_CACHE_FRESH_MS = 250;   // a busy-state older than this = "unknown" → the gate fails open
+// The remote skip-if-running fail-open window is configurable: rcConfig.maeGateMs (default
+// 250). A busy-state older than that — or none at all — reads as "unknown" and the gate
+// fails open. Set it in the config tool's Maestro Locations panel.
 
 // Parse ":MQR,<id>,<chan>,<KIND>,<value>" (KIND = POS|MOV|ERR) into g_maeRemote.
 // Runs on Core 0 (WiFi RX task) — parse + store only, never any I/O.
@@ -669,7 +671,7 @@ static bool maestroSequenceBusy(uint8_t id) {
   }
   if (slot.type == 2) {                                     // REMOTE — read the mesh-relayed cache
     const MaeRemoteCache& c = g_maeRemote[id - 1];
-    if (c.valid && (millis() - c.ms) <= MAE_CACHE_FRESH_MS) return c.moving != 0;   // fresh → trust it
+    if (c.valid && (millis() - c.ms) <= rcConfig.maeGateMs) return c.moving != 0;   // fresh → trust it
     maestroWrite(id, 0x93, nullptr, 0);                     // stale/unknown → warm the cache (async :MQR) …
     return false;                                           // … and fail open right now
   }
@@ -698,7 +700,7 @@ static bool maestroVerbBusy(const char* cmd, uint8_t wcbId) {
   const uint8_t id = maeVerbDeviceId(cmd);
   if (!id || !wcb) return false;                            // not a single gate-able Maestro → never skip
   const MaeRemoteCache& c = g_maeRemote[id - 1];
-  if (c.valid && (millis() - c.ms) <= MAE_CACHE_FRESH_MS) return c.moving != 0;
+  if (c.valid && (millis() - c.ms) <= rcConfig.maeGateMs) return c.moving != 0;
   char q[24]; snprintf(q, sizeof(q), ";M%u,getMovingState", id);
   if (wcbId) wcb->send(wcbId, q); else wcb->broadcast(q);   // warm the cache (async :MQR) …
   return false;                                             // … and fail open right now
