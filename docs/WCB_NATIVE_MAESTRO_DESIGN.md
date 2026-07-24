@@ -197,8 +197,15 @@ export/import.
 ## 10. Maestro query readback (2-way) — separate but related
 
 The shared `WcbMaestro` also builds the **query** verbs `getPosition` / `getMovingState`
-/ `getErrors`, which make the Maestro *reply* with bytes. The library builds only the
-REQUEST; reading the reply is the firmware's job.
+/ `getErrors`, which make the Maestro *reply* with bytes. The library builds the REQUEST;
+**reading** the reply bytes off serial is still the firmware's job — but **WcbCmd ≥ 0.7.0
+now ships the shared decode/format helpers** so the reply text can't drift from NaviCore's
+parser:
+- `WcbMaestro::replyInfo(cmd, kind, len)` — map a get* frame's command byte (`out[2]`:
+  `0x10`/`0x13`/`0x21`) to its reply `ReplyKind` (POS/MOV/ERR) and byte count (2/1/2).
+- `WcbMaestro::decodeReply(kind, bytes, len, value)` — raw LOW/HIGH bytes → `uint16_t`.
+- `WcbMaestro::formatReply(out, cap, id, chan, kind, bytes, len)` — emit the exact
+  `:MQR,<id>,<chan>,<KIND>,<value>` line below (`REPLY_TEXT_MAX`-byte buffer).
 
 **Reply wire format (both hosts):** `getPosition` → 2 bytes **LOW then HIGH**, value
 `(hi<<8)|lo` in ¼µs. `getMovingState` → 1 byte (0/1). `getErrors` → 2 bytes LOW/HIGH,
@@ -228,8 +235,10 @@ The mechanism exists but the addressing does not:
 - **Recommended Phase-2 transport:** have the WCB **correlate the reply to its request on
   the WCB side** (it knows which query/port/Maestro it just forwarded) and relay it as a
   normal **text COMMAND** unicast to NaviCore (device id 20) carrying the context the raw
-  bytes lack — e.g. `:MQR,<maestroId>,<chan>,POS,<u16>` or small JSON. Rides the existing
-  CRC/ETM/ACK'd path, needs no new packed struct, lands in `onCommand`. NaviCore queues
+  bytes lack — `:MQR,<maestroId>,<chan>,<KIND>,<value>`, built with
+  `WcbMaestro::formatReply()` (WcbCmd 0.7.0) rather than by hand, since that is the exact
+  text `maeConsumeRemoteReply()` parses. Rides the existing CRC/ETM/ACK'd path, needs no
+  new packed struct, lands in `onCommand`. NaviCore queues
   it in the callback and matches it to the outstanding request in `loop()`. Ensure
   `enableSpecialPeer(20)` + the relaying WCB has `?SPECIAL,ON,20`.
 - **NaviCore config tool is already Phase-2-ready:** the `[MAE:<slot>]` marker is
