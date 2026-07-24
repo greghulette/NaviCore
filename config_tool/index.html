@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.07:51.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.09:43.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8963,14 +8963,7 @@ function actionSummary(a) {
   else if (a.type === 'maestro' || a.type === 'maestro_remote' || a.type === 'maestro_local') {
     // "maestro_local" (legacy) implicitly targets Maestro 1
     const id = (a.type === 'maestro_local') ? 1 : (a.target || '?');
-    if (a.wcbverb) {
-      // via-WCB: show the actual wire command sent to the WCB — ;M<dev>,verb — using the
-      // picked Maestro slot's Pololu device #.
-      const dev = (Array.isArray(config.maestros) && config.maestros[+id - 1]) ? config.maestros[+id - 1].device : '?';
-      core = `Maestro ${id} (via WCB): ;M${dev},${a.cmd}${a.skipRunning ? ' · skip if busy' : ''}`;
-    } else {
-      core = `Maestro ${id}: ${_maestroCmdSummary(id, a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
-    }
+    core = `Maestro ${id}: ${_maestroCmdSummary(id, a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
   }
   else if (a.type === 'serial')        core = `${a.port}: ${escH(a.cmd)}`;
   else if (a.type === 'hcr') {
@@ -10487,10 +10480,7 @@ function _cmdlibUpdatePreview() {
   const el = document.getElementById('cmdlib-preview');
   if (!el || !_cmdlibSel) return;
   const wire = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
-  // "Maestro (via WCB)" sends this to the WCB as a ;M<dev>,verb command (the WCB drives
-  // Pololu). <dev> is the Pololu device # of the Maestro you pick in "Send to" on the action
-  // row — so show that form here, not the bare verb (which is identical to the raw board).
-  el.textContent = (_cmdlibSel.board && _cmdlibSel.board.wcbverb) ? (';M<dev>,' + wire) : wire;
+  el.textContent = wire;
 }
 
 // Write the composed command into the action row, then close. Only the command's
@@ -10526,15 +10516,9 @@ function _cmdlibUse() {
     else                    action = { type: 'stop' };
   } else if (mode === 'maestro') {
     const cur = +(document.getElementById(fid + '-target')?.value) || 1;   // keep the row's slot if any
-    // wcbverb: a re-edit of a maestro row preserves the hidden carrier; a fresh pick (or a
-    // convert from a non-maestro row, which has NO carrier) takes it from the picked board
-    // (nc-maestro-wcb sets it). Key off carrier PRESENCE, not rowHadCmd (which is true for any
-    // populated row, incl. non-maestro ones with no carrier → would drop the board's flag).
-    const vwEl = document.getElementById(fid + '-wcbverb');
-    const viaWcb = vwEl ? (vwEl.value === '1') : !!(board && board.wcbverb);
-    const skip   = !!document.getElementById(fid + '-skiprun')?.checked;
+    const skip = !!document.getElementById(fid + '-skiprun')?.checked;
     action = { type: 'maestro', target: String(cur >= 1 && cur <= NUM_MAESTRO_SLOTS ? cur : 1), cmd: wire,
-               ...(viaWcb ? { wcbverb: 1 } : {}), ...(skip ? { skipRunning: 1 } : {}) };
+               ...(skip ? { skipRunning: 1 } : {}) };
   } else if (mode === 'wled') {
     action = { type: 'wled', cmd: wire };
   } else if (mode === 'device') {
@@ -10957,10 +10941,6 @@ function _appendCommandView(container, action) {
     slotSel.id = fid + '-target';
     slotSel.innerHTML = maestroIdOptions(action.target || 1);
     row1.appendChild(makeFieldGroup('Send to', slotSel));
-    // Carry wcbverb (board-set, not user-editable) across render → read-back.
-    const vw = document.createElement('input');
-    vw.type = 'hidden'; vw.id = fid + '-wcbverb'; vw.value = action.wcbverb ? '1' : '';
-    row1.appendChild(vw);
     // "Skip if already running" gate — check the Maestro's getMovingState (busy) before firing.
     const skipBox = document.createElement('input');
     skipBox.type = 'checkbox'; skipBox.id = fid + '-skiprun'; skipBox.checked = !!action.skipRunning;
@@ -11240,10 +11220,9 @@ function readActionFromFid(fid, type, extras) {
     if (target < 1 || target > NUM_MAESTRO_SLOTS) target = 1;
     const cmd = document.getElementById(fid + '-cmd')?.value || '';
     if (!cmd.trim()) return null;
-    const wcbverb     = document.getElementById(fid + '-wcbverb')?.value === '1';   // via-WCB transport (board-set)
     const skipRunning = !!document.getElementById(fid + '-skiprun')?.checked;        // skip-if-running gate (user toggle)
     return { type: 'maestro', target: String(target), cmd,
-             ...(wcbverb ? { wcbverb: 1 } : {}), ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
+             ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
   }
   if (type === 'serial') {
     const port = document.getElementById(fid + '-port')?.value || 'S3';

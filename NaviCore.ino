@@ -516,51 +516,6 @@ static inline uint16_t sbusToRangeMidClosed(int sbusVal, uint16_t outMin, uint16
 // that cache channel state (passthrough smoothing) MUST gate their cache write
 // on this, else a dropped write (disabled/invalid slot, or a remote stream not
 // yet up) would poison the cache and defeat the self-healing re-apply.
-// ── WCB-native Maestro routing ("Maestro (via WCB)" board) ───────────────────
-// The command library has TWO Maestro servo boards: "Maestro (Pololu raw)" (raw bytes —
-// Serial2 local / broadcast remote) and "Maestro (via WCB)", whose actions carry
-// wcbverb=true. When a via-WCB action fires, rcExecuteActionNow sets g_maeViaWcb around
-// executeMaestroCmd, so maestroWrite emits the command as a native ';M<dev>,verb' unicast
-// to the WCB that WDP says hosts that Maestro (the WCB drives Pololu). Passthrough, timeline
-// scrub, replay keyframes, and idle-release NEVER set the flag → they always stay raw.
-// Set ONLY around executeMaestroCmd's synchronous body (single-core loop, no re-entrancy).
-static bool g_maeViaWcb = false;
-
-// Pololu device# D → the WCB id (1-20) currently advertising it as a LOCAL Maestro over WDP,
-// or 0 if none has (advert not converged / non-WDP host). First match wins deterministically.
-static uint8_t wcbHostingMaestro(uint8_t D) {
-  if (!wcb) return 0;
-  for (uint8_t id = 1; id <= WCB_MAX_BOARDS; id++) {   // getNeighbor keys on WCB NUMBER — scan 1..20
-    const WCBNeighbor* nb = wcb->getNeighbor(id);      // null = never heard / aged out
-    if (!nb) continue;
-    for (uint8_t m = 0; m < nb->maestroCount && m < 9; m++)
-      if (nb->maestroIds[m] == D) return id;
-  }
-  return 0;
-}
-
-// Reverse-map a compact Pololu command byte back to the shared ';M<dev>,verb' text and
-// UNICAST it (ETM-ensured) to the WCB hosting device# `dev`. Returns false — so maestroWrite
-// falls through to the raw path — when the verb has no ';M' form (stopScript 0xA4) or no WCB
-// currently advertises `dev` (WDP not converged). Values are already range-clamped by the
-// callers (maestroSetTarget/Speed/Accel), so they satisfy the WCB's WcbMaestro::build bounds.
-static bool maestroWriteRemoteVerb(uint8_t dev, uint8_t cmd_compact, const uint8_t* p, size_t plen) {
-  char verb[40];
-  switch (cmd_compact) {
-    case 0x84: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,setTarget,%u,%u", dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;
-    case 0x87: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,setSpeed,%u,%u",  dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;
-    case 0x89: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,setAccel,%u,%u",  dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;
-    case 0xA2: snprintf(verb, sizeof(verb), ";M%u,goHome", dev); break;
-    case 0xA7: if (plen < 1) return false; snprintf(verb, sizeof(verb), ";M%u,%u", dev, p[0]); break;                 // restart-at-subroutine (numeric comma form)
-    case 0xA8: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,sub,%u,%u", dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;   // subroutine + parameter
-    case 0xA4: snprintf(verb, sizeof(verb), ";M%u,stopScript", dev); break;   // stop script — needs the stopScript verb added to WcbMaestro
-    default:   return false;   // no ';M' verb for this opcode → caller falls back to the raw path
-  }
-  const uint8_t host = wcbHostingMaestro(dev);
-  if (!host || !wcb) return false;   // no WCB advertises this device# yet → caller falls back to raw broadcast
-  return wcb->send(host, verb);      // unicast, ETM ACK+retry (send()'s `ensured` defaults true)
-}
-
 static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
                          const uint8_t* payload, size_t plen) {
   if (id < 1 || id > RC_NUM_MAESTROS) return false;
@@ -571,14 +526,6 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
          id, slot.device);
     return false;
   }
-
-  // "Maestro (via WCB)" board: the action set g_maeViaWcb, so send this command as a native
-  // ;M<dev>,verb unicast to the WCB that hosts this Maestro (WCB drives Pololu). If no WCB
-  // advertises the device# yet (WDP not converged) or the verb has no ;M form,
-  // maestroWriteRemoteVerb returns false and we fall through to the raw path below. Streams
-  // and the "Maestro (Pololu raw)" board keep g_maeViaWcb false → always raw.
-  if (g_maeViaWcb && maestroWriteRemoteVerb(slot.device, cmd_compact, payload, plen))
-    return true;
 
   Stream* dest = (slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast;
   if (!dest) return false;              // remote slot but stream not yet up
@@ -691,7 +638,7 @@ static void maeConsumeRemoteReply(const char* body) {
 static bool maestroSequenceBusy(uint8_t id) {
   if (id < 1 || id > RC_NUM_MAESTROS) return false;
   const RcMaestroSlot& slot = rcConfig.maestros[id - 1];
-  if (slot.type == 1) {                                     // LOCAL — ask now (raw Serial2; g_maeViaWcb is still false here)
+  if (slot.type == 1) {                                     // LOCAL — ask now (bounded raw Serial2 read)
     uint8_t rb[1];
     return maestroLocalQuery(id, 0x93, nullptr, 0, rb, 1) == 1 && rb[0] != 0;   // 0x93 = getMovingState
   }
@@ -1512,9 +1459,7 @@ static void rcExecuteActionNow(const RcAction& a) {
       // actually wired locally) is now defined in the Maestro Locations panel.
       dlog(DBG_MAESTRO, "[DISPATCH] Maestro (legacy local → ID 1)  %s\n", a.cmd);
       if (a.skipRunning && maestroSequenceBusy(1)) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro 1 skipped — already running\n"); break; }
-      g_maeViaWcb = a.wcbverb;          // "Maestro (via WCB)" board → route as ;M<dev>,verb (else raw)
       executeMaestroCmd(1, a.cmd);
-      g_maeViaWcb = false;
       break;
 
     case RA_MAESTRO_REMOTE: {
@@ -1527,9 +1472,7 @@ static void rcExecuteActionNow(const RcAction& a) {
       }
       dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d  %s\n", id, a.cmd);
       if (a.skipRunning && maestroSequenceBusy((uint8_t)id)) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d skipped — already running\n", id); break; }
-      g_maeViaWcb = a.wcbverb;          // "Maestro (via WCB)" board → route as ;M<dev>,verb (else raw)
       executeMaestroCmd((uint8_t)id, a.cmd);
-      g_maeViaWcb = false;
       break;
     }
     case RA_SERIAL: {
