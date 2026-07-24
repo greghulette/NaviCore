@@ -575,8 +575,10 @@ static int maestroLocalQuery(uint8_t id, uint8_t cmd_compact,
   const uint8_t t = rcConfig.maestros[id - 1].type;
   if (t == 0) return -2;                                   // disabled slot
   if (t == 2) {                                            // Remote → broadcast the query; the hosting WCB relays
-    return maestroWrite(id, cmd_compact, payload, plen)    // the reply back over the mesh as :MQR (async)
-             ? -3 : -2;                                    // -3 = sent (maeConsumeRemoteReply handles the reply)
+    bool sent = maestroWrite(id, cmd_compact, payload, plen);   // the reply back over the mesh as :MQR (async)
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u remote query 0x%02X %s — awaiting :MQR\n",
+         id, cmd_compact, sent ? "sent" : "SEND-FAILED");
+    return sent ? -3 : -2;                                 // -3 = sent (maeConsumeRemoteReply handles the reply)
   }
   while (Serial2.available()) Serial2.read();              // drop stale RX so the decode aligns
   if (!maestroWrite(id, cmd_compact, payload, plen)) return -2;
@@ -673,6 +675,7 @@ static bool maestroSequenceBusy(uint8_t id) {
     const MaeRemoteCache& c = g_maeRemote[id - 1];
     if (c.valid && (millis() - c.ms) <= rcConfig.maeGateMs) return c.moving != 0;   // fresh → trust it
     maestroWrite(id, 0x93, nullptr, 0);                     // stale/unknown → warm the cache (async :MQR) …
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u gate: cache stale → sent getMovingState, fail-open\n", id);
     return false;                                           // … and fail open right now
   }
   return false;                                             // disabled → never "busy"
@@ -703,6 +706,7 @@ static bool maestroVerbBusy(const char* cmd, uint8_t wcbId) {
   if (c.valid && (millis() - c.ms) <= rcConfig.maeGateMs) return c.moving != 0;
   char q[24]; snprintf(q, sizeof(q), ";M%u,getMovingState", id);
   if (wcbId) wcb->send(wcbId, q); else wcb->broadcast(q);   // warm the cache (async :MQR) …
+  dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u via-WCB gate: cache stale → sent %s, fail-open\n", id, q);
   return false;                                             // … and fail open right now
 }
 
@@ -2140,7 +2144,10 @@ void onWCBCommand(uint8_t senderID, const char* command) {
   // A WCB-relayed Maestro read reply — §10 format ":MQR,<id>,<chan>,<KIND>,<value>"
   // (WCB_NATIVE_MAESTRO_DESIGN.md). Parse into g_maeRemote (the skip-if-running gate +
   // remote Read-live read it). Core-0 safe: the consumer only parses + stores.
-  if (command && strncmp(command, ":MQR,", 5) == 0) { maeConsumeRemoteReply(command + 5); return; }
+  if (command && strncmp(command, ":MQR,", 5) == 0) {
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro RX reply  %s\n", command);   // gated + infrequent
+    maeConsumeRemoteReply(command + 5); return;
+  }
 
   // Unhandled (legacy/unknown) WCB command.  This runs in the ESP-NOW
   // receive callback on Core 0; a blocking Serial.printf here can stall the
@@ -2148,8 +2155,8 @@ void onWCBCommand(uint8_t senderID, const char* command) {
   // with the main loop's Serial output on Core 1.  It's rare (almost all RC
   // traffic is JSON handled above), so gate it behind the same verbose flag
   // used for the fragment logging rather than printing unconditionally.
-  if (rcTelemetry::RC_TELEM_VERBOSE)
-    Serial.printf("[WCB RX] from WCB%d: %s\n", senderID, command);
+  if (rcTelemetry::RC_TELEM_VERBOSE || (g_dbgFlags & DBG_MAESTRO))
+    Serial.printf("[WCB RX] from WCB%d: %s\n", senderID, command);   // Maestro chip also surfaces a malformed/other WCB reply
 }
 
 // =============================================================================
