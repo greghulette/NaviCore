@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">23.21:39.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">23.22:55.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8963,7 +8963,14 @@ function actionSummary(a) {
   else if (a.type === 'maestro' || a.type === 'maestro_remote' || a.type === 'maestro_local') {
     // "maestro_local" (legacy) implicitly targets Maestro 1
     const id = (a.type === 'maestro_local') ? 1 : (a.target || '?');
-    core = `Maestro ${id}${a.wcbverb ? ' (via WCB)' : ''}: ${_maestroCmdSummary(id, a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
+    if (a.wcbverb) {
+      // via-WCB: show the actual wire command sent to the WCB — ;M<dev>,verb — using the
+      // picked Maestro slot's Pololu device #.
+      const dev = (Array.isArray(config.maestros) && config.maestros[+id - 1]) ? config.maestros[+id - 1].device : '?';
+      core = `Maestro ${id} (via WCB): ;M${dev},${a.cmd}${a.skipRunning ? ' · skip if busy' : ''}`;
+    } else {
+      core = `Maestro ${id}: ${_maestroCmdSummary(id, a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
+    }
   }
   else if (a.type === 'serial')        core = `${a.port}: ${escH(a.cmd)}`;
   else if (a.type === 'hcr') {
@@ -10474,7 +10481,12 @@ function _cmdlibShowComposer() {
 
 function _cmdlibUpdatePreview() {
   const el = document.getElementById('cmdlib-preview');
-  if (el && _cmdlibSel) el.textContent = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
+  if (!el || !_cmdlibSel) return;
+  const wire = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
+  // "Maestro (via WCB)" sends this to the WCB as a ;M<dev>,verb command (the WCB drives
+  // Pololu). <dev> is the Pololu device # of the Maestro you pick in "Send to" on the action
+  // row — so show that form here, not the bare verb (which is identical to the raw board).
+  el.textContent = (_cmdlibSel.board && _cmdlibSel.board.wcbverb) ? (';M<dev>,' + wire) : wire;
 }
 
 // Write the composed command into the action row, then close. Only the command's
