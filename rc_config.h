@@ -94,6 +94,8 @@ struct RcAction {
   char    cmd[96];
   uint16_t delayMs;       // optional pre-fire delay (ms)
   char    note[20];       // human-readable label shown in GUI (19 chars + null)
+  bool    wcbverb;        // RA_MAESTRO_REMOTE: route via WCB verb (;M<dev>,verb — WCB drives Pololu) instead of raw bytes
+  bool    skipRunning;    // RA_MAESTRO_REMOTE: skip firing if a Maestro sequence is already running (getMovingState gate)
 
   // RA_HCR-specific fields (zero for other action types). The HCR destination
   // (transport, serial port or WCB ID/port) is a GLOBAL setting stored in
@@ -769,7 +771,9 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["type"]   = "maestro";
       obj["target"] = a.target;
       obj["cmd"]    = a.cmd;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (a.delayMs)     obj["delay"]      = a.delayMs;
+      if (a.wcbverb)     obj["wcbverb"]     = true;
+      if (a.skipRunning) obj["skipRunning"] = true;
       break;
     case RA_SERIAL:
       obj["type"]  = "serial";
@@ -851,7 +855,9 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.type = RA_MAESTRO_REMOTE;
     strlcpy(a.target, obj["target"] | "", sizeof(a.target));
     strlcpy(a.cmd,    obj["cmd"]    | "", sizeof(a.cmd));
-    a.delayMs = obj["delay"] | 0;
+    a.delayMs     = obj["delay"]      | 0;
+    a.wcbverb     = obj["wcbverb"]     | false;
+    a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "serial") == 0) {
     a.type = RA_SERIAL;

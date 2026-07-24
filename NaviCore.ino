@@ -516,15 +516,15 @@ static inline uint16_t sbusToRangeMidClosed(int sbusVal, uint16_t outMin, uint16
 // that cache channel state (passthrough smoothing) MUST gate their cache write
 // on this, else a dropped write (disabled/invalid slot, or a remote stream not
 // yet up) would poison the cache and defeat the self-healing re-apply.
-// ── WCB-native remote Maestro routing (smart auto-route) ─────────────────────
-// A DISCRETE Maestro command (button/switch/timeline/replayed ACTION → executeMaestroCmd)
-// aimed at a REMOTE slot is sent to the hosting WCB as a native ';M<dev>,verb' command —
-// the WCB parses it (WcbMaestro) and drives Pololu. STREAMS (passthrough, timeline scrub,
-// replay position keyframes, idle-release) bypass executeMaestroCmd and keep g_maeDiscrete
-// false, so they stay on the lightweight raw-Pololu path (Serial2 local / broadcast remote).
-// The flag is set ONLY around executeMaestroCmd's synchronous body (single-core loop, no
-// re-entrancy), so maestroWrite can tell a discrete command from a servo stream.
-static bool g_maeDiscrete = false;
+// ── WCB-native Maestro routing ("Maestro (via WCB)" board) ───────────────────
+// The command library has TWO Maestro servo boards: "Maestro (Pololu raw)" (raw bytes —
+// Serial2 local / broadcast remote) and "Maestro (via WCB)", whose actions carry
+// wcbverb=true. When a via-WCB action fires, rcExecuteActionNow sets g_maeViaWcb around
+// executeMaestroCmd, so maestroWrite emits the command as a native ';M<dev>,verb' unicast
+// to the WCB that WDP says hosts that Maestro (the WCB drives Pololu). Passthrough, timeline
+// scrub, replay keyframes, and idle-release NEVER set the flag → they always stay raw.
+// Set ONLY around executeMaestroCmd's synchronous body (single-core loop, no re-entrancy).
+static bool g_maeViaWcb = false;
 
 // Pololu device# D → the WCB id (1-20) currently advertising it as a LOCAL Maestro over WDP,
 // or 0 if none has (advert not converged / non-WDP host). First match wins deterministically.
@@ -553,7 +553,8 @@ static bool maestroWriteRemoteVerb(uint8_t dev, uint8_t cmd_compact, const uint8
     case 0xA2: snprintf(verb, sizeof(verb), ";M%u,goHome", dev); break;
     case 0xA7: if (plen < 1) return false; snprintf(verb, sizeof(verb), ";M%u,%u", dev, p[0]); break;                 // restart-at-subroutine (numeric comma form)
     case 0xA8: if (plen < 3) return false; snprintf(verb, sizeof(verb), ";M%u,sub,%u,%u", dev, p[0], (unsigned)(p[1] | (p[2] << 7))); break;   // subroutine + parameter
-    default:   return false;   // stopScript (0xA4) + anything else has no ';M' verb → caller uses the raw path
+    case 0xA4: snprintf(verb, sizeof(verb), ";M%u,stopScript", dev); break;   // stop script — needs the stopScript verb added to WcbMaestro
+    default:   return false;   // no ';M' verb for this opcode → caller falls back to the raw path
   }
   const uint8_t host = wcbHostingMaestro(dev);
   if (!host || !wcb) return false;   // no WCB advertises this device# yet → caller falls back to raw broadcast
@@ -571,11 +572,12 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
     return false;
   }
 
-  // Smart auto-route: a DISCRETE command to a REMOTE slot goes WCB-native (;M<dev>,verb,
-  // unicast to the WCB that advertises this Maestro over WDP). If the verb has no ;M form
-  // or no WCB advertises it yet, this returns false and we fall through to the raw path
-  // below. Streams (g_maeDiscrete == false) and LOCAL slots never take this branch.
-  if (slot.type == 2 && g_maeDiscrete && maestroWriteRemoteVerb(slot.device, cmd_compact, payload, plen))
+  // "Maestro (via WCB)" board: the action set g_maeViaWcb, so send this command as a native
+  // ;M<dev>,verb unicast to the WCB that hosts this Maestro (WCB drives Pololu). If no WCB
+  // advertises the device# yet (WDP not converged) or the verb has no ;M form,
+  // maestroWriteRemoteVerb returns false and we fall through to the raw path below. Streams
+  // and the "Maestro (Pololu raw)" board keep g_maeViaWcb false → always raw.
+  if (g_maeViaWcb && maestroWriteRemoteVerb(slot.device, cmd_compact, payload, plen))
     return true;
 
   Stream* dest = (slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast;
@@ -654,6 +656,50 @@ static void maestroReportQuery(uint8_t slot, uint8_t kind, uint8_t ch, int n, ui
   } else {
     Serial.printf("[MAE:%u]{\"q\":\"err\",\"val\":%u}\n", slot, val);
   }
+}
+
+// ── Remote-Maestro read cache + skip-if-running gate ─────────────────────────
+// A REMOTE Maestro's read reply (getMovingState/Position/Errors) can't be read
+// synchronously — it comes back over the mesh via the WCB relay (see
+// docs/WCB_NATIVE_MAESTRO_DESIGN.md §10). onWCBCommand parses the relayed ":MQR,…"
+// text into this per-slot cache, which the skip-if-running gate reads.
+struct MaeRemoteCache { uint16_t pos; uint8_t moving; uint16_t err; uint32_t ms; bool valid; };
+static MaeRemoteCache g_maeRemote[RC_NUM_MAESTROS] = {};
+static const uint32_t MAE_CACHE_FRESH_MS = 250;   // a busy-state older than this = "unknown" → the gate fails open
+
+// Parse ":MQR,<id>,<chan>,<KIND>,<value>" (KIND = POS|MOV|ERR) into g_maeRemote.
+// Runs on Core 0 (WiFi RX task) — parse + store only, never any I/O.
+static void maeConsumeRemoteReply(const char* body) {
+  int id = atoi(body);                                      // body = "<id>,<chan>,<KIND>,<value>"
+  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  const char* p = strchr(body, ','); if (!p) return; p++;   // → chan
+  p = strchr(p, ',');                if (!p) return; p++;   // → KIND
+  const char* v = strchr(p, ',');    if (!v) return;        // v points at the comma before value
+  long val = atol(v + 1);
+  MaeRemoteCache& c = g_maeRemote[id - 1];
+  if      (strncmp(p, "MOV", 3) == 0) c.moving = (uint8_t)(val != 0);
+  else if (strncmp(p, "POS", 3) == 0) c.pos    = (uint16_t)val;
+  else if (strncmp(p, "ERR", 3) == 0) c.err    = (uint16_t)val;
+  c.ms = millis(); c.valid = true;
+}
+
+// Is Maestro `id` mid-movement (a servo still moving)? The skip-if-running gate uses this.
+// LOCAL slot → query getMovingState synchronously (bounded ~25 ms read). REMOTE slot → read
+// the WDP-relayed cache; if stale/missing, FAIL OPEN (return false = "not busy, go ahead").
+// getMovingState is a PROXY for "sequence running" — it misses a paused / instant-move
+// script, but it's the only native running-signal the Maestro offers.
+static bool maestroSequenceBusy(uint8_t id) {
+  if (id < 1 || id > RC_NUM_MAESTROS) return false;
+  const RcMaestroSlot& slot = rcConfig.maestros[id - 1];
+  if (slot.type == 1) {                                     // LOCAL — ask now (raw Serial2; g_maeViaWcb is still false here)
+    uint8_t rb[1];
+    return maestroLocalQuery(id, 0x93, nullptr, 0, rb, 1) == 1 && rb[0] != 0;   // 0x93 = getMovingState
+  }
+  if (slot.type == 2) {                                     // REMOTE — read the relayed cache
+    const MaeRemoteCache& c = g_maeRemote[id - 1];
+    return c.valid && (millis() - c.ms) <= MAE_CACHE_FRESH_MS && c.moving != 0;
+  }
+  return false;                                             // disabled → never "busy"
 }
 
 // Valid Maestro channel guard (0-31 covers Micro/Mini Maestro 6/12/18/24).
@@ -896,7 +942,6 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
   strlcpy(buf, cmd, sizeof(buf));
   char* tok = strtok(buf, ",");
   if (!tok) return;
-  g_maeDiscrete = true;   // discrete-command scope: a REMOTE slot routes WCB-native (see maestroWrite)
   if      (strcmp(tok, "goHome")        == 0) maestroGoHome(id);
   else if (strcmp(tok, "stopScript")    == 0) maestroStopScript(id);
   else if (strcmp(tok, "setTarget")     == 0) {
@@ -980,7 +1025,6 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
       maeSmoothInvalidateSlot(id);           // a device-side script may change speed/accel we can't see
     }
   }
-  g_maeDiscrete = false;   // leave discrete scope — streams (passthrough/scrub/replay) below stay raw
 }
 
 // =============================================================================
@@ -1467,7 +1511,10 @@ static void rcExecuteActionNow(const RcAction& a) {
       // with old configs.  The location of Maestro 1 (and whether it's
       // actually wired locally) is now defined in the Maestro Locations panel.
       dlog(DBG_MAESTRO, "[DISPATCH] Maestro (legacy local → ID 1)  %s\n", a.cmd);
+      if (a.skipRunning && maestroSequenceBusy(1)) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro 1 skipped — already running\n"); break; }
+      g_maeViaWcb = a.wcbverb;          // "Maestro (via WCB)" board → route as ;M<dev>,verb (else raw)
       executeMaestroCmd(1, a.cmd);
+      g_maeViaWcb = false;
       break;
 
     case RA_MAESTRO_REMOTE: {
@@ -1479,7 +1526,10 @@ static void rcExecuteActionNow(const RcAction& a) {
         break;
       }
       dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d  %s\n", id, a.cmd);
+      if (a.skipRunning && maestroSequenceBusy((uint8_t)id)) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d skipped — already running\n", id); break; }
+      g_maeViaWcb = a.wcbverb;          // "Maestro (via WCB)" board → route as ;M<dev>,verb (else raw)
       executeMaestroCmd((uint8_t)id, a.cmd);
+      g_maeViaWcb = false;
       break;
     }
     case RA_SERIAL: {
@@ -2084,6 +2134,11 @@ void onWCBCommand(uint8_t senderID, const char* command) {
     queueRemoteCli(senderID, command);   // noinline — keeps the 200 B buffer off this frame
     return;
   }
+
+  // A WCB-relayed Maestro read reply — §10 format ":MQR,<id>,<chan>,<KIND>,<value>"
+  // (WCB_NATIVE_MAESTRO_DESIGN.md). Parse into g_maeRemote (the skip-if-running gate +
+  // remote Read-live read it). Core-0 safe: the consumer only parses + stores.
+  if (command && strncmp(command, ":MQR,", 5) == 0) { maeConsumeRemoteReply(command + 5); return; }
 
   // Unhandled (legacy/unknown) WCB command.  This runs in the ESP-NOW
   // receive callback on Core 0; a blocking Serial.printf here can stall the
