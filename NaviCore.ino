@@ -568,16 +568,35 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
 // bounds the stall so a missing Maestro or an unwired RX line can't starve SBUS.
 //   return: bytes read (== nReply on success, < nReply on timeout), or
 //           -2 = send failed (disabled/bad device#), -3 = REMOTE query sent (reply async).
+// Send a REMOTE Maestro read as the shared ";M<dev>,<verb>[,<ch>]" TEXT verb (broadcast), NOT
+// raw Pololu bytes — so the hosting WCB's get-relay (maestroRewriteInboundGet → handleMaestroGet)
+// reads the Maestro and unicasts ":MQR,<id>,<chan>,<KIND>,<value>" home. <dev> is the slot's
+// Pololu device # (must equal the WCB's ?MAESTRO,M<n> id). ch is used only for getPosition.
+static bool maestroBroadcastReadVerb(uint8_t id, uint8_t cmd_compact, uint8_t ch) {
+  if (!wcb || id < 1 || id > RC_NUM_MAESTROS) return false;
+  const char* verb = (cmd_compact == 0x90) ? "getPosition"
+                   : (cmd_compact == 0x93) ? "getMovingState"
+                   : (cmd_compact == 0xA1) ? "getErrors" : nullptr;
+  if (!verb) return false;
+  const uint8_t dev = rcConfig.maestros[id - 1].device;
+  char q[40];
+  if (cmd_compact == 0x90) snprintf(q, sizeof(q), ";M%u,%s,%u", dev, verb, ch);
+  else                     snprintf(q, sizeof(q), ";M%u,%s", dev, verb);
+  wcb->broadcast(q);
+  return true;
+}
+
 static int maestroLocalQuery(uint8_t id, uint8_t cmd_compact,
                              const uint8_t* payload, size_t plen,
                              uint8_t* reply, size_t nReply) {
   if (id < 1 || id > RC_NUM_MAESTROS) return -2;
   const uint8_t t = rcConfig.maestros[id - 1].type;
   if (t == 0) return -2;                                   // disabled slot
-  if (t == 2) {                                            // Remote → broadcast the query; the hosting WCB relays
-    bool sent = maestroWrite(id, cmd_compact, payload, plen);   // the reply back over the mesh as :MQR (async)
-    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u remote query 0x%02X %s — awaiting :MQR\n",
-         id, cmd_compact, sent ? "sent" : "SEND-FAILED");
+  if (t == 2) {                                            // Remote → send the ;M<dev>,<verb> TEXT (not raw bytes)
+    const uint8_t ch = (payload && plen >= 1) ? payload[0] : 0;  // so the hosting WCB's get-relay reads the Maestro
+    bool sent = maestroBroadcastReadVerb(id, cmd_compact, ch);   // and unicasts :MQR home (handleMaestroGet). async.
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u remote read 0x%02X %s — awaiting :MQR\n",
+         id, cmd_compact, sent ? "verb-sent" : "SEND-FAILED");
     return sent ? -3 : -2;                                 // -3 = sent (maeConsumeRemoteReply handles the reply)
   }
   while (Serial2.available()) Serial2.read();              // drop stale RX so the decode aligns
@@ -674,7 +693,7 @@ static bool maestroSequenceBusy(uint8_t id) {
   if (slot.type == 2) {                                     // REMOTE — read the mesh-relayed cache
     const MaeRemoteCache& c = g_maeRemote[id - 1];
     if (c.valid && (millis() - c.ms) <= rcConfig.maeGateMs) return c.moving != 0;   // fresh → trust it
-    maestroWrite(id, 0x93, nullptr, 0);                     // stale/unknown → warm the cache (async :MQR) …
+    maestroBroadcastReadVerb(id, 0x93, 0);                  // stale/unknown → warm via ;M<dev>,getMovingState (async :MQR) …
     dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u gate: cache stale → sent getMovingState, fail-open\n", id);
     return false;                                           // … and fail open right now
   }
