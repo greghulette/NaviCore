@@ -992,6 +992,7 @@
     <button class="btn btn-ghost" id="btn-export-cfg" type="button">Export</button>
     <button class="btn btn-ghost" id="btn-import-cfg" type="button">Import</button>
     <button class="btn btn-ghost" id="btn-cheatsheet" type="button" title="Printable control cheat sheet — what every button / switch / knob does (HTML or PDF)">📋 Cheat Sheet</button>
+    <button class="btn btn-ghost" id="btn-cs-qr" type="button" title="Send the cheat sheet to a phone — uploads it to file.io and shows a QR to scan" onclick="cheatSheetToPhone()">📱 QR</button>
     <button class="btn btn-ghost" id="btn-terminal" type="button" title="Open terminal">⌨ Terminal</button>
     <button class="btn btn-ghost" id="btn-clips" type="button" title="Record/replay clip library" onclick="openClipsModal()">🎬 Clips</button>
     <button class="btn btn-ghost" id="btn-theme" type="button" title="Toggle light / dark theme" aria-label="Toggle theme" style="min-width:36px;justify-content:center;font-size:15px">☾</button>
@@ -2281,7 +2282,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:52.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.11:13.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14680,6 +14681,55 @@ function openCheatSheet() {
   } catch (e) {
     console.error('Cheat sheet build failed:', e);
     alert('Cheat sheet failed to build: ' + ((e && e.message) || e));
+  }
+}
+
+// ── Cheat sheet → phone via file.io + QR ─────────────────────────────────────
+// Uploads the generated cheat-sheet HTML to file.io (free, no signup, auto-expiring)
+// and shows a QR of the returned link for a phone to scan. If the browser upload is
+// blocked (file.io CORS) or file.io is down, it degrades to a clear warning + the
+// existing Save-HTML path. The QR image is rendered by api.qrserver.com (it only sees
+// the file.io link string). Nothing here is "private" — anyone with the link can open it.
+function _csQrModal(inner) {
+  let m = document.getElementById('cs-qr-modal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'cs-qr-modal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+    m.addEventListener('click', e => { if (e.target === m) m.remove(); });
+    document.body.appendChild(m);
+  }
+  m.innerHTML = `<div style="background:var(--card,#1e1e28);color:var(--text,#eee);border:1px solid var(--border,#333);border-radius:12px;max-width:380px;width:100%;padding:18px 20px;position:relative;box-shadow:0 14px 44px rgba(0,0,0,.5);text-align:center">
+    <button type="button" onclick="var e=document.getElementById('cs-qr-modal');if(e)e.remove()" style="position:absolute;top:6px;right:12px;border:0;background:none;font-size:22px;line-height:1;cursor:pointer;color:var(--muted,#999)">×</button>${inner}</div>`;
+}
+
+async function cheatSheetToPhone() {
+  let html;
+  try { html = _buildCheatSheetHtml(); }
+  catch (e) { alert('Cheat sheet failed to build: ' + ((e && e.message) || e)); return; }
+  _csQrModal('<div style="padding:18px 0;font-size:14px">Uploading cheat sheet to file.io…</div>');
+  try {
+    const fd = new FormData();
+    fd.append('file', new Blob([html], { type: 'text/html' }), 'NaviCore_CheatSheet.html');
+    fd.append('maxDownloads', '100');
+    fd.append('expires', '1d');
+    const resp = await fetch('https://file.io/?expires=1d&maxDownloads=100', { method: 'POST', body: fd });
+    const data = await resp.json().catch(() => null);
+    const link = data && (data.link || data.url);
+    if (!resp.ok || !link) throw new Error((data && (data.message || data.error)) || ('file.io returned HTTP ' + resp.status));
+    const qr = 'https://api.qrserver.com/v1/create-qr-code/?size=340x340&margin=12&data=' + encodeURIComponent(link);
+    _csQrModal(`<h3 style="margin:2px 0 10px;font-size:16px">📱 Scan on your phone</h3>
+      <img src="${escH(qr)}" alt="QR code" style="width:260px;height:260px;display:block;margin:6px auto;background:#fff;padding:6px;border-radius:8px" onerror="this.style.display='none'">
+      <div style="font-size:12px;word-break:break-all;margin:8px 0"><a href="${escH(link)}" target="_blank" rel="noopener" style="color:var(--accent,#5aa0ff)">${escH(link)}</a></div>
+      <div style="font-size:11px;color:var(--muted,#999);line-height:1.5;text-align:left;margin-top:8px">Hosted on <b>file.io</b> — no login, auto-deletes after ~1 day (or a limited number of opens). <b>Anyone with this link can view it</b> (button labels, not secrets). QR rendered by api.qrserver.com.</div>`);
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    _csQrModal(`<h3 style="margin:2px 0 10px;font-size:16px">Couldn't upload</h3>
+      <div style="font-size:13px;text-align:left;line-height:1.55">
+        <p style="margin:0 0 8px"><code style="word-break:break-all">${escH(msg)}</code></p>
+        <p style="margin:0 0 8px">Usually a <b>CORS block</b> (file.io refusing a browser upload) or file.io being down — not something fixable from here without a relay/proxy.</p>
+        <p style="margin:0">Fallback: <b>📋 Cheat Sheet → ↓ Save HTML</b>, then AirDrop / email / a shared drive to your phone.</p>
+      </div>`);
   }
 }
 
