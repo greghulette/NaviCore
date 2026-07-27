@@ -2282,7 +2282,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.11:13.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.11:26.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14703,31 +14703,43 @@ function _csQrModal(inner) {
     <button type="button" onclick="var e=document.getElementById('cs-qr-modal');if(e)e.remove()" style="position:absolute;top:6px;right:12px;border:0;background:none;font-size:22px;line-height:1;cursor:pointer;color:var(--muted,#999)">×</button>${inner}</div>`;
 }
 
+// 📱 QR upload endpoint — ONE Cloudflare Worker the project owner hosts for all users
+// (see tools/cheatsheet-relay-worker.js). It stores the cheat-sheet HTML for ~1 day behind
+// a random, CORS-open link, so the browser can upload directly. Leave the REPLACE-ME
+// placeholder to keep the button in "not set up" mode.
+const CS_QR_ENDPOINT = 'https://REPLACE-ME.workers.dev';
+const CS_QR_TOKEN    = '';   // optional — must match the Worker's UPLOAD_TOKEN if you set one
+
 async function cheatSheetToPhone() {
+  if (/REPLACE-ME/.test(CS_QR_ENDPOINT)) {
+    _csQrModal(`<h3 style="margin:2px 0 10px;font-size:16px">QR upload isn't set up yet</h3>
+      <div style="font-size:13px;text-align:left;line-height:1.55">Deploy the relay Worker (see <code>tools/cheatsheet-relay-worker.js</code>) and put its URL in <code>CS_QR_ENDPOINT</code> at the top of this script. Until then: <b>📋 Cheat Sheet → ↓ Save HTML</b>.</div>`);
+    return;
+  }
   let html;
   try { html = _buildCheatSheetHtml(); }
   catch (e) { alert('Cheat sheet failed to build: ' + ((e && e.message) || e)); return; }
-  _csQrModal('<div style="padding:18px 0;font-size:14px">Uploading cheat sheet to file.io…</div>');
+  _csQrModal('<div style="padding:18px 0;font-size:14px">Uploading cheat sheet…</div>');
   try {
-    const fd = new FormData();
-    fd.append('file', new Blob([html], { type: 'text/html' }), 'NaviCore_CheatSheet.html');
-    fd.append('maxDownloads', '100');
-    fd.append('expires', '1d');
-    const resp = await fetch('https://file.io/?expires=1d&maxDownloads=100', { method: 'POST', body: fd });
+    const resp = await fetch(CS_QR_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/html', ...(CS_QR_TOKEN ? { 'X-CS-Token': CS_QR_TOKEN } : {}) },
+      body: html,
+    });
     const data = await resp.json().catch(() => null);
-    const link = data && (data.link || data.url);
-    if (!resp.ok || !link) throw new Error((data && (data.message || data.error)) || ('file.io returned HTTP ' + resp.status));
+    const link = data && data.link;
+    if (!resp.ok || !link) throw new Error((data && data.error) || ('relay returned HTTP ' + resp.status));
     const qr = 'https://api.qrserver.com/v1/create-qr-code/?size=340x340&margin=12&data=' + encodeURIComponent(link);
     _csQrModal(`<h3 style="margin:2px 0 10px;font-size:16px">📱 Scan on your phone</h3>
       <img src="${escH(qr)}" alt="QR code" style="width:260px;height:260px;display:block;margin:6px auto;background:#fff;padding:6px;border-radius:8px" onerror="this.style.display='none'">
       <div style="font-size:12px;word-break:break-all;margin:8px 0"><a href="${escH(link)}" target="_blank" rel="noopener" style="color:var(--accent,#5aa0ff)">${escH(link)}</a></div>
-      <div style="font-size:11px;color:var(--muted,#999);line-height:1.5;text-align:left;margin-top:8px">Hosted on <b>file.io</b> — no login, auto-deletes after ~1 day (or a limited number of opens). <b>Anyone with this link can view it</b> (button labels, not secrets). QR rendered by api.qrserver.com.</div>`);
+      <div style="font-size:11px;color:var(--muted,#999);line-height:1.5;text-align:left;margin-top:8px">Stored on the NaviCore relay — auto-deletes in ~1 day. <b>Anyone with this link can open it</b> (button labels, not secrets). QR image rendered by api.qrserver.com.</div>`);
   } catch (e) {
     const msg = (e && e.message) || String(e);
     _csQrModal(`<h3 style="margin:2px 0 10px;font-size:16px">Couldn't upload</h3>
       <div style="font-size:13px;text-align:left;line-height:1.55">
         <p style="margin:0 0 8px"><code style="word-break:break-all">${escH(msg)}</code></p>
-        <p style="margin:0 0 8px">Usually a <b>CORS block</b> (file.io refusing a browser upload) or file.io being down — not something fixable from here without a relay/proxy.</p>
+        <p style="margin:0 0 8px">The relay may be unreachable or misconfigured — check <code>CS_QR_ENDPOINT</code> and the Worker's KV binding / token.</p>
         <p style="margin:0">Fallback: <b>📋 Cheat Sheet → ↓ Save HTML</b>, then AirDrop / email / a shared drive to your phone.</p>
       </div>`);
   }
