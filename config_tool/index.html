@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:45.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:52.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14598,7 +14598,7 @@ function _buildCheatSheetHtml() {
     txEl.querySelectorAll('[data-sw]').forEach(z => { const v = z.getAttribute('data-sw'); csInfo['s' + v] = csSwInfo(v); });
     txEl.querySelectorAll('[data-knob]').forEach(z => { const v = z.getAttribute('data-knob'); csInfo['k' + v] = csKnobInfo(v); });
   }
-  const txSection = tx ? `<section><h2>Transmitter</h2><p class="note">Tap any button, switch, or knob for its assignments (swipe the diagram on a phone).</p><div class="txwrap">${tx}</div></section>` : '';
+  const txSection = tx ? `<section><h2>Transmitter</h2><p class="note">Tap any button, switch, or knob for its assignments. On a phone, zoom in first for easier tapping.</p><div class="txctl"><button type="button" onclick="txZoom(-0.5)" aria-label="Zoom out">−</button><button type="button" onclick="txZoom(-99)">Fit</button><button type="button" onclick="txZoom(0.5)" aria-label="Zoom in">+</button></div><div class="txzoom">${tx}</div></section>` : '';
 
   // Concatenate every trigger section (each is '' when empty); the "nothing yet" note
   // shows only when they are ALL empty.
@@ -14608,7 +14608,7 @@ function _buildCheatSheetHtml() {
   // Inline downloader for the printed page's toolbar. Assembled from split literals
   // so this source can't contain a "</scr"+"ipt>" that would end index.html's script.
   const csData = JSON.stringify(csInfo).split('<').join('\\u003c');   // escape < so the embedded data can't close this script block early
-  const script = '<scr' + 'ipt>var CS_INFO=' + csData + ';function dlHtml(){var h="<!doctype html>\\n"+document.documentElement.outerHTML;var b=new Blob([h],{type:"text/html"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download="NaviCore_CheatSheet.html";document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},1000);}function toggleView(btn){var n=document.body.classList.toggle("view-note");btn.textContent=n?"Show commands":"Show notes";}function csClose(){document.getElementById("cs-modal").style.display="none";}function csShow(k){var i=CS_INFO[k];if(!i)return;document.getElementById("cs-body").innerHTML=i;document.getElementById("cs-modal").style.display="flex";}document.addEventListener("click",function(e){var t=e.target,z=t&&t.closest?t.closest("[data-btn],[data-sw],[data-knob]"):null;if(!z)return;var k=z.hasAttribute("data-btn")?"b"+z.getAttribute("data-btn"):z.hasAttribute("data-sw")?"s"+z.getAttribute("data-sw"):"k"+z.getAttribute("data-knob");csShow(k);});document.addEventListener("keydown",function(e){if(e.key==="Escape")csClose();});</scr' + 'ipt>';
+  const script = '<scr' + 'ipt>var CS_INFO=' + csData + ';var TXZ=1;function txZoom(d){var w=document.querySelector(".txzoom"),s=w&&w.querySelector("svg");if(!s)return;var b=Math.min(w.clientWidth,620);TXZ=Math.max(1,Math.min(4,Math.round((TXZ+d)*4)/4));if(TXZ<=1){TXZ=1;s.style.width="100%";s.style.maxWidth="620px";}else{s.style.maxWidth="none";s.style.width=(b*TXZ)+"px";}}function dlHtml(){var h="<!doctype html>\\n"+document.documentElement.outerHTML;var b=new Blob([h],{type:"text/html"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download="NaviCore_CheatSheet.html";document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},1000);}function toggleView(btn){var n=document.body.classList.toggle("view-note");btn.textContent=n?"Show commands":"Show notes";}function csClose(){document.getElementById("cs-modal").style.display="none";}function csShow(k){var i=CS_INFO[k];if(!i)return;document.getElementById("cs-body").innerHTML=i;document.getElementById("cs-modal").style.display="flex";}document.addEventListener("click",function(e){var t=e.target,z=t&&t.closest?t.closest("[data-btn],[data-sw],[data-knob]"):null;if(!z)return;var k=z.hasAttribute("data-btn")?"b"+z.getAttribute("data-btn"):z.hasAttribute("data-sw")?"s"+z.getAttribute("data-sw"):"k"+z.getAttribute("data-knob");csShow(k);});document.addEventListener("keydown",function(e){if(e.key==="Escape")csClose();});</scr' + 'ipt>';
 
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NaviCore Control Cheat Sheet</title>
 <style>
@@ -14631,7 +14631,9 @@ td.trig{font-weight:600;white-space:nowrap;background:#fafafb}
 tr{break-inside:avoid}
 .note{color:#666;font-size:12px;margin:0 0 8px}
 .peeracts{font-size:13px}
-.txwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.txzoom{overflow:auto;-webkit-overflow-scrolling:touch;max-height:82vh}
+.txctl{display:flex;gap:6px;margin:0 0 8px}
+.txctl button{font:inherit;font-size:16px;line-height:1;min-width:44px;padding:7px 12px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#333;cursor:pointer}
 .cs-note{display:none}
 body.view-note .cs-cmd{display:none}
 body.view-note .cs-note{display:inline}
@@ -14657,9 +14659,6 @@ body.view-note .cs-note{display:inline}
   .wrap td.trig{background:#f4f4f5;border-bottom:1px solid #eaeaec;font-size:14px;padding:7px 11px;white-space:normal}
   .wrap td[data-label]::before{content:attr(data-label);display:block;font-size:10px;text-transform:uppercase;letter-spacing:.03em;color:#999;font-weight:700;margin-bottom:1px}
   .cs-box{padding:14px 14px 18px}
-  /* Enlarge the transmitter diagram on phones so its tap zones are finger-sized; the
-     .txwrap scrolls horizontally (max-width:none overrides the SVG's inline 620px cap). */
-  .txwrap>svg{min-width:720px!important;max-width:none!important}
 }
 @media print{body{background:#fff}.toolbar,#cs-modal{display:none!important}.wrap{max-width:none;padding:0}section{border:1px solid #ccc;box-shadow:none;padding:8px 10px}}
 </style><\/head>
