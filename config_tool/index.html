@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:23.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:45.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14598,7 +14598,7 @@ function _buildCheatSheetHtml() {
     txEl.querySelectorAll('[data-sw]').forEach(z => { const v = z.getAttribute('data-sw'); csInfo['s' + v] = csSwInfo(v); });
     txEl.querySelectorAll('[data-knob]').forEach(z => { const v = z.getAttribute('data-knob'); csInfo['k' + v] = csKnobInfo(v); });
   }
-  const txSection = tx ? `<section><h2>Transmitter</h2><p class="note">Tap any button, switch, or knob for its assignments.</p>${tx}</section>` : '';
+  const txSection = tx ? `<section><h2>Transmitter</h2><p class="note">Tap any button, switch, or knob for its assignments (swipe the diagram on a phone).</p><div class="txwrap">${tx}</div></section>` : '';
 
   // Concatenate every trigger section (each is '' when empty); the "nothing yet" note
   // shows only when they are ALL empty.
@@ -14631,6 +14631,7 @@ td.trig{font-weight:600;white-space:nowrap;background:#fafafb}
 tr{break-inside:avoid}
 .note{color:#666;font-size:12px;margin:0 0 8px}
 .peeracts{font-size:13px}
+.txwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .cs-note{display:none}
 body.view-note .cs-cmd{display:none}
 body.view-note .cs-note{display:inline}
@@ -14656,6 +14657,9 @@ body.view-note .cs-note{display:inline}
   .wrap td.trig{background:#f4f4f5;border-bottom:1px solid #eaeaec;font-size:14px;padding:7px 11px;white-space:normal}
   .wrap td[data-label]::before{content:attr(data-label);display:block;font-size:10px;text-transform:uppercase;letter-spacing:.03em;color:#999;font-weight:700;margin-bottom:1px}
   .cs-box{padding:14px 14px 18px}
+  /* Enlarge the transmitter diagram on phones so its tap zones are finger-sized; the
+     .txwrap scrolls horizontally (max-width:none overrides the SVG's inline 620px cap). */
+  .txwrap>svg{min-width:720px!important;max-width:none!important}
 }
 @media print{body{background:#fff}.toolbar,#cs-modal{display:none!important}.wrap{max-width:none;padding:0}section{border:1px solid #ccc;box-shadow:none;padding:8px 10px}}
 </style><\/head>
