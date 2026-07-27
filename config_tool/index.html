@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.12:25.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.14:10.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7104,7 +7104,7 @@ function handleBoardMessage(line) {
       // 0 (display says "0 fps") rather than lying with a synthesized 5.
       const hb = _rcLastHbSbus;
       updateSbusStatus({
-        ok:       hb ? (hb.fps > 0 && !hb.lost && !hb.failsafe) : false,
+        ok:       hb ? (hb.fps > 0 && !hb.lost && !hb.failsafe && hb.ageMs < 500) : false,
         lost:     hb ? hb.lost     : false,
         failsafe: hb ? hb.failsafe : false,
         chCount:  msg.ch.length,
@@ -7149,7 +7149,7 @@ function handleBoardMessage(line) {
       // right when rc_hb arrives, even if rc_ch hasn't fired in this
       // interval yet (or if SBUS is genuinely lost — fps will read 0).
       updateSbusStatus({
-        ok:       _rcLastHbSbus.fps > 0 && !_rcLastHbSbus.lost && !_rcLastHbSbus.failsafe,
+        ok:       _rcLastHbSbus.fps > 0 && !_rcLastHbSbus.lost && !_rcLastHbSbus.failsafe && _rcLastHbSbus.ageMs < 500,
         lost:     _rcLastHbSbus.lost,
         failsafe: _rcLastHbSbus.failsafe,
         chCount:  0,                  // unknown until next rc_ch
@@ -7170,7 +7170,7 @@ function handleBoardMessage(line) {
         if (ageMs > 1500) {
           updateSbusStatus({
             ok: false, lost: true, failsafe: false,
-            chCount: 0, fps: 0, ageMs,
+            chCount: 0, fps: 0, ageMs, _stale: true,
           });
         }
       }, 500);
@@ -8239,14 +8239,54 @@ function renderHcrDestFields() {
 // ════════════════════════════════════════════════════════════════════════════
 //  UI helpers
 // ════════════════════════════════════════════════════════════════════════════
+// Wall-clock of the last REAL sbus status paint (any transport). The staleness
+// watchdog uses it to force the dot red when data stops arriving — the key case
+// being the browser tab getting suspended (laptop sleep / backgrounded) and then
+// resuming with a FROZEN pre-sleep snapshot: messages stop, timers freeze, and the
+// old dot just sat there green with a stale age because nothing re-evaluated it and
+// the USB path had no watchdog at all (only the WCB rc_ch-silence one existed).
+// Watchdog-forced repaints pass {_stale:true} so they don't reset this clock.
+let _sbusFreshMs    = 0;
+let _sbusStaleTimer = null;
+// No fresh sbus data for this long → show "no data / idle". Sized to tolerate the
+// SLOWEST legitimate source: the WCB heartbeat is only 0.5 Hz (2000 ms) and can be
+// the sole updater when rc_ch isn't subscribed, and a single heartbeat is allowed to
+// drop ("covered by the next one") → 4000 ms clears both without false-firing. This
+// is only a backstop for total silence / a suspended tab; genuine live SBUS loss is
+// already flagged faster by the firmware (USB sbusOk age-gate, or heartbeat fps→0).
+const SBUS_STALE_MS = 4000;
+
+function _sbusStaleTick() {
+  if (_sbusFreshMs === 0) return;                 // nothing received yet — keep initial "No signal"
+  const gap = Date.now() - _sbusFreshMs;
+  if (gap > SBUS_STALE_MS) {
+    // ageMs = the real wall-clock gap, so the age now visibly CLIMBS instead of
+    // sitting frozen — the exact symptom that made a dead link look alive.
+    updateSbusStatus({ ok: false, lost: false, failsafe: false, chCount: 0, fps: 0, ageMs: gap, _stale: true });
+  }
+}
+// Re-check the instant the tab becomes visible again (wake / refocus) so a stale
+// green corrects immediately instead of waiting up to one 500 ms watchdog interval.
+document.addEventListener('visibilitychange', () => { if (!document.hidden) _sbusStaleTick(); });
+
 function updateSbusStatus(s) {
   const dot    = document.getElementById('sbus-dot');
   const state  = document.getElementById('sbus-state');
   const detail = document.getElementById('sbus-detail');
   if (!dot || !state || !detail) return;
 
+  // Real incoming data resets the staleness clock and (on first data) starts the
+  // watchdog; watchdog-forced reds carry {_stale:true} and must NOT reset it.
+  if (!s._stale) {
+    _sbusFreshMs = Date.now();
+    if (!_sbusStaleTimer) _sbusStaleTimer = setInterval(_sbusStaleTick, 500);
+  }
+
   let color, label;
-  if (s.failsafe) {
+  if (s._stale) {
+    color = 'var(--red)';
+    label = 'No data — link idle';
+  } else if (s.failsafe) {
     color = 'var(--red)';
     label = 'FAILSAFE';
   } else if (s.lost || !s.ok) {
