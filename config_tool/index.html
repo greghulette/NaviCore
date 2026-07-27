@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.14:10.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.14:23.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3172,6 +3172,10 @@ let readBuffer = '';
 let disconnecting = false;   // true while disconnect() tears down — stops the
                              // read loop from re-acquiring a reader (which
                              // would deadlock port.close()).
+let _wantAutoReconnect = false;  // set only after an UNINTENTIONAL link loss (sleep/unplug);
+                                 // cleared by a manual disconnect so we never re-open a port
+                                 // the user deliberately closed. Gates the wake auto-reconnect.
+let _autoReconnecting  = false;  // re-entrancy guard for tryAutoReconnect()
 let isMonitoring = false;
 let currentMode  = 1;
 let editingBtn   = null;
@@ -3809,6 +3813,8 @@ async function disconnect() {
   } finally {
     port = null;
     disconnecting = false;
+    _wantAutoReconnect = false;   // default: don't auto-reopen. handleLinkLost() re-arms
+                                  // this AFTER us when the teardown was an unintentional loss.
     setConnected(false);
     // Force the next connection to re-Load before allowing a Save — the
     // config in memory is now stale w.r.t. whatever board we reconnect to.
@@ -3849,6 +3855,61 @@ async function disconnect() {
     _tlDownload = null;
     _tlAbortWaiters('disconnected');   // reject in-flight timeline upload waiters
   }
+}
+
+// ── Unexpected serial-link loss ─────────────────────────────────────────────
+// The read loop exits (or the browser fires a 'disconnect' event) when the port
+// dies on its OWN: the host sleeping/hibernating invalidates the USB handle, the
+// cable is pulled, or the board reboots. Nothing else flipped the UI out of
+// "Connected" in that case (setConnected(false) only ran on an EXPLICIT user
+// Disconnect), so the header used to sit on a stale green while SBUS went dark.
+// Route those through the normal bounded teardown, say so plainly, and — only
+// when it's unambiguous and safe — try to heal.
+async function handleLinkLost() {
+  if (disconnecting || !port) return;   // a manual teardown is already running, or we're already down
+  console.warn('Serial link lost (sleep / unplug / board reboot) — tearing down session.');
+  // Reflect it on the SBUS block right away instead of waiting for the 4 s watchdog.
+  try { updateSbusStatus({ ok: false, lost: false, failsafe: false, chCount: 0, fps: 0, ageMs: 0, _stale: true }); } catch (_) {}
+  await disconnect();                   // bounded (settleWithin) — safe even on an already-dead port
+  _wantAutoReconnect = true;            // this loss was NOT user-initiated → allow one wake heal
+  const st = document.getElementById('status-text');
+  if (st) st.textContent = 'Connection lost — click Connect to resume';
+  if (!document.hidden) tryAutoReconnect();   // if hidden, the wake handler retries later
+}
+
+// Best-effort auto-reconnect: acts ONLY when exactly one previously-granted port
+// exists (so there's no wrong-device ambiguity) AND a NaviCore actually answers
+// (PONG). With 0 or 2+ granted ports it does nothing and leaves it to the user —
+// so it can never grab the wrong serial device. A failed attempt disarms itself
+// (clears _wantAutoReconnect via disconnect()) so it won't spin on a dead port.
+async function tryAutoReconnect() {
+  if (port || disconnecting || _fwFlashing || _autoReconnecting || !_wantAutoReconnect) return;
+  let ports;
+  try { ports = await navigator.serial.getPorts(); } catch (_) { return; }
+  if (!ports || ports.length !== 1) return;   // ambiguous or none — user picks via Connect
+  _autoReconnecting = true;
+  try {
+    const answered = await openPortAndStart(ports[0]);   // returns whether a PONG was seen
+    if (!answered) {
+      // Opened, but nothing spoke PONG (wrong device, or still booting) — don't
+      // leave a bogus "Connected" pointed at a silent port.
+      await disconnect();
+      const st = document.getElementById('status-text');
+      if (st) st.textContent = 'Auto-reconnect found no board — click Connect';
+    }
+  } catch (_) {
+    try { await disconnect(); } catch (__) {}
+  } finally {
+    _autoReconnecting = false;
+  }
+}
+
+// Physical unplug / OS-level port invalidation fires this even when the read loop
+// hasn't yet errored out.
+if (navigator.serial && navigator.serial.addEventListener) {
+  navigator.serial.addEventListener('disconnect', ev => {
+    if (port && ev.target === port && !disconnecting) handleLinkLost();
+  });
 }
 
 function setConnected(v) {
@@ -6867,6 +6928,10 @@ async function startReading() {
       await new Promise(r => setTimeout(r, 50));
     }
   }
+  // Fell out of the read loop. If this was NOT a user Disconnect, the port died on
+  // us (host sleep / unplug / board reboot) — surface it instead of leaving a stale
+  // "Connected". handleLinkLost() re-checks the guards itself and is idempotent.
+  if (!disconnecting && port) handleLinkLost();
 }
 
 // ── Via WCB fragment reassembly buffer (receive-side) ───────────────────────
@@ -8267,7 +8332,11 @@ function _sbusStaleTick() {
 }
 // Re-check the instant the tab becomes visible again (wake / refocus) so a stale
 // green corrects immediately instead of waiting up to one 500 ms watchdog interval.
-document.addEventListener('visibilitychange', () => { if (!document.hidden) _sbusStaleTick(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  _sbusStaleTick();               // correct a stale-green SBUS dot the instant we wake
+  if (!port) tryAutoReconnect();  // link may have died while suspended — heal if unambiguous & safe
+});
 
 function updateSbusStatus(s) {
   const dot    = document.getElementById('sbus-dot');
