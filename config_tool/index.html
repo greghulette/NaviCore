@@ -2282,7 +2282,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.11:26.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.12:07.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14707,8 +14707,8 @@ function _csQrModal(inner) {
 // (see tools/cheatsheet-relay-worker.js). It stores the cheat-sheet HTML for ~1 day behind
 // a random, CORS-open link, so the browser can upload directly. Leave the REPLACE-ME
 // placeholder to keep the button in "not set up" mode.
-const CS_QR_ENDPOINT = 'https://REPLACE-ME.workers.dev';
-const CS_QR_TOKEN    = '';   // optional — must match the Worker's UPLOAD_TOKEN if you set one
+const CS_QR_ENDPOINT = 'https://navicore-cheatsheet.greg-hulette.workers.dev';
+const CS_QR_TOKEN    = 'jf;af7kljaf8LJK*RELKFja;fff';   // optional — must match the Worker's UPLOAD_TOKEN if you set one (Worker isn't enforcing one yet, so this is currently ignored)
 
 async function cheatSheetToPhone() {
   if (/REPLACE-ME/.test(CS_QR_ENDPOINT)) {
