@@ -56,8 +56,15 @@ export default {
       if (key.length > KEY_LEN || !/^[a-z0-9]+$/i.test(key))
         return new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain', ...CORS } });
       const html = env.CS ? await env.CS.get('cs:' + key) : null;
-      if (html != null)
-        return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...CORS } });
+      if (html != null) {
+        const headers = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...CORS };
+        // ?dl → serve as a real file download so a phone saves it to Files/Downloads
+        // instead of just rendering it. The cheat sheet page's "📥 Save" button links
+        // here; a bare GET (no ?dl) still renders inline for viewing/scanning.
+        if (url.searchParams.has('dl'))
+          headers['Content-Disposition'] = 'attachment; filename="NaviCore_CheatSheet.html"';
+        return new Response(html, { headers });
+      }
       return new Response(RETRY_PAGE, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...CORS } });
     }
 
