@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:12.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:23.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10429,6 +10429,15 @@ function _cmdlibShowComposer() {
     } else if (p.type === 'bool') {
       const on = _cmdlibValues[p.name] && _cmdlibValues[p.name] !== 'false' && _cmdlibValues[p.name] !== '0';
       field = `<input type="checkbox" id="${pid}" data-pbool="${esc(p.name)}" ${on ? 'checked' : ''} style="width:auto">`;
+    } else if (cmd.id === 'maestro.setEasing' && p.name === 'profile') {
+      // Easing profile → a dropdown of the smoothing profiles (by NAME) + Off + Release,
+      // instead of a raw "p0" text box. The stored wire value stays "pN" / "off" / "release".
+      const cur = String(_cmdlibValues[p.name] || 'release');
+      const opts = _smoothProfiles().map((prof, k) =>
+          `<option value="p${k}" ${cur === 'p' + k ? 'selected' : ''}>${esc(_smoothProfileName(k))}</option>`).join('')
+        + `<option value="off" ${cur === 'off' ? 'selected' : ''}>Off — full speed</option>`
+        + `<option value="release" ${cur === 'release' ? 'selected' : ''}>Release — local only</option>`;
+      field = `<select id="${pid}" data-pname="${esc(p.name)}" style="width:220px">${opts}</select>`;
     } else if (p.enum) {
       const en = _cmdlibEnum(p.enum);
       const opts = ((en && en.values) || []).map(v =>
