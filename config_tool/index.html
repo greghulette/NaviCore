@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:30.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.23:40.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2867,7 +2867,7 @@
           <h2 class="cfg-pane-title">Maestro Locations</h2>
           <div class="sb-section" style="border-bottom:none">
             <div id="maestro-locations" style="display:flex;flex-direction:column;gap:6px"></div>
-            <div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;flex-wrap:wrap">
+            <div style="display:none;align-items:center;gap:8px;margin-top:10px;font-size:12px;flex-wrap:wrap"><!-- Skip-if-running timeout: UI hidden for now (feature shelved); config.maeGateMs + firmware retained -->
               <label for="mae-gate-ms">Skip-if-running timeout (ms):</label>
               <input id="mae-gate-ms" type="number" min="50" max="5000" step="10" style="width:80px"
                      oninput="config.maeGateMs = Math.max(50, Math.min(5000, parseInt(this.value,10)||250))">
@@ -8969,12 +8969,12 @@ function _maestroCmdSummary(slot, cmd) {
 function actionSummary(a) {
   if (!a || !a.type) return '—';
   let core;
-  if (a.type === 'wcb_unicast')        core = `WCB${a.target}: ${escH(a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
-  else if (a.type === 'wcb_broadcast') core = `WCB*: ${escH(a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
+  if (a.type === 'wcb_unicast')        core = `WCB${a.target}: ${escH(a.cmd)}`;
+  else if (a.type === 'wcb_broadcast') core = `WCB*: ${escH(a.cmd)}`;
   else if (a.type === 'maestro' || a.type === 'maestro_remote' || a.type === 'maestro_local') {
     // "maestro_local" (legacy) implicitly targets Maestro 1
     const id = (a.type === 'maestro_local') ? 1 : (a.target || '?');
-    core = `Maestro ${id}: ${_maestroCmdSummary(id, a.cmd)}${a.skipRunning ? ' · skip if busy' : ''}`;
+    core = `Maestro ${id}: ${_maestroCmdSummary(id, a.cmd)}`;
   }
   else if (a.type === 'serial')        core = `${a.port}: ${escH(a.cmd)}`;
   else if (a.type === 'hcr') {
@@ -10958,10 +10958,14 @@ function _appendCommandView(container, action) {
     slotSel.id = fid + '-target';
     slotSel.innerHTML = maestroIdOptions(action.target || 1);
     row1.appendChild(makeFieldGroup('Send to', slotSel));
-    // "Skip if already running" gate — check the Maestro's getMovingState (busy) before firing.
+    // "Skip if already running" gate — HIDDEN from the UI for now: getMovingState can't tell
+    // whether a Maestro SCRIPT is running (only ramping servos), so the gate rarely fires. The
+    // firmware path is kept; the checkbox stays in the DOM but hidden so an already-saved value
+    // round-trips. Re-expose once a reliable "script running" signal exists (e.g. a busy channel).
     const skipBox = document.createElement('input');
     skipBox.type = 'checkbox'; skipBox.id = fid + '-skiprun'; skipBox.checked = !!action.skipRunning;
-    row1.appendChild(makeFieldGroup('Skip if already running', skipBox));
+    skipBox.style.display = 'none';
+    row1.appendChild(skipBox);
   } else if (mode === 'wled') {
     const note = document.createElement('div');
     note.style.cssText = 'font-size:11px;color:var(--muted);align-self:center;max-width:200px';
@@ -11014,19 +11018,14 @@ function _appendCommandView(container, action) {
 
     row1.appendChild(makeFieldGroup('WCB', wcbSel));
     row1.appendChild(makeFieldGroup('Serial', portSel));
-    // A via-WCB Maestro verb (;M…) offers the same "Skip if already running" gate as the raw
-    // board — the firmware checks the Maestro's getMovingState over the WCB (:MQR) first. Put it
-    // on its OWN line under the (nowrap) Command/WCB/Serial row so it stays inside the card.
+    // Skip-if-running gate — HIDDEN from the UI for now (getMovingState can't detect a running
+    // script). Keep a hidden checkbox for ;M verbs so an already-saved value round-trips; the
+    // firmware path stays intact. Re-expose when a reliable signal lands.
     if (/;M[1-8]/i.test(action.cmd || '')) {
-      const skipRow = document.createElement('div');
-      skipRow.style.cssText = 'display:flex;align-items:center;gap:6px;flex-basis:100%;margin-top:4px';
       const skipBox = document.createElement('input');
       skipBox.type = 'checkbox'; skipBox.id = fid + '-skiprun'; skipBox.checked = !!action.skipRunning;
-      const skipLbl = document.createElement('label');
-      skipLbl.htmlFor = skipBox.id; skipLbl.textContent = 'Skip if already running';
-      skipLbl.style.cssText = 'font-size:12px;color:var(--muted);cursor:pointer';
-      skipRow.appendChild(skipBox); skipRow.appendChild(skipLbl);
-      container.appendChild(skipRow);
+      skipBox.style.display = 'none';
+      container.appendChild(skipBox);
     }
   }
 
