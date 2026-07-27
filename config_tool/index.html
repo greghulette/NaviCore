@@ -992,7 +992,6 @@
     <button class="btn btn-ghost" id="btn-export-cfg" type="button">Export</button>
     <button class="btn btn-ghost" id="btn-import-cfg" type="button">Import</button>
     <button class="btn btn-ghost" id="btn-cheatsheet" type="button" title="Printable control cheat sheet — what every button / switch / knob does (HTML or PDF)">📋 Cheat Sheet</button>
-    <button class="btn btn-ghost" id="btn-cs-qr" type="button" title="Send the cheat sheet to a phone — uploads it to file.io and shows a QR to scan" onclick="cheatSheetToPhone()">📱 QR</button>
     <button class="btn btn-ghost" id="btn-terminal" type="button" title="Open terminal">⌨ Terminal</button>
     <button class="btn btn-ghost" id="btn-clips" type="button" title="Record/replay clip library" onclick="openClipsModal()">🎬 Clips</button>
     <button class="btn btn-ghost" id="btn-theme" type="button" title="Toggle light / dark theme" aria-label="Toggle theme" style="min-width:36px;justify-content:center;font-size:15px">☾</button>
@@ -2282,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.12:07.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.12:25.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14609,7 +14608,18 @@ function _buildCheatSheetHtml() {
   // Inline downloader for the printed page's toolbar. Assembled from split literals
   // so this source can't contain a "</scr"+"ipt>" that would end index.html's script.
   const csData = JSON.stringify(csInfo).split('<').join('\\u003c');   // escape < so the embedded data can't close this script block early
-  const script = '<scr' + 'ipt>var CS_INFO=' + csData + ';var TXZ=1;function txZoom(d){var w=document.querySelector(".txzoom"),s=w&&w.querySelector("svg");if(!s)return;var b=Math.min(w.clientWidth,620);TXZ=Math.max(1,Math.min(4,Math.round((TXZ+d)*4)/4));if(TXZ<=1){TXZ=1;s.style.width="100%";s.style.maxWidth="620px";}else{s.style.maxWidth="none";s.style.width=(b*TXZ)+"px";}}function dlHtml(){var h="<!doctype html>\\n"+document.documentElement.outerHTML;var b=new Blob([h],{type:"text/html"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download="NaviCore_CheatSheet.html";document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},1000);}function toggleView(btn){var n=document.body.classList.toggle("view-note");btn.textContent=n?"Show commands":"Show notes";}function csClose(){document.getElementById("cs-modal").style.display="none";}function csShow(k){var i=CS_INFO[k];if(!i)return;document.getElementById("cs-body").innerHTML=i;document.getElementById("cs-modal").style.display="flex";}document.addEventListener("click",function(e){var t=e.target,z=t&&t.closest?t.closest("[data-btn],[data-sw],[data-knob]"):null;if(!z)return;var k=z.hasAttribute("data-btn")?"b"+z.getAttribute("data-btn"):z.hasAttribute("data-sw")?"s"+z.getAttribute("data-sw"):"k"+z.getAttribute("data-knob");csShow(k);});document.addEventListener("keydown",function(e){if(e.key==="Escape")csClose();});</scr' + 'ipt>';
+  // "Send to phone" uploader, baked into the printed page's OWN inline script (the sheet
+  // opens as a standalone tab, so it can't call the config tool's functions). It POSTs the
+  // page's HTML to the relay — endpoint + token injected here at build time — and shows a QR
+  // of the returned short link. Single quotes inside are backslash-escaped for the enclosing
+  // single-quoted string; the body holds no literal "</scr"+"ipt>". Token is not secret (it
+  // ships in this public page) — the relay's per-IP rate limit + size cap are the real guard.
+  const csEp = JSON.stringify(CS_QR_ENDPOINT).split('<').join('\\u003c');
+  const csTk = JSON.stringify(CS_QR_TOKEN).split('<').join('\\u003c');
+  const csQrJs = ';var CS_EP=' + csEp + ';var CS_TK=' + csTk + ';'
+    + 'function csModal(h){var m=document.getElementById("csqr");if(!m){m=document.createElement("div");m.id="csqr";m.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px";m.addEventListener("click",function(e){if(e.target===m)m.remove();});document.body.appendChild(m);}m.innerHTML="<div style=\'background:#fff;color:#1a1a1a;border-radius:12px;max-width:360px;width:100%;padding:20px;position:relative;text-align:center;box-shadow:0 14px 44px rgba(0,0,0,.5)\'><button class=\'csqx\' style=\'position:absolute;top:6px;right:12px;border:0;background:none;font-size:22px;line-height:1;cursor:pointer;color:#999\'>×</button>"+h+"</div>";var x=m.querySelector(".csqx");if(x)x.onclick=function(){m.remove();};}'
+    + 'function csToPhone(){if(/REPLACE-ME/.test(CS_EP)){var old0=document.getElementById("csqr");if(old0)old0.remove();csModal("<div style=\'font-size:13px;line-height:1.5\'>QR upload is not set up for this build. Use <b>Save HTML</b> instead.</div>");return;}var old=document.getElementById("csqr");if(old)old.remove();var HTML="<!doctype html>\\n"+document.documentElement.outerHTML;csModal("<div style=\'padding:16px 0;font-size:14px\'>Uploading cheat sheet…</div>");var hd={"Content-Type":"text/html"};if(CS_TK)hd["X-CS-Token"]=CS_TK;fetch(CS_EP,{method:"POST",headers:hd,body:HTML}).then(function(r){return r.json().catch(function(){return null;}).then(function(d){return{ok:r.ok,status:r.status,d:d};});}).then(function(x){var link=x.d&&x.d.link;if(!x.ok||!link)throw new Error((x.d&&x.d.error)||("relay HTTP "+x.status));var qr="https://api.qrserver.com/v1/create-qr-code/?size=340x340&margin=12&data="+encodeURIComponent(link);csModal("<div style=\'font-size:16px;font-weight:600;margin:2px 0 10px\'>📱 Scan on your phone</div><img class=\'csqi\' src=\'"+qr+"\' alt=\'QR\' style=\'width:240px;height:240px;display:block;margin:6px auto;background:#fff;padding:6px;border-radius:8px\'><div style=\'font-size:12px;word-break:break-all;margin:8px 0\'><a href=\'"+link+"\' target=\'_blank\' rel=\'noopener\' style=\'color:#c0392b\'>"+link+"</a></div><div style=\'font-size:11px;color:#888;line-height:1.5\'>Auto-deletes in ~1 day. Anyone with the link can open it.</div>");var im=document.querySelector("#csqr img.csqi");if(im)im.onerror=function(){this.style.display="none";};}).catch(function(e){csModal("<div style=\'font-size:16px;font-weight:600;margin:2px 0 10px\'>Could not upload</div><div style=\'font-size:13px;text-align:left;line-height:1.5\'><p style=\'margin:0 0 8px\'><code>"+String((e&&e.message)||e)+"</code></p><p style=\'margin:0\'>Use <b>Save HTML</b>, then AirDrop / email it to your phone.</p></div>");});}';
+  const script = '<scr' + 'ipt>var CS_INFO=' + csData + ';var TXZ=1;function txZoom(d){var w=document.querySelector(".txzoom"),s=w&&w.querySelector("svg");if(!s)return;var b=Math.min(w.clientWidth,620);TXZ=Math.max(1,Math.min(4,Math.round((TXZ+d)*4)/4));if(TXZ<=1){TXZ=1;s.style.width="100%";s.style.maxWidth="620px";}else{s.style.maxWidth="none";s.style.width=(b*TXZ)+"px";}}function dlHtml(){var h="<!doctype html>\\n"+document.documentElement.outerHTML;var b=new Blob([h],{type:"text/html"});var u=URL.createObjectURL(b);var a=document.createElement("a");a.href=u;a.download="NaviCore_CheatSheet.html";document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(function(){URL.revokeObjectURL(u);},1000);}function toggleView(btn){var n=document.body.classList.toggle("view-note");btn.textContent=n?"Show commands":"Show notes";}function csClose(){document.getElementById("cs-modal").style.display="none";}function csShow(k){var i=CS_INFO[k];if(!i)return;document.getElementById("cs-body").innerHTML=i;document.getElementById("cs-modal").style.display="flex";}document.addEventListener("click",function(e){var t=e.target,z=t&&t.closest?t.closest("[data-btn],[data-sw],[data-knob]"):null;if(!z)return;var k=z.hasAttribute("data-btn")?"b"+z.getAttribute("data-btn"):z.hasAttribute("data-sw")?"s"+z.getAttribute("data-sw"):"k"+z.getAttribute("data-knob");csShow(k);});document.addEventListener("keydown",function(e){if(e.key==="Escape")csClose();});' + csQrJs + '</scr' + 'ipt>';
 
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NaviCore Control Cheat Sheet</title>
 <style>
@@ -14664,7 +14674,7 @@ body.view-note .cs-note{display:inline}
 @media print{body{background:#fff}.toolbar,#cs-modal{display:none!important}.wrap{max-width:none;padding:0}section{border:1px solid #ccc;box-shadow:none;padding:8px 10px}}
 </style><\/head>
 <body class="${anyNote ? 'view-note' : ''}">
-<div class="toolbar"><button onclick="window.print()">\u{1F5A8} Save as PDF</button><button class="alt" onclick="dlHtml()">↓ Save HTML</button><button class="alt" onclick="toggleView(this)">${anyNote ? 'Show commands' : 'Show notes'}</button></div>
+<div class="toolbar"><button onclick="window.print()">\u{1F5A8} Save as PDF</button><button class="alt" onclick="dlHtml()">↓ Save HTML</button><button class="alt" onclick="csToPhone()">📱 Send to Phone</button><button class="alt" onclick="toggleView(this)">${anyNote ? 'Show commands' : 'Show notes'}</button></div>
 <div class="wrap"><h1>NaviCore — Control Cheat Sheet</h1><div class="meta">Generated ${escH(when)}</div>${body}</div>
 <div id="cs-modal" onclick="if(event.target===this)csClose()"><div class="cs-box"><button class="cs-x" onclick="csClose()">×</button><div id="cs-body"></div></div></div>
 ${script}
@@ -14684,66 +14694,17 @@ function openCheatSheet() {
   }
 }
 
-// ── Cheat sheet → phone via file.io + QR ─────────────────────────────────────
-// Uploads the generated cheat-sheet HTML to file.io (free, no signup, auto-expiring)
-// and shows a QR of the returned link for a phone to scan. If the browser upload is
-// blocked (file.io CORS) or file.io is down, it degrades to a clear warning + the
-// existing Save-HTML path. The QR image is rendered by api.qrserver.com (it only sees
-// the file.io link string). Nothing here is "private" — anyone with the link can open it.
-function _csQrModal(inner) {
-  let m = document.getElementById('cs-qr-modal');
-  if (!m) {
-    m = document.createElement('div');
-    m.id = 'cs-qr-modal';
-    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
-    m.addEventListener('click', e => { if (e.target === m) m.remove(); });
-    document.body.appendChild(m);
-  }
-  m.innerHTML = `<div style="background:var(--card,#1e1e28);color:var(--text,#eee);border:1px solid var(--border,#333);border-radius:12px;max-width:380px;width:100%;padding:18px 20px;position:relative;box-shadow:0 14px 44px rgba(0,0,0,.5);text-align:center">
-    <button type="button" onclick="var e=document.getElementById('cs-qr-modal');if(e)e.remove()" style="position:absolute;top:6px;right:12px;border:0;background:none;font-size:22px;line-height:1;cursor:pointer;color:var(--muted,#999)">×</button>${inner}</div>`;
-}
-
-// 📱 QR upload endpoint — ONE Cloudflare Worker the project owner hosts for all users
-// (see tools/cheatsheet-relay-worker.js). It stores the cheat-sheet HTML for ~1 day behind
-// a random, CORS-open link, so the browser can upload directly. Leave the REPLACE-ME
-// placeholder to keep the button in "not set up" mode.
+// 📱 Cheat-sheet QR relay — ONE Cloudflare Worker the project owner hosts for all users
+// (see tools/cheatsheet-relay-worker.js). Stores the cheat-sheet HTML for ~1 day behind a
+// random, CORS-open link; the browser uploads it directly. These two constants are injected
+// into the cheat sheet page's OWN inline uploader (csQrJs in _buildCheatSheetHtml) — the
+// "📱 Send to Phone" button lives on the generated sheet, not on this config page. Leave the
+// REPLACE-ME placeholder to keep that button in "not set up" mode. CS_QR_TOKEN must match the
+// Worker's UPLOAD_TOKEN secret; note it ships in this public page + every generated sheet, so
+// it's a bot speed-bump, not a secret — the relay's per-IP rate limit + size cap + 1-day TTL
+// are the real abuse guard.
 const CS_QR_ENDPOINT = 'https://navicore-cheatsheet.greg-hulette.workers.dev';
-const CS_QR_TOKEN    = 'jf;af7kljaf8LJK*RELKFja;fff';   // optional — must match the Worker's UPLOAD_TOKEN if you set one (Worker isn't enforcing one yet, so this is currently ignored)
-
-async function cheatSheetToPhone() {
-  if (/REPLACE-ME/.test(CS_QR_ENDPOINT)) {
-    _csQrModal(`<h3 style="margin:2px 0 10px;font-size:16px">QR upload isn't set up yet</h3>
-      <div style="font-size:13px;text-align:left;line-height:1.55">Deploy the relay Worker (see <code>tools/cheatsheet-relay-worker.js</code>) and put its URL in <code>CS_QR_ENDPOINT</code> at the top of this script. Until then: <b>📋 Cheat Sheet → ↓ Save HTML</b>.</div>`);
-    return;
-  }
-  let html;
-  try { html = _buildCheatSheetHtml(); }
-  catch (e) { alert('Cheat sheet failed to build: ' + ((e && e.message) || e)); return; }
-  _csQrModal('<div style="padding:18px 0;font-size:14px">Uploading cheat sheet…</div>');
-  try {
-    const resp = await fetch(CS_QR_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/html', ...(CS_QR_TOKEN ? { 'X-CS-Token': CS_QR_TOKEN } : {}) },
-      body: html,
-    });
-    const data = await resp.json().catch(() => null);
-    const link = data && data.link;
-    if (!resp.ok || !link) throw new Error((data && data.error) || ('relay returned HTTP ' + resp.status));
-    const qr = 'https://api.qrserver.com/v1/create-qr-code/?size=340x340&margin=12&data=' + encodeURIComponent(link);
-    _csQrModal(`<h3 style="margin:2px 0 10px;font-size:16px">📱 Scan on your phone</h3>
-      <img src="${escH(qr)}" alt="QR code" style="width:260px;height:260px;display:block;margin:6px auto;background:#fff;padding:6px;border-radius:8px" onerror="this.style.display='none'">
-      <div style="font-size:12px;word-break:break-all;margin:8px 0"><a href="${escH(link)}" target="_blank" rel="noopener" style="color:var(--accent,#5aa0ff)">${escH(link)}</a></div>
-      <div style="font-size:11px;color:var(--muted,#999);line-height:1.5;text-align:left;margin-top:8px">Stored on the NaviCore relay — auto-deletes in ~1 day. <b>Anyone with this link can open it</b> (button labels, not secrets). QR image rendered by api.qrserver.com.</div>`);
-  } catch (e) {
-    const msg = (e && e.message) || String(e);
-    _csQrModal(`<h3 style="margin:2px 0 10px;font-size:16px">Couldn't upload</h3>
-      <div style="font-size:13px;text-align:left;line-height:1.55">
-        <p style="margin:0 0 8px"><code style="word-break:break-all">${escH(msg)}</code></p>
-        <p style="margin:0 0 8px">The relay may be unreachable or misconfigured — check <code>CS_QR_ENDPOINT</code> and the Worker's KV binding / token.</p>
-        <p style="margin:0">Fallback: <b>📋 Cheat Sheet → ↓ Save HTML</b>, then AirDrop / email / a shared drive to your phone.</p>
-      </div>`);
-  }
-}
+const CS_QR_TOKEN    = 'jf;af7kljaf8LJK*RELKFja;fff';
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Threshold panel toggle
