@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.10:46.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.11:05.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4218,7 +4218,9 @@ async function sendLine(msg, silent = false) {
   // WCB port; a follower relays it to the leader). No local writer in this tab.
   if (sharedActive) {
     if (!silent) appendTerminalLine('> ' + msg, 'tx');
-    if (sharedHub) sharedHub.send(msg + '\n');
+    // AWAIT the hub write so multi-fragment SET_CONFIG sends stay flow-controlled —
+    // without the await they burst and overwhelm the WCB's ESP-NOW TX queue (drops).
+    if (sharedHub) await sharedHub.send(msg + '\n');
     return;
   }
   if (!writer) return;
@@ -4518,7 +4520,7 @@ function sendDebugFlagsToBoard() {
   for (const c of DEBUG_CATEGORIES) {
     if (c.bit && debugFilters[c.key]) flags |= c.bit;
   }
-  if (typeof writer !== 'undefined' && writer) {
+  if ((typeof writer !== 'undefined' && writer) || sharedActive) {
     sendJSON({ type: 'SET_DEBUG_FLAGS', flags }, /*silent=*/true).catch(() => {});
   }
 }
@@ -4613,7 +4615,7 @@ function initTerminal() {
 
   send.addEventListener('click', async () => {
     const value = input.value.trim();
-    if (!value || !writer) return;
+    if (!value || (!writer && !sharedActive)) return;
     if (viaWcbActive) {
       // Relay the raw CLI line to the NaviCore over the bridge (;w20,<cmd>).
       // Echo the clean command to the primary pane; send the wrapped form
@@ -4640,7 +4642,7 @@ function initTerminal() {
     });
     sendW.addEventListener('click', async () => {
       const value = inputW.value.trim();
-      if (!value || !writer) return;
+      if (!value || (!writer && !sharedActive)) return;
       appendTerminalLine('> ' + value, 'tx', 'wcb');
       await sendLine(value, /*silent=*/true);   // raw to the bridge WCB
       inputW._pushHistory?.(value);
@@ -6274,7 +6276,7 @@ function _tlActiveMaestro() {
 // Emit the interpolated Maestro positions at time `ms`. `force` bypasses the
 // change-dedupe (used when arming, so the servos snap to the current pose).
 function _tlSendLiveAt(ms, force) {
-  if (!_tlLive || !writer || !_tlClip) return;
+  if (!_tlLive || (!writer && !sharedActive) || !_tlClip) return;
   _tlActiveMaestro().forEach(({ slot, ch, kfs }) => {
     const q = _tlInterpolateAt(kfs, k => k.pos, ms);   // ¼µs (pos is stored in ¼µs)
     if (q == null) return;
@@ -6302,7 +6304,7 @@ function _tlUpdateLiveBtns() {
 }
 
 function _tlSetLive(on) {
-  if (on && !writer) { alert('Connect to the board first to use live preview.'); return; }
+  if (on && !writer && !sharedActive) { alert('Connect to the board first to use live preview.'); return; }
   _tlLive = on;
   if (on && _tlClip) {
     // Zero speed/accel on the active channels so the servos track the cursor
