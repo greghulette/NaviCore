@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.14:58.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.00:32.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3160,6 +3160,7 @@
 
 <!-- Firmware flasher (esptool-js wrapper) — loads CDN deps on first use. -->
 <script src="flasher.js"></script>
+<script src="serial-hub.js"></script>
 
 <script>
 // ════════════════════════════════════════════════════════════════════════════
@@ -3168,6 +3169,12 @@
 let port = null;
 let reader = null;
 let writer = null;
+// Shared-port (WcbSerialHub) transport — set when connected via "Shared port across tabs".
+let sharedHub      = null;   // the hub singleton (null until the first shared connect)
+let sharedActive   = false;  // true = connected through the shared hub (no local port in THIS tab)
+let _sharedWired   = false;  // hub listeners registered once
+let _sharedBuf     = '';
+let _sharedDecoder = null;
 let readBuffer = '';
 let disconnecting = false;   // true while disconnect() tears down — stops the
                              // read loop from re-acquiring a reader (which
@@ -3701,7 +3708,7 @@ const maestroCommands = {
 // `settleMs` is how long to wait after opening before pinging — long for a
 // cold initial connect, short for a post-flash reconnect that already waited
 // for the board to boot.
-async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true) {
+async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceViaWcb = false) {
   window._loggedMissingSbus = false;
   // Every fresh connection starts in DIRECT-USB mode. viaWcbActive must track
   // the LIVE transport, never a stale localStorage preference — otherwise a USB
@@ -3744,8 +3751,9 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true) {
     }
     return _pongSeen;
   };
-  let pongOk = await pingForPong();          // try Direct USB
-  if (!pongOk && allowViaWcb) {
+  if (forceViaWcb) onViaWcbToggle(true);      // caller KNOWS it's a WCB — start in Via WCB, skip the direct probe
+  let pongOk = await pingForPong();          // try current transport (Direct USB, or forced Via WCB)
+  if (!pongOk && allowViaWcb && !viaWcbActive) {
     console.log('No direct PONG — retrying through a tethered WCB (Via WCB)…');
     onViaWcbToggle(true);                     // wrap PINGs so the WCB relays them
     pongOk = await pingForPong();             // try the bridge
@@ -3772,15 +3780,8 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
   // the flash (or the resumed session).  The button is also disabled while
   // flashing; this guard is defense-in-depth in case a click slips through.
   if (_fwFlashing) return;
-  if (port) { await disconnect(); return; }
-  try {
-    const p = await navigator.serial.requestPort();
-    await openPortAndStart(p);
-  } catch(e) {
-    console.error(e);
-    alert('Could not open serial port:\n' + e.message);
-    port = null;
-  }
+  if (port || sharedActive) { await disconnect(); return; }
+  openConnectModal();
 });
 
 // Resolve when `p` settles OR after `ms` — whichever first. Never rejects, so
@@ -3792,24 +3793,114 @@ function settleWithin(p, ms) {
   ]);
 }
 
+// ── Connect method modal (USB / Via WCB / Shared port) ───────────────────────
+function openConnectModal()  { document.getElementById('connect-modal')?.classList.add('open'); }
+function closeConnectModal() { document.getElementById('connect-modal')?.classList.remove('open'); }
+
+async function connectDirect() {
+  closeConnectModal();
+  try {
+    const p = await navigator.serial.requestPort();
+    await openPortAndStart(p, 4000, true, false);   // try direct, auto-fallback to Via WCB
+  } catch (e) { console.error(e); if (e?.name !== 'NotFoundError') alert('Could not open serial port:\n' + e.message); port = null; }
+}
+async function connectViaWcbOpt() {
+  closeConnectModal();
+  try {
+    const p = await navigator.serial.requestPort();
+    await openPortAndStart(p, 4000, true, true);    // force Via WCB (skip the direct probe)
+  } catch (e) { console.error(e); if (e?.name !== 'NotFoundError') alert('Could not open serial port:\n' + e.message); port = null; }
+}
+async function connectSharedOpt() {
+  closeConnectModal();
+  await connectSharedPort();
+}
+
+// ── Shared-port transport (WcbSerialHub) ─────────────────────────────────────
+// Joins the same cross-tab hub the WCB Wizard uses (channel "wcb-shared-serial").
+// The shared port is a USB-tethered WCB owned by another SAME-ORIGIN tab, so we run
+// in Via-WCB mode: outbound JSON is wrapped ;w20,<json> and relayed over ESP-NOW to
+// the NaviCore at special-peer slot 20. Requires same-origin tabs (BroadcastChannel).
+function onSharedData(u8) {
+  if (!sharedActive) return;
+  if (!_sharedDecoder) _sharedDecoder = new TextDecoder();
+  _sharedBuf += _sharedDecoder.decode(u8, { stream: true });
+  let idx;
+  while ((idx = _sharedBuf.indexOf('\n')) !== -1) {
+    const line = _sharedBuf.slice(0, idx).trim();
+    _sharedBuf = _sharedBuf.slice(idx + 1);
+    if (line.length > 0) handleBoardMessage(line);   // same dispatch as a direct connection
+  }
+}
+function onSharedState(st) {
+  if (sharedActive) setConnected(!!st.portOpen);      // reflect the live shared-port state
+}
+
+async function connectSharedPort() {
+  if (typeof WcbSerialHub === 'undefined' || !WcbSerialHub.supported) {
+    alert('Port sharing needs a Chromium browser (WebSerial + Web Locks + BroadcastChannel).');
+    return;
+  }
+  if (!sharedHub) sharedHub = new WcbSerialHub({ baudRate: 115200 });
+  // Pick a port inside this click gesture: the FIRST tab to share becomes the owner
+  // and picks the WCB; a follower (the Wizard already owns it) can just cancel the picker.
+  try { await sharedHub.requestPort(); } catch (_) {}
+  if (!_sharedWired) {
+    _sharedWired = true;
+    sharedHub.on('data',  onSharedData);
+    sharedHub.on('state', onSharedState);
+    sharedHub.on('log',   (m) => appendTerminalLine('· [hub] ' + m, 'sys'));
+  }
+  _sharedBuf = ''; _sharedDecoder = null;
+  sharedHub.join();
+  sharedActive = true;
+  // Wait (bounded) for leader election + the shared port to actually open.
+  for (let i = 0; i < 40 && !sharedHub.portOpen; i++) await new Promise(r => setTimeout(r, 100));
+  if (!sharedHub.portOpen) {
+    appendTerminalLine('· shared: joined the session — waiting for a tab to open the port…', 'sys');
+    setConnected(false);
+    return;
+  }
+  setConnected(true);
+  onViaWcbToggle(true);   // the shared port is a WCB gateway → relay ;w20 to the NaviCore
+  // Handshake — mirror openPortAndStart's tail (PING for PONG, then config + monitor).
+  _pongSeen = false;
+  for (let i = 0; i < 6 && !_pongSeen; i++) { await sendJSON({ type: 'PING' }); await new Promise(r => setTimeout(r, 500)); }
+  await sendJSON({ type: 'GET_CONFIG' });
+  await new Promise(r => setTimeout(r, 400));
+  await sendJSON({ type: 'START_MONITOR' });
+  isMonitoring = true;
+  sendDebugFlagsToBoard();
+}
+
 async function disconnect() {
   if (disconnecting) return;          // re-entrancy guard (rapid clicks)
   disconnecting = true;               // stop startReading() re-acquiring a reader
   try {
-    // Best-effort STOP_MONITOR — bounded so a back-pressured write can't hang.
-    if (isMonitoring && writer) {
-      await settleWithin(sendJSON({ type: 'STOP_MONITOR' }), 400);
+    if (sharedActive) {
+      // Shared-hub path: no local port/writer/reader in this tab. Flush STOP_MONITOR
+      // through the hub, then leave the session (the finally below resets the UI,
+      // viaWcbActive, timers, etc. exactly as for a direct disconnect).
+      if (isMonitoring) { await settleWithin(sendJSON({ type: 'STOP_MONITOR' }), 400); }
+      isMonitoring = false;
+      sharedActive = false;
+      try { sharedHub?.leave(); } catch (_) {}
+    } else {
+      // Best-effort STOP_MONITOR — bounded so a back-pressured write can't hang.
+      if (isMonitoring && writer) {
+        await settleWithin(sendJSON({ type: 'STOP_MONITOR' }), 400);
+      }
+      isMonitoring = false;
+
+      // Cancel the read loop. With `disconnecting` set, startReading() exits
+      // instead of grabbing a new reader, so the stream is left unlocked.
+      if (reader) { await settleWithin(reader.cancel(), 800); reader = null; }
+
+      try { if (writer) writer.releaseLock(); } catch (_) {}
+      writer = null;
+
+      if (port) { await settleWithin(port.close(), 800); }
     }
-    isMonitoring = false;
-
-    // Cancel the read loop. With `disconnecting` set, startReading() exits
-    // instead of grabbing a new reader, so the stream is left unlocked.
-    if (reader) { await settleWithin(reader.cancel(), 800); reader = null; }
-
-    try { if (writer) writer.releaseLock(); } catch (_) {}
-    writer = null;
-
-    if (port) { await settleWithin(port.close(), 800); }
   } finally {
     port = null;
     disconnecting = false;
@@ -4123,6 +4214,13 @@ function renderWcbStatus(online) {
 // silent=true skips the terminal echo — used for background polls like the
 // WCB-status poll that fires every 3s and would otherwise spam the log.
 async function sendLine(msg, silent = false) {
+  // Shared-port mode: hand the line to the hub (the leader tab writes it to the real
+  // WCB port; a follower relays it to the leader). No local writer in this tab.
+  if (sharedActive) {
+    if (!silent) appendTerminalLine('> ' + msg, 'tx');
+    if (sharedHub) sharedHub.send(msg + '\n');
+    return;
+  }
   if (!writer) return;
   if (!silent) appendTerminalLine('> ' + msg, 'tx');
   const encoded = new TextEncoder().encode(msg + '\n');
@@ -4185,7 +4283,7 @@ function onViaWcbToggle(checked) {
   { const tg = document.getElementById('via-wcb-toggle'); if (tg) tg.checked = viaWcbActive; }
   try { localStorage.setItem('rc_via_wcb_on', viaWcbActive ? '1' : '0'); } catch (_) {}
   const status = document.getElementById('status-text');
-  if (port && status) {
+  if ((port || sharedActive) && status) {
     status.textContent = viaWcbActive
       ? `Connected via WCB → RC #${RC_WCB_DEVICE_ID}`
       : 'Connected ✓';
@@ -4327,7 +4425,7 @@ async function sendJSON(obj, silent = false) {
     // torn-down writer anyway, but catching it here avoids the spurious
     // error spam and leaves the RC's reassembly to time out cleanly at
     // its 5 s FRAG_TIMEOUT_MS.
-    if (!port || disconnecting) {
+    if ((!port && !sharedActive) || disconnecting) {
       console.warn(`sendJSON: port closed mid-send, aborted at fragment ${i + 1}/${total}`);
       return;
     }
@@ -4747,7 +4845,7 @@ let _clipRecording = false;
 // to the terminal (main pane) so there's a trace even when the Clips modal is
 // doing the talking.
 async function sendRcCli(cmd, silent = false) {
-  if (!writer) { if (!silent) clipsStatus('Not connected to a board.'); return false; }
+  if (!writer && !sharedActive) { if (!silent) clipsStatus('Not connected to a board.'); return false; }
   if (viaWcbActive) {
     if (!silent) appendTerminalLine('> ' + cmd, 'tx', 'main');
     await sendLine(';w' + RC_WCB_DEVICE_ID + ',' + cmd, /*silent=*/true);
@@ -4773,7 +4871,7 @@ function _updateClipNameOptions(names) {
 // Ensure the datalist exists and (throttled, if connected) refresh it from the board.
 function _ensureClipNamesFresh() {
   _updateClipNameOptions(_knownClipNames);
-  if (!writer) return;
+  if (!writer && !sharedActive) return;
   const now = Date.now();
   if (now - _lastClipNamesFetch < 3000) return;
   _lastClipNamesFetch = now;
@@ -8243,7 +8341,7 @@ function onWcbHexInput(field, el) {
 // which drops the USB connection; the GUI will see a disconnect event and the
 // user reconnects to pick up the freshly-instantiated WCBClient.
 async function rebootBoard() {
-  if (!port) {
+  if (!port && !sharedActive) {
     alert('Not connected to a board.');
     return;
   }
@@ -9146,7 +9244,7 @@ function openModal(btn) {
     let tap = 1;
     if (ev.ctrlKey || ev.metaKey) tap = 2;
     else if (ev.altKey)            tap = 3;
-    if (!port) { alert('Connect to the board first.'); return; }
+    if (!port && !sharedActive) { alert('Connect to the board first.'); return; }
     sendJSON({ type: 'TRIGGER', mode: currentMode, btn, tap });
     console.log(`TRIGGER → mode=${currentMode} btn=${btn} tap=${tap}`);
     return;
@@ -12888,7 +12986,7 @@ async function otaUpdateOverWcb() {
           'Check "Via WCB", connect through your relay WCB, then try again.');
     return;
   }
-  if (!writer) { alert('Not connected.'); return; }
+  if (!writer && !sharedActive) { alert('Not connected.'); return; }
   const target = RC_WCB_DEVICE_ID;
 
   const statusEl = document.getElementById('fw-status');
@@ -13338,7 +13436,7 @@ function buildCalibrationSteps() {
 }
 
 function openCalibrationModal() {
-  if (!port) {
+  if (!port && !sharedActive) {
     alert('Connect to the board first.');
     return;
   }
@@ -13763,7 +13861,7 @@ function finishCalibration() {
 //    target == 0  → broadcast  ·  1..20 → unicast to that WCB board.
 // ════════════════════════════════════════════════════════════════════════════
 document.getElementById('btn-qs-send').addEventListener('click', async () => {
-  if (!port) { alert('Connect to the board first.'); return; }
+  if (!port && !sharedActive) { alert('Connect to the board first.'); return; }
   const target = +(document.getElementById('qs-target').value || 0);
   const cmd    = document.getElementById('qs-cmd').value.trim();
   if (!cmd) { alert('Enter a command.'); return; }
@@ -14917,5 +15015,36 @@ updateButtonHighlights();
   });
 })();
 </script>
+<!-- ── Connect method chooser (USB / Via WCB / Shared port) ─────────────────── -->
+<style>
+  #connect-modal .connect-opt { text-align:left; padding:12px 14px; border:1px solid var(--border);
+    border-radius:8px; background:var(--surface); color:inherit; cursor:pointer; display:flex;
+    flex-direction:column; gap:3px; width:100%; font:inherit; }
+  #connect-modal .connect-opt:hover { border-color:var(--accent); }
+  #connect-modal .co-title { font-weight:700; }
+  #connect-modal .co-desc  { font-size:12px; color:var(--muted); }
+</style>
+<div class="modal-overlay" id="connect-modal" onclick="if(event.target===this)closeConnectModal()">
+  <div class="modal" style="width:460px">
+    <div class="modal-header">
+      <div class="modal-title">Connect</div>
+      <button class="btn btn-ghost" type="button" onclick="closeConnectModal()" style="margin-left:auto">✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:10px">
+      <button type="button" class="connect-opt" onclick="connectDirect()">
+        <span class="co-title">🔌 Connect via USB</span>
+        <span class="co-desc">Plug straight into a NaviCore over USB.</span>
+      </button>
+      <button type="button" class="connect-opt" onclick="connectViaWcbOpt()">
+        <span class="co-title">📡 Via a WCB</span>
+        <span class="co-desc">Plug into a USB-tethered WCB; commands relay over ESP-NOW to the NaviCore at slot 20.</span>
+      </button>
+      <button type="button" class="connect-opt" onclick="connectSharedOpt()">
+        <span class="co-title">🔗 Shared port (across tabs)</span>
+        <span class="co-desc">Share the WCB port already open in your WCB Wizard tab — no second cable. Same-origin tabs only; relays via that WCB.</span>
+      </button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

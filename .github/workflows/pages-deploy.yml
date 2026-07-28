@@ -1,0 +1,128 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploy the NaviCore Config Tool to GitHub Pages.
+#
+#   main             → gh-pages:/config_tool               (PRODUCTION)
+#   any other branch → gh-pages:/dev/<branch>/config_tool  (per-branch PREVIEW)
+#
+# Each run rewrites ONLY its own slice of the gh-pages branch and leaves every
+# other path untouched, so production and all branch previews accumulate side by
+# side.
+#
+# WHY THIS EXISTS: the config tool talks to a board over Web Serial. To share ONE
+# USB-tethered WCB's port across two browser tabs (this tool + the WCB Wizard) via
+# WcbSerialHub, both tabs must be SAME-ORIGIN — BroadcastChannel and Web Locks are
+# origin-scoped. Publishing here puts the config tool on the same github.io origin
+# as the Wizard (greghulette.github.io/…), so "open two tabs and share" works.
+#
+# Example URLs (replace <user> with the repo owner):
+#   https://<user>.github.io/NaviCore/config_tool/                 (prod, main)
+#   https://<user>.github.io/NaviCore/dev/<branch>/config_tool/    (branch preview)
+#   (Wizard lives at https://<user>.github.io/Wireless_Communication_Board-WCB/Wizard/
+#    — SAME origin, different path → the two tabs can share a port.)
+#
+# ── ONE-TIME SETUP ──────────────────────────────────────────────────────────
+#   1. Merge this workflow to main so production deploys (and new branches inherit it).
+#   2. Bootstrap gh-pages: run this workflow once (push to main, or Actions ▸
+#      "Run workflow") → it creates gh-pages:/config_tool.
+#   3. Repo Settings ▸ Pages ▸ Source = "Deploy from a branch", Branch = "gh-pages" / "(root)".
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deploy Config Tool to Pages
+
+on:
+  push:
+    # Every branch EXCEPT gh-pages (the publish target) and throwaway claude/*
+    # worktree branches. Only when the config tool (or this file) changes.
+    branches: ['**', '!gh-pages', '!claude/**']
+    paths:
+      - 'config_tool/**'
+      - '.github/workflows/pages-deploy.yml'
+  workflow_dispatch:    # manual "Run workflow" per branch — handy for the bootstrap above
+
+permissions:
+  contents: write       # push to the gh-pages branch
+
+concurrency:
+  # Per-branch group so cross-branch pushes don't cancel each other's deploy; each
+  # run edits only its own slice of the tree, so gh-pages rebases never conflict.
+  group: gh-pages-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10        # a wedged run must not block the serialized queue forever
+    steps:
+      - name: Check out the pushed branch
+        uses: actions/checkout@v4
+
+      - name: Publish this branch's config_tool into its gh-pages slice
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          if [ "$BRANCH" = "main" ]; then
+            DEST="config_tool";             IMGDIR="Images"
+          else
+            DEST="dev/$BRANCH/config_tool";  IMGDIR="dev/$BRANCH/Images"
+          fi
+          echo "Deploying branch '$BRANCH'  ->  /$DEST"
+
+          SRC="$GITHUB_WORKSPACE/config_tool"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          GHP="$(mktemp -d)"
+
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Get the current gh-pages (or start a clean orphan on first run).
+          if git ls-remote --exit-code --heads "$REMOTE" gh-pages >/dev/null 2>&1; then
+            git clone -q --branch gh-pages --single-branch "$REMOTE" "$GHP"
+          else
+            echo "gh-pages does not exist yet — creating it."
+            git -C "$GHP" init -q -b gh-pages
+            git -C "$GHP" remote add origin "$REMOTE"
+          fi
+
+          # Replace ONLY this branch's slice; every other path is left as-is.
+          rm -rf "${GHP:?}/$DEST"
+          mkdir -p "$GHP/$DEST"
+          cp -a "$SRC/." "$GHP/$DEST/"
+          touch "$GHP/.nojekyll"          # serve files verbatim (no Jekyll processing)
+
+          # The config tool pulls a couple of logos via ../Images/<file> (a sibling
+          # folder). Deploy ONLY the referenced files as a sibling Images/ — the repo's
+          # full Images/ tree is docs assets the tool never uses. Discovered dynamically
+          # so it adapts if the tool's image set changes.
+          rm -rf "$GHP/$IMGDIR"
+          refs="$(grep -rhoE '\.\./Images/[A-Za-z0-9._-]+' "$SRC" 2>/dev/null | sed 's#\.\./Images/##' | sort -u)"
+          if [ -n "$refs" ]; then
+            mkdir -p "$GHP/$IMGDIR"
+            n=0
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              if [ -f "$GITHUB_WORKSPACE/Images/$f" ]; then
+                cp -a "$GITHUB_WORKSPACE/Images/$f" "$GHP/$IMGDIR/"; n=$((n+1))
+              else
+                echo "::warning::config_tool references Images/$f but it's missing in the repo"
+              fi
+            done <<< "$refs"
+            echo "Deployed $n referenced image(s) -> /$IMGDIR"
+          fi
+
+          cd "$GHP"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish for $BRANCH."
+            exit 0
+          fi
+          git commit -q -m "Deploy config_tool ($BRANCH) -> /$DEST [skip ci]"
+
+          # Serialized by concurrency; light retry covers any external race on gh-pages.
+          for i in 1 2 3; do
+            if git push -q origin gh-pages; then echo "Published /$DEST"; exit 0; fi
+            echo "Push rejected — syncing gh-pages and retrying ($i/3)…"
+            git fetch -q origin gh-pages && git rebase -q origin/gh-pages || true
+          done
+          echo "::error::Failed to push to gh-pages after 3 attempts."
+          exit 1
