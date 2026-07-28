@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.13:55.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.14:21.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2983,6 +2983,15 @@
             <div class="noconn" style="margin-top:4px">Time window for multi-tap detection</div>
           </div>
           <div class="sb-section">
+            <h3>Telemetry Rate</h3>
+            <div class="tapwin-row">
+              <input type="range" id="chrate-input" min="1" max="20" step="1" value="20" style="flex:1"
+                     oninput="document.getElementById('chrate-val').textContent = this.value + ' Hz';">
+              <span id="chrate-val" style="color:var(--muted);font-size:12px;min-width:42px;text-align:right">20 Hz</span>
+            </div>
+            <div class="noconn" style="margin-top:4px">Live channel-monitor rate (rc_ch). Higher is smoother; lower frees mesh airtime.</div>
+          </div>
+          <div class="sb-section">
             <h3>SBUS Output</h3>
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
               <input type="checkbox" id="sbus-out-toggle"
@@ -3478,6 +3487,7 @@ let config = {
   maeGateMs:        250,      // remote/via-WCB skip-if-running fail-open window (ms)
   boardType:        0,        // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   tapWindowMs:   500,
+  chRateHz:      20,         // rc_ch live-monitor broadcast rate (Hz, 1–20; 20 = smooth default)
   matrixChannel: 7,
   matrixDebounceFrames: 1,
   funcBindings: { mode: 4 },
@@ -7550,6 +7560,10 @@ function applyConfig(data) {
     const t = +data.tapWindowMs;                    // coerce: a string here would show
     if (Number.isFinite(t)) config.tapWindowMs = t; // as a false "dirty" diff on save
   }
+  if (data.chRateHz !== undefined) {
+    const r = +data.chRateHz;                       // rc_ch live-monitor rate (Hz)
+    if (Number.isFinite(r)) config.chRateHz = Math.max(1, Math.min(20, r));
+  }
   if (data.matrixDebounceFrames !== undefined)
     config.matrixDebounceFrames = Math.max(1, Math.min(4, +data.matrixDebounceFrames || 1));
   if (data.matrixChannel !== undefined) {
@@ -7616,6 +7630,11 @@ function applyConfig(data) {
     config.auxBaud = { ...config.auxBaud, ...data.auxBaud };
   }
   document.getElementById('tapwin-input').value = config.tapWindowMs;
+  { const cr = document.getElementById('chrate-input');
+    if (cr) { const hz = Math.max(1, Math.min(20, config.chRateHz ?? 20));
+              cr.value = hz;
+              const cv = document.getElementById('chrate-val');
+              if (cv) cv.textContent = hz + ' Hz'; } }
   { const g = document.getElementById('mae-gate-ms'); if (g) g.value = config.maeGateMs ?? 250; }
   { const sb = document.getElementById('sbus-out-toggle'); if (sb) sb.checked = !!config.sbusOutEnabled; }
   { const bd = document.getElementById('board-select'); if (bd) bd.value = String(config.boardType ?? 0); }
@@ -12501,6 +12520,11 @@ async function saveConfigToBoard() {
     // triple taps (the firmware applies the same guard on load).
     if (Number.isFinite(tw)) config.tapWindowMs = Math.max(100, tw);
   }
+  {
+    const cr = parseInt(document.getElementById('chrate-input').value, 10);
+    // rc_ch live-monitor rate; clamp to the slider's 1–20 Hz (firmware clamps too).
+    if (Number.isFinite(cr)) config.chRateHz = Math.max(1, Math.min(20, cr));
+  }
   syncPeerEventFromDom();   // commit the inline new-peer action editor into config.peerEvent before diffing
 
   // ─── Diff against the on-board baseline ─────────────────────────────────
@@ -13916,6 +13940,7 @@ function exportConfigCsv() {
 
   rows.push(csvRow(pad(['config','matrixChannel','','' + (config.matrixChannel || '')])));
   rows.push(csvRow(pad(['config','tapWindowMs','','' + (config.tapWindowMs || '')])));
+  rows.push(csvRow(pad(['config','chRateHz','','' + (config.chRateHz || 20)])));
   rows.push(csvRow(pad(['config','matrixDebounceFrames','','' + (config.matrixDebounceFrames || 1)])));
   if (config.funcBindings && config.funcBindings.mode !== undefined) {
     rows.push(csvRow(pad(['config','funcBinding_mode','','' + config.funcBindings.mode])));
@@ -14261,6 +14286,8 @@ function handleConfigImportFile(event) {
             imported.matrixChannel = Number(value || channel || imported.matrixChannel);
           } else if (control === 'tapwindowms') {
             imported.tapWindowMs = Number(value || channel || imported.tapWindowMs);
+          } else if (control === 'chratehz') {
+            imported.chRateHz = Math.max(1, Math.min(20, parseInt(value || channel, 10) || 20));
           } else if (control === 'matrixdebounceframes') {
             imported.matrixDebounceFrames = Math.max(1, Math.min(4, parseInt(value || channel, 10) || 1));
           } else if (control === 'funcbinding_mode') {
