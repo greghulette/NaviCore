@@ -970,23 +970,12 @@
     <div class="status-dot" id="conn-dot"></div>
     <span id="status-text">Disconnected</span>
     <button class="btn btn-primary" id="btn-connect">Connect</button>
-    <!-- ── Via WCB (remote management bridge) ───────────────────────────
-         Unchecked = Direct USB (this tool is plugged straight into an
-         NaviCore).
-         Checked   = Via WCB: this tool is plugged into ANY WCB on the
-         network and that WCB relays outbound JSON to the RC at the
-         fixed special-peer slot (deviceId 20).  The tethered WCB's
-         own id is irrelevant — its only role is to ferry packets
-         in/out of ESP-NOW.  Inbound rc_hb / rc_ch / rc_trig / rc_mode
-         from the RC drive the same SVG / channel-grid / mode-indicator
-         UI as a directly-connected RC.  Persisted to localStorage. -->
-    <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);margin-left:4px;cursor:pointer"
-           title="Bridge through a USB-tethered WCB to the remote NaviCore (always at WCB special-peer slot 20).">
-      <input id="via-wcb-toggle" type="checkbox"
-             style="margin:0;cursor:pointer"
-             onchange="onViaWcbToggle(this.checked)">
-      Via WCB
-    </label>
+    <!-- Transport (Direct USB vs Via-WCB bridge) is chosen in the Connect modal
+         and auto-detected on connect — no manual toggle. onViaWcbToggle() still
+         drives the transport programmatically; the status text (left) reads
+         "Connected via WCB → RC #20" and the terminal grows a bridge column, so
+         the live mode is always visible without a checkbox. -->
+
     <button class="btn btn-blue"    id="btn-refresh" disabled>Refresh</button>
     <button class="btn btn-ghost" id="btn-hwsetup" type="button">Config</button>
     <button class="btn btn-ghost" id="btn-export-cfg" type="button">Export</button>
@@ -2281,7 +2270,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.14:21.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.15:03.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3814,14 +3803,12 @@ async function connectDirect() {
     await openPortAndStart(p, 4000, true, false);   // try direct, auto-fallback to Via WCB
   } catch (e) { console.error(e); if (e?.name !== 'NotFoundError') alert('Could not open serial port:\n' + e.message); port = null; }
 }
+// "Via a WCB" — always routes through the cross-tab hub (WcbSerialHub). As the
+// sole tab it elects itself leader and owns the tethered WCB's port (identical
+// to a plain bridge); when the WCB Wizard shares the SAME WCB on this origin,
+// both tabs drive it with no second cable. Merged from the old separate
+// "Via a WCB" (direct) + "Shared port (across tabs)" options into one.
 async function connectViaWcbOpt() {
-  closeConnectModal();
-  try {
-    const p = await navigator.serial.requestPort();
-    await openPortAndStart(p, 4000, true, true);    // force Via WCB (skip the direct probe)
-  } catch (e) { console.error(e); if (e?.name !== 'NotFoundError') alert('Could not open serial port:\n' + e.message); port = null; }
-}
-async function connectSharedOpt() {
   closeConnectModal();
   await connectSharedPort();
 }
@@ -15081,15 +15068,11 @@ updateButtonHighlights();
     <div class="modal-body" style="display:flex;flex-direction:column;gap:10px">
       <button type="button" class="connect-opt" onclick="connectDirect()">
         <span class="co-title">🔌 Connect via USB</span>
-        <span class="co-desc">Plug straight into a NaviCore over USB.</span>
+        <span class="co-desc">Plug straight into a NaviCore over USB — full speed, and the only mode that can flash firmware.</span>
       </button>
       <button type="button" class="connect-opt" onclick="connectViaWcbOpt()">
         <span class="co-title">📡 Via a WCB</span>
-        <span class="co-desc">Plug into a USB-tethered WCB; commands relay over ESP-NOW to the NaviCore at slot 20.</span>
-      </button>
-      <button type="button" class="connect-opt" onclick="connectSharedOpt()">
-        <span class="co-title">🔗 Shared port (across tabs)</span>
-        <span class="co-desc">Share the WCB port already open in your WCB Wizard tab — no second cable. Same-origin tabs only; relays via that WCB.</span>
+        <span class="co-desc">Plug into a USB-tethered WCB; commands relay over ESP-NOW to the NaviCore at slot 20. Automatically shares that one WCB with your WCB Wizard tab (same site) — no second cable.</span>
       </button>
     </div>
   </div>
