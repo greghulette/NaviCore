@@ -2270,7 +2270,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.15:03.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.19:48.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9863,7 +9863,11 @@ function renderHcrParamFields(container, fn, curChan, curTrack) {
     // so preserve it; coercing it to 2 would rewrite an untouched action on re-open.
     trackW = mkNum('-track', (curTrack === undefined || curTrack === null) ? 2 : curTrack, 99); trackL = 'Seconds';
     trackTitle = 'Fade duration in seconds (0 = instant).';
-  } else {                        // the original 11 fns — behavior unchanged
+  } else if (fn === 3 || fn === 4) {     // Trigger/Stimulate — emotion + MOD/STRONG level
+    chanW  = mkSelect('-chan', HCR_EMOTIONS.map(e => [e.v, e.n]), curChan); chanL = 'Emotion';
+    trackW = mkSelect('-track', [[0, 'Moderate'], [1, 'Strong']], (curTrack === undefined || curTrack === null) ? 0 : curTrack); trackL = 'Level';
+    trackTitle = 'Trigger/Stimulate strength: Moderate or Strong.';
+  } else {                        // SetEmotion / PlayWAV / StopWAV / SetVolume / etc.
     if (HCR_FN_USES_EMOTION.has(fn)) {
       chanW = mkSelect('-chan', HCR_EMOTIONS.map(e => [e.v, e.n]), curChan); chanL = 'Emotion';
     } else if (HCR_FN_USES_AUDIO_CHAN.has(fn)) {
@@ -9874,7 +9878,7 @@ function renderHcrParamFields(container, fn, curChan, curTrack) {
       chanW = mkNum('-chan', curChan, 99); chanL = 'Chan';
     }
     trackW = mkNum('-track', curTrack, 9999); trackL = 'Track/Val';
-    trackTitle = 'Track number (PlayWAV), volume (SetVolume), or emote level (Trigger/Stimulate)';
+    trackTitle = 'Track/file number (PlayWAV), volume (SetVolume), or level (SetEmotion 0-100).';
   }
   if (trackW && trackTitle) trackW.title = trackTitle;
 

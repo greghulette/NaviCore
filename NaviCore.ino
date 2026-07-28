@@ -1155,24 +1155,39 @@ static String hcrFormatWcbCommand(uint8_t fn, int chan, int track) {
   // Shared validation + normalization (incl. the emotion-4→Overload shortcut)
   // lives in hcrNormalizeAction() — one source of truth for both transports.
   if (!hcrNormalizeAction(fn, chan, track)) return "";
-  // fn 7/10/13 are NOT in the WCB's numeric ";H,FN" switch (WCB_HCR.cpp
-  // processHCRRuntimeCommand) — it only maps 2,3,4,5,6,8,9,11,14,16,17. Emit the
-  // readable verbs the WCB DOES implement so HCR-over-WCB needs no firmware change
-  // on the receiving board. All other fns use the numeric convention.
+  // Emit the WCB's READABLE ";H,<VERB>" forms (WCB_HCR.cpp processHCRRuntimeCommand)
+  // rather than the numeric ";H,FN,fn,chan,track" convention, so the ETM log is
+  // self-documenting. EVERY fn NaviCore supports has a verb; params map 1:1 —
+  // emotion 0..3 → H/S/M/C, Trigger/Stimulate level 0/1 → MOD/STRONG, audio channel
+  // 0/1/2 → V/A/B (fn 17 chan 3 = ALL → channel omitted; the WCB's ;H,VOL loops
+  // V/A/B when no channel is named). A WCB too old to speak these verbs must update —
+  // that is the intended contract (it only ever spoke a subset of the numeric switch).
+  static const char EMO[] = "HSMC";   // NaviCore emotion enum: 0=Happy 1=Sad 2=Mad 3=Scared
+  static const char VAB[] = "VAB";    // NaviCore audio-chan enum: 0=V 1=A 2=B
+  const char emo = (chan >= 0 && chan <= 3) ? EMO[chan] : '?';   // used by fn 2/3/4
+  const char vab = (chan >= 0 && chan <= 2) ? VAB[chan] : 'V';   // used by fn 14/16/17
   switch (fn) {
-    case 7:  return String(";H,MUSE,GAP,") + chan + "," + track;  // Muse(min,max)
-    case 10: return String(";H,OVERRIDE,") + chan;                // OverrideEmotions(v)
-    case 13: return String(";H,MUSE,") + track;                   // SetMuse(v)
-    // SetVolume: a specific channel rides the numeric WCB FN-17 (SetVolume(ch,v));
-    // chan 3 = ALL uses the WCB's ;H,VOL with the channel OMITTED (set V+A+B to the
-    // value) in ONE message — the WCB's ;H,VOL handler treats a leading non-channel
-    // field as the value and loops V/A/B (WCB_HCR.cpp, ch<0 → all). Works end-to-end.
+    case 2:  return String(";H,SETEMOTION,") + emo + "," + track;                 // SetEmotion(e, 0-100)
+    case 3:  return String(";H,TRIGGER,")    + emo + "," + (track >= 1 ? "STRONG" : "MOD");  // Trigger(e, MOD|STRONG)
+    case 4:  return String(";H,STIM,")       + emo + "," + (track >= 1 ? "STRONG" : "MOD");  // Stimulate(e, MOD|STRONG)
+    case 5:  return String(";H,OVERLOAD");
+    case 6:  return String(";H,MUSE");                                            // trigger one muse
+    case 7:  return String(";H,MUSE,GAP,") + chan + "," + track;                  // Muse(min,max) seconds
+    case 8:  return String(";H,STOP");                                            // stop all audio + emotes
+    case 9:  return String(";H,STOPEMOTE");
+    case 10: return String(";H,OVERRIDE,") + chan;                               // OverrideEmotions(0|1)
+    case 11: return String(";H,RESETEMOTIONS");
+    case 12:
+    case 15: return String(";H,") + (fn == 12 ? "FADEIN" : "FADEOUT") + "," + (char)(chan == 2 ? 'B' : 'A') + "," + track;
+    case 13: return String(";H,MUSE,") + track;                                  // SetMuse(0|1)
+    case 14: return String(";H,PLAY,")    + vab + "," + track;                    // PlayWAV(A|B, file) — WCB rejects V
+    case 16: return String(";H,STOPWAV,") + vab;                                 // StopWAV(A|B)
+    // SetVolume: a single channel → ;H,VOL,<V|A|B>,<v>; chan 3 = ALL → ;H,VOL,<v>
+    // (channel omitted, one message sets V+A+B).
     case 17: return (chan == 3) ? (String(";H,VOL,") + track)
-                                : (String(";H,FN,17,") + chan + "," + track);
-    // Volume Up/Down. chan 0 = ALL (V+A+B) in ONE message — the WCB's ;H,VOLUP/VOLDN
-    // with the channel omitted loops V/A/B itself (WCB_HCR.cpp). chan 1/2/3 = a single
-    // V/A/B channel → ;H,VOLUP,<V|A|B>[,step] (the WCB reads a named field-1 as the
-    // channel; a numeric field-1 is the step). track = step (0 → the WCB's default 5).
+                                : (String(";H,VOL,") + vab + "," + track);
+    // Volume Up/Down. chan 0 = ALL (channel omitted, the WCB loops V/A/B); chan 1/2/3 =
+    // a single V/A/B channel. track = step (0 → the WCB's default 5).
     case 18:
     case 19: {
       String out = String(";H,") + (fn == 18 ? "VOLUP" : "VOLDN");
@@ -1180,7 +1195,7 @@ static String hcrFormatWcbCommand(uint8_t fn, int chan, int track) {
       if (track > 0) out += String(",") + track;
       return out;
     }
-    default: return String(";H,FN,") + (int)fn + "," + chan + "," + track;
+    default: return String(";H,FN,") + (int)fn + "," + chan + "," + track;       // unreachable: every valid fn has a verb
   }
 }
 
