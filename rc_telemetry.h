@@ -377,11 +377,14 @@ inline bool _pumpGetConfigSend() {
 
 // ── Timing ───────────────────────────────────────────────────────────────────
 // Heartbeat at 0.5 Hz (2 s) — low-overhead "I'm alive" beacon driving the
-// config tool / Wizard's online-RC list.  Channels at 5 Hz (200 ms) — fast
-// enough for the live SBUS visualizer to feel responsive, slow enough that
-// 24-channel JSON packets (~150 B) don't saturate ESP-NOW airtime.
+// config tool / Wizard's online-RC list.  Channels at 20 Hz (50 ms) — smooth
+// enough for the live SBUS / PWM visualizer to feel fluid; 5 Hz felt choppy,
+// especially over the cross-tab shared-port relay. rc_ch is GATED on an active
+// subscriber (see below), so this ~2.5 KB/s of ESP-NOW airtime is spent ONLY
+// while a config tool is live-monitoring — never at idle. Raise CH_INTERVAL_MS
+// back up (100 = 10 Hz, 200 = 5 Hz) if a busy mesh needs the airtime back.
 constexpr uint32_t HB_INTERVAL_MS = 2000;
-constexpr uint32_t CH_INTERVAL_MS = 200;
+constexpr uint32_t CH_INTERVAL_MS = 50;    // 20 Hz
 
 inline uint32_t _lastHb = 0;
 inline uint32_t _lastCh = 0;
@@ -389,7 +392,7 @@ inline uint32_t _lastCh = 0;
 // ── Subscription gate for high-rate broadcasts ───────────────────────────────
 // `rc_hb` is a low-cost (0.5 Hz) presence beacon that ALWAYS runs so the WCB
 // Wizard's discovery feature can find this RC even when no config tool is
-// open.  `rc_ch` is 10× the bandwidth (5 Hz × 128 B = ~640 B/s of ESP-NOW
+// open.  `rc_ch` is the high-rate stream (20 Hz × 128 B = ~2.5 KB/s of ESP-NOW
 // airtime) and only useful when a config tool is actively live-monitoring,
 // so we gate it on "have we received an inbound JSON message from a WCB
 // sender recently?".  Any inbound JSON (PING / TRIGGER / SET_MODE / fragment)
