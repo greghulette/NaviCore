@@ -2281,7 +2281,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.12:00.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.13:55.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3857,8 +3857,24 @@ async function connectSharedPort() {
   // Wait (bounded) for leader election + the shared port to actually open.
   for (let i = 0; i < 40 && !sharedHub.portOpen; i++) await new Promise(r => setTimeout(r, 100));
   if (!sharedHub.portOpen) {
-    appendTerminalLine('· shared: joined the session — waiting for a tab to open the port…', 'sys');
+    // We never got an open shared port. If we became our OWN leader here, NO other tab is
+    // sharing a port through the hub on this origin — the WCB Wizard almost certainly used
+    // a NORMAL Connect (which grabs the port for itself, OUTSIDE the hub) instead of "Share
+    // port across tabs", or the two tabs aren't same-origin. Say so plainly, and LEAVE the
+    // hub so we're not left as a broken port-less leader blocking a real one.
+    const selfPromoted = sharedHub.role === 'leader';
+    try { sharedHub.leave(); } catch (_) {}
+    sharedActive = false;
     setConnected(false);
+    if (selfPromoted) {
+      alert('No shared port found.\n\n' +
+            'To share one WCB across tabs, the OTHER tab (the WCB Wizard) must ALSO connect it via ' +
+            '“Share port across tabs”. A normal Connect grabs the port for itself and can’t be shared. ' +
+            'Both tabs must be on the same site (…github.io).\n\n' +
+            'In the Wizard: Connect → “Share port across tabs”, then reconnect here.');
+    } else {
+      appendTerminalLine('· shared: joined the session but no tab has opened the port yet — try again.', 'sys');
+    }
     return;
   }
   setConnected(true);
