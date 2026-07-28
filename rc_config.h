@@ -499,6 +499,7 @@ struct RcConfig {
   bool           sbusOutEnabled;        // re-emit SBUS frames on SBUS_OUT_PIN; off saves the per-byte passthrough tee
   uint8_t        boardType;             // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   int            tapWindowMs;
+  uint8_t        chRateHz;        // rc_ch live-monitor broadcast rate in Hz (1–20; default 20). Runtime-tunable from the config tool — higher = smoother monitor, more mesh airtime.
   int            matrixChannel;   // SBUS channel carrying the multiplexed button matrix
   // Consecutive in-band SBUS frames a matrix button must hold before a press
   // is accepted. 1 = fastest (safe for a DIGITAL SBUS source — no analog
@@ -619,6 +620,7 @@ void rcConfigLoadDefaults() {
   rcConfig.maeGateMs        = 250;           // remote skip-if-running fail-open window (ms)
   rcConfig.boardType        = 0;             // 0 = NaviCore v2 PCB (default pinout); 1 = WCB HW 3.2
   rcConfig.tapWindowMs      = 500;
+  rcConfig.chRateHz         = 20;           // rc_ch live-monitor rate (Hz); 20 = current smooth default
   rcConfig.matrixChannel    = 7;            // button matrix on CH7
   rcConfig.matrixDebounceFrames = 1;     // digital SBUS source — fastest; bump for analog matrix
   rcConfig.funcBindings.modeSwitch = SW_SE;  // SE (CH12) drives mode 1/2/3
@@ -987,6 +989,7 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   doc["maeGateMs"]            = rcConfig.maeGateMs;         // remote skip-if-running fail-open window (ms)
   doc["boardType"]            = rcConfig.boardType;        // hardware pin profile (0=NaviCore v2, 1=WCB 3.2)
   doc["tapWindowMs"]          = rcConfig.tapWindowMs;
+  doc["chRateHz"]             = rcConfig.chRateHz;          // rc_ch live-monitor broadcast rate (Hz, 1–20)
   doc["matrixChannel"]        = rcConfig.matrixChannel;
   doc["matrixDebounceFrames"] = rcConfig.matrixDebounceFrames;
 
@@ -1187,6 +1190,12 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   // effectively always-false, silently killing double/triple taps while single
   // taps keep working. Treat a nonsensically small/zero value as unset → default.
   if (rcConfig.tapWindowMs < 100) rcConfig.tapWindowMs = 500;
+  if (doc.containsKey("chRateHz")) {
+    int hz = doc["chRateHz"] | 20;           // rc_ch live-monitor rate; 0/absent → default 20 Hz
+    if (hz < 1)  hz = 20;                     // a zero/negative rate would stall the channel stream entirely
+    if (hz > 20) hz = 20;                     // clamp to the mesh-safe ceiling the UI slider enforces
+    rcConfig.chRateHz = (uint8_t)hz;
+  }
   if (doc.containsKey("matrixChannel")) rcConfig.matrixChannel = doc["matrixChannel"];
   if (doc.containsKey("matrixDebounceFrames")) {
     int d = doc["matrixDebounceFrames"] | 1;

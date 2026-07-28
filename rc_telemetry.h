@@ -381,13 +381,24 @@ inline bool _pumpGetConfigSend() {
 // enough for the live SBUS / PWM visualizer to feel fluid; 5 Hz felt choppy,
 // especially over the cross-tab shared-port relay. rc_ch is GATED on an active
 // subscriber (see below), so this ~2.5 KB/s of ESP-NOW airtime is spent ONLY
-// while a config tool is live-monitoring — never at idle. Raise CH_INTERVAL_MS
-// back up (100 = 10 Hz, 200 = 5 Hz) if a busy mesh needs the airtime back.
+// while a config tool is live-monitoring — never at idle. The rate is now
+// runtime-tunable (config tool slider → rcConfig.chRateHz, 1–20 Hz); the
+// constant below is just the fallback/default when chRateHz is unset.
 constexpr uint32_t HB_INTERVAL_MS = 2000;
-constexpr uint32_t CH_INTERVAL_MS = 50;    // 20 Hz
+constexpr uint32_t CH_INTERVAL_MS = 50;    // 20 Hz — default/fallback rate
 
 inline uint32_t _lastHb = 0;
 inline uint32_t _lastCh = 0;
+
+// Runtime rc_ch emit interval derived from the config-tool slider
+// (rcConfig.chRateHz, 1–20 Hz). Falls back to the 20 Hz default when the field
+// is unset/out of range, matching rcConfigFromJSON's clamp. Read live every
+// tick so a saved SET_CONFIG takes effect immediately — no reboot/reflash.
+inline uint32_t _chIntervalMs() {
+  int hz = rcConfig.chRateHz;
+  if (hz < 1 || hz > 20) return CH_INTERVAL_MS;   // 0/unset/corrupt → 20 Hz default
+  return 1000UL / (uint32_t)hz;
+}
 
 // ── Subscription gate for high-rate broadcasts ───────────────────────────────
 // `rc_hb` is a low-cost (0.5 Hz) presence beacon that ALWAYS runs so the WCB
@@ -628,7 +639,7 @@ inline void tick() {
   // rc_ch is gated on subscription — see _hasWcbSubscriber comment above.
   // Without a recent inbound, we don't emit channel updates because they're
   // useless to anyone not actively monitoring (10× the cost of rc_hb).
-  if (now - _lastCh >= CH_INTERVAL_MS && _hasWcbSubscriber(now)) {
+  if (now - _lastCh >= _chIntervalMs() && _hasWcbSubscriber(now)) {
     _lastCh = now;
     char buf[240];
     int  len = snprintf(buf, sizeof(buf),
