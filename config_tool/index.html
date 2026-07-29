@@ -583,6 +583,13 @@
     margin-left: auto;
   }
   .btn-remove-action:hover { background: var(--red); color: #fff; }
+  .btn-move-action {
+    background: transparent; color: var(--muted); border: 1px solid var(--line-2);
+    border-radius: 4px; width: 26px; height: 26px; padding: 0;
+    cursor: pointer; font-size: 13px; line-height: 1;
+  }
+  .btn-move-action:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-move-action:disabled { opacity: .3; cursor: default; }
   .btn-add-action {
     width: 100%; padding: 8px; font-size: 12px;
     border: 1px dashed var(--border); color: var(--muted);
@@ -2270,7 +2277,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.19:48.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.20:00.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9466,13 +9473,37 @@ function removeActionRow(tier, ai) {
   if (tier === 'peer') _peerEventDirty = true;   // a click, not an input event — mark dirty explicitly
 }
 
+// Move an action row one slot earlier/later by reordering it among its siblings.
+// collectTierActions() reads .action-row elements in DOM order, so this changes the
+// saved sequence with no data-model change. dir < 0 = up/earlier, dir > 0 = down/later.
+function moveActionRow(tier, ai, dir) {
+  const rows = document.getElementById(`rows-${tier}`);
+  const row  = document.getElementById(`action-${tier}-${ai}`);
+  if (!rows || !row) return;
+  if (dir < 0) {
+    const prev = row.previousElementSibling;
+    if (prev && prev.classList.contains('action-row')) rows.insertBefore(row, prev);
+  } else {
+    const next = row.nextElementSibling;
+    if (next && next.classList.contains('action-row')) rows.insertBefore(next, row);
+  }
+  refreshTierState(tier);
+  if (tier === 'peer') _peerEventDirty = true;
+}
+
 function refreshTierState(tier) {
   const rows = document.getElementById(`rows-${tier}`);
   if (!rows) return;
   const rowEls = rows.querySelectorAll('.action-row');
+  const multi = rowEls.length > 1;
   rowEls.forEach((r, idx) => {
     const x = r.querySelector('.btn-remove-action');
-    if (x) x.style.visibility = rowEls.length > 1 ? 'visible' : 'hidden';
+    if (x) x.style.visibility = multi ? 'visible' : 'hidden';
+    // Reorder arrows: only meaningful with 2+ rows; the ends can't go further.
+    const up = r.querySelector('.btn-move-up');
+    const dn = r.querySelector('.btn-move-down');
+    if (up) { up.style.visibility = multi ? 'visible' : 'hidden'; up.disabled = idx === 0; }
+    if (dn) { dn.style.visibility = multi ? 'visible' : 'hidden'; dn.disabled = idx === rowEls.length - 1; }
   });
   const card = rows.parentElement;
   const addBtn = card.querySelector('.btn-add-action');
@@ -9552,14 +9583,33 @@ function buildActionRow(tier, ai, action) {
   noteInput.style.width = '160px';
   row.appendChild(makeFieldGroup('Note', noteInput));
 
-  // × Remove button
+  // Reorder (▲ ▼) + remove (×) — a right-aligned control cluster. Reordering just
+  // moves the row among its siblings; collectTierActions() reads rows in DOM order,
+  // so the saved sequence follows the visual order (no data model to touch).
+  const ctrls = document.createElement('div');
+  ctrls.style.cssText = 'margin-left:auto; display:flex; gap:6px; align-items:flex-start';
+  const mkMove = (glyph, dir, cls, title) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn-move-action ' + cls;
+    b.textContent = glyph;
+    b.title = title;
+    b.onclick = () => moveActionRow(tier, ai, dir);
+    return b;
+  };
+  ctrls.appendChild(mkMove('▲', -1, 'btn-move-up',   'Move this action earlier'));
+  ctrls.appendChild(mkMove('▼',  1, 'btn-move-down', 'Move this action later'));
+
   const rm = document.createElement('button');
   rm.type = 'button';
   rm.className = 'btn-remove-action';
+  rm.style.marginLeft = '0';   // grouped in the cluster; the CSS margin-left:auto isn't wanted here
   rm.textContent = '×';
   rm.title = 'Remove this action';
   rm.onclick = () => removeActionRow(tier, ai);
-  row.appendChild(rm);
+  ctrls.appendChild(rm);
+
+  row.appendChild(ctrls);
 
   return row;
 }
