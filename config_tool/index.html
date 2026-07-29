@@ -2277,7 +2277,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.20:00.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.09:24.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3957,6 +3957,13 @@ async function disconnect() {
     if (_rcSbusTimer) { clearInterval(_rcSbusTimer); _rcSbusTimer = null; }
     _rcLastChMs   = 0;
     _rcLastHbSbus = null;
+    // Also stop the universal SBUS-staleness watchdog and forget the freshness clock, so it
+    // can't keep repainting a torn-down session; the next real data re-arms it on reconnect.
+    if (_sbusStaleTimer) { clearInterval(_sbusStaleTimer); _sbusStaleTimer = null; }
+    _sbusFreshMs = 0;
+    // Paint the SBUS block dead immediately — a manual Disconnect must not leave a stale
+    // green "Receiving" until the 4 s watchdog would have caught it.
+    updateSbusStatus({ ok: false, lost: false, failsafe: false, chCount: 0, fps: 0, ageMs: 0, _stale: true });
     // The rc_trig one-shot can otherwise fire ~250 ms after teardown,
     // mutating live-display globals on a disconnected UI.
     if (_rcTrigReleaseTimer) { clearTimeout(_rcTrigReleaseTimer); _rcTrigReleaseTimer = null; }
@@ -4007,6 +4014,8 @@ async function tryAutoReconnect() {
       await disconnect();
       const st = document.getElementById('status-text');
       if (st) st.textContent = 'Auto-reconnect found no board — click Connect';
+    } else {
+      _wantAutoReconnect = false;   // reconnected — disarm until the next unintentional loss
     }
   } catch (_) {
     try { await disconnect(); } catch (__) {}
@@ -7345,17 +7354,19 @@ function handleBoardMessage(line) {
         ageMs:    _rcLastHbSbus.ageMs,
       });
     }
-    // SBUS RECEIVER block watchdog — flips the dot red if rc_ch goes
-    // silent for > 1.5s (RC broadcasts at 5 Hz / 200 ms, so 1.5 s ≈ 7
-    // missed packets — well past normal jitter).  This handles loss of
-    // the WCB link itself; SBUS-side loss is reported directly by the
-    // RC via sbusLost/sbusFail in rc_hb (handled above).
+    // SBUS RECEIVER block watchdog — flips the dot red if rc_ch goes silent. The threshold
+    // scales with the live rc_ch rate (a runtime slider, 1–20 Hz): ~3 missed frames + jitter,
+    // floored at 1.5 s. At 20 Hz that's the original 1.5 s; at 1 Hz (~1000 ms/frame) it's
+    // ~3.5 s, so a single dropped packet at a low rate no longer false-reds. Handles WCB-link
+    // loss; SBUS-side loss is reported via sbusLost/sbusFail in rc_hb (handled above).
     if (!_rcSbusTimer) {
       _rcSbusTimer = setInterval(() => {
         if (!viaWcbActive) return;
-        const ageMs = Date.now() - _rcLastChMs;
         if (_rcLastChMs === 0) return;   // no rc_ch yet — leave initial state
-        if (ageMs > 1500) {
+        const ageMs    = Date.now() - _rcLastChMs;
+        const perFrame = 1000 / (config.chRateHz || 20);
+        const staleMs  = Math.max(1500, Math.round(perFrame * 3) + 500);
+        if (ageMs > staleMs) {
           updateSbusStatus({
             ok: false, lost: true, failsafe: false,
             chCount: 0, fps: 0, ageMs, _stale: true,
@@ -9587,7 +9598,7 @@ function buildActionRow(tier, ai, action) {
   // moves the row among its siblings; collectTierActions() reads rows in DOM order,
   // so the saved sequence follows the visual order (no data model to touch).
   const ctrls = document.createElement('div');
-  ctrls.style.cssText = 'margin-left:auto; display:flex; gap:6px; align-items:flex-start';
+  ctrls.style.cssText = 'margin-left:auto; display:flex; gap:6px; align-self:center';
   const mkMove = (glyph, dir, cls, title) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -9915,7 +9926,7 @@ function renderHcrParamFields(container, fn, curChan, curTrack) {
     trackTitle = 'Fade duration in seconds (0 = instant).';
   } else if (fn === 3 || fn === 4) {     // Trigger/Stimulate — emotion + MOD/STRONG level
     chanW  = mkSelect('-chan', HCR_EMOTIONS.map(e => [e.v, e.n]), curChan); chanL = 'Emotion';
-    trackW = mkSelect('-track', [[0, 'Moderate'], [1, 'Strong']], (curTrack === undefined || curTrack === null) ? 0 : curTrack); trackL = 'Level';
+    trackW = mkSelect('-track', [[0, 'Moderate'], [1, 'Strong']], (+curTrack >= 1 ? 1 : 0)); trackL = 'Level';   // seed by the runtime rule (>=1 = Strong), not exact match, so a legacy value never silently downgrades
     trackTitle = 'Trigger/Stimulate strength: Moderate or Strong.';
   } else {                        // SetEmotion / PlayWAV / StopWAV / SetVolume / etc.
     if (HCR_FN_USES_EMOTION.has(fn)) {

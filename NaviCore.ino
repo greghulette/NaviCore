@@ -1177,11 +1177,19 @@ static String hcrFormatWcbCommand(uint8_t fn, int chan, int track) {
     case 9:  return String(";H,STOPEMOTE");
     case 10: return String(";H,OVERRIDE,") + chan;                               // OverrideEmotions(0|1)
     case 11: return String(";H,RESETEMOTIONS");
+    // Defensive fallback only: fades are intercepted in executeHcrAction() and normalize()
+    // rejects fn 12/15, so this is unreachable — but keep its channel mapping consistent
+    // with the live fade path (1=A, 2=B) rather than the wrong 2=B/else=A it had.
     case 12:
-    case 15: return String(";H,") + (fn == 12 ? "FADEIN" : "FADEOUT") + "," + (char)(chan == 2 ? 'B' : 'A') + "," + track;
+    case 15: return String(";H,") + (fn == 12 ? "FADEIN" : "FADEOUT") + "," + (char)(chan == 1 ? 'A' : 'B') + "," + track;
     case 13: return String(";H,MUSE,") + track;                                  // SetMuse(0|1)
-    case 14: return String(";H,PLAY,")    + vab + "," + track;                    // PlayWAV(A|B, file) — WCB rejects V
-    case 16: return String(";H,STOPWAV,") + vab;                                 // StopWAV(A|B)
+    // PlayWAV/StopWAV verbs are A|B only — the V (voice) channel has no verb. Keep the
+    // numeric form for chan 0 (V): the WCB's FN handler still delivers PlayWAV/StopWAV on V
+    // there, so an existing V-channel WAV action keeps working (no regression from verbs).
+    case 14: return (chan == 0) ? (String(";H,FN,14,0,") + track)
+                                : (String(";H,PLAY,")    + vab + "," + track);   // PlayWAV(A|B, file)
+    case 16: return (chan == 0) ? (String(";H,FN,16,0,") + track)
+                                : (String(";H,STOPWAV,") + vab);                 // StopWAV(A|B)
     // SetVolume: a single channel → ;H,VOL,<V|A|B>,<v>; chan 3 = ALL → ;H,VOL,<v>
     // (channel omitted, one message sets V+A+B).
     case 17: return (chan == 3) ? (String(";H,VOL,") + track)
