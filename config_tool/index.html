@@ -2277,7 +2277,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.09:49.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.10:10.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4124,17 +4124,18 @@ function startWcbStatusPoll() {
   wcbQuantity = 0;
   renderWcbStatus(null);            // shows "configure first" or "—"
   // Each tick re-checks the gate so the panel wakes up the moment the user
-  // saves a non-default WCB network config (no reconnect needed). Bridged Via
-  // WCB always polls — the network is implicitly up and the firmware answers
-  // GET_WCB_STATUS over the mesh.
+  // saves a non-default WCB network config (no reconnect needed). A bridged
+  // session — Via WCB OR shared-port — always polls: the network is implicitly
+  // up and the firmware answers GET_WCB_STATUS over the mesh. (sharedActive is
+  // set before this poll starts; viaWcbActive is set just after, so gate on both.)
   wcbStatusTimer = setInterval(() => {
-    if (isWcbConfigured() || viaWcbActive) {
+    if (isWcbConfigured() || viaWcbActive || sharedActive) {
       sendJSON({ type: 'GET_WCB_STATUS' }, /*silent=*/true).catch(() => {});
     } else {
       renderWcbStatus(null);        // keep the placeholder live
     }
   }, 3000);
-  if (isWcbConfigured() || viaWcbActive) sendJSON({ type: 'GET_WCB_STATUS' }, /*silent=*/true).catch(() => {});
+  if (isWcbConfigured() || viaWcbActive || sharedActive) sendJSON({ type: 'GET_WCB_STATUS' }, /*silent=*/true).catch(() => {});
 }
 function stopWcbStatusPoll() {
   if (wcbStatusTimer) { clearInterval(wcbStatusTimer); wcbStatusTimer = null; }
@@ -4172,7 +4173,7 @@ function forgetLearnedPeer(id, btnEl) {
   // Remove the chip immediately so it feels responsive.
   try { const chip = btnEl && btnEl.closest('.wcb-chip'); if (chip) chip.remove(); } catch (_) {}
   sendJSON({ type: 'FORGET_PEER', id }).catch(() => {});
-  setTimeout(() => { if (isWcbConfigured() || viaWcbActive) sendJSON({ type: 'GET_WCB_STATUS' }, true).catch(() => {}); }, 600);
+  setTimeout(() => { if (isWcbConfigured() || viaWcbActive || sharedActive) sendJSON({ type: 'GET_WCB_STATUS' }, true).catch(() => {}); }, 600);
 }
 
 function renderWcbStatus(online) {
@@ -4181,7 +4182,7 @@ function renderWcbStatus(online) {
   // If the WCB Network section is untouched (all-default identity fields),
   // don't show chips at all — there's nothing meaningful to report yet.
   // Bridged Via WCB is the exception: the network is implicitly up, so render.
-  if (!isWcbConfigured() && !viaWcbActive) {
+  if (!isWcbConfigured() && !viaWcbActive && !sharedActive) {
     list.innerHTML = '<div class="noconn">Configure WCB Network in Config → WCB Network to enable status</div>';
     return;
   }
