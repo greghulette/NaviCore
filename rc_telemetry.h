@@ -791,6 +791,25 @@ static const uint8_t ALIAS_MAX_TRIES = 4;
 static uint8_t _aliasTries[21] = {0};
 static bool    _aliasWasUp[21] = {false};
 
+// Bounded ?WHOAMI fallback, shared by BOTH status paths (the bridged build on
+// Core 0 and the direct-USB poll on Core 1) so neither can pester a board every
+// poll. A named board never reaches the send: onWcbNeighbor already caches the
+// name from its WDP advert, so wcbAlias(i)[0] is set and this returns early —
+// ?WHOAMI is only a fallback for a board whose advert carries NO name. Even then
+// we ask at most ALIAS_MAX_TRIES times per online session (re-armed on an
+// offline→online edge), then leave it alone: an un-aliased board is fine. Caller
+// guarantees i != selfId. Shared counters race benignly (same as the alias cache).
+inline void maybeQueryAlias(int i, bool up, bool client) {
+  if (i < 1 || i > 20) return;
+  if (client) return;                                // clients are named from their advert, not ?WHOAMI
+  if (up && !_aliasWasUp[i]) _aliasTries[i] = 0;     // came online → re-arm the query budget
+  _aliasWasUp[i] = up;
+  if (up && wcb && wcbReady && !wcbAlias(i)[0] && _aliasTries[i] < ALIAS_MAX_TRIES) {
+    wcb->send((uint8_t)i, "?WHOAMI");
+    _aliasTries[i]++;
+  }
+}
+
 // Build the WCB_STATUS reply (board liveness + friendly aliases) into buf — the
 // same payload NaviCore.ino emits to USB, but reusable over the WCB bridge.
 // relayId = the WCB that relayed the query (0 = direct USB; non-zero lets the
@@ -870,16 +889,7 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
     // self is always live.
     const bool up = (i == selfId) ? true
                   : (client ? (nb != nullptr) : (wcb && wcb->isOnline(i)));
-    if (i != selfId && !client) {   // ?WHOAMI only to heartbeat boards — a client is named from its advert
-      if (up && !_aliasWasUp[i]) _aliasTries[i] = 0;   // came online → re-arm the alias query
-      _aliasWasUp[i] = up;
-      // Ask for the friendly name only until it's cached AND only a few times —
-      // an un-aliased board is fine, we just stop pestering it every poll.
-      if (up && wcb && wcbReady && !wcbAlias(i)[0] && _aliasTries[i] < ALIAS_MAX_TRIES) {
-        wcb->send((uint8_t)i, "?WHOAMI");
-        _aliasTries[i]++;
-      }
-    }
+    if (i != selfId) maybeQueryAlias(i, up, client);   // bounded ?WHOAMI fallback (named boards never reach the send)
     len += snprintf(buf + len, n - len, "%s%s", (i > 1) ? "," : "", up ? "1" : "0");
   }
   // known[] tells the tool which slots to actually render (floor + discovered),

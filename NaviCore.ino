@@ -2904,12 +2904,13 @@ void handleSerialInput() {
             bool up = (i == selfId) ? true
                     : (client ? (nb != nullptr) : (wcb && wcb->isOnline(i)));
             Serial.printf("%s%s", (i > 1) ? "," : "", up ? "1" : "0");
-            // Lazily learn each online board's friendly alias: ask once with
-            // "?WHOAMI"; the {"type":"wcb_alias"} reply is cached by
-            // rcTelemetry::handle(). Re-asks each poll only until cached. Skip
-            // clients — they're named from their WDP advert, not ?WHOAMI.
-            if (up && !client && i != selfId && wcb && wcbReady && !rcTelemetry::wcbAlias(i)[0])
-              wcb->send((uint8_t)i, "?WHOAMI");
+            // Lazily learn each online board's friendly alias via the SHARED
+            // bounded fallback: a board advertising its name over WDP is already
+            // cached (onWcbNeighbor) and never queried; a nameless one is asked
+            // only ALIAS_MAX_TRIES times per online session, not every poll. This
+            // is the same cap the bridged status build uses — previously the
+            // direct-USB poll was uncapped and pestered an un-aliased board (~3s).
+            if (i != selfId) rcTelemetry::maybeQueryAlias(i, up, client);
           }
           Serial.print("],\"known\":[");
           for (int i = 1; i <= hi; i++)
