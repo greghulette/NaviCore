@@ -784,13 +784,33 @@ inline int wcbHighestKnown(int floor) {
   return hi;
 }
 
-inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases) {
+// Same as wcbHighestKnown but ignores slot `excl` when deciding how far to
+// extend past the floor. Over the WCB bridge, `excl` is the relaying node's own
+// id: it's a transport hop (a mgmt relay typically sits at a high id like 19),
+// not a managed board, and it's reported separately in the "relay" field — so
+// letting it stretch `hi` would pad the online/known/clients arrays with a dozen
+// dead slots and bloat the reply past one ESP-NOW packet (which the relay's
+// WCB_Client can't reassemble → the whole reply is lost). excl <= 0 disables it.
+inline int wcbHighestKnownExcl(int floor, int excl) {
+  int hi = (floor > WCB_MAX_BOARDS) ? WCB_MAX_BOARDS : (floor < 0 ? 0 : floor);
+  for (int i = WCB_MAX_BOARDS; i > hi; i--) {
+    if (i == excl) continue;
+    if (wcbBoardKnown(i, floor)) { hi = i; break; }
+  }
+  return hi;
+}
+
+inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi = 0) {
   if (!buf || n == 0) return 0;
   int q = rcConfig.wcbNetwork.quantity;   // pre-registered floor (still reported as "quantity")
   if (q < 0) q = 0;
   if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
   const int selfId = rcConfig.wcbNetwork.deviceId;
-  const int hi = wcbHighestKnown(q);       // extend past the floor to cover auto-discovered boards
+  // Extend past the floor to cover auto-discovered boards, but never let the
+  // relay's own slot stretch it (see wcbHighestKnownExcl). maxHi > 0 caps it
+  // further so the caller can shrink the reply until it fits one ESP-NOW packet.
+  int hi = wcbHighestKnownExcl(q, relayId);
+  if (maxHi > 0 && hi > maxHi) hi = maxHi;
   size_t len = snprintf(buf, n,
       "{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"relay\":%d,\"online\":[",
       q, selfId, (int)relayId);
@@ -1092,9 +1112,20 @@ inline bool handle(uint8_t senderID, const char* command) {
   // a names-less reply if a big network wouldn't fit one ESP-NOW packet.
   if (!strcmp(type, "GET_WCB_STATUS")) {
     char wbuf[200];
-    size_t l = buildWcbStatus(wbuf, sizeof(wbuf), senderID, true);
-    if (l >= sizeof(wbuf))                           // names overflowed one packet (would-be len >= buf size)
-      buildWcbStatus(wbuf, sizeof(wbuf), senderID, false);
+    // The reply MUST land in ONE ESP-NOW packet: wcb->send() fragments anything
+    // over ~187 chars (checksum-on) via the MGMT protocol, and the relaying
+    // WCB_Client does NOT reassemble inbound fragments — so an oversize reply is
+    // silently dropped (unlike a small PONG, which sails through). Direct USB has
+    // no such limit. So shed detail until it fits: richest first, then drop the
+    // aliases, then shrink the roster toward the pre-registered floor.
+    int q = rcConfig.wcbNetwork.quantity;
+    if (q < 0) q = 0;
+    if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
+    const size_t kFit = 185;                         // one-packet budget (ETM field 199 − CRC suffix, w/ margin)
+    size_t l = buildWcbStatus(wbuf, sizeof(wbuf), senderID, true, 0);
+    if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), senderID, false, 0);   // drop names
+    for (int cap = WCB_MAX_BOARDS - 1; l > kFit && cap >= q; cap--)             // trim the roster
+      l = buildWcbStatus(wbuf, sizeof(wbuf), senderID, false, cap);
     if (wcb) wcb->send(senderID, wbuf);
     return true;
   }
