@@ -1821,7 +1821,9 @@ static void dispatchHcrVolume(uint8_t audioChan, uint8_t vol) {
 // stick/knob would spam a Maestro/HCR command on every SBUS frame (~70+/s),
 // and SBUS line jitter (±1-2 counts) would do the same. Matches the ≥5
 // deadband the matrix/mode selectors already use. Sentinel 0xFFFF forces the
-// first frame through so the initial position is always sent.
+// first frame past the deadband so the baseline gets seeded immediately; the
+// knobPrimed gate then suppresses that first DISPATCH so nothing twitches to the
+// startup position on boot (see knobPrimed) — outputs move only on a real change.
 #define KNOB_CHANGE_DEADBAND 5
 static uint16_t lastKnobRaw[RC_NUM_KNOBS] = {
   0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,    // S1, S2, LS, RS
@@ -1834,6 +1836,14 @@ static uint16_t lastKnobRaw[RC_NUM_KNOBS] = {
 // resetModeAwareKnobs() (that only watches the global mode switch) — so we
 // detect the per-knob mode change here and re-arm.
 static int8_t lastKnobMode[RC_NUM_KNOBS] = {0};
+// Boot-twitch suppression. A knob's VERY FIRST processed frame only SEEDS its
+// change-detection baseline (lastKnobRaw) — it does not dispatch — so servos and
+// other outputs don't jump to the startup stick position on power-up. Nothing
+// moves until the source actually changes (a real user action). This is distinct
+// from the mode-change re-arm (lastKnobRaw = 0xFFFF), which DOES snap to position:
+// by the time a mode switch is flipped the knob is already primed, so flipping it
+// is itself the action that commands the move.
+static bool knobPrimed[RC_NUM_KNOBS] = {false};
 
 void processKnobs() {
   if (navirec::isReplaying()) return;   // replay owns the servos/volume during playback
@@ -1881,9 +1891,13 @@ void processKnobs() {
       raw = (uint16_t)flipped;
     }
 
-    // Only dispatch when the source actually moved (or on the first frame).
+    // Only dispatch when the source actually moved past the deadband.
     if (abs((int)raw - (int)lastKnobRaw[i]) < KNOB_CHANGE_DEADBAND) continue;
     lastKnobRaw[i] = raw;
+    // First frame after boot: seed the baseline only, don't drive anything — a
+    // servo shouldn't twitch to the startup stick position on power-up (only
+    // once the source is actually moved). See knobPrimed.
+    if (!knobPrimed[i]) { knobPrimed[i] = true; continue; }
     if (cnt == 0) continue;   // this mode drives nothing (still tracked lastKnobRaw above)
 
     for (uint8_t o = 0; o < cnt && o < RC_KNOB_MAX_OUTPUTS; o++) {
