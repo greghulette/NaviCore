@@ -2277,7 +2277,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.10:47.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.11:00.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -15145,6 +15145,17 @@ renderMaestroLocations();
 renderWledSlots();
 renderAssignmentList();
 updateButtonHighlights();
+
+// Auto-connect over the shared port when the WCB Wizard opened us with ?share=1
+// (it's the shared-port leader; we join the SAME-ORIGIN hub as a FOLLOWER of its
+// port — no port picker, no manual "Via a WCB" click). A short delay lets the
+// hub's leader election settle; connectViaWcbOpt() → connectSharedPort() does the
+// rest (requestPort fails silently with no user gesture and we follow the leader).
+try {
+  if (new URLSearchParams(location.search).get('share') === '1') {
+    setTimeout(() => { connectViaWcbOpt().catch(e => console.warn('[auto-share] failed:', e)); }, 600);
+  }
+} catch (_) {}
 </script>
 <!-- ── Atlas RC theme toggle (light / dark, persisted) ── -->
 <script>
