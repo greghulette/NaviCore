@@ -228,6 +228,16 @@ inline bool handle(uint8_t senderID, const char* command);
 // drops one request — the config tool re-issues after its 5 s timeout.
 inline uint8_t _pendingGetConfigSender = 0;
 
+// Deferred bridged WCB_STATUS reply. handle() runs in the WCB_Client receive
+// callback (Core 0 WiFi task); building the status fires ?WHOAMI ESP-NOW sends
+// AND the reply is itself an ESP-NOW TX. Doing that burst inline in the callback
+// — hit every 3 s by the config tool's bridged status poll — panicked the RC
+// (crash-reboot loop). So stash the requester here and let tick() (Core 1) build
+// and send it, the same defer-to-loop discipline GET_CONFIG/SET_CONFIG/TRIGGER
+// use. Latest requester wins: a status poll is idempotent, so overwriting a
+// still-pending one simply answers the newest.
+inline uint8_t _pendingWcbStatusSender = 0;
+
 // Inter-fragment pacing.  40 ms saturated the ESP-NOW MAC layer in testing
 // (queue-overflow drops on the receiving WCB); 150 ms gives the MAC + ETM
 // ACK round-trip comfortable headroom.  Matches the config tool's outbound
@@ -558,6 +568,10 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
   Serial.printf("[RC] reassembled payload had unexpected type '%s' — dropping\n", type);
 }
 
+// Forward decl — defined further down; tick() builds the deferred WCB_STATUS
+// reply on Core 1 (default arg lives on the definition, so it's omitted here).
+inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi);
+
 // ── Outbound: heartbeat + channel snapshot (periodic) ───────────────────────
 // Called from loop().  Emits at most one HB and one CH packet per call,
 // throttled to the constants above.  Setting _lastHb = 0 / _lastCh = 0
@@ -605,6 +619,29 @@ inline void tick() {
     }
   }
   if (_pumpGetConfigSend()) return;   // a send is in progress this tick — suppress telemetry
+
+  // Deferred bridged WCB_STATUS reply — built and SENT here on Core 1, never in
+  // the Core-0 receive callback (see _pendingWcbStatusSender). buildWcbStatus
+  // fires ?WHOAMI ESP-NOW sends and the reply is a TX; that burst is safe from
+  // the main loop but panicked the RC from the WiFi-task callback. Single packet
+  // (kept ≤ one ESP-NOW frame by shedding aliases, then trimming the roster),
+  // so no fragment pump — just send it. Only when no CONFIG send is active
+  // (we're past _pumpGetConfigSend's early return), so it never fights for air.
+  if (_pendingWcbStatusSender != 0) {
+    const uint8_t to = _pendingWcbStatusSender;
+    _pendingWcbStatusSender = 0;
+    int q = rcConfig.wcbNetwork.quantity;
+    if (q < 0) q = 0;
+    if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
+    char wbuf[200];
+    const size_t kFit = 185;                       // one ESP-NOW frame (ETM field 199 − CRC suffix, w/ margin)
+    size_t l = buildWcbStatus(wbuf, sizeof(wbuf), to, true, 0);
+    if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, 0);   // drop names
+    for (int cap = WCB_MAX_BOARDS - 1; l > kFit && cap >= q; cap--)       // trim the roster
+      l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, cap);
+    if (wcb) wcb->send(to, wbuf);
+    return;   // one status reply this tick — skip the periodic telemetry below
+  }
 
   if (!wcb) return;
   const uint32_t now = millis();
@@ -1117,27 +1154,15 @@ inline bool handle(uint8_t senderID, const char* command) {
 
   // ── GET_WCB_STATUS — answer it over the WCB bridge too ─────────────────
   // Direct USB builds this same WCB_STATUS payload in NaviCore.ino; when the
-  // config tool is bridged through a WCB the query arrives here instead, so
-  // build the reply and unicast it back to the relaying WCB (senderID).  We
-  // tag senderID as "relay" so the tool can badge that node, and fall back to
-  // a names-less reply if a big network wouldn't fit one ESP-NOW packet.
+  // config tool is bridged through a WCB the query arrives here instead. DON'T
+  // build/send it here — we're in the Core-0 receive callback, and building the
+  // reply fires ?WHOAMI ESP-NOW sends plus the reply TX. That burst, hit every
+  // 3 s by the config tool's bridged poll, panicked the RC into a crash-reboot
+  // loop (and every reboot re-entered fresh discovery, re-firing ?WHOAMI, which
+  // re-crashed it — self-sustaining). So just record the requester; tick()
+  // (Core 1) builds and unicasts the reply, tagging `to` as the relay node.
   if (!strcmp(type, "GET_WCB_STATUS")) {
-    char wbuf[200];
-    // The reply MUST land in ONE ESP-NOW packet: wcb->send() fragments anything
-    // over ~187 chars (checksum-on) via the MGMT protocol, and the relaying
-    // WCB_Client does NOT reassemble inbound fragments — so an oversize reply is
-    // silently dropped (unlike a small PONG, which sails through). Direct USB has
-    // no such limit. So shed detail until it fits: richest first, then drop the
-    // aliases, then shrink the roster toward the pre-registered floor.
-    int q = rcConfig.wcbNetwork.quantity;
-    if (q < 0) q = 0;
-    if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
-    const size_t kFit = 185;                         // one-packet budget (ETM field 199 − CRC suffix, w/ margin)
-    size_t l = buildWcbStatus(wbuf, sizeof(wbuf), senderID, true, 0);
-    if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), senderID, false, 0);   // drop names
-    for (int cap = WCB_MAX_BOARDS - 1; l > kFit && cap >= q; cap--)             // trim the roster
-      l = buildWcbStatus(wbuf, sizeof(wbuf), senderID, false, cap);
-    if (wcb) wcb->send(senderID, wbuf);
+    _pendingWcbStatusSender = senderID;   // latest wins; idempotent poll (see the decl)
     return true;
   }
 
