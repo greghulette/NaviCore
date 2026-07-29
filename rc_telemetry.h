@@ -812,8 +812,19 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
   int hi = wcbHighestKnownExcl(q, relayId);
   if (maxHi > 0 && hi > maxHi) hi = maxHi;
   size_t len = snprintf(buf, n,
-      "{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"relay\":%d,\"online\":[",
+      "{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"relay\":%d",
       q, selfId, (int)relayId);
+  // The relaying node itself is deliberately kept OUT of the online/known/clients
+  // arrays (it's a transport hop, not a managed board — see wcbHighestKnownExcl),
+  // so carry its friendly name separately. Lets the tool draw a distinct "relay"
+  // chip for it without re-inflating the positional arrays. Only when bridged and
+  // the name is cached (from its WDP advert); its length is counted so the
+  // one-packet fit-loop in the caller still holds.
+  if (relayId >= 1 && len < n) {
+    const char* rn = wcbAlias((int)relayId);
+    if (rn && rn[0]) len += snprintf(buf + len, n - len, ",\"relayName\":\"%s\"", rn);
+  }
+  if (len < n) len += snprintf(buf + len, n - len, ",\"online\":[");
   for (int i = 1; i <= hi && len < n; i++) {
     const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
     const bool client = nb ? nb->isClient : wcbIsClient(i);

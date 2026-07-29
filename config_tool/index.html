@@ -2277,7 +2277,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.10:36.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.10:47.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4100,6 +4100,7 @@ const WCB_FORGET_SUPPRESS_MS = 2500;
 let wcbEverSeen    = new Set();    // board IDs that have reported online
 let wcbSelfId      = 0;             // local deviceId, from firmware reply
 let wcbRelay       = 0;             // WCB # relaying the Via-WCB bridge (0 = direct USB); badged in the panel
+let wcbRelayName   = '';            // the relay node's friendly name (from the reply's relayName) — it's kept out of the online[] arrays, so we draw its own chip
 let wcbQuantity    = 0;             // board count from the firmware reply — authoritative over a bridge where config may be default
 // True once the user has set ANY of the identity fields away from their
 // fresh-out-of-the-box defaults. macOct2/3 default to 0; password defaults
@@ -4124,6 +4125,7 @@ function startWcbStatusPoll() {
   wcbTemporary = [];
   wcbForgetSuppress.clear();        // drop any pending forget-suppression from a prior session
   wcbRelay    = 0;
+  wcbRelayName = '';
   wcbQuantity = 0;
   renderWcbStatus(null);            // shows "configure first" or "—"
   // Each tick re-checks the gate so the panel wakes up the moment the user
@@ -4145,6 +4147,7 @@ function stopWcbStatusPoll() {
   wcbEverSeen = new Set();
   wcbSelfId   = 0;
   wcbRelay    = 0;
+  wcbRelayName = '';
   wcbQuantity = 0;
   wcbKnown    = null;
   wcbClients  = [];
@@ -4239,6 +4242,19 @@ function renderWcbStatus(online) {
       <span class="wcb-chip-name">WCB ${i}${aliasRaw ? ' · ' + escH(aliasRaw) : ''}${clientTag}${tempTag}${autoTag}${relayTag}${selfTag}</span>
       <span class="wcb-chip-state${stateCls}">${stateLabel}</span>${forgetBtn}
     </div>`;
+  }
+  // The relaying node itself is kept OUT of the roster arrays above (excluded on
+  // the RC so the reply fits one ESP-NOW packet), so draw it its own chip here —
+  // it's obviously online (we're bridged through it right now). Only when it isn't
+  // already shown as a normal roster slot (it won't be, but guard anyway).
+  if (wcbRelay > 0 && !(wcbKnown && wcbKnown[wcbRelay - 1])) {
+    const rn = String(wcbRelayName || '').trim();
+    html += `<div class="wcb-chip">
+      <span class="wcb-chip-dot online"></span>
+      <span class="wcb-chip-name">WCB ${wcbRelay}${rn ? ' · ' + escH(rn) : ''} <small title="Relay — this WCB is bridging the config tool to the RC over ESP-NOW; it carries the mesh, not a droid board" style="color:var(--accent);font-weight:400">· relay 📡</small></span>
+      <span class="wcb-chip-state online">Online</span>
+    </div>`;
+    shown++;
   }
   if (!shown) html = '<div class="noconn">No WCBs configured (set quantity in Config → WCB Network)</div>';
   list.innerHTML = html;
@@ -7424,6 +7440,9 @@ function handleBoardMessage(line) {
     if (typeof msg.self === 'number') wcbSelfId = msg.self;
     // relay = the WCB bridging this Via-WCB session (0/absent on direct USB).
     wcbRelay    = (typeof msg.relay === 'number') ? msg.relay : 0;
+    // relayName = its friendly name; the relay is kept out of online[]/known[] to
+    // keep the reply inside one ESP-NOW packet, so we draw its own chip from these.
+    wcbRelayName = (typeof msg.relayName === 'string') ? msg.relayName : '';
     wcbQuantity = (typeof msg.quantity === 'number') ? msg.quantity : 0;
     wcbAliases = Array.isArray(msg.aliases) ? msg.aliases : [];
     // portLabels[] (newer firmware, USB only) = per-board array of 5 serial-port
