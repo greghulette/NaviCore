@@ -2277,7 +2277,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.09:34.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.09:49.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -12499,6 +12499,10 @@ let _configBaseline = null;
 // re-snapshots the baseline to the settled (post-render) config — killing the phantom
 // "unsaved config changes" prompt a flash otherwise leaves. Cleared the moment it fires.
 let _postFlashReload = false;
+// Config snapshot taken when the Config window OPENS. The close prompt diffs against THIS
+// (not the on-board baseline), so render-time padding that runs on open/connect — after the
+// on-board diff baseline was taken — can't fabricate a phantom "unsaved changes" prompt.
+let _hwSetupBaseline = null;
 
 // Deep-clone + deep-equal helpers for the diff.  JSON.stringify is fine
 // here — config values are plain JSON-serialisable (no Dates, RegExes,
@@ -12729,6 +12733,10 @@ function openHwSetup() {
   // Restore the last-active tab (or default to Channels).
   const lastTab = localStorage.getItem('rcConfigLastTab') || 'general';
   setConfigTab(lastTab);
+  // Snapshot config NOW — after every open-time render/normalization has run — so the close
+  // prompt (_hwSetupUnsaved) only fires for edits you actually make IN this window, never for
+  // a field a render lazily padded after the on-board diff baseline was taken.
+  _hwSetupBaseline = _deepClone(config);
   document.getElementById('hwsetup-modal').classList.add('open');
 }
 
@@ -12767,6 +12775,13 @@ function onThreeAxisGimbalsChange(checked) {
 // in-memory config against what the board last confirmed — but against the
 // PENDING baseline if a Save is in flight (those changes are already on the
 // wire), so clicking Save then closing doesn't re-prompt before the ACK lands.
+// True only if config CHANGED since the Config window was OPENED — the render-time padding
+// that happens on open/connect is already in _hwSetupBaseline, so it can't fabricate a
+// phantom prompt; a genuine edit made while the window was open still diffs and prompts.
+function _hwSetupUnsaved() {
+  if (!_configLoaded || !_hwSetupBaseline) return false;
+  return Object.keys(_diffConfigBranches(config, _hwSetupBaseline)).length > 0;
+}
 function _configUnsaved() {
   if (!_configLoaded) return false;
   const base = _pendingSaveBaseline || _configBaseline;
@@ -12776,7 +12791,7 @@ function closeHwSetup() {
   // The Config window is where all the wiring/hardware settings live and it has
   // its own Save — so if you close it with unsaved edits, offer to save them to
   // the NaviCore first (else they only live in the tool, not on the board).
-  if (_configUnsaved()) {
+  if (_hwSetupUnsaved()) {
     if (confirm('You have unsaved config changes.\n\nOK — save them to the NaviCore now.\nCancel — close without saving (your edits stay in the tool but are NOT on the board yet).')) {
       saveConfigToBoard();
     }
