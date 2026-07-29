@@ -2277,7 +2277,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.09:24.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.09:34.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7506,6 +7506,12 @@ function handleBoardMessage(line) {
     _syncMaestroChFromConfig();
     renderMaestroLocations();   // badges reflect the freshly-synced mirror
     renderWledSlots();
+    // After a firmware flash, the reconnect re-loads config and the renders above can
+    // pad/normalize a field AFTER the baseline snapshot — a phantom "unsaved changes"
+    // diff that made closing the Config window prompt even though nothing was edited.
+    // Re-snapshot the baseline to the fully-settled config so a flash alone never prompts;
+    // a genuine edit made afterward still diffs against this and still warns.
+    if (_postFlashReload) { _postFlashReload = false; _configBaseline = _deepClone(config); }
     return;
   }
   if (msg.type === 'ACK') {
@@ -12489,6 +12495,10 @@ let _configLoaded = false;
 // Save so subsequent edits diff against the new on-board state.  Null when
 // no Load has happened yet → falls back to full-config send.
 let _configBaseline = null;
+// Set true while a firmware-flash reconnect is re-loading config, so the CONFIG handler
+// re-snapshots the baseline to the settled (post-render) config — killing the phantom
+// "unsaved config changes" prompt a flash otherwise leaves. Cleared the moment it fires.
+let _postFlashReload = false;
 
 // Deep-clone + deep-equal helpers for the diff.  JSON.stringify is fine
 // here — config values are plain JSON-serialisable (no Dates, RegExes,
@@ -13300,6 +13310,7 @@ async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
     if (resumeAfter) {
       setStatus('Reconnecting…');
       appendLog('Reconnecting to the board…');
+      _postFlashReload = true;   // the config reload below must not leave a phantom "unsaved changes" prompt
       const ok = await reopenAfterFlash(flashPort);
       // Update the flash-panel status to its FINAL state — otherwise it
       // stays stuck on "Reconnecting…" even though the session is live
