@@ -2277,7 +2277,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.10:10.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.10:36.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3881,8 +3881,9 @@ async function connectSharedPort() {
     }
     return;
   }
+  viaWcbActive = true;    // set the flag BEFORE setConnected starts the WCB-status poll, so its GET_WCB_STATUS wraps as ;w20 and reaches the RC
   setConnected(true);
-  onViaWcbToggle(true);   // the shared port is a WCB gateway → relay ;w20 to the NaviCore
+  onViaWcbToggle(true);   // the shared port is a WCB gateway → relay ;w20 to the NaviCore (applies UI + 'Connected via WCB' text)
   // Handshake — mirror openPortAndStart's tail (PING for PONG, then config + monitor).
   _pongSeen = false;
   for (let i = 0; i < 6 && !_pongSeen; i++) { await sendJSON({ type: 'PING' }); await new Promise(r => setTimeout(r, 500)); }
@@ -4077,6 +4078,7 @@ function setConnected(v) {
 // up — and the loaded config.wcbNetwork may read as default over the bridge —
 // so we poll/render regardless and lean on the firmware reply's own quantity.
 let wcbStatusTimer = null;
+let _wcbStatusSeen  = false;  // logs the first WCB_STATUS reply per session to the terminal (bridged-reply visibility)
 let wcbAliases     = [];   // per-board friendly names from WCB_STATUS replies (index i-1)
 let wcbPortLabels  = [];   // per-board array of 5 serial-port device labels (ports 1-5) from WCB_STATUS (WDP portLabels)
 let wcbKnown       = null;  // per-board "render this slot" mask from WCB_STATUS (floor + auto-discovered); null = old fw
@@ -4112,6 +4114,7 @@ function isWcbConfigured() {
 }
 function startWcbStatusPoll() {
   stopWcbStatusPoll();
+  _wcbStatusSeen = false;           // re-arm the one-time reply log for this session
   wcbEverSeen = new Set();          // fresh per-session memory
   wcbSelfId   = 0;
   wcbAliases  = [];
@@ -7413,6 +7416,11 @@ function handleBoardMessage(line) {
   // Silenced: WCB_STATUS replies arrive every 3s from the background poll.
   // Handle (and return) BEFORE the terminal echo so they don't spam the log.
   if (msg.type === 'WCB_STATUS') {
+    if (!_wcbStatusSeen) {   // one-time visibility: confirms the bridged reply arrives + shows what the RC reports
+      _wcbStatusSeen = true;
+      appendTerminalLine('< [wcb] first WCB_STATUS this session: quantity=' + (msg.quantity ?? '?') +
+                         ' online=' + JSON.stringify(msg.online || []) + ' known=' + JSON.stringify(msg.known || []), 'rx');
+    }
     if (typeof msg.self === 'number') wcbSelfId = msg.self;
     // relay = the WCB bridging this Via-WCB session (0/absent on direct USB).
     wcbRelay    = (typeof msg.relay === 'number') ? msg.relay : 0;
