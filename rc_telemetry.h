@@ -596,8 +596,9 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
 }
 
 // Forward decl — defined further down; tick() builds the deferred WCB_STATUS
-// reply on Core 1 (default arg lives on the definition, so it's omitted here).
-inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi);
+// reply on Core 1 and calls this BEFORE the definition, so the default args live
+// HERE (where those call sites can see them) and are omitted on the definition.
+inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi = 0, bool includeRelayName = true);
 
 // ── Outbound: heartbeat + channel snapshot (periodic) ───────────────────────
 // Called from loop().  Emits at most one HB and one CH packet per call,
@@ -657,19 +658,26 @@ inline void tick() {
   if (_pendingWcbStatusSender != 0) {
     const uint8_t to = _pendingWcbStatusSender;
     _pendingWcbStatusSender = 0;
-    int q = rcConfig.wcbNetwork.quantity;
-    if (q < 0) q = 0;
-    if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
     char wbuf[200];
     const size_t kFit = 185;                       // one ESP-NOW frame (ETM field 199 − CRC suffix, w/ margin)
-    size_t l = buildWcbStatus(wbuf, sizeof(wbuf), to, true, 0);
-    if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, 0);   // drop names
-    // Trim the roster toward the floor. cap stays >= 1: maxHi == 0 is the "no cap"
-    // sentinel, so a cap of 0 (possible when q == 0) would silently UN-trim back to
-    // the full roster instead of trimming to empty.
-    for (int cap = WCB_MAX_BOARDS - 1; l > kFit && cap >= q && cap >= 1; cap--)
-      l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, cap);
-    if (wcb) wcb->send(to, wbuf);
+    // Shrink the reply until it fits ONE ESP-NOW packet (the relay's WCB_Client
+    // can't reassemble fragments, so an over-budget reply is lost/corrupt). Shed the
+    // cheapest, least-essential data first: board aliases, then the relay's own
+    // friendly name, and only THEN start trimming the roster itself.
+    size_t l = buildWcbStatus(wbuf, sizeof(wbuf), to, true,  0);                // full: aliases + relayName
+    if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, 0);         // drop board names
+    if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, 0, false);  // drop the relay name too
+    // Still over budget -> trim the roster, past the pre-registered floor if we must:
+    // fitting one packet beats always listing `quantity` slots (quantity is still
+    // reported, so the tool renders placeholders for the trimmed tail). cap stays
+    // >= 1 because maxHi == 0 is the "no cap" sentinel -- a cap of 0 would UN-trim
+    // back to the full roster instead of shrinking toward empty.
+    for (int cap = WCB_MAX_BOARDS - 1; l > kFit && cap >= 1; cap--)
+      l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, cap, false);
+    // Never transmit a still-oversized (snprintf-truncated -> invalid JSON) reply;
+    // with cap>=1 this is unreachable in practice, but a truncated packet is
+    // unparseable anyway, so drop it and let the config tool re-poll.
+    if (wcb && l <= kFit) wcb->send(to, wbuf);
     return;   // one status reply this tick — skip the periodic telemetry below
   }
 
@@ -888,7 +896,7 @@ inline int wcbHighestKnownExcl(int floor, int excl) {
   return hi;
 }
 
-inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi = 0) {
+inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi, bool includeRelayName) {
   if (!buf || n == 0) return 0;
   int q = rcConfig.wcbNetwork.quantity;   // pre-registered floor (still reported as "quantity")
   if (q < 0) q = 0;
@@ -908,7 +916,7 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
   // chip for it without re-inflating the positional arrays. Only when bridged and
   // the name is cached (from its WDP advert); its length is counted so the
   // one-packet fit-loop in the caller still holds.
-  if (relayId >= 1 && len < n) {
+  if (relayId >= 1 && includeRelayName && len < n) {
     const char* rn = wcbAlias((int)relayId);
     if (rn && rn[0]) len += snprintf(buf + len, n - len, ",\"relayName\":\"%s\"", rn);
   }
