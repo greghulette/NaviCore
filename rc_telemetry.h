@@ -471,6 +471,28 @@ inline void init() {
 inline String  _pendingReassembled;          // full JSON of a reassembled fragmented payload
 inline uint8_t _pendingReassembledSender = 0;
 
+// Config tool's per-action Test button (bridged). handle() runs on Core 0; the
+// action must be DISPATCHED on Core 1 (it drives Maestro/ESP-NOW TX). So stash
+// the raw TEST_ACTION JSON here under the same mutex the SET_CONFIG hand-off uses
+// and let NaviCore.ino's loop drain + execute it. Latest wins (a test is a
+// one-shot the user paces by hand). takeTestAction() is the Core-1 side.
+inline String _pendingTestAction;
+inline void queueTestAction(const char* json) {
+  if (!json) return;
+  if (_pendingMutex && xSemaphoreTake(_pendingMutex, portMAX_DELAY) == pdTRUE) {
+    _pendingTestAction = String(json);
+    xSemaphoreGive(_pendingMutex);
+  }
+}
+inline bool takeTestAction(String& out) {
+  bool got = false;
+  if (_pendingMutex && xSemaphoreTake(_pendingMutex, portMAX_DELAY) == pdTRUE) {
+    if (_pendingTestAction.length() > 0) { out = _pendingTestAction; _pendingTestAction = String(); got = true; }
+    xSemaphoreGive(_pendingMutex);
+  }
+  return got;
+}
+
 // (_pendingGetConfigSender is declared up in the outbound-send state-machine
 //  block above, since the pump functions there reference it.)
 
@@ -1159,6 +1181,15 @@ inline bool handle(uint8_t senderID, const char* command) {
     } else {
       Serial.println("[RC] SET_CONFIG dropped — apply queue full");
     }
+    return true;
+  }
+
+  // ── TEST_ACTION — fire one action live (config tool's per-action Test button) ──
+  // Dispatching drives Maestro/ESP-NOW TX, which must not run in this Core-0
+  // receive callback — stash the raw JSON and let NaviCore.ino's loop parse +
+  // execute it on Core 1 (drainTestAction). Same defer discipline as SET_CONFIG.
+  if (!strcmp(type, "TEST_ACTION")) {
+    queueTestAction(command);
     return true;
   }
 

@@ -1633,6 +1633,30 @@ void rcExecuteAction(const RcAction& a) {
   rcExecuteActionNow(a);
 }
 
+// Test-fire ONE action from the config tool's per-action Test button, without
+// saving the config. Parses the action object with the SAME parser the editors
+// use, then dispatches its effect NOW — bypassing the per-action delay (a test
+// should fire the instant you click) and the calibration gate (you asked for it
+// explicitly). Runs on Core 1 (USB handler / loop drain), so the dispatch's
+// Maestro/ESP-NOW TX is safe. Returns false if the action JSON didn't parse.
+static bool rcTestAction(JsonObject act) {
+  if (act.isNull()) return false;
+  RcAction a{};   // zero-init so any field the parser leaves unset (skipRunning/delayMs/…) is clean
+  if (!actionFromJson(act, a)) return false;
+  rcExecuteActionNow(a);
+  return true;
+}
+
+// Drain a bridged TEST_ACTION deferred from rc_telemetry::handle() (Core 0).
+// Called from loop() (Core 1); parses the stashed JSON and fires the action.
+void drainTestAction() {
+  String js;
+  if (!rcTelemetry::takeTestAction(js)) return;
+  StaticJsonDocument<640> tdoc;      // one action object is small; 640 B is ample
+  if (deserializeJson(tdoc, js) != DeserializationError::Ok) return;
+  rcTestAction(tdoc["action"].as<JsonObject>());
+}
+
 // ── Record/replay dispatch callbacks (the player reaches NaviCore's static
 //    dispatch layer through these). ────────────────────────────────────────────
 static void recCbDispatch(const RcAction& a)               { rcExecuteActionNow(a); }
@@ -2816,6 +2840,18 @@ void handleSerialInput() {
           resetMaestroReleaseState();   // clear stale auto-release state so defaults take effect live
           Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
+        } else if (strcmp(type,"TEST_ACTION")==0) {
+          // Config tool's per-action Test button — fire one action live, no save.
+          // hdr is a filtered parse (no nested "action"), so re-parse the raw
+          // buffer into a small doc. We're in loop() (Core 1), so dispatch is safe.
+          StaticJsonDocument<640> tdoc;
+          if (deserializeJson(tdoc, serialInputBuf) != DeserializationError::Ok) {
+            Serial.println("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"parse failed\"}");
+          } else {
+            bool ok = rcTestAction(tdoc["action"].as<JsonObject>());
+            Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}\n", ok ? "true" : "false");
+          }
+
         } else if (strcmp(type,"REBOOT")==0) {
           // ACK first so the GUI hears the reply, then restart after a brief
           // delay so the USB TX buffer drains before the reset kills it.
@@ -3541,6 +3577,11 @@ void loop() {
   // Forget-learned-peer — run any FORGET_PEER deferred from the Core-0 Via-WCB
   // path here on Core 1 (esp_now_del_peer + NVS write). Cheap no-op when idle.
   drainForgetPeer();
+
+  // Per-action Test button (bridged) — fire any TEST_ACTION deferred from the
+  // Core-0 Via-WCB path here on Core 1, sharing the same dispatch path. Cheap
+  // no-op when nothing is pending. (Direct-USB TEST_ACTION fires inline above.)
+  drainTestAction();
 
   // Record/replay — drain captured events into the PSRAM clip (Core-1 sole
   // writer) and advance any active replay. Both cheap no-ops when idle.
