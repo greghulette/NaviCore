@@ -585,15 +585,15 @@
   .btn-remove-action:hover { background: var(--red); color: #fff; }
   .btn-move-action {
     background: transparent; color: var(--muted); border: 1px solid var(--line-2);
-    border-radius: 4px; width: 26px; height: 26px; padding: 0;
-    cursor: pointer; font-size: 13px; line-height: 1;
+    border-radius: 4px; height: 26px; padding: 0 8px;
+    cursor: pointer; font-size: 11px; line-height: 1; white-space: nowrap; align-self: center;
   }
   .btn-move-action:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn-move-action:disabled { opacity: .3; cursor: default; }
   .btn-test-action {
     background: transparent; color: var(--green); border: 1px solid var(--green);
-    border-radius: 4px; width: 26px; height: 26px; padding: 0;
-    cursor: pointer; font-size: 12px; line-height: 1; align-self: center;
+    border-radius: 4px; height: 26px; padding: 0 8px;
+    cursor: pointer; font-size: 11px; line-height: 1; align-self: center; white-space: nowrap; font-weight: 600;
   }
   .btn-test-action:hover { background: var(--green); color: #000; }
   .btn-test-action.fired { background: var(--green); color: #000; }
@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.22:44.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.22:53.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9649,22 +9649,22 @@ function buildActionRow(tier, ai, action) {
   const testBtn = document.createElement('button');
   testBtn.type = 'button';
   testBtn.className = 'btn-test-action';
-  testBtn.textContent = '▶';
+  testBtn.textContent = '▶ Test';
   testBtn.title = 'Test-fire this action now on the connected NaviCore (live — does not save)';
   testBtn.onclick = () => testActionRow(tier, ai, testBtn);
   ctrls.appendChild(testBtn);
 
-  const mkMove = (glyph, dir, cls, title) => {
+  const mkMove = (glyph, label, dir, cls, title) => {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'btn-move-action ' + cls;
-    b.textContent = glyph;
+    b.textContent = glyph + ' ' + label;
     b.title = title;
     b.onclick = () => moveActionRow(tier, ai, dir);
     return b;
   };
-  ctrls.appendChild(mkMove('▲', -1, 'btn-move-up',   'Move this action earlier'));
-  ctrls.appendChild(mkMove('▼',  1, 'btn-move-down', 'Move this action later'));
+  ctrls.appendChild(mkMove('▲', 'Up',   -1, 'btn-move-up',   'Move this action earlier'));
+  ctrls.appendChild(mkMove('▼', 'Down',  1, 'btn-move-down', 'Move this action later'));
 
   const rm = document.createElement('button');
   rm.type = 'button';
