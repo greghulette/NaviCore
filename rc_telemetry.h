@@ -395,18 +395,18 @@ inline bool _pumpGetConfigSend() {
 // runtime-tunable (config tool slider → rcConfig.chRateHz, 1–20 Hz); the
 // constant below is just the fallback/default when chRateHz is unset.
 constexpr uint32_t HB_INTERVAL_MS = 2000;
-constexpr uint32_t CH_INTERVAL_MS = 50;    // 20 Hz — default/fallback rate
+constexpr uint32_t CH_INTERVAL_MS = 200;   // 5 Hz — default/fallback rate (20Hz floods the shared mesh)
 
 inline uint32_t _lastHb = 0;
 inline uint32_t _lastCh = 0;
 
 // Runtime rc_ch emit interval derived from the config-tool slider
-// (rcConfig.chRateHz, 1–20 Hz). Falls back to the 20 Hz default when the field
+// (rcConfig.chRateHz, 1–20 Hz). Falls back to the 5 Hz default when the field
 // is unset/out of range, matching rcConfigFromJSON's clamp. Read live every
 // tick so a saved SET_CONFIG takes effect immediately — no reboot/reflash.
 inline uint32_t _chIntervalMs() {
   int hz = rcConfig.chRateHz;
-  if (hz < 1 || hz > 20) return CH_INTERVAL_MS;   // 0/unset/corrupt → 20 Hz default
+  if (hz < 1 || hz > 20) return CH_INTERVAL_MS;   // 0/unset/corrupt → 5 Hz default
   return 1000UL / (uint32_t)hz;
 }
 

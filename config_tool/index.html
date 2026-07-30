@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">30.00:03.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">30.15:52.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2991,9 +2991,9 @@
           <div class="sb-section">
             <h3>Telemetry Rate</h3>
             <div class="tapwin-row">
-              <input type="range" id="chrate-input" min="1" max="20" step="1" value="20" style="flex:1"
+              <input type="range" id="chrate-input" min="1" max="20" step="1" value="5" style="flex:1"
                      oninput="document.getElementById('chrate-val').textContent = this.value + ' Hz';">
-              <span id="chrate-val" style="color:var(--muted);font-size:12px;min-width:42px;text-align:right">20 Hz</span>
+              <span id="chrate-val" style="color:var(--muted);font-size:12px;min-width:42px;text-align:right">5 Hz</span>
             </div>
             <div class="noconn" style="margin-top:4px">Live channel-monitor rate (rc_ch). Higher is smoother; lower frees mesh airtime.</div>
           </div>
@@ -3493,7 +3493,7 @@ let config = {
   maeGateMs:        250,      // remote/via-WCB skip-if-running fail-open window (ms)
   boardType:        0,        // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   tapWindowMs:   500,
-  chRateHz:      20,         // rc_ch live-monitor broadcast rate (Hz, 1–20; 20 = smooth default)
+  chRateHz:      5,          // rc_ch live-monitor broadcast rate (Hz, 1–20; 5 = smooth + light mesh load)
   matrixChannel: 7,
   matrixDebounceFrames: 1,
   funcBindings: { mode: 4 },
@@ -7400,7 +7400,7 @@ function handleBoardMessage(line) {
         if (!viaWcbActive) return;
         if (_rcLastChMs === 0) return;   // no rc_ch yet — leave initial state
         const ageMs    = Date.now() - _rcLastChMs;
-        const perFrame = 1000 / (config.chRateHz || 20);
+        const perFrame = 1000 / (config.chRateHz || 5);
         const staleMs  = Math.max(1500, Math.round(perFrame * 3) + 500);
         if (ageMs > staleMs) {
           updateSbusStatus({
@@ -7686,7 +7686,7 @@ function applyConfig(data) {
   }
   document.getElementById('tapwin-input').value = config.tapWindowMs;
   { const cr = document.getElementById('chrate-input');
-    if (cr) { const hz = Math.max(1, Math.min(20, config.chRateHz ?? 20));
+    if (cr) { const hz = Math.max(1, Math.min(20, config.chRateHz ?? 5));
               cr.value = hz;
               const cv = document.getElementById('chrate-val');
               if (cv) cv.textContent = hz + ' Hz'; } }
@@ -14104,7 +14104,7 @@ function exportConfigCsv() {
 
   rows.push(csvRow(pad(['config','matrixChannel','','' + (config.matrixChannel || '')])));
   rows.push(csvRow(pad(['config','tapWindowMs','','' + (config.tapWindowMs || '')])));
-  rows.push(csvRow(pad(['config','chRateHz','','' + (config.chRateHz || 20)])));
+  rows.push(csvRow(pad(['config','chRateHz','','' + (config.chRateHz || 5)])));
   rows.push(csvRow(pad(['config','matrixDebounceFrames','','' + (config.matrixDebounceFrames || 1)])));
   if (config.funcBindings && config.funcBindings.mode !== undefined) {
     rows.push(csvRow(pad(['config','funcBinding_mode','','' + config.funcBindings.mode])));
@@ -14451,7 +14451,7 @@ function handleConfigImportFile(event) {
           } else if (control === 'tapwindowms') {
             imported.tapWindowMs = Number(value || channel || imported.tapWindowMs);
           } else if (control === 'chratehz') {
-            imported.chRateHz = Math.max(1, Math.min(20, parseInt(value || channel, 10) || 20));
+            imported.chRateHz = Math.max(1, Math.min(20, parseInt(value || channel, 10) || 5));
           } else if (control === 'matrixdebounceframes') {
             imported.matrixDebounceFrames = Math.max(1, Math.min(4, parseInt(value || channel, 10) || 1));
           } else if (control === 'funcbinding_mode') {
