@@ -476,18 +476,23 @@ inline uint8_t _pendingReassembledSender = 0;
 // the raw TEST_ACTION JSON here under the same mutex the SET_CONFIG hand-off uses
 // and let NaviCore.ino's loop drain + execute it. Latest wins (a test is a
 // one-shot the user paces by hand). takeTestAction() is the Core-1 side.
-inline String _pendingTestAction;
-inline void queueTestAction(const char* json) {
+inline String  _pendingTestAction;
+inline uint8_t _pendingTestActionSender = 0;   // relay to ACK back to, once dispatched on Core 1
+inline void queueTestAction(uint8_t senderID, const char* json) {
   if (!json) return;
   if (_pendingMutex && xSemaphoreTake(_pendingMutex, portMAX_DELAY) == pdTRUE) {
-    _pendingTestAction = String(json);
+    _pendingTestAction       = String(json);
+    _pendingTestActionSender = senderID;
     xSemaphoreGive(_pendingMutex);
   }
 }
-inline bool takeTestAction(String& out) {
+inline bool takeTestAction(String& out, uint8_t& sender) {
   bool got = false;
   if (_pendingMutex && xSemaphoreTake(_pendingMutex, portMAX_DELAY) == pdTRUE) {
-    if (_pendingTestAction.length() > 0) { out = _pendingTestAction; _pendingTestAction = String(); got = true; }
+    if (_pendingTestAction.length() > 0) {
+      out = _pendingTestAction; sender = _pendingTestActionSender;
+      _pendingTestAction = String(); _pendingTestActionSender = 0; got = true;
+    }
     xSemaphoreGive(_pendingMutex);
   }
   return got;
@@ -659,7 +664,10 @@ inline void tick() {
     const size_t kFit = 185;                       // one ESP-NOW frame (ETM field 199 − CRC suffix, w/ margin)
     size_t l = buildWcbStatus(wbuf, sizeof(wbuf), to, true, 0);
     if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, 0);   // drop names
-    for (int cap = WCB_MAX_BOARDS - 1; l > kFit && cap >= q; cap--)       // trim the roster
+    // Trim the roster toward the floor. cap stays >= 1: maxHi == 0 is the "no cap"
+    // sentinel, so a cap of 0 (possible when q == 0) would silently UN-trim back to
+    // the full roster instead of trimming to empty.
+    for (int cap = WCB_MAX_BOARDS - 1; l > kFit && cap >= q && cap >= 1; cap--)
       l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, cap);
     if (wcb) wcb->send(to, wbuf);
     return;   // one status reply this tick — skip the periodic telemetry below
@@ -813,14 +821,16 @@ static const uint8_t ALIAS_MAX_TRIES = 4;
 static uint8_t _aliasTries[21] = {0};
 static bool    _aliasWasUp[21] = {false};
 
-// Bounded ?WHOAMI fallback, shared by BOTH status paths (the bridged build on
-// Core 0 and the direct-USB poll on Core 1) so neither can pester a board every
-// poll. A named board never reaches the send: onWcbNeighbor already caches the
-// name from its WDP advert, so wcbAlias(i)[0] is set and this returns early —
-// ?WHOAMI is only a fallback for a board whose advert carries NO name. Even then
-// we ask at most ALIAS_MAX_TRIES times per online session (re-armed on an
-// offline→online edge), then leave it alone: an un-aliased board is fine. Caller
-// guarantees i != selfId. Shared counters race benignly (same as the alias cache).
+// Bounded ?WHOAMI fallback, shared by BOTH status paths — the bridged build
+// (buildWcbStatus, now run from tick()) and the direct-USB poll (NaviCore.ino).
+// Both run on Core 1, so the static counters below are effectively single-core
+// (no cross-core access). A named board never reaches the send: onWcbNeighbor
+// already caches the name from its WDP advert, so wcbAlias(i)[0] is set and this
+// returns early — ?WHOAMI is only a fallback for a board whose advert carries NO
+// name. Even then we ask at most ALIAS_MAX_TRIES times per online session
+// (re-armed on an offline→online edge), then leave it alone: an un-aliased board
+// is fine. Caller guarantees i != selfId (and, in buildWcbStatus, calls only on
+// the includeAliases pass so the fit-loop's retries don't multiply the query).
 inline void maybeQueryAlias(int i, bool up, bool client) {
   if (i < 1 || i > 20) return;
   if (client) return;                                // clients are named from their advert, not ?WHOAMI
@@ -911,7 +921,14 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
     // self is always live.
     const bool up = (i == selfId) ? true
                   : (client ? (nb != nullptr) : (wcb && wcb->isOnline(i)));
-    if (i != selfId) maybeQueryAlias(i, up, client);   // bounded ?WHOAMI fallback (named boards never reach the send)
+    // Bounded ?WHOAMI fallback — but ONLY on the aliases pass. The caller's
+    // fit-loop re-invokes buildWcbStatus up to ~20 times per poll (retry, then
+    // roster-trim), all with includeAliases=false; without this gate every pass
+    // would re-fire ?WHOAMI and blow the whole per-session try budget in one tick
+    // (a burst of ESP-NOW sends). The first, richest call is always aliases=true,
+    // so the query still happens exactly once per poll. (Named boards never reach
+    // the send anyway — their alias is already cached from WDP.)
+    if (i != selfId && includeAliases) maybeQueryAlias(i, up, client);
     len += snprintf(buf + len, n - len, "%s%s", (i > 1) ? "," : "", up ? "1" : "0");
   }
   // known[] tells the tool which slots to actually render (floor + discovered),
@@ -1189,7 +1206,7 @@ inline bool handle(uint8_t senderID, const char* command) {
   // receive callback — stash the raw JSON and let NaviCore.ino's loop parse +
   // execute it on Core 1 (drainTestAction). Same defer discipline as SET_CONFIG.
   if (!strcmp(type, "TEST_ACTION")) {
-    queueTestAction(command);
+    queueTestAction(senderID, command);   // senderID = relay to ACK back to after dispatch
     return true;
   }
 

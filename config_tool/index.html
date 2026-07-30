@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.22:53.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">29.23:30.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4205,7 +4205,10 @@ function renderWcbStatus(online) {
   // Prefer the firmware reply's count — over a bridge config.wcbNetwork may
   // still read as default, but the RC always reports its real quantity.
   const quantity = wcbQuantity || (config.wcbNetwork && config.wcbNetwork.quantity) || 0;
-  if (quantity < 1) {
+  // quantity 0 = no roster to draw — but if we're bridged through a relay
+  // (wcbRelay > 0) fall through so its chip still renders (we're talking through
+  // it right now); the empty-roster message is handled by the !shown fallback.
+  if (quantity < 1 && wcbRelay <= 0) {
     list.innerHTML = '<div class="noconn">No WCBs configured (set quantity in Config → WCB Network)</div>';
     return;
   }
@@ -4255,9 +4258,12 @@ function renderWcbStatus(online) {
   }
   // The relaying node itself is kept OUT of the roster arrays above (excluded on
   // the RC so the reply fits one ESP-NOW packet), so draw it its own chip here —
-  // it's obviously online (we're bridged through it right now). Only when it isn't
-  // already shown as a normal roster slot (it won't be, but guard anyway).
-  if (wcbRelay > 0 && !(wcbKnown && wcbKnown[wcbRelay - 1])) {
+  // it's obviously online (we're bridged through it right now). Skip it if it's
+  // already drawn as a normal roster slot — using the SAME floor fallback the loop
+  // uses (wcbKnown null → i <= quantity), so an older no-known[] reply can't
+  // double-render the relay both as a roster slot and here.
+  const relayInRoster = wcbKnown ? !!wcbKnown[wcbRelay - 1] : (wcbRelay <= quantity);
+  if (wcbRelay > 0 && !relayInRoster) {
     const rn = String(wcbRelayName || '').trim();
     html += `<div class="wcb-chip">
       <span class="wcb-chip-dot online"></span>
@@ -12866,7 +12872,12 @@ function closeHwSetup() {
   // The Config window is where all the wiring/hardware settings live and it has
   // its own Save — so if you close it with unsaved edits, offer to save them to
   // the NaviCore first (else they only live in the tool, not on the board).
-  if (_hwSetupUnsaved()) {
+  // Prompt only when BOTH are true: there are changes not yet on the board
+  // (_configUnsaved — so a just-saved edit doesn't re-prompt), AND those changes
+  // were made in THIS window (_hwSetupUnsaved — so open/connect render-padding
+  // can't fabricate a phantom prompt). Either alone gives a false positive:
+  // _configUnsaved fires on render-padding; _hwSetupUnsaved fires after a save.
+  if (_configUnsaved() && _hwSetupUnsaved()) {
     if (confirm('You have unsaved config changes.\n\nOK — save them to the NaviCore now.\nCancel — close without saving (your edits stay in the tool but are NOT on the board yet).')) {
       saveConfigToBoard();
     }

@@ -1648,13 +1648,23 @@ static bool rcTestAction(JsonObject act) {
 }
 
 // Drain a bridged TEST_ACTION deferred from rc_telemetry::handle() (Core 0).
-// Called from loop() (Core 1); parses the stashed JSON and fires the action.
+// Called from loop() (Core 1); parses the stashed JSON, fires the action, then
+// unicasts an ACK back to the relay so the bridged path mirrors the direct-USB
+// reply (the tool's terminal shows confirmation — the only feedback for a
+// silent action like a serial write).
 void drainTestAction() {
-  String js;
-  if (!rcTelemetry::takeTestAction(js)) return;
+  String  js;
+  uint8_t sender = 0;
+  if (!rcTelemetry::takeTestAction(js, sender)) return;
+  bool ok = false;
   StaticJsonDocument<640> tdoc;      // one action object is small; 640 B is ample
-  if (deserializeJson(tdoc, js) != DeserializationError::Ok) return;
-  rcTestAction(tdoc["action"].as<JsonObject>());
+  if (deserializeJson(tdoc, js) == DeserializationError::Ok)
+    ok = rcTestAction(tdoc["action"].as<JsonObject>());
+  if (sender >= 1 && sender <= WCB_MAX_BOARDS && wcb && wcbReady) {
+    char ack[64];
+    snprintf(ack, sizeof(ack), "{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}", ok ? "true" : "false");
+    wcb->send(sender, ack);
+  }
 }
 
 // ── Record/replay dispatch callbacks (the player reaches NaviCore's static
