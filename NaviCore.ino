@@ -2778,6 +2778,28 @@ void handleSerialInput() {
           Serial.print(rcConfigToJSON());
           Serial.println("}");
 
+        } else if (strcmp(type,"GET_CMDLIB")==0) {
+          // Stream back the config tool's private command library stored on this
+          // droid (opaque to the firmware). Empty library if nothing saved yet.
+          String lib;
+          if (!rcCmdlibLoadLFS(lib) || lib.length() == 0) lib = "{\"boards\":[],\"enums\":{}}";
+          Serial.print("{\"type\":\"CMDLIB\",\"data\":");
+          Serial.print(lib);
+          Serial.println("}");
+
+        } else if (strcmp(type,"SET_CMDLIB")==0) {
+          // Persist the library OPAQUELY. Pull the raw "data" value by substring
+          // (it can be many KB — avoid a second big parse); data is the LAST field.
+          bool ok = false;
+          int k   = serialInputBuf.indexOf("\"data\":");
+          int end = serialInputBuf.lastIndexOf('}');
+          if (k >= 0 && end > k + 7) {
+            String lib = serialInputBuf.substring(k + 7, end);
+            lib.trim();
+            if (lib.length() > 0) ok = rcCmdlibSaveLFS(lib);
+          }
+          Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s}\n", ok ? "true" : "false");
+
         } else if (strcmp(type,"SET_CONFIG")==0) {
           DynamicJsonDocument bigDoc(98304);
           if (deserializeJson(bigDoc, serialInputBuf) != DeserializationError::Ok) {

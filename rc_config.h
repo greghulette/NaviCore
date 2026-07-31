@@ -1585,6 +1585,51 @@ bool rcConfigLoadLFS() {
   return applied;
 }
 
+// ── Custom command-library storage (config tool's private boards) ────────────
+// The RC stores this JSON OPAQUELY — it never parses or uses it. It's the config
+// tool's private command-library boards, kept on the droid so they travel to any
+// browser/machine that connects. Saved/served verbatim; the tool owns the shape.
+static const char* RC_CMDLIB_PATH     = "/cmdlib.json";
+static const char* RC_CMDLIB_TMP_PATH = "/cmdlib.json.tmp";
+
+// Atomic write (tmp + rename + on-flash size verify), same discipline as the
+// config save so a power loss can't corrupt the live file. `json` is the raw
+// library JSON (the tool's {schema,enums,boards} object). Returns false on any
+// failure (surfaced in the SET_CMDLIB ACK).
+bool rcCmdlibSaveLFS(const String& json) {
+  if (!g_lfsReady) { Serial.println("[CMDLIB] LittleFS not mounted — save skipped"); return false; }
+  File f = LittleFS.open(RC_CMDLIB_TMP_PATH, "w");
+  if (!f) { Serial.println("[CMDLIB] LFS: cannot open temp file for write"); return false; }
+  size_t n = f.print(json);
+  f.close();
+  if (n != json.length()) {
+    Serial.printf("[CMDLIB] LFS: short write %u/%u — keeping previous\n", (unsigned)n, (unsigned)json.length());
+    LittleFS.remove(RC_CMDLIB_TMP_PATH); return false;
+  }
+  { File chk = LittleFS.open(RC_CMDLIB_TMP_PATH, "r"); size_t onDisk = chk ? chk.size() : 0; if (chk) chk.close();
+    if (onDisk != json.length()) {
+      Serial.printf("[CMDLIB] LFS: temp truncated on flash (%u/%u) — not updated\n", (unsigned)onDisk, (unsigned)json.length());
+      LittleFS.remove(RC_CMDLIB_TMP_PATH); return false;
+    } }
+  if (!LittleFS.rename(RC_CMDLIB_TMP_PATH, RC_CMDLIB_PATH)) {
+    Serial.println("[CMDLIB] LFS: rename failed — previous kept");
+    LittleFS.remove(RC_CMDLIB_TMP_PATH); return false;
+  }
+  Serial.printf("[CMDLIB] saved to LittleFS (%u bytes).\n", (unsigned)json.length());
+  return true;
+}
+
+// Read /cmdlib.json into `out` (raw JSON). Returns false if missing/empty.
+bool rcCmdlibLoadLFS(String& out) {
+  if (!g_lfsReady || !LittleFS.exists(RC_CMDLIB_PATH)) return false;
+  File f = LittleFS.open(RC_CMDLIB_PATH, "r");
+  if (!f) return false;
+  if (f.size() == 0) { f.close(); return false; }
+  out = f.readString();
+  f.close();
+  return out.length() > 0;
+}
+
 // Returns true only if EVERY NVS value was written successfully.
 bool rcConfigSaveNVS() {
   bool ok = true;

@@ -92,6 +92,8 @@ bool   rcConfigFromJSON(const String& json);
 bool   rcConfigFromJSON(const JsonObject& doc);   // JsonObject overload — skip the double-parse
 bool   rcConfigSaveNVS();   // legacy NVS save (migration source only)
 bool   rcConfigSaveLFS();   // primary: persist config to /config.json on LittleFS
+bool   rcCmdlibSaveLFS(const String& json);   // persist the config tool's private command library to /cmdlib.json
+bool   rcCmdlibLoadLFS(String& out);          // read /cmdlib.json (raw JSON) — false if missing/empty
 
 namespace rcTelemetry {
 
@@ -227,6 +229,10 @@ inline bool handle(uint8_t senderID, const char* command);
 // (a new request arriving in the same instant the old one clears) just
 // drops one request — the config tool re-issues after its 5 s timeout.
 inline uint8_t _pendingGetConfigSender = 0;
+// GET_CMDLIB requester — same defer-to-tick + single-flight discipline as
+// _pendingGetConfigSender (both drive the ONE _outSend fragment machine, so
+// tick() arms whichever is pending only when _outSend is idle).
+inline uint8_t _pendingGetCmdlibSender = 0;
 
 // Deferred bridged WCB_STATUS reply. handle() runs in the WCB_Client receive
 // callback (Core 0 WiFi task); building the status fires ?WHOAMI ESP-NOW sends
@@ -294,24 +300,19 @@ inline bool _sendFragment(uint16_t idx) {
   return true;
 }
 
-// Arm a fragmented CONFIG send to `target`.  Returns false if the payload
-// can't be sent (empty / too large for the fragment budget); true if armed.
-// Does NOT send the first fragment — _pumpGetConfigSend() does, same tick.
-inline bool _startGetConfigSend(uint8_t target) {
+// Arm a fragmented send of an ALREADY-WRAPPED payload (a full {"type":...} JSON
+// message) to `target`. Returns false if it can't be sent (empty / too many
+// fragments); true if armed. Does NOT send the first fragment — the pump does,
+// same tick. Shared by CONFIG and CMDLIB (the fragment/reassembly layer is
+// payload-agnostic: the reassembled payload's own "type" tells the tool apart).
+// `what` is only for the log line.
+inline bool _startFragSend(uint8_t target, const String& wrapped, const char* what) {
   if (!wcb || target == 0) return false;
-  String body = rcConfigToJSON();
-  String wrapped;
-  wrapped.reserve(body.length() + 40);
-  wrapped += "{\"type\":\"CONFIG\",\"id\":";
-  wrapped += rcConfig.wcbNetwork.deviceId;
-  wrapped += ",\"data\":";
-  wrapped += body;
-  wrapped += "}";
 
   // Split into codepoint-safe chunks (each <= FRAG_CHUNK_BYTES bytes, never cutting
   // a multi-byte UTF-8 char) and record the byte boundaries. `total` is the chunk
-  // count; _sendFragment slices on these boundaries so a multi-byte value in the
-  // CONFIG can't be torn across two fragments (the receiver positionally join()s).
+  // count; _sendFragment slices on these boundaries so a multi-byte value can't be
+  // torn across two fragments (the receiver positionally join()s).
   size_t total = 0;
   {
     size_t i = 0; const size_t N = wrapped.length();
@@ -331,9 +332,9 @@ inline bool _startGetConfigSend(uint8_t target) {
     if (i < N) total = (size_t)FRAG_MAX_PARTS + 1;    // didn't fit within the part budget — force the bail
   }
   if (total == 0 || total > FRAG_MAX_PARTS) {
-    Serial.printf("[RC] CONFIG send bailed: %u bytes needs > %u fragments. "
+    Serial.printf("[RC] %s send bailed: %u bytes needs > %u fragments. "
                   "Use Direct USB for this size.\n",
-                  (unsigned)wrapped.length(), (unsigned)FRAG_MAX_PARTS);
+                  what, (unsigned)wrapped.length(), (unsigned)FRAG_MAX_PARTS);
     return false;
   }
 
@@ -351,9 +352,39 @@ inline bool _startGetConfigSend(uint8_t target) {
   _outSend.lastSendMs = millis() - FRAG_PACING_MS;
   _outSend.payload    = wrapped;
 
-  Serial.printf("[RC] CONFIG send START: %u bytes → %u fragments to W%u (sid=%u)\n",
-                (unsigned)wrapped.length(), (unsigned)total, (unsigned)target, (unsigned)sid);
+  Serial.printf("[RC] %s send START: %u bytes → %u fragments to W%u (sid=%u)\n",
+                what, (unsigned)wrapped.length(), (unsigned)total, (unsigned)target, (unsigned)sid);
   return true;
+}
+
+// Arm a fragmented CONFIG send to `target`.  Returns false if the payload
+// can't be sent (empty / too large for the fragment budget); true if armed.
+inline bool _startGetConfigSend(uint8_t target) {
+  String body = rcConfigToJSON();
+  String wrapped;
+  wrapped.reserve(body.length() + 40);
+  wrapped += "{\"type\":\"CONFIG\",\"id\":";
+  wrapped += rcConfig.wcbNetwork.deviceId;
+  wrapped += ",\"data\":";
+  wrapped += body;
+  wrapped += "}";
+  return _startFragSend(target, wrapped, "CONFIG");
+}
+
+// Arm a fragmented CMDLIB send (the config tool's private command library) to
+// `target`. Reads /cmdlib.json; sends an empty library if the file is missing so
+// the tool always gets a definitive answer. Shares _outSend with CONFIG — only
+// one send is in flight at a time (the pending-slot guards serialize them).
+inline bool _startGetCmdlibSend(uint8_t target) {
+  String body;
+  if (!rcCmdlibLoadLFS(body) || body.length() == 0)
+    body = "{\"boards\":[],\"enums\":{}}";
+  String wrapped;
+  wrapped.reserve(body.length() + 24);
+  wrapped += "{\"type\":\"CMDLIB\",\"data\":";
+  wrapped += body;
+  wrapped += "}";
+  return _startFragSend(target, wrapped, "CMDLIB");
 }
 
 // Advance the in-progress send by at most one fragment, paced at
@@ -592,6 +623,25 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     if (wcb) wcb->send(senderID, ack);
     return;
   }
+  if (!strcmp(type, "SET_CMDLIB")) {
+    // Persist the tool's private command library OPAQUELY. Pull the raw "data"
+    // value by SUBSTRING rather than a second multi-KB parse: the message is
+    // {"type":"SET_CMDLIB","data":<lib>} with data LAST, so the value runs from
+    // after the first `"data":` to the message's final '}'.
+    bool ok = false;
+    int k = json.indexOf("\"data\":");
+    int end = json.lastIndexOf('}');
+    if (k >= 0 && end > k + 7) {
+      String lib = json.substring(k + 7, end);
+      lib.trim();
+      if (lib.length() > 0) ok = rcCmdlibSaveLFS(lib);
+    }
+    Serial.printf("[RC] SET_CMDLIB → %s\n", ok ? "saved to LittleFS" : "SAVE FAILED / empty");
+    char ack[72];
+    snprintf(ack, sizeof(ack), "{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s}", ok ? "true" : "false");
+    if (wcb) wcb->send(senderID, ack);
+    return;
+  }
   Serial.printf("[RC] reassembled payload had unexpected type '%s' — dropping\n", type);
 }
 
@@ -645,6 +695,15 @@ inline void tick() {
     if (!_startGetConfigSend(_pendingGetConfigSender)) {
       _pendingGetConfigSender = 0;    // couldn't start (too big / empty) — clear so we don't wedge
     }
+  }
+  // CMDLIB shares the SAME _outSend machine as CONFIG — arm it only when idle so
+  // a CONFIG send in flight defers it to a later tick (they never overlap). We
+  // clear the slot up front (the pump's busy guard is _outSend.active), so a
+  // failed start can't wedge and the pump's CONFIG-slot clear stays a no-op here.
+  if (_pendingGetCmdlibSender != 0 && !_outSend.active) {
+    const uint8_t to = _pendingGetCmdlibSender;
+    _pendingGetCmdlibSender = 0;
+    _startGetCmdlibSend(to);   // false = nothing to send (bailed) — already cleared
   }
   if (_pumpGetConfigSend()) return;   // a send is in progress this tick — suppress telemetry
 
@@ -1182,6 +1241,14 @@ inline bool handle(uint8_t senderID, const char* command) {
     return true;
   }
 
+  // ── GET_CMDLIB — stream the stored private command library back (fragmented) ──
+  // Same defer-to-tick + single-flight discipline as GET_CONFIG; shares _outSend
+  // (tick arms whichever is pending only when the fragment machine is idle).
+  if (!strcmp(type, "GET_CMDLIB")) {
+    if (_pendingGetCmdlibSender == 0) _pendingGetCmdlibSender = senderID;
+    return true;
+  }
+
   // ── SET_CONFIG ────────────────────────────────────────────────────────────
   // Always defer to main loop — rcConfigFromJSON + rcConfigSaveLFS block
   // 100+ ms on flash I/O and we're in the WCB_Client receive-callback
@@ -1190,7 +1257,11 @@ inline bool handle(uint8_t senderID, const char* command) {
   // a DynamicJsonDocument sized for the real payload.  This branch fires
   // for a single-packet SET_CONFIG too (rare but possible if the config
   // ever shrinks below the ~200 byte threshold).
-  if (!strcmp(type, "SET_CONFIG")) {
+  // SET_CMDLIB rides the SAME deferred-apply path (stash the raw message; tick()
+  // drains it to _applyReassembled, which dispatches by "type"). A large library
+  // arrives as fragments and reassembles into this same slot; this branch only
+  // catches a rare single-packet SET_CMDLIB (tiny library).
+  if (!strcmp(type, "SET_CONFIG") || !strcmp(type, "SET_CMDLIB")) {
     // Mutex-guarded — same reasoning as the fragment-complete branch.
     bool accepted = false;
     if (_pendingMutex && xSemaphoreTake(_pendingMutex, portMAX_DELAY) == pdTRUE) {
@@ -1201,11 +1272,8 @@ inline bool handle(uint8_t senderID, const char* command) {
       }
       xSemaphoreGive(_pendingMutex);
     }
-    if (accepted) {
-      Serial.println("[RC] SET_CONFIG → deferred to main loop");
-    } else {
-      Serial.println("[RC] SET_CONFIG dropped — apply queue full");
-    }
+    Serial.printf(accepted ? "[RC] %s → deferred to main loop\n"
+                           : "[RC] %s dropped — apply queue full\n", type);
     return true;
   }
 
