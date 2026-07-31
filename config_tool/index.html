@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.18:48.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.19:54.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4098,6 +4098,12 @@ let wcbPortLabels  = [];   // per-board array of 5 serial-port device labels (po
 let wcbKnown       = null;  // per-board "render this slot" mask from WCB_STATUS (floor + auto-discovered); null = old fw
 let wcbClients     = [];   // per-board "this slot is a client device (not a WCB board)" flag from WCB_STATUS
 let wcbTemporary   = [];   // per-board "this slot advertised the WDP temporary flag" (live-only, never persisted)
+// Over the WCB bridge the lean one-packet WCB_STATUS can't carry aliases + port
+// labels, so they arrive via a separate fragmented WCB_META reply and are CACHED
+// here. These track the on-demand pull (bounded + throttled) and the last online[].
+let _wcbMetaTries  = 0;    // GET_WCB_META attempts this session (bounded so we don't pester a nameless board)
+let _wcbMetaReqAt  = 0;    // last GET_WCB_META request time (throttle)
+let _wcbLastOnline = [];   // last online[] so a WCB_META reply can re-render immediately
 // After a forget, a WCB_STATUS reply the RC BUILT before it processed the forget
 // still carries known[id]=1. sendJSON is fire-and-forget (no response
 // correlation), so that stale reply can land just after we optimistically remove
@@ -4132,6 +4138,7 @@ function startWcbStatusPoll() {
   _wcbStatusSeen = false;           // re-arm the one-time reply log for this session
   wcbEverSeen = new Set();          // fresh per-session memory
   wcbSelfId   = 0;
+  _wcbMetaTries = 0; _wcbMetaReqAt = 0; _wcbLastOnline = [];   // re-fetch aliases + port labels over the bridge this session
   wcbAliases  = [];
   wcbPortLabels = [];
   wcbKnown    = null;               // drop the previous board's slot mask (else it lingers until the first reply)
@@ -4194,6 +4201,30 @@ function forgetLearnedPeer(id, btnEl) {
   try { const chip = btnEl && btnEl.closest('.wcb-chip'); if (chip) chip.remove(); } catch (_) {}
   sendJSON({ type: 'FORGET_PEER', id }).catch(() => {});
   setTimeout(() => { if (isWcbConfigured() || viaWcbActive || sharedActive) sendJSON({ type: 'GET_WCB_STATUS' }, true).catch(() => {}); }, 600);
+}
+
+// Over the WCB bridge the lean WCB_STATUS omits aliases + port labels (they don't
+// fit one packet). Pull them via the separate fragmented WCB_META reply, on demand:
+// while some KNOWN non-self/non-relay board still has no cached name, ask a few times
+// (bounded + throttled) — enough to catch a name the RC learns a beat after we
+// connect, without pestering forever for a genuinely un-named board. USB replies
+// already carry names, so this only fires when bridged and something is actually missing.
+function _maybeRequestWcbMeta() {
+  if (!viaWcbActive && !sharedActive) return;    // USB status already carries names/labels
+  if (_wcbMetaTries >= 8) return;                // gave up — a board may simply be un-named
+  const q = wcbQuantity || (config.wcbNetwork && config.wcbNetwork.quantity) || 0;
+  const upper = Math.max(q, (wcbKnown && wcbKnown.length) || 0);
+  let missing = false;
+  for (let i = 1; i <= upper && !missing; i++) {
+    const known = wcbKnown ? !!wcbKnown[i - 1] : (i <= q);
+    if (!known || i === wcbSelfId) continue;
+    if (!(wcbAliases && wcbAliases[i - 1])) missing = true;
+  }
+  if (!missing) return;                          // every known board already has a cached name
+  const now = Date.now();
+  if ((now - _wcbMetaReqAt) < 5000) return;      // throttle
+  _wcbMetaTries++; _wcbMetaReqAt = now;
+  sendJSON({ type: 'GET_WCB_META' }, /*silent=*/true).catch(() => {});
 }
 
 function renderWcbStatus(online) {
@@ -4268,7 +4299,9 @@ function renderWcbStatus(online) {
   // double-render the relay both as a roster slot and here.
   const relayInRoster = wcbKnown ? !!wcbKnown[wcbRelay - 1] : (wcbRelay <= quantity);
   if (wcbRelay > 0 && !relayInRoster) {
-    const rn = String(wcbRelayName || '').trim();
+    // Prefer the reply's relayName; fall back to the cached WCB_META alias so the
+    // relay shows its name over the bridge too (relayName can be shed by the fit-loop).
+    const rn = String(wcbRelayName || (wcbAliases && wcbAliases[wcbRelay - 1]) || '').trim();
     html += `<div class="wcb-chip">
       <span class="wcb-chip-dot online"></span>
       <span class="wcb-chip-name">WCB ${wcbRelay}${rn ? ' · ' + escH(rn) : ''} <small title="Relay — this WCB is bridging the config tool to the RC over ESP-NOW; it carries the mesh, not a droid board" style="color:var(--accent);font-weight:400">· relay 📡</small></span>
@@ -7273,7 +7306,7 @@ function handleBoardMessage(line) {
       sess.parts[f - 1] = msg.s || '';
       sess.got++;
       sess.expireAt = Date.now() + FRAG_TIMEOUT_MS;
-      if (sess.total >= 4) _fragProgress(sess.got, sess.total);   // visible bar for slow multi-packet pulls (config over WCB)
+      if (sess.total >= 8) _fragProgress(sess.got, sess.total);   // visible bar for slow multi-packet pulls (config/cmdlib); skips the small WCB_META fetch
     }
     if (sess.got >= sess.total) {
       _fragSessions.delete(sid);
@@ -7529,10 +7562,14 @@ function handleBoardMessage(line) {
     // keep the reply inside one ESP-NOW packet, so we draw its own chip from these.
     wcbRelayName = (typeof msg.relayName === 'string') ? msg.relayName : '';
     wcbQuantity = (typeof msg.quantity === 'number') ? msg.quantity : 0;
-    wcbAliases = Array.isArray(msg.aliases) ? msg.aliases : [];
-    // portLabels[] (newer firmware, USB only) = per-board array of 5 serial-port
-    // device labels (ports 1-5), advertised by each board over WDP; "" = unlabeled.
-    wcbPortLabels = Array.isArray(msg.portLabels) ? msg.portLabels : [];
+    // CACHE, don't clear: over the WCB bridge the lean WCB_STATUS omits aliases +
+    // port labels (they come via the separate WCB_META reply), so only overwrite
+    // when this reply actually carries them (USB, or a full build) — otherwise the
+    // 3 s poll would wipe the cached names every tick.
+    if (Array.isArray(msg.aliases)) wcbAliases = msg.aliases;
+    // portLabels[] = per-board array of 5 serial-port device labels (ports 1-5),
+    // advertised by each board over WDP; "" = unlabeled. Cached, same as aliases.
+    if (Array.isArray(msg.portLabels)) wcbPortLabels = msg.portLabels;
     // known[] (newer firmware) = which slots to render: the floor + auto-
     // discovered boards. Absent on older firmware → fall back to 1..quantity.
     wcbKnown = Array.isArray(msg.known) ? msg.known : null;
@@ -7557,7 +7594,18 @@ function handleBoardMessage(line) {
         if (Array.isArray(wcbKnown)) wcbKnown[fid - 1] = false;
       }
     }
-    renderWcbStatus(Array.isArray(msg.online) ? msg.online : []);
+    _wcbLastOnline = Array.isArray(msg.online) ? msg.online : [];
+    renderWcbStatus(_wcbLastOnline);
+    _maybeRequestWcbMeta();   // pull aliases + port labels over the bridge (cached, bounded)
+    return;
+  }
+  // WCB_META — the per-board aliases + serial-port labels that don't fit the
+  // one-packet bridged WCB_STATUS (they arrive fragmented + on demand). Cache them
+  // so the lean 3 s liveness poll never has to carry them.
+  if (msg.type === 'WCB_META') {
+    if (Array.isArray(msg.aliases))    wcbAliases    = msg.aliases;
+    if (Array.isArray(msg.portLabels)) wcbPortLabels = msg.portLabels;
+    renderWcbStatus(_wcbLastOnline);
     return;
   }
 

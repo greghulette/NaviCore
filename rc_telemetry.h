@@ -245,6 +245,10 @@ inline uint8_t _pendingGetCmdlibSender = 0;
 // machine involved; answered from tick() (Core 1) to keep the flash read off the
 // Core-0 receive callback.
 inline uint8_t _pendingGetCmdlibMetaSender = 0;
+// GET_WCB_META requester — the per-board aliases + serial-port labels that don't
+// fit the one-packet bridged WCB_STATUS. Fragmented (shares the _outSend machine
+// with GET_CONFIG/GET_CMDLIB), answered from tick() on Core 1.
+inline uint8_t _pendingGetWcbMetaSender = 0;
 
 // Deferred bridged WCB_STATUS reply. handle() runs in the WCB_Client receive
 // callback (Core 0 WiFi task); building the status fires ?WHOAMI ESP-NOW sends
@@ -768,6 +772,7 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
 // reply on Core 1 and calls this BEFORE the definition, so the default args live
 // HERE (where those call sites can see them) and are omitted on the definition.
 inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi = 0, bool includeRelayName = true);
+inline String buildWcbMeta();   // per-board aliases + serial-port labels, fragmented (GET_WCB_META)
 
 // ── Outbound: heartbeat + channel snapshot (periodic) ───────────────────────
 // Called from loop().  Emits at most one HB and one CH packet per call,
@@ -823,6 +828,15 @@ inline void tick() {
     const uint8_t to = _pendingGetCmdlibSender;
     _pendingGetCmdlibSender = 0;
     _startGetCmdlibSend(to);   // false = nothing to send (bailed) — already cleared
+  }
+  // GET_WCB_META — the aliases + serial-port labels that don't fit the one-packet
+  // bridged WCB_STATUS. Fragmented (the tool reassembles + caches), single-flight on
+  // _outSend like the pulls above, pumped below — so the frequent liveness poll stays
+  // lean and this never interleaves with a config/cmdlib transfer.
+  if (_pendingGetWcbMetaSender != 0 && !_outSend.active) {
+    const uint8_t to = _pendingGetWcbMetaSender;
+    _pendingGetWcbMetaSender = 0;
+    _startFragSend(to, buildWcbMeta(), "WCB_META");
   }
   // GET_CMDLIB_META — one tiny packet (size + signature) so the tool can skip a
   // re-pull when its cache already matches. Flash read done here on Core 1. Only
@@ -1160,6 +1174,46 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
   return len;
 }
 
+// Build the WCB_META reply — the per-board friendly aliases + serial-port labels
+// that don't fit the one-packet bridged WCB_STATUS. Sent FRAGMENTED (the tool
+// reassembles) on demand (GET_WCB_META) and CACHED by the tool, so the frequent
+// liveness poll stays lean. Same positional-array shape as the USB WCB_STATUS
+// aliases[]/portLabels[] fields, so the tool parses it identically. Aliases are
+// already sanitized (setWcbAlias); port labels are external WDP input, cleaned here.
+inline String buildWcbMeta() {
+  int q = rcConfig.wcbNetwork.quantity;
+  if (q < 0) q = 0;
+  if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
+  const int selfId = rcConfig.wcbNetwork.deviceId;
+  const int hi = wcbHighestKnown(q);
+  String s; s.reserve(320);
+  s += "{\"type\":\"WCB_META\",\"aliases\":[";
+  for (int i = 1; i <= hi; i++) {
+    if (i > 1) s += ',';
+    s += '"'; s += (i == selfId) ? "" : wcbAlias(i); s += '"';
+  }
+  s += "],\"portLabels\":[";
+  for (int i = 1; i <= hi; i++) {
+    if (i > 1) s += ',';
+    s += '[';
+    const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+    for (int p = 0; p < 5; p++) {
+      if (p) s += ',';
+      const char* lbl = (nb && !nb->isClient) ? nb->portLabels[p] : "";
+      s += '"';
+      for (int k = 0; k < 24 && lbl[k]; k++) {   // strip JSON-hostile chars (same as the USB build)
+        char c = lbl[k];
+        if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;
+        s += c;
+      }
+      s += '"';
+    }
+    s += ']';
+  }
+  s += "]}";
+  return s;
+}
+
 inline bool handle(uint8_t senderID, const char* command) {
   if (!wcb || !wcbReady) return false;   // WCB down — can't be receiving anyway
   if (!command || command[0] != '{') return false;
@@ -1383,6 +1437,12 @@ inline bool handle(uint8_t senderID, const char* command) {
   // GET_CMDLIB_META — cheap signature so the tool decides whether to pull.
   if (!strcmp(type, "GET_CMDLIB_META")) {
     _pendingGetCmdlibMetaSender = senderID;   // answered from tick() (Core 1)
+    return true;
+  }
+  // GET_WCB_META — aliases + port labels the one-packet WCB_STATUS can't carry.
+  // Deferred + single-flight on the fragment machine (answered from tick(), Core 1).
+  if (!strcmp(type, "GET_WCB_META")) {
+    if (_pendingGetWcbMetaSender == 0) _pendingGetWcbMetaSender = senderID;
     return true;
   }
 
