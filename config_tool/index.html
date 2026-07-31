@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.18:40.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.18:48.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -13632,11 +13632,14 @@ async function otaUpdateOverWcb() {
   const pctEl    = document.getElementById('fw-progress-pct');
   const setStatus = t => { if (statusEl) statusEl.textContent = t; };
   const log = t => { if (logEl) { logEl.style.display = 'block'; logEl.textContent += t + '\n'; logEl.scrollTop = logEl.scrollHeight; } };
+  let otaStartMs = 0;   // set when DATA streaming begins → drives the live elapsed timer
   const setProgress = (done, total) => {
     if (wrapEl) wrapEl.style.display = 'block';
     const p = total ? Math.round(done * 100 / total) : 0;
     if (barEl) barEl.style.width = p + '%';
-    if (pctEl) pctEl.textContent = `${p}%  (${Math.round(done/1024)}/${Math.round(total/1024)} KB)`;
+    let el = '';
+    if (otaStartMs) { const s = Math.floor((Date.now() - otaStartMs) / 1000); el = `  ·  ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+    if (pctEl) pctEl.textContent = `${p}%  (${Math.round(done / 1024)}/${Math.round(total / 1024)} KB)${el}`;
   };
 
   _otaInProgress = true;
@@ -13700,6 +13703,7 @@ async function otaUpdateOverWcb() {
     // firmware already on the target. Throughput self-tunes to the target's drain
     // rate; WINDOW < the 12-deep queue so we never cause our own overflow drops.
     setStatus('OTA-WCB: streaming…');
+    otaStartMs = Date.now();   // start the elapsed clock at the first DATA packet
     const WINDOW  = 8;      // packets in flight (< the target's 12-deep RX queue)
     const PACE_MS = 12;     // small gap between sends so a burst can't flood the relay/USB
     let confirmed = 0;      // target's ACK'd write cursor (bytes)
@@ -13737,6 +13741,14 @@ async function otaUpdateOverWcb() {
         if (++noAdvance >= WINDOW - 1) { nextSend = confirmed; noAdvance = 0; }
       }
       // a.offset < confirmed → stale/duplicate ACK; ignore.
+    }
+
+    // Transfer complete — log the time + throughput so a future run can be
+    // compared against it (a regression would show up as a lower KB/s here).
+    {
+      const secs = otaStartMs ? (Date.now() - otaStartMs) / 1000 : 0;
+      const kbps = secs ? (size / 1024 / secs).toFixed(1) : '?';
+      log(`Transferred ${Math.round(size / 1024)} KB in ${Math.floor(secs / 60)}:${String(Math.floor(secs % 60)).padStart(2, '0')} (${kbps} KB/s).`);
     }
 
     // END — verify (SHA) + switch boot slot; the target reboots remotely. Resend
