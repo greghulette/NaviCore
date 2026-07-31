@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NaviCore — Segment Title Cards</title>
+</head>
+<body>
+
+<style>
+  :root {
+    --ground:     #06080c;
+    --steel-hi:   #f4f7fb;
+    --steel-mid:  #aab3bf;
+    --panel-line: #5d6573;
+    --blue:       #2b86ff;
+    --blue-hot:   #7cc0ff;
+    --blue-soft:  #5cb0ff;
+
+    --display: "Bahnschrift", "DIN Alternate", "DIN Condensed", "Oswald",
+               "Franklin Gothic Medium", system-ui, sans-serif;
+    --mono:    "Cascadia Mono", "Consolas", "SF Mono", ui-monospace, monospace;
+  }
+
+  /* Single committed dark world — these are film frames, not documents. */
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--steel-mid);
+    font-family: var(--mono);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    padding: 22px;
+    box-sizing: border-box;
+  }
+
+  /* ---------------------------------------------------------------- stage */
+
+  .stage {
+    position: relative;
+    width: min(100%, calc((100vh - 230px) * 16 / 9));
+    aspect-ratio: 16 / 9;
+    background:
+      radial-gradient(120% 100% at 22% 42%, #101720 0%, #080b10 55%, #04060a 100%);
+    border: 1px solid #1b222d;
+    border-radius: 3px;
+    overflow: hidden;
+    container-type: size;
+    user-select: none;
+  }
+  .stage:fullscreen {
+    width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    aspect-ratio: auto;
+    border: 0;
+    border-radius: 0;
+  }
+  .stage::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      repeating-linear-gradient(to bottom,
+        rgba(140,170,210,.028) 0 1px, transparent 1px 3px),
+      radial-gradient(130% 100% at 40% 50%, transparent 55%, rgba(0,0,0,.6) 100%);
+  }
+
+  .card {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    padding: 7cqh 7cqw;
+    box-sizing: border-box;
+  }
+
+  /* --------------------------------------------------- viewfinder brackets */
+
+  .brackets { position: absolute; inset: 3.6cqh 2.8cqw; pointer-events: none; opacity: 0; }
+  .brackets span {
+    position: absolute; width: 2.2cqw; height: 2.2cqw;
+    border: 1px solid var(--panel-line); opacity: .45;
+  }
+  .brackets span:nth-child(1) { top: 0; left: 0;  border-right: 0; border-bottom: 0; }
+  .brackets span:nth-child(2) { top: 0; right: 0; border-left: 0;  border-bottom: 0; }
+  .brackets span:nth-child(3) { bottom: 0; left: 0;  border-right: 0; border-top: 0; }
+  .brackets span:nth-child(4) { bottom: 0; right: 0; border-left: 0;  border-top: 0; }
+
+  /* ------------------------------------------------------------- eyebrow */
+
+  .eyebrow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 2cqw;
+  }
+  .part {
+    display: flex;
+    align-items: center;
+    gap: 1.1cqw;
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 600;
+    font-size: 2.5cqh;
+    letter-spacing: 0.34em;
+    text-transform: uppercase;
+    color: var(--blue-soft);
+    opacity: 0;
+    transform: translateX(-1.4cqw);
+  }
+  .part svg { width: 2.9cqh; height: 2.9cqh; flex: none; }
+
+  .runtime {
+    font-family: var(--mono);
+    font-size: 1.7cqh;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #7a8a9e;
+    border: 1px solid #23303f;
+    border-radius: 1px;
+    padding: 0.6cqh 1.1cqw;
+    opacity: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .stage.no-runtime .runtime { display: none; }
+
+  /* --------------------------------------------------------------- title */
+
+  .title-block {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2.4cqh;
+  }
+
+  .title {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 700;
+    font-size: 13cqh;
+    line-height: 0.94;
+    letter-spacing: 0.008em;
+    margin: 0;
+    text-wrap: balance;
+    background: linear-gradient(100deg,
+      var(--steel-hi) 0%, var(--steel-mid) 30%, #8fb6e8 58%, var(--blue-soft) 82%, var(--blue) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    clip-path: inset(0 100% 0 0);
+    transform: translateX(-1.2cqw);
+  }
+
+  .rule {
+    height: 2px;
+    width: 22cqw;
+    background: linear-gradient(90deg, var(--blue) 0%, #2f4257 70%, transparent 100%);
+    transform: scaleX(0);
+    transform-origin: left center;
+  }
+
+  .covers {
+    font-family: var(--mono);
+    font-size: 2cqh;
+    letter-spacing: 0.16em;
+    color: #93a6bd;
+    margin: 0;
+    opacity: 0;
+    transform: translateY(1cqh);
+  }
+
+  /* --------------------------------------------------------------- footer */
+
+  .footer {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 2cqw;
+  }
+
+  .ticks { display: flex; gap: 0.7cqw; align-items: center; opacity: 0; }
+  .ticks i {
+    display: block;
+    width: 2.2cqw;
+    height: 2px;
+    background: #222d3b;
+  }
+  .ticks i.done { background: #3a4a5e; }
+  .ticks i.now  { background: var(--blue-soft); box-shadow: 0 0 1.2cqh rgba(92,176,255,.75); }
+
+  .lockup {
+    display: flex;
+    align-items: center;
+    gap: 0.9cqw;
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 600;
+    font-size: 2.1cqh;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: #7f8fa3;
+    opacity: 0;
+  }
+  .lockup svg { width: 2.8cqh; height: 2.8cqh; flex: none; }
+
+  /* ============================================================== timeline
+     Each card runs 4.00s: 1.6s of build, then a 2.4s hold to trim against. */
+
+  .stage.playing .brackets { animation: fadeIn .5s ease-out       .00s both; }
+  .stage.playing .part     { animation: slideIn .55s cubic-bezier(.2,.8,.3,1) .10s both; }
+  .stage.playing .runtime  { animation: fadeIn .5s ease-out       .35s both; }
+  .stage.playing .title    { animation: wipeIn .75s cubic-bezier(.25,.85,.25,1) .45s both; }
+  .stage.playing .rule     { animation: drawRule .55s cubic-bezier(.3,.8,.3,1)  .95s both; }
+  .stage.playing .covers   { animation: riseIn .6s ease-out      1.15s both; }
+  .stage.playing .ticks    { animation: fadeIn .5s ease-out      1.30s both; }
+  .stage.playing .lockup   { animation: fadeIn .6s ease-out      1.35s both; }
+
+  @keyframes fadeIn   { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes slideIn  { from { opacity: 0; transform: translateX(-1.4cqw); }
+                        to   { opacity: 1; transform: translateX(0); } }
+  @keyframes riseIn   { from { opacity: 0; transform: translateY(1cqh); }
+                        to   { opacity: 1; transform: translateY(0); } }
+  @keyframes drawRule { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes wipeIn   { from { clip-path: inset(0 100% 0 0); transform: translateX(-1.2cqw); }
+                        to   { clip-path: inset(0 0 0 0);    transform: translateX(0); } }
+
+  /* -------------------------------------------------------------- controls */
+
+  .controls, .picker {
+    display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; justify-content: center;
+    font-family: var(--mono); font-size: 12px;
+    letter-spacing: .08em; color: #7c8b9f;
+  }
+  .picker { gap: 6px; max-width: min(100%, 980px); }
+  .stage:fullscreen ~ .controls,
+  .stage:fullscreen ~ .picker,
+  .stage:fullscreen ~ .notes { display: none; }
+
+  .controls button, .picker button {
+    font: inherit; letter-spacing: .12em; text-transform: uppercase;
+    color: #cfe2f8; background: #101720;
+    border: 1px solid #253243; border-radius: 2px;
+    padding: 7px 14px; cursor: pointer;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  .picker button { padding: 6px 10px; letter-spacing: .06em; text-transform: none; }
+  .controls button:hover, .picker button:hover { border-color: var(--blue); background: #16202c; }
+  .controls button:focus-visible, .picker button:focus-visible {
+    outline: 2px solid var(--blue-hot); outline-offset: 2px;
+  }
+  .picker button.active { border-color: var(--blue); color: var(--blue-hot); background: #14202e; }
+  .controls button.armed { border-color: var(--blue); color: var(--blue-hot); }
+  .controls button.off   { color: #64717f; }
+
+  .notes {
+    max-width: 70ch; font-size: 12px; line-height: 1.75;
+    color: #64717f; text-align: center; margin: 0;
+  }
+  .notes b { color: #9fb0c4; font-weight: 400; }
+  .notes kbd {
+    font: inherit; border: 1px solid #2b3849; border-radius: 2px;
+    padding: 1px 5px; color: #8b9bb0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .stage.playing * { animation-duration: 1ms !important; animation-delay: 0ms !important; }
+  }
+</style>
+
+<div class="stage" id="stage">
+  <div class="brackets"><span></span><span></span><span></span><span></span></div>
+  <div class="card" id="card"></div>
+</div>
+
+<div class="controls">
+  <button type="button" id="prev">◀ Prev</button>
+  <button type="button" id="replay">Replay</button>
+  <button type="button" id="next">Next ▶</button>
+  <button type="button" id="full">Record fullscreen</button>
+  <button type="button" id="all">Play all</button>
+  <button type="button" id="sound" class="armed">Sound: on</button>
+  <button type="button" id="rt" class="armed">Runtimes: on</button>
+</div>
+
+<div class="picker" id="picker"></div>
+
+<p class="notes">
+  Each card runs <b>4.0 s</b> — 1.6 s of build, then a 2.4 s hold you can trim against.
+  <b>Record fullscreen</b> replays the current card with no page chrome in shot;
+  <b>Play all</b> runs the set back to back as one take you cut up later.
+  Keys: <kbd>←</kbd> <kbd>→</kbd> switch, <kbd>R</kbd> replay, <kbd>F</kbd> fullscreen, <kbd>S</kbd> sound.
+</p>
+
+<script>
+(() => {
+  /* ------------------------------------------------------------ the cards
+     Ordered by dependency — the order you actually do the work in, which is
+     not the order the config tool's tab strip runs in. */
+  const CARDS = [
+    { n: 0, title: "Before You Start",     covers: "Hardware · Wiring · UART assignments",        rt: "4 min"  },
+    { n: 1, title: "Flash &<br>First Connect", covers: "Browser flashing · Port selection · Factory reset", rt: "5 min" },
+    { n: 2, title: "Transmitter Model",    covers: "Model file · Channel map · X20 options",      rt: "6 min"  },
+    { n: 3, title: "Foundations",          covers: "General · Baud rates · Calibration · Matrix & mode", rt: "9 min" },
+    { n: 4, title: "Naming",               covers: "Logical buttons · Labels that carry through", rt: "3 min"  },
+    { n: 5, title: "Destinations",         covers: "WCB · Maestro · HCR · MP3 · WLED",            rt: "14 min" },
+    { n: 6, title: "Mapping",              covers: "Actions · Switches · Knobs · Multi-tap",      rt: "16 min" },
+    { n: 7, title: "Record &<br>Replay",   covers: "Capture · Clips · Library · Triggers",        rt: "8 min"  },
+    { n: 8, title: "Finishing",            covers: "New-peer · Cheat sheet · QR · Backup",        rt: "5 min"  },
+    { n: 9, title: "Verify &<br>Troubleshoot", covers: "End-to-end check · Failure modes",        rt: "6 min"  },
+  ];
+
+  const CARD_MS = 4000;
+  const GAP_MS  = 400;
+
+  const stage  = document.getElementById("stage");
+  const cardEl = document.getElementById("card");
+  const picker = document.getElementById("picker");
+  const soundBtn = document.getElementById("sound");
+  const rtBtn    = document.getElementById("rt");
+
+  let index = 0;
+  let soundOn = true;
+  let allTimer = null;
+
+  /* Compact NaviCore hex — the full mark has too much detail at this size. */
+  const GLYPH = (accent) => `
+    <svg viewBox="0 0 40 40" aria-hidden="true">
+      <polygon points="20,3 34.7,11.5 34.7,28.5 20,37 5.3,28.5 5.3,11.5"
+               fill="none" stroke="${accent}" stroke-width="2.4" stroke-linejoin="round"/>
+      <circle cx="20" cy="20" r="6.2" fill="none" stroke="${accent}" stroke-width="2"/>
+      <circle cx="20" cy="20" r="2.4" fill="${accent}"/>
+    </svg>`;
+
+  function render(i) {
+    const c = CARDS[i];
+    const ticks = CARDS.map((_, k) =>
+      `<i class="${k < i ? "done" : k === i ? "now" : ""}"></i>`).join("");
+
+    cardEl.innerHTML = `
+      <div class="eyebrow">
+        <div class="part">${GLYPH("#5cb0ff")}<span>Part ${String(c.n).padStart(2, "0")}</span></div>
+        <div class="runtime">${c.rt}</div>
+      </div>
+      <div class="title-block">
+        <h1 class="title">${c.title}</h1>
+        <div class="rule"></div>
+        <p class="covers">${c.covers}</p>
+      </div>
+      <div class="footer">
+        <div class="ticks">${ticks}</div>
+        <div class="lockup">${GLYPH("#7f8fa3")}<span>NaviCore</span></div>
+      </div>`;
+
+    [...picker.children].forEach((b, k) => b.classList.toggle("active", k === i));
+  }
+
+  /* --------------------------------------------------------------- audio
+     A short accent per card, synthesized — same voices as the intro, minus
+     the sustaining layers a 4-second card has no room for. */
+
+  let ctx, master, dryBus, wetBus, noiseBuf, live = [];
+
+  function ensureCtx() {
+    if (ctx) return;
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+    master = ctx.createGain();
+    master.gain.value = 0.9;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.knee.value = 22; comp.ratio.value = 4;
+    comp.attack.value = 0.005;  comp.release.value = 0.18;
+    master.connect(comp); comp.connect(ctx.destination);
+
+    dryBus = ctx.createGain(); dryBus.gain.value = 1; dryBus.connect(master);
+
+    const conv = ctx.createConvolver();
+    const len = Math.floor(ctx.sampleRate * 1.8);
+    const ir = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = ir.getChannelData(c);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.8);
+    }
+    conv.buffer = ir;
+    wetBus = ctx.createGain(); wetBus.gain.value = 0.5;
+    wetBus.connect(conv); conv.connect(master);
+
+    noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const nd = noiseBuf.getChannelData(0);
+    for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  }
+
+  function out(node, send) {
+    node.connect(dryBus);
+    const s = ctx.createGain(); s.gain.value = send;
+    node.connect(s); s.connect(wetBus);
+  }
+
+  function tone(t, { f, f2 = 0, type = "sine", dur = .4, gain = .2, atk = .006, send = .4 }) {
+    const osc = ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f, t);
+    if (f2) osc.frequency.exponentialRampToValueAtTime(Math.max(f2, 8), t + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + atk);
+    g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    osc.connect(g); out(g, send);
+    osc.start(t); osc.stop(t + dur + .05);
+    live.push([osc, g]);
+  }
+
+  function air(t, { dur = .2, gain = .2, f0 = 800, f1 = 0, q = 1, send = .4 }) {
+    const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+    const bp = ctx.createBiquadFilter(); bp.type = "bandpass"; bp.Q.value = q;
+    bp.frequency.setValueAtTime(f0, t);
+    if (f1) bp.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + Math.min(.02, dur * .25));
+    g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    src.connect(bp); bp.connect(g); out(g, send);
+    src.start(t, Math.random()); src.stop(t + dur + .05);
+    live.push([src, g]);
+  }
+
+  // Stepped astromech blip — same engine as the intro, kept to two notes.
+  function r2(t, notes, { gain = .06, send = .5, ring = 46, cutoff = 2000 } = {}) {
+    const osc = ctx.createOscillator(); osc.type = "square";
+    const amp = ctx.createGain(); amp.gain.value = .62;
+    const rm = ctx.createOscillator(); rm.type = "sine"; rm.frequency.value = ring;
+    const rmAmt = ctx.createGain(); rmAmt.gain.value = .38;
+    rm.connect(rmAmt); rmAmt.connect(amp.gain);
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
+    lp.frequency.value = cutoff; lp.Q.value = 1.2;
+    const g = ctx.createGain(); g.gain.setValueAtTime(.0001, t);
+
+    let time = t;
+    notes.forEach(([f, d]) => {
+      osc.frequency.setValueAtTime(f, time);
+      g.gain.setValueAtTime(.0001, time);
+      g.gain.exponentialRampToValueAtTime(gain, time + .007);
+      g.gain.setValueAtTime(gain, time + Math.max(d * .6, .018));
+      g.gain.exponentialRampToValueAtTime(.0001, time + d);
+      time += d;
+    });
+    const total = time - t;
+    osc.connect(amp); amp.connect(lp); lp.connect(g); out(g, send);
+    osc.start(t); osc.stop(t + total + .05);
+    rm.start(t);  rm.stop(t + total + .05);
+    live.push([osc, g], [rm, g]);
+  }
+
+  function stopAudio() {
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    live.forEach(([src, g]) => {
+      try {
+        g.gain.cancelScheduledValues(now);
+        g.gain.setValueAtTime(Math.max(g.gain.value, .0001), now);
+        g.gain.exponentialRampToValueAtTime(.0001, now + .05);
+        src.stop(now + .08);
+      } catch (e) { /* already stopped */ }
+    });
+    live = [];
+  }
+
+  // Accent runs 0–1.4s, under the build. The hold stays silent.
+  function accent(t0, cardIndex) {
+    const T = (s) => t0 + s;
+    // part number lands
+    air(T(0.10), { dur: .09, gain: .085, f0: 1500, q: 5, send: .35 });
+    // title wipe — low swell plus air moving left to right
+    tone(T(0.45), { f: 88, f2: 190, type: "sawtooth", dur: .75, gain: .13, atk: .02, send: .4 });
+    air(T(0.45),  { dur: .70, gain: .075, f0: 380, f1: 2400, q: 2.6, send: .55 });
+    // rule draws
+    air(T(0.95), { dur: .22, gain: .05, f0: 900, f1: 2600, q: 3, send: .45 });
+    // droid acknowledges — pitch tracks the part number so the set ascends
+    r2(T(1.16), [[360 + cardIndex * 22, .06], [540 + cardIndex * 30, .08]], { gain: .055 });
+  }
+
+  /* ----------------------------------------------------------- transport */
+
+  async function play(i = index) {
+    index = (i + CARDS.length) % CARDS.length;
+    stopAudio();
+
+    if (soundOn) {
+      ensureCtx();
+      try { await ctx.resume(); } catch (e) { /* still locked */ }
+    }
+
+    render(index);
+    stage.classList.remove("playing");
+    void stage.offsetWidth;               // force reflow so animations restart
+    stage.classList.add("playing");
+
+    if (soundOn && ctx && ctx.state === "running") accent(ctx.currentTime, index);
+    refreshSoundBtn();
+  }
+
+  function stopAll() {
+    if (allTimer) { clearTimeout(allTimer); allTimer = null; }
+    document.getElementById("all").classList.remove("armed");
+  }
+
+  function playAll(from = 0) {
+    stopAll();
+    document.getElementById("all").classList.add("armed");
+    const step = (i) => {
+      if (i >= CARDS.length) { stopAll(); return; }
+      play(i);
+      allTimer = setTimeout(() => {
+        stage.classList.remove("playing");   // brief black between cards
+        allTimer = setTimeout(() => step(i + 1), GAP_MS);
+      }, CARD_MS);
+    };
+    step(from);
+  }
+
+  function refreshSoundBtn() {
+    const locked = soundOn && (!ctx || ctx.state !== "running");
+    soundBtn.textContent = !soundOn ? "Sound: off" : locked ? "Enable sound" : "Sound: on";
+    soundBtn.classList.toggle("armed", soundOn && !locked);
+    soundBtn.classList.toggle("off", !soundOn);
+  }
+
+  /* -------------------------------------------------------------- wiring */
+
+  CARDS.forEach((c, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = String(i).padStart(2, "0") + " " + c.title.replace(/<br>/g, " ");
+    b.addEventListener("click", () => { stopAll(); play(i); });
+    picker.appendChild(b);
+  });
+
+  document.getElementById("prev").addEventListener("click",   () => { stopAll(); play(index - 1); });
+  document.getElementById("next").addEventListener("click",   () => { stopAll(); play(index + 1); });
+  document.getElementById("replay").addEventListener("click", () => { stopAll(); play(index); });
+  document.getElementById("all").addEventListener("click", () => {
+    if (allTimer) { stopAll(); play(index); } else playAll(0);
+  });
+
+  document.getElementById("full").addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else stage.requestFullscreen().catch(() => play());
+  });
+  document.addEventListener("fullscreenchange", () => {
+    if (document.fullscreenElement === stage) play();
+  });
+
+  soundBtn.addEventListener("click", () => {
+    soundOn = !soundOn;
+    if (!soundOn) stopAudio();
+    stopAll(); play();
+  });
+
+  rtBtn.addEventListener("click", () => {
+    const off = stage.classList.toggle("no-runtime");
+    rtBtn.textContent = off ? "Runtimes: off" : "Runtimes: on";
+    rtBtn.classList.toggle("armed", !off);
+    rtBtn.classList.toggle("off", off);
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target.matches("input, textarea")) return;
+    const k = e.key.toLowerCase();
+    if (k === "arrowleft")  { stopAll(); play(index - 1); }
+    if (k === "arrowright") { stopAll(); play(index + 1); }
+    if (k === "r") { stopAll(); play(index); }
+    if (k === "f") document.getElementById("full").click();
+    if (k === "s") soundBtn.click();
+    if (/^[0-9]$/.test(k)) { stopAll(); play(Number(k)); }
+  });
+
+  play(0);
+})();
+</script>
+</body>
+</html>

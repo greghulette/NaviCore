@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NaviCore Setup Video — Segment Breakout</title>
+</head>
+<body>
+
+<style>
+  :root {
+    --bg:        #fbfcfd;
+    --surface:   #ffffff;
+    --rail:      #eef2f7;
+    --line:      #dde5ee;
+    --ink:       #12181f;
+    --ink-2:     #46545f;
+    --ink-3:     #6b7885;
+    --blue:      #1a6fd4;
+    --blue-soft: #e8f1fd;
+    --amber:     #8a5a00;
+    --amber-bg:  #fdf5e3;
+    --amber-line:#e8d4a0;
+
+    --display: "Bahnschrift", "DIN Alternate", "Oswald", system-ui, sans-serif;
+    --body: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #0a0e13;
+      --surface:   #111820;
+      --rail:      #0e141b;
+      --line:      #202b36;
+      --ink:       #e6edf5;
+      --ink-2:     #a9b8c6;
+      --ink-3:     #78899a;
+      --blue:      #5cb0ff;
+      --blue-soft: #10233a;
+      --amber:     #e8b862;
+      --amber-bg:  #211a0d;
+      --amber-line:#4a3a1a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0a0e13;
+    --surface:   #111820;
+    --rail:      #0e141b;
+    --line:      #202b36;
+    --ink:       #e6edf5;
+    --ink-2:     #a9b8c6;
+    --ink-3:     #78899a;
+    --blue:      #5cb0ff;
+    --blue-soft: #10233a;
+    --amber:     #e8b862;
+    --amber-bg:  #211a0d;
+    --amber-line:#4a3a1a;
+  }
+  :root[data-theme="light"] {
+    --bg:        #fbfcfd;
+    --surface:   #ffffff;
+    --rail:      #eef2f7;
+    --line:      #dde5ee;
+    --ink:       #12181f;
+    --ink-2:     #46545f;
+    --ink-3:     #6b7885;
+    --blue:      #1a6fd4;
+    --blue-soft: #e8f1fd;
+    --amber:     #8a5a00;
+    --amber-bg:  #fdf5e3;
+    --amber-line:#e8d4a0;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 40px;
+  }
+
+  /* ------------------------------------------------------------- masthead */
+
+  .masthead { display: flex; flex-direction: column; gap: 14px; }
+  .kicker {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-size: 13px;
+    letter-spacing: .28em;
+    text-transform: uppercase;
+    color: var(--blue);
+    margin: 0;
+  }
+  h1 {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 700;
+    font-size: clamp(34px, 6vw, 52px);
+    line-height: 1.04;
+    letter-spacing: .005em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 17px;
+    color: var(--ink-2);
+    margin: 0;
+    max-width: 64ch;
+  }
+  .totals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    padding: 16px 0 0;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .totals b { color: var(--ink); font-weight: 600; }
+
+  /* --------------------------------------------------------------- callout */
+
+  .lede {
+    background: var(--blue-soft);
+    border-left: 3px solid var(--blue);
+    padding: 18px 22px;
+    border-radius: 0 3px 3px 0;
+  }
+  .lede p { margin: 0; color: var(--ink-2); }
+  .lede p + p { margin-top: 10px; }
+  .lede strong { color: var(--ink); }
+
+  /* ----------------------------------------------------------- part blocks */
+
+  .part {
+    display: grid;
+    grid-template-columns: 62px 1fr;
+    gap: 0 22px;
+    border-top: 1px solid var(--line);
+    padding-top: 26px;
+  }
+  @media (max-width: 620px) {
+    .part { grid-template-columns: 1fr; gap: 12px; }
+  }
+
+  .num {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 700;
+    font-size: 40px;
+    line-height: 1;
+    color: var(--blue);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -.01em;
+  }
+
+  .part-body { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+  .part-head { display: flex; flex-direction: column; gap: 6px; }
+  .part h2 {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 700;
+    font-size: 27px;
+    line-height: 1.12;
+    margin: 0;
+    letter-spacing: .004em;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+    letter-spacing: .04em;
+  }
+  .pill {
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    padding: 2px 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .pill.tab { color: var(--blue); border-color: var(--blue); }
+
+  .why {
+    font-size: 14.5px;
+    color: var(--ink-3);
+    font-style: italic;
+    margin: 0;
+    padding-left: 12px;
+    border-left: 2px solid var(--line);
+  }
+
+  .part-body ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 9px; }
+  .part-body li { color: var(--ink-2); }
+  .part-body li strong { color: var(--ink); font-weight: 600; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .87em;
+    background: var(--rail);
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    padding: 1px 5px;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+
+  .fail {
+    background: var(--amber-bg);
+    border: 1px solid var(--amber-line);
+    border-radius: 3px;
+    padding: 14px 18px;
+  }
+  .fail h3 {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-size: 12px;
+    letter-spacing: .2em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 8px;
+  }
+  .fail ul { padding-left: 18px; gap: 6px; }
+  .fail li { font-size: 14.5px; }
+
+  /* ---------------------------------------------------------------- close */
+
+  .close { border-top: 1px solid var(--line); padding-top: 26px; }
+  .close h2 {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-size: 24px;
+    margin: 0 0 12px;
+  }
+  .close p { color: var(--ink-2); margin: 0 0 12px; max-width: 64ch; }
+  .close ul { color: var(--ink-2); padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+  .close strong { color: var(--ink); }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="kicker">NaviCore · Production Reference</p>
+    <h1>Setup &amp; Configuration Walkthrough</h1>
+    <p class="standfirst">
+      Ten parts, filmed in dependency order — the order the work actually happens in, which is
+      not the order the config tool's tab strip runs in.
+    </p>
+    <div class="totals">
+      <span><b>10</b> parts</span>
+      <span><b>~81</b> minutes total</span>
+      <span><b>Part 6</b> is the longest</span>
+      <span><b>Part 5</b> is modular</span>
+    </div>
+  </header>
+
+  <div class="lede">
+    <p>
+      <strong>Why this order.</strong> The tab strip reads General → Channels → Logical → Transmitter →
+      WCB → HCR → MP3 → Maestro → WLED → Smoothing → Baud → Firmware. Filming it that way breaks
+      three times: Firmware is last in the UI but first in reality, destinations must exist before
+      anything can be mapped to them, and calibration is meaningless until the transmitter model is loaded.
+    </p>
+    <p>
+      <strong>The through-line.</strong> Parts 3–4 establish what controls exist. Part 5 establishes where
+      commands can go. Part 6 connects the two. Everything before is prerequisite, everything after is payoff.
+    </p>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 00 -->
+  <section class="part">
+    <div class="num">00</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Before You Start</h2>
+        <div class="meta"><span class="pill">4 min</span><span>No software yet — bench and wiring only</span></div>
+      </div>
+      <p class="why">Sets expectations and prevents the two wiring mistakes that make everything downstream mysterious.</p>
+      <ul>
+        <li><strong>Which board you have.</strong> NaviCore v2 PCB or WCB HW 3.2. This choice changes the GPIO pin map and it is the first thing you'll set in software.</li>
+        <li><strong>The UART map.</strong> SBUS in on Serial1, local Maestro on S2, aux devices on S3/S4/S5, SBUS passthrough out on GPIO9.</li>
+        <li><strong>The port-numbering trap.</strong> The same three aux ports are silkscreened <code>Serial 1/2/3</code> on NaviCore v2 and <code>Serial 3/4/5</code> on WCB 3.2. Say this out loud with both boards on camera.</li>
+        <li><strong>Port capability differs.</strong> S3 is the hardware UART and goes to 115200. S4/S5 are bit-banged SoftwareSerial and cap at 57600. This decides where WLED can live.</li>
+        <li><strong>What you need on the bench:</strong> transmitter, receiver, at least one Maestro, and a Chromium browser. Everything else — WCB boards, HCR, MP3 trigger, WLED — is optional and covered modularly in Part 5.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>Show a device on S4 at 115200 not working, then the same device on S3 working.</li>
+          <li>Show what "no SBUS" looks like in the monitor, so viewers can recognize a dead receiver link later.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 01 -->
+  <section class="part">
+    <div class="num">01</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Flash &amp; First Connect</h2>
+        <div class="meta"><span class="pill">5 min</span><span class="pill tab">Firmware tab</span></div>
+      </div>
+      <p class="why">First in reality, last in the tab strip. Nothing else can be demonstrated until the board answers.</p>
+      <ul>
+        <li><strong>Flash from the browser.</strong> The Firmware tab pulls the binary straight from <code>github.com/greghulette/NaviCore/firmware</code>. No Arduino IDE, no toolchain.</li>
+        <li><strong>Version awareness.</strong> "Currently on board" populates from the board's PING reply; "Latest on GitHub" from the repo. Show the ↻ re-check.</li>
+        <li><strong>Reassure about config loss.</strong> NVS is preserved on a normal update — only blank or partition-mismatched boards get a full flash. People will assume flashing wipes their work.</li>
+        <li><strong>Connect over Web Serial.</strong> Port picker, what the right port looks like, what a successful connect looks like.</li>
+        <li><strong>Reset to factory defaults on camera</strong> so every viewer is starting from the same state you are.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>The port not appearing in the picker — and the driver fix.</li>
+          <li>Trying to connect in a non-Chromium browser and getting nothing.</li>
+          <li>A board that's connected but not answering PING, and how you tell the difference.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 02 -->
+  <section class="part">
+    <div class="num">02</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Transmitter Model</h2>
+        <div class="meta"><span class="pill">6 min</span><span class="pill tab">Transmitter tab</span></div>
+      </div>
+      <p class="why">Channel numbers mean nothing until the model exists. Calibration in Part 3 depends entirely on this.</p>
+      <ul>
+        <li><strong>Pick your model:</strong> FrSky Tandem X18, FrSky Twin X-Lite, or FrSky Twin X20.</li>
+        <li><strong>Explain what the model actually drives:</strong> which transmitter graphic is shown, which controls appear during calibration, and the default channel assignment for each control.</li>
+        <li><strong>Load the bundled model file</strong> onto the transmitter's SD card and select it, so the channel map matches what NaviCore expects.</li>
+        <li><strong>X20 owners:</strong> the 3-axis gimbal option adds J5/J6 twist axes plus the two stick-click momentary buttons at matrix slots 19/20. Leave it off on a standard 2-axis X20.</li>
+        <li><strong>Custom mixers still work.</strong> Calibration overrides per-control channels individually — the model only supplies starting points. Worth saying explicitly; it unblocks anyone with an existing setup.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>Wrong model selected — the graphic doesn't match the transmitter in your hand, and channels land on the wrong controls.</li>
+          <li>3-axis enabled on a 2-axis X20: phantom axes in the table that never move.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 03 -->
+  <section class="part">
+    <div class="num">03</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Foundations</h2>
+        <div class="meta"><span class="pill">10 min</span><span class="pill tab">General</span><span class="pill tab">Baud Rates</span><span class="pill tab">Channels</span></div>
+      </div>
+      <p class="why">The densest part of the video. Everything here is a global that silently breaks later work if it's wrong.</p>
+      <ul>
+        <li><strong>Board / PCB.</strong> Set it, save, <em>then reboot</em> — pins are assigned at boot, so a save alone does nothing.</li>
+        <li><strong>Tap window.</strong> 100–2000 ms, default 500. This is the multi-tap detection window and it directly shapes how Part 6 feels to use.</li>
+        <li><strong>Telemetry rate.</strong> 1–20 Hz for the live channel monitor. Higher is smoother; lower frees mesh airtime.</li>
+        <li><strong>SBUS output.</strong> Off by default. Only enable if you daisy-chain a downstream SBUS device — leaving it off saves the per-frame CPU of re-transmitting.</li>
+        <li><strong>Baud rates.</strong> S2 for the local Maestro bus, then S3/S4/S5. One port = one device = one baud. Must match what the device is set to.</li>
+        <li><strong>Matrix &amp; mode.</strong> Which SBUS channel carries the multiplexed buttons (7 by default), and which switch — SA through SH — drives Mode 1/2/3. Show what "disabled" means: always Mode 1.</li>
+        <li><strong>Debounce.</strong> 1 frame is right for a digital SBUS source and resolves taps roughly twice as fast. Raise to 2–4 only when driving from a physical resistor-ladder matrix. Applies on save, no reboot.</li>
+        <li><strong>Calibrate against the live monitor.</strong> Per-button trigger values and labels, switch channel and 2/3-position type, then the analog axes — sliders LS/RS, pots S1/S2, sticks J1–J4 — including the reverse checkbox.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>Change the board type, save, <em>don't</em> reboot — show nothing happening. Then reboot and show it work.</li>
+          <li>A baud mismatch on the Maestro bus: commands go out, servos don't move.</li>
+          <li>Two buttons with overlapping trigger values, and how the monitor reveals it.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 04 -->
+  <section class="part">
+    <div class="num">04</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Logical Buttons</h2>
+        <div class="meta"><span class="pill">5 min</span><span class="pill tab">Logical Buttons tab</span></div>
+      </div>
+      <p class="why">How you get more buttons than your transmitter physically has. Half of this happens on the transmitter, which is why people get stuck.</p>
+      <ul>
+        <li><strong>What they are:</strong> 15 extra buttons riding the matrix channel that don't appear anywhere on the transmitter graphic.</li>
+        <li><strong>How they fire:</strong> mix a transmitter logical switch — or any spare source — onto the matrix channel, then set the value it outputs. When the matrix channel reaches that value within ±10, the logical button fires.</li>
+        <li><strong>They are first-class.</strong> Same per-mode behaviour, same multi-tap, same action editor as a physical button. Nothing is second-tier about them.</li>
+        <li><strong>Film the transmitter side.</strong> Build the mix on the transmitter on camera. This is the half that isn't in the config tool and it's where every stuck viewer will be.</li>
+        <li><strong>Leave a trigger blank to disable that slot.</strong></li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>A logical button value that collides with a physical button's value — both fire, and it looks like a ghost press.</li>
+          <li>A value set correctly in the tool but never actually output by the transmitter mix — dead button, nothing in the monitor.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 05 -->
+  <section class="part">
+    <div class="num">05</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Destinations</h2>
+        <div class="meta"><span class="pill">14 min</span><span class="pill">modular</span><span class="pill tab">WCB</span><span class="pill tab">Maestro</span><span class="pill tab">HCR</span><span class="pill tab">MP3</span><span class="pill tab">WLED</span></div>
+      </div>
+      <p class="why">Nothing can be mapped to a destination that doesn't exist yet. Break these into five clips — most viewers don't own all five.</p>
+      <ul>
+        <li><strong>WCB Network — 5 min.</strong> MAC octets 2 and 3, password, quantity, device ID, and the WiFi channel that must match every board. Query an existing board with <code>?WCBM</code> / <code>?WCBP</code> / <code>?WCBQ</code> / <code>?WCBCH</code>. Explain that quantity is a pre-registered floor, not a limit — extra boards auto-join. Remote WCBs need firmware 6.2.0 or newer; check with <code>?version</code>. Show the <b>REBOOT PENDING</b> badge and honour it: credentials are only read at boot. Close with the WCB Send test — unicast 1–20, or 0 to broadcast.</li>
+        <li><strong>Maestro Locations — 4 min.</strong> Eight logical Maestros; buttons and knobs address "Maestro 1–8" and never care about the wiring. Every physical Maestro needs a unique Pololu device number (0–127) set in Maestro Control Center, matching the value here. Demonstrate importing a Maestro settings file — or dragging it onto a row — to pull in real per-channel endpoints and names, which then drive passthrough ranges and the timeline editor.</li>
+        <li><strong>HCR — 2 min.</strong> One global destination, via Serial or via WCB. Every HCR action routes through it. Set once, save.</li>
+        <li><strong>MP3 Trigger — 1.5 min.</strong> Serial means wired to this controller's aux ports; WCB means wired to another board and configured there with <code>?MP3,S&lt;port&gt;</code>.</li>
+        <li><strong>WLED — 2 min.</strong> One row per WLED with an ID from 1–9, addressed by actions as <code>;L&lt;id&gt;,VERB</code>. Route to a local aux port or a remote WCB. WLED wants 115200, so realistically only S3 — tie this straight back to the port-capability point from Part 0. A bare <code>;L,VERB</code> drives the lowest-id local WLED.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>Save WCB credentials, skip the reboot, watch nothing join. Then reboot.</li>
+          <li>A WiFi channel mismatch between boards — everything looks configured, no peer ever appears.</li>
+          <li>Two Maestros sharing a device number: both respond to one command.</li>
+          <li>WLED on S4 at 115200 — garbage or silence. Move it to S3.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 06 -->
+  <section class="part">
+    <div class="num">06</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Mapping</h2>
+        <div class="meta"><span class="pill">18 min</span><span class="pill">longest part</span><span class="pill tab">action editor</span><span class="pill tab">Smoothing</span></div>
+      </div>
+      <p class="why">The reason anyone is watching. Everything before this was setup; this is where the droid starts doing things.</p>
+      <ul>
+        <li><strong>Open the action editor</strong> from a button and walk its structure before assigning anything.</li>
+        <li><strong>Maestro actions in full:</strong> set servo position, send all servos home, run a script by subroutine, stop the script, and the speed and acceleration limits. Speed is 0–16383 and acceleration 0–255, with <b>0 meaning unlimited</b> in both cases — the value everyone gets backwards. Positions are entered in µs.</li>
+        <li><strong>The other action families:</strong> WCB commands (unicast and broadcast), HCR, MP3 trigger, WLED lighting, and raw serial. One real on-droid result for each.</li>
+        <li><strong>Modes.</strong> Switch the mode tabs and map the same button differently per position. This is where the combinatorics become concrete.</li>
+        <li><strong>Multi-tap.</strong> Single, double, triple — and the exclusive versus cumulative distinction, which needs a slow, deliberate demonstration. Tie it back to the tap window set in Part 3.</li>
+        <li><strong>Switches</strong> get an action per position rather than per tap.</li>
+        <li><strong>Knobs, sliders and joysticks</strong> drive continuous output, and each picks a smoothing profile in its editor.</li>
+        <li><strong>Smoothing profiles.</strong> Per-Maestro, per-channel easing — really the Maestro's speed and acceleration limits behind a friendlier control. Slide right for more easing, far left for snappy. A Maestro <em>"set active easing"</em> switch action can swap profiles live, so the same servos glide or snap on demand. Enable the Maestro in the Maestro tab before its channels appear here.</li>
+        <li><strong>Test without saving:</strong> Shift+Click a configured button to fire it.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>Speed set to 0 expecting "stopped", getting full speed instead.</li>
+          <li>A double-tap that keeps registering as two singles because the tap window is too short.</li>
+          <li>Mapping to a Maestro that was never enabled in the Maestro tab.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 07 -->
+  <section class="part">
+    <div class="num">07</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Record &amp; Replay</h2>
+        <div class="meta"><span class="pill">8 min</span><span class="pill tab">Record</span><span class="pill tab">Library</span></div>
+      </div>
+      <p class="why">The headline feature, and it only makes sense once viewers have controls mapped. Don't move it earlier.</p>
+      <ul>
+        <li><strong>What gets captured:</strong> everything the droid does over a bounded window — Maestro moves, HCR, WCB commands, MP3, aux serial — saved as a named clip.</li>
+        <li><strong>Perform, then save.</strong> Record a real sequence live on the transmitter rather than clicking it together. That's the whole appeal.</li>
+        <li><strong>Anti-snap.</strong> Servo positions are snapshotted at clip start and eased into on replay, so a clip never slams servos from wherever they happened to be.</li>
+        <li><strong>The library.</strong> Name clips, rename them, build a set. Clips live on their own flash partition, so they don't compete with your config or OTA space.</li>
+        <li><strong>Trigger a clip from a button</strong>, which closes the loop back to Part 6. Toggle works on any button; level and hold need a switch.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>Replaying a clip that starts from a very different servo position, so viewers see the ease-in doing its job.</li>
+          <li>Trying to use a hold trigger on a momentary button.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 08 -->
+  <section class="part">
+    <div class="num">08</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Finishing</h2>
+        <div class="meta"><span class="pill">5 min</span><span class="pill tab">WCB</span><span class="pill tab">cheat sheet</span></div>
+      </div>
+      <p class="why">The quality-of-life layer. Short, high-delight, and a good place to breathe after Part 7.</p>
+      <ul>
+        <li><strong>New-peer event.</strong> The passive alert is a cyan LED pulse plus a terminal line; you can also run actions when a board joins. Fires once per board after an 8-second boot grace, so your existing fleet doesn't set it off at power-on.</li>
+        <li><strong>The cheat sheet.</strong> Generate it and walk what it contains — buttons by mode, switches, knobs, recorded sequences, and the interactive transmitter graphic you can tap for assignments.</li>
+        <li><strong>Send it to your phone</strong> with the QR button, then show it working at the droid where you'd actually want it.</li>
+        <li><strong>Back up.</strong> Export the config and say plainly why: it's the only copy that survives a board swap.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>Nothing to break here — use the time for the phone demo instead.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ PART 09 -->
+  <section class="part">
+    <div class="num">09</div>
+    <div class="part-body">
+      <div class="part-head">
+        <h2>Verify &amp; Troubleshoot</h2>
+        <div class="meta"><span class="pill">6 min</span><span class="pill tab">terminal</span></div>
+      </div>
+      <p class="why">The most re-watched part of any setup video, because it's where people land when their build doesn't work.</p>
+      <ul>
+        <li><strong>Walk the whole chain once</strong> — transmitter, monitor, action, droid — naming each hop so viewers know where to look when a hop is dead.</li>
+        <li><strong>Use the terminal as a diagnostic.</strong> Show what a healthy exchange looks like so an unhealthy one is recognizable.</li>
+        <li><strong>Then the greatest hits,</strong> each reproduced live: REBOOT PENDING ignored, WiFi channel mismatch, duplicate Maestro device numbers, baud mismatch on an aux port, WLED on a bit-banged port, and a remote WCB running older than 6.2.0.</li>
+        <li><strong>Close on the recovery path:</strong> reset to defaults, re-import your backup, and you're back where you started.</li>
+      </ul>
+      <div class="fail">
+        <h3>Film the failure</h3>
+        <ul>
+          <li>This entire part is the failure reel — budget time to stage each one properly rather than describing it.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════════════════════════════ CLOSING -->
+  <section class="close">
+    <h2>Notes for the shoot</h2>
+    <ul>
+      <li><strong>Film each part as its own session.</strong> A fluffed take then costs one part, not the whole run.</li>
+      <li><strong>Publish twice from one shoot.</strong> A playlist of ten videos, plus the full concatenation as a single chaptered upload. Most viewers arrive at Part 6 from a search and never see the rest.</li>
+      <li><strong>Show the failure states.</strong> Most setup tutorials only film the happy path and become useless the moment a viewer deviates. The amber boxes above are the highest-value footage in the whole project.</li>
+      <li><strong>Screen-first, droid-second</strong> — the inverse of an overview video. Zoom the browser to about 150%; half your audience is watching on a phone at the bench.</li>
+      <li><strong>Say every value out loud and put it on screen,</strong> so people can pause on it.</li>
+      <li><strong>Don't silently cut the waiting.</strong> If discovery takes 30 seconds, say so — people panic when their run is slower than the video.</li>
+    </ul>
+  </section>
+
+</div>
+</body>
+</html>

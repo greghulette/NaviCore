@@ -1,0 +1,1019 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NaviCore — 10s Intro</title>
+</head>
+<body>
+
+<style>
+  :root {
+    --ground:      #06080c;
+    --steel-hi:    #f4f7fb;
+    --steel-mid:   #aab3bf;
+    --steel-lo:    #646d79;
+    --panel-line:  #5d6573;
+    --blue:        #2b86ff;
+    --blue-hot:    #7cc0ff;
+    --blue-soft:   #5cb0ff;
+
+    --display: "Bahnschrift", "DIN Alternate", "DIN Condensed", "Oswald",
+               "Franklin Gothic Medium", system-ui, sans-serif;
+    --mono:    "Cascadia Mono", "Consolas", "SF Mono", ui-monospace, monospace;
+  }
+
+  /* Committed single visual world: this is a film frame, it stays dark in
+     every viewer theme. */
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--steel-mid);
+    font-family: var(--mono);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+
+  /* ---------------------------------------------------------------- stage */
+
+  .stage {
+    position: relative;
+    width: min(100%, calc((100vh - 210px) * 16 / 9));
+    aspect-ratio: 16 / 9;
+    background:
+      radial-gradient(120% 90% at 50% 46%, #10161f 0%, #070a0e 58%, #04060a 100%);
+    border: 1px solid #1b222d;
+    border-radius: 3px;
+    overflow: hidden;
+    container-type: size;
+    container-name: frame;
+    user-select: none;
+  }
+
+  .stage:fullscreen {
+    width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    aspect-ratio: auto;
+    border: 0;
+    border-radius: 0;
+  }
+
+  /* Everything inside sizes off the frame, so it composes identically at
+     any capture resolution. */
+  .frame-inner {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-rows: 1fr auto;
+    align-items: center;
+    padding: 5cqh 6cqw;
+    box-sizing: border-box;
+  }
+
+  /* faint instrument scanlines + vignette */
+  .stage::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      repeating-linear-gradient(
+        to bottom,
+        rgba(140, 170, 210, 0.030) 0 1px,
+        transparent 1px 3px
+      ),
+      radial-gradient(130% 100% at 50% 50%, transparent 52%, rgba(0, 0, 0, 0.62) 100%);
+  }
+
+  /* ------------------------------------------------------ viewfinder marks */
+
+  .brackets {
+    position: absolute;
+    inset: 3.4cqh 2.6cqw;
+    pointer-events: none;
+    opacity: 0;
+  }
+  .brackets span {
+    position: absolute;
+    width: 2.4cqw;
+    height: 2.4cqw;
+    border: 1px solid var(--panel-line);
+    opacity: 0.5;
+  }
+  .brackets span:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; }
+  .brackets span:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; }
+  .brackets span:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; }
+  .brackets span:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; }
+
+  /* ------------------------------------------------------------- the mark */
+
+  .mark-row {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2.2cqh;
+    justify-self: center;
+  }
+
+  .mark {
+    width: 29cqh;
+    height: 29cqh;
+    overflow: visible;
+    transform: scale(1.045);
+    opacity: 0;
+  }
+
+  .mark .draw { stroke-dasharray: 100; stroke-dashoffset: 100; }
+  .mark .fade { opacity: 0; }
+  .mark .eye  { opacity: 0; transform-origin: 100px 100px; transform: scale(0.72); }
+  .mark .bloom { opacity: 0; transform-origin: 100px 100px; transform: scale(0.4); }
+  .mark .idle-glow { opacity: 0; transform-origin: 100px 100px; }
+
+  /* ---------------------------------------------------------- the wordmark */
+
+  .wordmark {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 700;
+    font-size: 11cqh;
+    line-height: 0.92;
+    letter-spacing: 0.012em;
+    margin: 0;
+    background: linear-gradient(
+      100deg,
+      var(--steel-hi) 0%,
+      var(--steel-mid) 26%,
+      #8fb6e8 52%,
+      var(--blue-soft) 74%,
+      var(--blue) 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    display: flex;
+    white-space: pre;
+  }
+  .wordmark i {
+    font-style: normal;
+    display: inline-block;
+    opacity: 0;
+    transform: translateY(0.34em);
+  }
+
+  .tagline {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 400;
+    font-size: 2.5cqh;
+    letter-spacing: 0.42em;
+    text-transform: uppercase;
+    color: #93a3b8;
+    margin: 0;
+    padding-left: 0.42em;
+    opacity: 0;
+  }
+
+  /* ------------------------------------------------------------ lower band */
+
+  .band {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2.2cqh;
+    padding-bottom: 0.6cqh;
+  }
+
+  .chips {
+    display: flex;
+    gap: 1.5cqw;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .chip {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 600;
+    font-size: 2.1cqh;
+    letter-spacing: 0.19em;
+    text-transform: uppercase;
+    color: #c3d2e4;
+    padding: 0.72cqh 1.5cqw;
+    border: 1px solid #263243;
+    border-radius: 1px;
+    background: linear-gradient(180deg, rgba(43, 134, 255, 0.075), rgba(43, 134, 255, 0));
+    display: flex;
+    align-items: center;
+    gap: 0.7cqw;
+    opacity: 0;
+    transform: translateY(0.9cqh);
+  }
+  .chip::before {
+    content: "";
+    width: 0.45cqh;
+    height: 0.45cqh;
+    border-radius: 50%;
+    background: var(--blue-soft);
+    box-shadow: 0 0 0.9cqh rgba(92, 176, 255, 0.9);
+    flex: none;
+  }
+
+  .spec {
+    font-family: var(--mono);
+    font-size: 1.8cqh;
+    letter-spacing: 0.17em;
+    color: #93a6bd;
+    margin: 0;
+    text-align: center;
+    opacity: 0;
+  }
+
+  .byline {
+    font-family: var(--display);
+    font-stretch: 87.5%;
+    font-weight: 600;
+    font-size: 2.2cqh;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: #dbe7f5;
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 0.9cqw;
+    opacity: 0;
+  }
+  .byline span {
+    font-weight: 400;
+    font-size: 1.6cqh;
+    letter-spacing: 0.34em;
+    color: #63748a;
+  }
+
+  .url {
+    font-family: var(--mono);
+    font-size: 1.95cqh;
+    letter-spacing: 0.13em;
+    color: #cfe2f8;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 1cqw;
+    opacity: 0;
+  }
+  .url::before,
+  .url::after {
+    content: "";
+    width: 5cqw;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #2f4257, transparent);
+  }
+
+  /* ============================================================= timeline
+     Total runtime: 10.00s. Delays below are the storyboard beats, and are
+     mirrored by the Web Audio score in the script. */
+
+  .stage.playing .brackets      { animation: fadeIn .55s ease-out    .05s both; }
+
+  .stage.playing .mark          { animation: markIn 1.1s cubic-bezier(.2,.7,.3,1) .30s both,
+                                             markSettle .5s cubic-bezier(.3,.8,.3,1) 4.20s both; }
+  .stage.playing .hex-chassis   { animation: drawLine 1.30s cubic-bezier(.35,.6,.25,1) .40s both; }
+  .stage.playing .hex-detail    { animation: fadeIn .70s ease-out   1.50s both; }
+  .stage.playing .rails         { animation: fadeIn .70s ease-out   1.70s both; }
+  .stage.playing .plates        { animation: fadeIn .60s ease-out   1.85s both; }
+  .stage.playing .axis          { animation: fadeIn .60s ease-out   2.00s both; }
+
+  .stage.playing .wave-in       { animation: drawLine .90s cubic-bezier(.4,.1,.2,1) 2.00s both; }
+  .stage.playing .eye           { animation: eyeIn .70s cubic-bezier(.2,1.1,.4,1) 2.80s both; }
+  .stage.playing .bloom         { animation: bloom .85s cubic-bezier(.2,.7,.3,1) 3.00s both; }
+  .stage.playing .idle-glow     { animation: idlePulse 2.6s ease-in-out 3.60s infinite both; }
+  .stage.playing .wave-out      { animation: drawLine .90s cubic-bezier(.4,.1,.2,1) 3.40s both; }
+
+  .stage.playing .wordmark i    { animation: letterIn .62s cubic-bezier(.2,.85,.3,1) both; }
+  .stage.playing .tagline       { animation: riseIn .70s ease-out    5.30s both; }
+
+  .stage.playing .chip          { animation: riseIn .60s cubic-bezier(.2,.85,.3,1) both; }
+  .stage.playing .chip:nth-child(1) { animation-delay: 5.90s; }
+  .stage.playing .chip:nth-child(2) { animation-delay: 6.12s; }
+  .stage.playing .chip:nth-child(3) { animation-delay: 6.34s; }
+
+  .stage.playing .spec          { animation: fadeIn .80s ease-out    7.10s both; }
+  .stage.playing .byline        { animation: riseIn .70s ease-out    8.10s both; }
+  .stage.playing .url           { animation: riseIn .75s ease-out    8.65s both; }
+
+  @keyframes fadeIn   { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes riseIn   { from { opacity: 0; transform: translateY(0.9cqh); }
+                        to   { opacity: 1; transform: translateY(0); } }
+  @keyframes drawLine { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+  @keyframes markIn   { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes markSettle { from { transform: scale(1.045); } to { transform: scale(1); } }
+  @keyframes eyeIn    { from { opacity: 0; transform: scale(0.72); }
+                        to   { opacity: 1; transform: scale(1); } }
+  @keyframes bloom {
+    0%   { opacity: 0;   transform: scale(0.4); }
+    28%  { opacity: 0.95; }
+    100% { opacity: 0;   transform: scale(3.1); }
+  }
+  @keyframes idlePulse {
+    0%, 100% { opacity: 0.42; transform: scale(1); }
+    50%      { opacity: 0.9;  transform: scale(1.09); }
+  }
+  @keyframes letterIn { from { opacity: 0; transform: translateY(0.34em); }
+                        to   { opacity: 1; transform: translateY(0); } }
+
+  /* -------------------------------------------------------------- controls */
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    color: #7c8b9f;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .stage:fullscreen ~ .controls { display: none; }
+
+  .controls button {
+    font: inherit;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: #cfe2f8;
+    background: #101720;
+    border: 1px solid #253243;
+    border-radius: 2px;
+    padding: 8px 16px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  .controls button:hover { border-color: var(--blue); background: #16202c; }
+  .controls button:focus-visible { outline: 2px solid var(--blue-hot); outline-offset: 2px; }
+  .controls button.armed { border-color: var(--blue); color: var(--blue-hot); }
+  .controls button.off   { color: #64717f; }
+
+  .tc {
+    font-variant-numeric: tabular-nums;
+    color: var(--blue-soft);
+    min-width: 9ch;
+  }
+  .hint { color: #4f5c6e; }
+  .hint kbd {
+    font: inherit;
+    border: 1px solid #2b3849;
+    border-radius: 2px;
+    padding: 1px 5px;
+    color: #8b9bb0;
+  }
+
+  .notes {
+    max-width: 66ch;
+    font-size: 12px;
+    line-height: 1.75;
+    color: #64717f;
+    text-align: center;
+    margin: 0;
+  }
+  .notes b { color: #9fb0c4; font-weight: 400; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .stage.playing * { animation-duration: 1ms !important; animation-delay: 0ms !important; }
+    .stage.playing .idle-glow { animation: none !important; opacity: 0.6; }
+  }
+</style>
+
+<div class="stage" id="stage">
+  <div class="brackets"><span></span><span></span><span></span><span></span></div>
+
+  <div class="frame-inner">
+    <div class="mark-row">
+      <!-- NaviCore mark — geometry from assets-navicore/navicore-icon.svg -->
+      <svg class="mark" viewBox="0 0 200 200" role="img" aria-label="NaviCore">
+        <defs>
+          <linearGradient id="nc-steel" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#f4f7fb"/><stop offset=".5" stop-color="#aab3bf"/><stop offset="1" stop-color="#646d79"/>
+          </linearGradient>
+          <linearGradient id="nc-steel-h" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#cad2dd"/><stop offset=".5" stop-color="#8b94a1"/><stop offset="1" stop-color="#cad2dd"/>
+          </linearGradient>
+          <radialGradient id="nc-glow" cx="50%" cy="50%" r="50%">
+            <stop offset="0" stop-color="#eaf6ff"/><stop offset=".28" stop-color="#4f9dff"/><stop offset="1" stop-color="#2b86ff" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="nc-lens" cx="42%" cy="38%" r="65%">
+            <stop offset="0" stop-color="#dcefff"/><stop offset=".4" stop-color="#2b86ff"/><stop offset="1" stop-color="#0e2147"/>
+          </radialGradient>
+          <radialGradient id="nc-bloom" cx="50%" cy="50%" r="50%">
+            <stop offset="0" stop-color="#ffffff"/><stop offset=".35" stop-color="#8ec6ff" stop-opacity=".55"/><stop offset="1" stop-color="#2b86ff" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+
+        <!-- connector rails -->
+        <g class="rails fade">
+          <g fill="none" stroke="url(#nc-steel)" stroke-width="2.2" stroke-linecap="round">
+            <path d="M22 100 H6"/><path d="M22 86 H12 V79"/><path d="M22 114 H12 V121"/>
+            <path d="M178 100 H194"/><path d="M178 86 H188 V79"/><path d="M178 114 H188 V121"/>
+          </g>
+          <g fill="#0d1117" stroke="url(#nc-steel)" stroke-width="2">
+            <circle cx="4" cy="100" r="3"/><circle cx="12" cy="75" r="2.6"/><circle cx="12" cy="125" r="2.6"/>
+            <circle cx="196" cy="100" r="3"/><circle cx="188" cy="75" r="2.6"/><circle cx="188" cy="125" r="2.6"/>
+          </g>
+        </g>
+
+        <!-- machined hexagon chassis -->
+        <polygon class="hex-chassis draw" pathLength="100"
+                 points="100,16 172.7,58 172.7,142 100,184 27.3,142 27.3,58"
+                 fill="none" stroke="url(#nc-steel)" stroke-width="8" stroke-linejoin="round"/>
+
+        <g class="hex-detail fade">
+          <polygon points="100,11 177.1,55.5 177.1,144.5 100,189 22.9,144.5 22.9,55.5" fill="none" stroke="#5d6573" stroke-width="1"/>
+          <polygon points="100,21 168.3,60.5 168.3,139.5 100,179 31.7,139.5 31.7,60.5" fill="none" stroke="#5d6573" stroke-width="1"/>
+          <polygon points="100,30 160.6,65 160.6,135 100,170 39.4,135 39.4,65" fill="none" stroke="#2b86ff" stroke-width="1.8" opacity=".7"/>
+          <path d="M100 30 L39.4 65 L39.4 135" fill="none" stroke="#2b86ff" stroke-width="3" opacity=".9" stroke-linejoin="round"/>
+          <g stroke="#5d6573" stroke-width="1.8">
+            <g id="nc-vtk"><line x1="100" y1="24" x2="100" y2="31"/></g>
+            <use href="#nc-vtk" transform="rotate(60 100 100)"/><use href="#nc-vtk" transform="rotate(120 100 100)"/>
+            <use href="#nc-vtk" transform="rotate(180 100 100)"/><use href="#nc-vtk" transform="rotate(240 100 100)"/>
+            <use href="#nc-vtk" transform="rotate(300 100 100)"/>
+          </g>
+          <g stroke="#5d6573" stroke-width="1.6">
+            <line x1="100" y1="56" x2="100" y2="61"/><line x1="100" y1="144" x2="100" y2="139"/>
+          </g>
+        </g>
+
+        <!-- mounting plates -->
+        <g class="plates fade">
+          <g fill="url(#nc-steel-h)" stroke="#5d6573" stroke-width=".8">
+            <rect x="88" y="40" width="24" height="4.6" rx="2.3"/><rect x="83" y="47" width="34" height="4.6" rx="2.3"/>
+            <rect x="88" y="155.4" width="24" height="4.6" rx="2.3"/><rect x="83" y="148.4" width="34" height="4.6" rx="2.3"/>
+          </g>
+          <circle cx="100" cy="69" r="2.8" fill="#5cb0ff"/><circle cx="100" cy="131" r="2.8" fill="#5cb0ff"/>
+        </g>
+
+        <line class="axis fade" x1="40" y1="100" x2="160" y2="100"
+              stroke="#2b86ff" stroke-width="1" opacity=".2" stroke-dasharray="2 6"/>
+
+        <!-- signal in: steel -->
+        <path class="wave-in draw" pathLength="100" d="M38 100 Q45 84 52 100 T66 100 T80 100"
+              fill="none" stroke="url(#nc-steel)" stroke-width="3.2" stroke-linecap="round"/>
+        <!-- signal out: blue -->
+        <path class="wave-out draw" pathLength="100" d="M120 100 Q127 116 134 100 T148 100 T162 100"
+              fill="none" stroke="#5cb0ff" stroke-width="3.2" stroke-linecap="round"/>
+
+        <!-- photoreceptor -->
+        <g class="eye">
+          <circle cx="100" cy="100" r="30" fill="#0d1117" stroke="url(#nc-steel)" stroke-width="2.5"/>
+          <g stroke="#5d6573" stroke-width="1.4">
+            <g id="nc-ap"><line x1="100" y1="73" x2="100" y2="78"/></g>
+            <use href="#nc-ap" transform="rotate(45 100 100)"/><use href="#nc-ap" transform="rotate(90 100 100)"/>
+            <use href="#nc-ap" transform="rotate(135 100 100)"/><use href="#nc-ap" transform="rotate(180 100 100)"/>
+            <use href="#nc-ap" transform="rotate(225 100 100)"/><use href="#nc-ap" transform="rotate(270 100 100)"/>
+            <use href="#nc-ap" transform="rotate(315 100 100)"/>
+          </g>
+          <circle cx="100" cy="100" r="23" fill="none" stroke="url(#nc-steel)" stroke-width="3"/>
+          <circle class="idle-glow" cx="100" cy="100" r="20" fill="url(#nc-glow)"/>
+          <circle cx="100" cy="100" r="13" fill="url(#nc-lens)" stroke="#cfe8ff" stroke-width="1.3"/>
+          <circle cx="100" cy="100" r="5" fill="#dff0ff"/>
+          <circle cx="94.5" cy="94.5" r="3" fill="#ffffff"/>
+        </g>
+
+        <!-- ignition flash -->
+        <circle class="bloom" cx="100" cy="100" r="34" fill="url(#nc-bloom)"/>
+      </svg>
+
+      <h1 class="wordmark" id="wordmark">NaviCore</h1>
+      <p class="tagline">Astromech Animation Controller</p>
+    </div>
+
+    <div class="band">
+      <div class="chips">
+        <span class="chip">SBUS in · 16/24 ch</span>
+        <span class="chip">8 remote Maestros</span>
+        <span class="chip">Full WCB integration</span>
+      </div>
+      <p class="spec">Set up entirely from your web browser &mdash; nothing to install</p>
+      <p class="byline"><span>Created by</span> Greg Hulette</p>
+      <p class="url">greghulette.github.io/NaviCore</p>
+    </div>
+  </div>
+</div>
+
+<div class="controls">
+  <button type="button" id="replay">Replay</button>
+  <button type="button" id="full">Record fullscreen</button>
+  <button type="button" id="sound" class="armed">Sound: on</button>
+  <span class="tc" id="tc">0.0 / 10.0s</span>
+  <span class="hint"><kbd>R</kbd> replay &nbsp; <kbd>F</kbd> fullscreen &nbsp; <kbd>S</kbd> sound</span>
+</div>
+
+<p class="notes">
+  <b>Sound:</b> hyperdrive spool-up, saber ignition and hum, a swing on the output signal,
+  and an astromech sign-off — all synthesized live, no samples. Browsers block audio until
+  you interact, so the first pass on load is silent: click <b>Replay</b> once and the score
+  comes in.
+  <b>To capture:</b> start your recorder (<b>Win + Alt + R</b> for Game Bar, or OBS with a
+  desktop-audio source), then click <b>Record fullscreen</b> — the clip restarts with no page
+  chrome in shot. Runtime is exactly 10.0 s from first frame to final hold.
+</p>
+
+<script>
+(() => {
+  const DURATION = 10000;
+  const stage    = document.getElementById("stage");
+  const tc       = document.getElementById("tc");
+  const wordmark = document.getElementById("wordmark");
+  const soundBtn = document.getElementById("sound");
+
+  /* ------------------------------------------------------------ wordmark
+     Split into per-letter spans so the reveal can stagger. Letters land
+     between 4.40s and 5.45s; the audio score blips on the same grid. */
+  const LETTER_START = 4.40;
+  const LETTER_STEP  = 0.055;
+  wordmark.textContent = "";
+  [..."NaviCore"].forEach((ch, i) => {
+    const el = document.createElement("i");
+    el.textContent = ch;
+    el.style.animationDelay = (LETTER_START + i * LETTER_STEP).toFixed(3) + "s";
+    wordmark.appendChild(el);
+  });
+
+  /* --------------------------------------------------------------- audio
+     Everything is synthesized — no external files, which the artifact CSP
+     would block anyway. Voices run through a dry bus and a procedural
+     reverb send so the score reads as one space rather than dry beeps. */
+
+  let ctx, master, dryBus, wetBus, noiseBuf;
+  let live = [];                       // sources scheduled for the current take
+  let soundOn = true;
+
+  function makeNoise(seconds) {
+    const buf = ctx.createBuffer(1, ctx.sampleRate * seconds, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function makeImpulse(seconds, decay) {
+    const len = Math.floor(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) {
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+      }
+    }
+    return buf;
+  }
+
+  function ensureCtx() {
+    if (ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC();
+
+    master = ctx.createGain();
+    master.gain.value = 0.9;
+    // Keeps the ignition and hyperdrive peaks in check once the saber hum,
+    // bed and closing chord are all stacked on top of each other.
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -14;
+    comp.knee.value = 22;
+    comp.ratio.value = 4;
+    comp.attack.value = 0.005;
+    comp.release.value = 0.18;
+    master.connect(comp);
+    comp.connect(ctx.destination);
+
+    dryBus = ctx.createGain();
+    dryBus.gain.value = 1;
+    dryBus.connect(master);
+
+    const conv = ctx.createConvolver();
+    conv.buffer = makeImpulse(2.4, 2.8);
+    wetBus = ctx.createGain();
+    wetBus.gain.value = 0.55;
+    wetBus.connect(conv);
+    conv.connect(master);
+
+    noiseBuf = makeNoise(2);
+  }
+
+  function out(node, send) {
+    node.connect(dryBus);
+    const s = ctx.createGain();
+    s.gain.value = send;
+    node.connect(s);
+    s.connect(wetBus);
+  }
+
+  // Pitched voice. f2 sweeps the pitch; atk/dur shape a percussive envelope.
+  function tone(t, { f, f2 = 0, type = "sine", dur = 0.4, gain = 0.2, atk = 0.006, send = 0.4 }) {
+    const osc = ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f, t);
+    if (f2) osc.frequency.exponentialRampToValueAtTime(Math.max(f2, 8), t + dur);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + atk);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    osc.connect(g);
+    out(g, send);
+    osc.start(t);
+    osc.stop(t + dur + 0.05);
+    live.push([osc, g]);
+  }
+
+  // Filtered noise — the machining, servo and transient layer.
+  function air(t, { dur = 0.2, gain = 0.2, f0 = 800, f1 = 0, q = 1, send = 0.4 }) {
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuf;
+
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.Q.value = q;
+    bp.frequency.setValueAtTime(f0, t);
+    if (f1) bp.frequency.exponentialRampToValueAtTime(f1, t + dur);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + Math.min(0.02, dur * 0.25));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    src.connect(bp); bp.connect(g);
+    out(g, send);
+    src.start(t, Math.random());
+    src.stop(t + dur + 0.05);
+    live.push([src, g]);
+  }
+
+  // Deep-space bed. Carries the open, then clears out once the saber hum
+  // takes over as the sustaining layer.
+  function bed(t, dur) {
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.Q.value = 0.7;
+    lp.frequency.setValueAtTime(200, t);
+    lp.frequency.linearRampToValueAtTime(950, t + 3.4);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.05, t + Math.min(2.4, dur * 0.5));
+    g.gain.setValueAtTime(0.05, t + dur - 1.2);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    lp.connect(g);
+    out(g, 0.5);
+    [55, 55.35, 82.5].forEach((f) => {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.value = f;
+      o.connect(lp);
+      o.start(t);
+      o.stop(t + dur + 0.1);
+      live.push([o, g]);
+    });
+  }
+
+  /* ------------------------------------------------- galaxy far, far away
+     All four voices below are built from scratch with oscillators and
+     filtered noise — no samples anywhere. */
+
+  // Hyperdrive spool-up: three saws climbing five octaves through a lowpass
+  // whose resonant peak accelerates ahead of them, with rushing air on top.
+  function hyperdrive(t, dur = 1.35) {
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.Q.value = 12;
+    lp.frequency.setValueAtTime(120, t);
+    lp.frequency.exponentialRampToValueAtTime(4800, t + dur);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.085, t + dur * 0.75);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.35);
+
+    lp.connect(g);
+    out(g, 0.55);
+    [44, 66, 88].forEach((f) => {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.setValueAtTime(f, t);
+      o.frequency.exponentialRampToValueAtTime(f * 5.5, t + dur);
+      o.connect(lp);
+      o.start(t);
+      o.stop(t + dur + 0.4);
+      live.push([o, g]);
+    });
+
+    air(t, { dur: dur + 0.2, gain: 0.07, f0: 220, f1: 5200, q: 3.2, send: 0.6 });
+  }
+
+  // Saber ignition — the snap-hiss: a noise crack pitched hard upward, a
+  // decaying hiss tail, and a low swell underneath it.
+  function saberIgnite(t) {
+    air(t,        { dur: 0.30, gain: 0.26, f0: 260,  f1: 5200, q: 1.6, send: 0.55 });
+    air(t + 0.02, { dur: 0.90, gain: 0.10, f0: 4200, f1: 700,  q: 1.1, send: 0.60 });
+    tone(t, { f: 90, f2: 240, type: "sawtooth", dur: 0.5, gain: 0.16, atk: 0.01, send: 0.35 });
+  }
+
+  // Saber hum — detuned saw cluster through a resonant lowpass, with the
+  // cutoff and pitch both wobbling. That instability is the whole character.
+  function saberHum(t, dur, gain = 0.042) {
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 760;
+    lp.Q.value = 6;
+
+    const lfo = ctx.createOscillator();
+    lfo.type = "sine";
+    lfo.frequency.value = 4.6;
+    const lfoAmt = ctx.createGain();
+    lfoAmt.gain.value = 190;
+    lfo.connect(lfoAmt);
+    lfoAmt.connect(lp.frequency);
+    lfo.start(t);
+    lfo.stop(t + dur + 0.1);
+
+    const vib = ctx.createOscillator();
+    vib.type = "sine";
+    vib.frequency.value = 3.1;
+    const vibAmt = ctx.createGain();
+    vibAmt.gain.value = 2.4;
+    vib.connect(vibAmt);
+    vib.start(t);
+    vib.stop(t + dur + 0.1);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + 0.12);
+    g.gain.setValueAtTime(gain, t + dur - 0.9);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    lp.connect(g);
+    out(g, 0.45);
+    [108, 110.5, 163, 219].forEach((f) => {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.value = f;
+      vibAmt.connect(o.frequency);
+      o.connect(lp);
+      o.start(t);
+      o.stop(t + dur + 0.1);
+      live.push([o, g]);
+    });
+    live.push([lfo, g], [vib, g]);
+  }
+
+  // Saber swing — Doppler. Pitch and filter bend up as it passes, then back
+  // down, with the volume peaking at the crossing point.
+  function saberSwing(t, dur = 0.7, gain = 0.13) {
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.Q.value = 3.2;
+    bp.frequency.setValueAtTime(320, t);
+    bp.frequency.exponentialRampToValueAtTime(1500, t + dur * 0.42);
+    bp.frequency.exponentialRampToValueAtTime(420, t + dur);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + dur * 0.42);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+    bp.connect(g);
+    out(g, 0.6);
+    [150, 226, 301].forEach((f) => {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.setValueAtTime(f, t);
+      o.frequency.exponentialRampToValueAtTime(f * 1.55, t + dur * 0.42);
+      o.frequency.exponentialRampToValueAtTime(f * 0.92, t + dur);
+      o.connect(bp);
+      o.start(t);
+      o.stop(t + dur + 0.05);
+      live.push([o, g]);
+    });
+
+    air(t, { dur, gain: gain * 0.5, f0: 700, f1: 2600, q: 1.4, send: 0.6 });
+  }
+
+  // Astromech chirp. `notes` is [hz, seconds, glide?] — the pitch STEPS to
+  // each note by default and only bends when glide is set, because sliding
+  // continuously between every note is exactly what makes a synth read as a
+  // slide whistle. Each stepped note also gets its own envelope so the
+  // phrase articulates into separate syllables.
+  //
+  // Voice is a square through a lowpass with amplitude modulation on top —
+  // the buzzy, circuit-driven texture, not a pure tone.
+  function r2(t, notes, { gain = 0.08, send = 0.5, ring = 42, cutoff = 2200 } = {}) {
+    const osc = ctx.createOscillator();
+    osc.type = "square";
+
+    const amp = ctx.createGain();
+    amp.gain.value = 0.62;
+    const rm = ctx.createOscillator();
+    rm.type = "sine";
+    rm.frequency.value = ring;
+    const rmAmt = ctx.createGain();
+    rmAmt.gain.value = 0.38;
+    rm.connect(rmAmt);
+    rmAmt.connect(amp.gain);
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = cutoff;
+    lp.Q.value = 1.2;
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+
+    let time = t;
+    notes.forEach(([f, d, glide], i) => {
+      const nextGlides = notes[i + 1] && notes[i + 1][2];
+
+      if (glide && i > 0) {
+        // bend from wherever we are — leave the envelope sustaining
+        osc.frequency.exponentialRampToValueAtTime(Math.max(f, 20), time + d);
+      } else {
+        osc.frequency.setValueAtTime(f, time);
+        g.gain.setValueAtTime(0.0001, time);
+        g.gain.exponentialRampToValueAtTime(gain, time + 0.007);
+      }
+
+      // Hold the note open only if the next one bends out of it.
+      if (!nextGlides) {
+        g.gain.setValueAtTime(gain, time + Math.max(d * 0.6, 0.018));
+        g.gain.exponentialRampToValueAtTime(0.0001, time + d);
+      }
+      time += d;
+    });
+    const total = Math.max(time - t, 0.08);
+
+    osc.connect(amp);
+    amp.connect(lp);
+    lp.connect(g);
+    out(g, send);
+
+    osc.start(t); osc.stop(t + total + 0.05);
+    rm.start(t);  rm.stop(t + total + 0.05);
+    live.push([osc, g], [rm, g]);
+  }
+
+  function stopAudio() {
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    live.forEach(([src, g]) => {
+      try {
+        g.gain.cancelScheduledValues(now);
+        g.gain.setValueAtTime(Math.max(g.gain.value, 0.0001), now);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+        src.stop(now + 0.08);
+      } catch (e) { /* already stopped */ }
+    });
+    live = [];
+  }
+
+  // The score. Every cue sits on the same beat as its visual counterpart.
+  function scheduleScore(t0) {
+    const T = (s) => t0 + s;
+
+    // Deep space. Clears at ~4.8s once the saber hum has the floor.
+    bed(T(0.00), 4.80);
+
+    // brackets
+    air(T(0.05), { dur: .06, gain: .05, f0: 3200, q: 6, send: .25 });
+
+    // chassis drawing itself — hyperdrive spooling up
+    hyperdrive(T(0.40), 1.35);
+
+    // detail rings, rails, plates seating — servo clicks with a droid chirp
+    [1.50, 1.70, 1.85].forEach((s, i) => {
+      air(T(s), { dur: .09, gain: .095, f0: 1400 + i * 520, q: 5, send: .35 });
+      r2(T(s + .02), [[560 + i * 90, .05], [400 + i * 70, .05]],
+         { gain: .038, ring: 55, cutoff: 1800, send: .4 });
+    });
+
+    // SBUS in — the signal arriving, steel
+    tone(T(2.00), { f: 180, f2: 520, type: "sawtooth", dur: .9, gain: .055, atk: .12, send: .45 });
+    air(T(2.00),  { dur: .9, gain: .05, f0: 600, f1: 1800, q: 2, send: .5 });
+
+    // photoreceptor ignition — snap-hiss, sub impact, then the hum settles in
+    tone(T(2.86), { f: 200, f2: 1500, dur: .16, gain: .045, atk: .10, send: .3 });
+    saberIgnite(T(3.00));
+    tone(T(3.00), { f: 110, f2: 34, dur: 1.5, gain: .40, atk: .004, send: .25 });
+    saberHum(T(3.05), 6.55);
+
+    // signal out — blue, the blade swinging right
+    saberSwing(T(3.40), .78, .12);
+
+    // wordmark letters — quiet data blips
+    for (let i = 0; i < 8; i++)
+      tone(T(LETTER_START + i * LETTER_STEP), { f: 1400 + i * 70, dur: .10, gain: .024, send: .5 });
+
+    // tagline
+    tone(T(5.30), { f: 660, dur: .5, gain: .034, atk: .06, send: .55 });
+
+    // R2 looks up — stepped syllables, then one bend up to make it a question
+    r2(T(5.52), [[420, .07], [620, .06], [470, .06], [700, .07], [560, .06], [880, .13, true]],
+       { gain: .075, ring: 38 });
+
+    // capability chips — three ascending droid blips
+    [[5.90, [[380, .06], [560, .08]]],
+     [6.12, [[440, .06], [660, .08]]],
+     [6.34, [[520, .06], [780, .09]]]].forEach(([s, notes]) => {
+      r2(T(s), notes, { gain: .06, ring: 48, cutoff: 2000 });
+      air(T(s), { dur: .04, gain: .035, f0: 2800, q: 7, send: .3 });
+    });
+
+    // browser-setup line
+    [392, 587.33].forEach((f) =>
+      tone(T(7.10), { f, dur: 1.6, gain: .04, atk: .35, send: .6 }));
+
+    // byline
+    tone(T(8.10), { f: 880, dur: .6, gain: .04, atk: .03, send: .6 });
+
+    // closing card — resolving chord
+    [261.63, 392.00, 523.25, 784.00].forEach((f, i) =>
+      tone(T(8.62 + i * 0.02), { f, type: "triangle", dur: 1.5, gain: .048, atk: .02, send: .7 }));
+
+    // R2 signs off — seven stepped syllables, one bend up on the last
+    r2(T(8.95), [[520, .08], [800, .07], [440, .07], [680, .07],
+                 [880, .07], [600, .06], [1000, .09], [1240, .15, true]],
+       { gain: .085, ring: 36, cutoff: 2600, send: .55 });
+  }
+
+  /* ------------------------------------------------------------ transport */
+
+  let raf = null;
+  let startedAt = 0;
+
+  function tick(now) {
+    const elapsed = Math.min(now - startedAt, DURATION);
+    tc.textContent = (elapsed / 1000).toFixed(1) + " / 10.0s";
+    if (elapsed < DURATION) raf = requestAnimationFrame(tick);
+  }
+
+  async function play() {
+    if (raf) cancelAnimationFrame(raf);
+    stopAudio();
+
+    if (soundOn) {
+      ensureCtx();
+      try { await ctx.resume(); } catch (e) { /* still locked */ }
+    }
+
+    stage.classList.remove("playing");
+    void stage.offsetWidth;              // force reflow so animations restart
+    stage.classList.add("playing");
+    startedAt = performance.now();
+    raf = requestAnimationFrame(tick);
+
+    if (soundOn && ctx && ctx.state === "running") scheduleScore(ctx.currentTime);
+    refreshSoundBtn();
+  }
+
+  function refreshSoundBtn() {
+    const locked = soundOn && (!ctx || ctx.state !== "running");
+    soundBtn.textContent = !soundOn ? "Sound: off"
+                         : locked   ? "Enable sound"
+                         :            "Sound: on";
+    soundBtn.classList.toggle("armed", soundOn && !locked);
+    soundBtn.classList.toggle("off", !soundOn);
+  }
+
+  document.getElementById("replay").addEventListener("click", play);
+
+  document.getElementById("full").addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else stage.requestFullscreen().catch(play);
+  });
+
+  soundBtn.addEventListener("click", () => {
+    soundOn = !soundOn;
+    if (!soundOn) stopAudio();
+    play();
+  });
+
+  // Entering fullscreen restarts the clip, so recording starts on frame 1.
+  document.addEventListener("fullscreenchange", () => {
+    if (document.fullscreenElement === stage) play();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target.matches("input, textarea")) return;
+    const k = e.key.toLowerCase();
+    if (k === "r") play();
+    if (k === "f") document.getElementById("full").click();
+    if (k === "s") soundBtn.click();
+  });
+
+  play();
+})();
+</script>
+</body>
+</html>
