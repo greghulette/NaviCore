@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.09:47.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.09:55.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10368,7 +10368,9 @@ function _ncLabelNorm(s) { return String(s || '').toLowerCase().replace(/[^a-z0-
 // the lower WCB/port; the user can still change the row). port is 1-5 (portLabels omit
 // the USB console at port 0), so it drops straight into a ";W<wcb>;S<port>" route.
 function _cmdlibLabelDest(board) {
-  const labels = (board && NC_BOARD_DEVICE_LABELS[board.id]) || [];
+  // Built-in boards use the hardcoded NC_BOARD_DEVICE_LABELS map; a CUSTOM board
+  // brings its own `labels:[...]` (serial-port device labels to match) in its JSON.
+  const labels = (board && NC_BOARD_DEVICE_LABELS[board.id]) || (board && board.labels) || [];
   if (!labels.length || typeof wcbPortLabels === 'undefined' || !Array.isArray(wcbPortLabels)) return null;
   const want = labels.map(_ncLabelNorm);
   for (let w = 0; w < wcbPortLabels.length; w++) {
@@ -10378,6 +10380,24 @@ function _cmdlibLabelDest(board) {
       const lbl = String(ports[p] || '').trim();
       if (lbl && want.includes(_ncLabelNorm(lbl))) return { wcb: w + 1, port: p + 1, label: lbl };
     }
+  }
+  return null;
+}
+
+// The first live WCB whose reported ALIAS matches one of this board's `aliasMatch`
+// entries → { target: "<id>", alias }, or null. This is the mesh-CLIENT twin of
+// _cmdlibLabelDest: a device that IS its own WCB node (e.g. the Leia Projector,
+// which advertises the WDP name "Leia Projector") is addressed by unicast to its
+// id, so the action auto-targets whatever id that device currently holds on the
+// mesh — no hardcoded number, and it follows the device if you renumber it.
+// Matched normalized (case/punctuation-insensitive), same as the label match.
+function _cmdlibAliasDest(board) {
+  const want = (board && board.aliasMatch) || [];
+  if (!Array.isArray(want) || !want.length || typeof wcbAliases === 'undefined' || !Array.isArray(wcbAliases)) return null;
+  const wantN = want.map(_ncLabelNorm);
+  for (let i = 0; i < wcbAliases.length; i++) {
+    const a = String(wcbAliases[i] || '').trim();
+    if (a && wantN.includes(_ncLabelNorm(a))) return { target: String(i + 1), alias: a };
   }
   return null;
 }
@@ -10942,9 +10962,11 @@ function _cmdlibUse() {
     else if (rowHadCmd && /^S\d$/.test(destsel)) action = { type: 'serial', port: destsel, cmd: wire };
     else if (rowHadCmd && /^\d+$/.test(destsel)) action = { type: 'wcb_unicast', target: destsel, cmd: wire };
     else {
-      const ld  = _cmdlibLabelDest(board);           // a WCB advertising this device's label (WDP)
-      const cfg = _cmdlibConfigDest(board, 'wcb');   // else HCR/MP3 → their configured WCB
-      if (ld)                     action = { type: 'wcb_unicast', target: String(ld.wcb), cmd: wire };
+      const ad  = _cmdlibAliasDest(board);           // live WCB whose ALIAS matches (mesh client, e.g. Leia) — id can float
+      const ld  = _cmdlibLabelDest(board);           // else a WCB advertising this device's serial label (WDP)
+      const cfg = _cmdlibConfigDest(board, 'wcb');   // else HCR/MP3 configured home, or the board's fixed dest.target
+      if (ad)                     action = { type: 'wcb_unicast', target: ad.target, cmd: wire };
+      else if (ld)                action = { type: 'wcb_unicast', target: String(ld.wcb), cmd: wire };
       else if (cfg && cfg.target) action = { type: 'wcb_unicast', target: cfg.target, cmd: wire };
       else {
         const curT = document.getElementById(fid + '-target')?.value;
@@ -11007,9 +11029,13 @@ function _cmdlibMergeLibraryData(data) {
                  local: b.local || undefined,   // local firmware-action kind (e.g. 'maestro')
                  // deliver:'wcb' forces WCB-unicast delivery for a mesh CLIENT device that
                  // takes raw text over ESP-NOW (e.g. Leia); dest:{target} is its fixed home.
-                 // Both are read by _cmdlibDestMode / _cmdlibConfigDest — preserve them here.
+                 // aliasMatch:[...] auto-targets the live WCB whose alias matches (id can float);
+                 // labels:[...] auto-routes to a WCB serial port advertising that device label.
+                 // All read by the dest resolvers — preserve them through the merge.
                  deliver: b.deliver || undefined,
                  dest: (b.dest && typeof b.dest === 'object') ? b.dest : undefined,
+                 aliasMatch: Array.isArray(b.aliasMatch) ? b.aliasMatch : undefined,
+                 labels: Array.isArray(b.labels) ? b.labels : undefined,
                  commands: Array.isArray(b.commands) ? b.commands : [] };
     const idx = cur.boards.findIndex(x => x.id === nb.id);
     if (idx >= 0) cur.boards[idx] = nb; else cur.boards.push(nb);
