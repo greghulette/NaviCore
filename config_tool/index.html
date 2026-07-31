@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">30.15:52.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.09:47.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10196,6 +10196,12 @@ function _cmdlibDestMode(board, cmd) {
   const local = _cmdlibLocalKind(board, cmd);
   if (local === 'maestro') return 'maestro';   // destination = a Maestro slot
   if (local)               return 'local';     // record / play / stop — this controller
+  // A custom board can force WCB-unicast delivery: some mesh CLIENT devices
+  // (e.g. the Leia Projector) receive a raw text command over ESP-NOW via their
+  // WCB_Client onWcbCommand — NOT a ';'-prefixed WCB verb and NOT a serial-port
+  // passthrough. Without this the ";"/"?" heuristic below would mis-route the
+  // command to a serial port. `deliver:"wcb"` sends it straight to the board id.
+  if (board && board.deliver === 'wcb') return 'wcb';
   const t = String((cmd && cmd.template) || (cmd && cmd.examples && cmd.examples[0]) || '').trim();
   if (/^;L/i.test(t) || (board && board.id === 'wcb-wled')) return 'wled';
   if (t.charAt(0) === ';' || t.charAt(0) === '?')           return 'wcb';   // ETM verb / WCB query → the WCB auto-routes
@@ -10322,6 +10328,10 @@ function _cmdlibConfigDest(board, mode) {
   const id = board && board.id;
   const d = (id === 'wcb-hcr' || id === 'hcr-native') ? (config && config.hcrDest)
           : (id === 'wcb-mp3')                        ? (config && config.mp3Dest)
+          // A custom board can declare a fixed home (e.g. the Leia Projector's WCB
+          // id): dest:{target:6} defaults its "Send to" to unicast WCB 6, so you
+          // don't re-pick it every time. Still fully overridable on the action row.
+          : (board && board.dest)                     ? board.dest
           : null;
   if (!d) return null;
   if (mode === 'serial') return { port: d.port || 'S3' };
@@ -10614,16 +10624,22 @@ function _cmdlibGroupEntries(boards) {
 // Render ONE board as a collapsible <details> of its filter-matching commands.
 // Returns {html, count}; html is '' when nothing matches. `label` overrides the
 // summary text (used to shorten a member's name inside a group).
-function _cmdlibRenderBoard(board, f, esc, label) {
+function _cmdlibRenderBoard(board, f, esc, label, customIds) {
   const matches = (board.commands || []).filter(c =>
     !f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f));
   if (!matches.length) return { html: '', count: 0 };
   const cnt = matches.length;
   const cntLabel = f ? (cnt + ' match' + (cnt === 1 ? '' : 'es')) : (cnt + ' cmd' + (cnt === 1 ? '' : 's'));
+  // Private (localStorage) board → a "· custom" tag + a ✕ to forget it from this browser.
+  const isCustom = !!(customIds && customIds.has(board.id));
+  const customUi = isCustom
+    ? ` <span style="font-size:10px;color:var(--accent);font-weight:600" title="A private board you imported — stored only in this browser, not in the shared library">· custom</span>
+        <button type="button" class="cmdlib-remove-custom" data-board="${esc(board.id)}" data-name="${esc(board.name)}" title="Remove this private board from this browser" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 4px">✕</button>`
+    : '';
   let html = `<details class="cmdlib-board"${f ? ' open' : ''}>
       <summary style="cursor:pointer;display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);user-select:none">
         <span class="cmdlib-caret" style="color:var(--muted);font-size:11px">&#9656;</span>
-        <span style="font-weight:600;flex:1">${esc(label || board.name)}</span>
+        <span style="font-weight:600;flex:1">${esc(label || board.name)}${customUi}</span>
         <span style="font-size:11px;color:var(--muted)">${cntLabel}</span>
       </summary>
       <div style="padding:2px 0 4px">`;
@@ -10644,19 +10660,20 @@ function _cmdlibRenderList(filter) {
   const lib = ncCommandLibrary();
   const f = (filter || '').trim().toLowerCase();
   const esc = s => escH(String(s == null ? '' : s));
+  const customIds = _cmdlibCustomIds();   // which boards are private (localStorage) — computed once
   let html = '', any = false;
   // Boards render COLLAPSED by default (a tidy list of sections, not a wall of
   // commands); a search auto-expands sections that have matches. Grouped clusters
   // add one more collapse level — the group, then its member libraries, then commands.
   for (const entry of _cmdlibGroupEntries(lib.boards || [])) {
     if (entry.type === 'board') {
-      const r = _cmdlibRenderBoard(entry.board, f, esc);
+      const r = _cmdlibRenderBoard(entry.board, f, esc, null, customIds);
       if (r.html) { html += r.html; any = true; }
       continue;
     }
     let inner = '', total = 0;
     for (const b of entry.boards) {
-      const r = _cmdlibRenderBoard(b, f, esc, entry.group.sub ? entry.group.sub(b.name) : b.name);
+      const r = _cmdlibRenderBoard(b, f, esc, entry.group.sub ? entry.group.sub(b.name) : b.name, customIds);
       if (r.html) { inner += r.html; total += r.count; }
     }
     if (!inner) continue;   // whole group filtered out
@@ -10675,6 +10692,12 @@ function _cmdlibRenderList(filter) {
   if (!any) html += `<div style="color:var(--muted);padding:16px 4px">No commands match. Try Import to add a library.</div>`;
   list.innerHTML = html;
   list.querySelectorAll('.cmdlib-item').forEach(btn => btn.onclick = () => _cmdlibSelect(btn.dataset.board, btn.dataset.cmd));
+  // ✕ on a custom board — stop the click from toggling the <summary>, confirm, forget it.
+  list.querySelectorAll('.cmdlib-remove-custom').forEach(btn => btn.onclick = (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const id = btn.dataset.board;
+    if (confirm('Remove your private "' + (btn.dataset.name || id) + '" board from this browser?\n\n(Its .json file is untouched — you can re-import it any time.)')) _cmdlibRemoveCustom(id);
+  });
 }
 
 function _cmdlibSelect(boardId, cmdId) {
@@ -10982,6 +11005,11 @@ function _cmdlibMergeLibraryData(data) {
     const nb = { id: b.id, name: b.name || b.id, kind: b.kind || 'wcb-verb',
                  routing: (b.routing && typeof b.routing === 'object') ? b.routing : undefined,
                  local: b.local || undefined,   // local firmware-action kind (e.g. 'maestro')
+                 // deliver:'wcb' forces WCB-unicast delivery for a mesh CLIENT device that
+                 // takes raw text over ESP-NOW (e.g. Leia); dest:{target} is its fixed home.
+                 // Both are read by _cmdlibDestMode / _cmdlibConfigDest — preserve them here.
+                 deliver: b.deliver || undefined,
+                 dest: (b.dest && typeof b.dest === 'object') ? b.dest : undefined,
                  commands: Array.isArray(b.commands) ? b.commands : [] };
     const idx = cur.boards.findIndex(x => x.id === nb.id);
     if (idx >= 0) cur.boards[idx] = nb; else cur.boards.push(nb);
@@ -11042,11 +11070,62 @@ function _cmdlibNormalize() {
 // Import a library .json FILE at runtime: our schema (boards[]) OR a DroidNet
 // board file (components[] + top-level enums). We never ship DroidNet's MPL
 // data in this repo — the user brings it themselves (file or URL fetch).
+// ── Persistent PRIVATE command-library boards (localStorage) ─────────────────
+// Imported boards are normally in-memory only — gone on refresh. To let you keep
+// your OWN device commands (e.g. a Leia Projector) without shipping them in this
+// repo's shared library, we also stash imported boards under a localStorage key
+// and re-merge them at startup (after the vendored catalog). Everything here
+// stays in THIS browser + the .json file you keep — nothing is committed or
+// synced anywhere. Boards are keyed by id, so re-importing an updated file
+// replaces that board in place.
+const NC_CMDLIB_CUSTOM_KEY = 'nc_cmdlib_custom_v1';
+function _cmdlibLoadCustom() {
+  try { const s = localStorage.getItem(NC_CMDLIB_CUSTOM_KEY); return s ? JSON.parse(s) : null; }
+  catch (e) { console.warn('Command library: custom boards failed to load —', e.message); return null; }
+}
+// Merge an imported library payload into the persisted custom set (by board id)
+// and write it back. Accepts our schema (boards[]) OR a DroidNet file
+// (components[] + enums) — the same shapes _cmdlibMergeLibraryData handles.
+function _cmdlibSaveCustom(data) {
+  const store = _cmdlibLoadCustom() || { schema: 'navicore-command-library/v1', enums: {}, boards: [] };
+  store.enums  = store.enums  || {};
+  store.boards = store.boards || [];
+  if (data && data.enums && typeof data.enums === 'object') Object.assign(store.enums, data.enums);
+  const incoming = (data && (data.boards || data.components)) || [];
+  (Array.isArray(incoming) ? incoming : []).forEach(b => {
+    if (!b || !b.id) return;
+    const idx = store.boards.findIndex(x => x && x.id === b.id);
+    if (idx >= 0) store.boards[idx] = b; else store.boards.push(b);
+  });
+  try { localStorage.setItem(NC_CMDLIB_CUSTOM_KEY, JSON.stringify(store)); }
+  catch (e) { alert('Could not save this library to your browser (localStorage): ' + e.message + '\nIt is loaded for this session but will be gone on refresh.'); }
+  return store.boards.map(b => b && b.id).filter(Boolean);
+}
+// Forget one custom board (id) — drops it from localStorage AND the live catalog.
+function _cmdlibRemoveCustom(boardId) {
+  const store = _cmdlibLoadCustom();
+  if (store && Array.isArray(store.boards)) {
+    store.boards = store.boards.filter(b => b && b.id !== boardId);
+    try { localStorage.setItem(NC_CMDLIB_CUSTOM_KEY, JSON.stringify(store)); } catch (e) {}
+  }
+  const lib = window.NC_COMMAND_LIBRARY;
+  if (lib && Array.isArray(lib.boards)) lib.boards = lib.boards.filter(b => b && b.id !== boardId);
+  _cmdlibGeneration++;
+  _cmdlibShowList();
+}
+// Which board ids came from the persisted custom set (for a "· custom" tag / ✕).
+function _cmdlibCustomIds() {
+  const store = _cmdlibLoadCustom();
+  return new Set((store && Array.isArray(store.boards) ? store.boards : []).map(b => b && b.id).filter(Boolean));
+}
+
 function _cmdlibImport(file) {
   const reader = new FileReader();
   reader.onload = () => {
     try {
-      const added = _cmdlibMergeLibraryData(JSON.parse(reader.result));
+      const parsed = JSON.parse(reader.result);
+      const added = _cmdlibMergeLibraryData(parsed);
+      if (added) _cmdlibSaveCustom(parsed);   // persist so it survives a refresh (private to this browser)
       _cmdlibNormalize();
       _cmdlibShowList();
       if (!added) alert('No boards found in that file. Expected our schema (boards[]) or a DroidNet board file (components[]).');
@@ -11118,7 +11197,11 @@ const NC_NAVICORE_LOCAL_MANIFEST = 'cmdlib/navicore/manifest.json';
 let _cmdlibReady = _cmdlibImportFromManifest(NC_DROIDNET_LOCAL_MANIFEST)
   .catch(e => { console.warn('Command library: vendored snapshot failed to load —', e.message); return null; })
   .then(() => _cmdlibImportFromManifest(NC_NAVICORE_LOCAL_MANIFEST))
-  .catch(e => { console.warn('Command library: NaviCore boards failed to load —', e.message); return null; });
+  .catch(e => { console.warn('Command library: NaviCore boards failed to load —', e.message); return null; })
+  // Re-merge your PRIVATE custom boards LAST (localStorage) so they layer on top
+  // of the vendored catalog and survive a refresh — see _cmdlibLoadCustom.
+  .then(() => { const c = _cmdlibLoadCustom(); if (c) { _cmdlibMergeLibraryData(c); _cmdlibNormalize(); } })
+  .catch(e => { console.warn('Command library: custom boards failed to merge —', e.message); return null; });
 
 // A prominent, hard-to-miss entry point into the command library — a full-
 // width primary button (not a tiny icon) so it is the obvious next step once
