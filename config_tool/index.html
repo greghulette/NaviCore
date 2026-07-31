@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.12:08.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.12:18.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -11218,8 +11218,14 @@ function _cmdlibGetDroidSig() { try { return localStorage.getItem('nc_cmdlib_dro
 function _cmdlibSetDroidSig(sig) { try { localStorage.setItem('nc_cmdlib_droid_sig', String(sig)); } catch (e) {} }
 // On connect, ask only for the cheap signature; the CMDLIB_META handler decides
 // whether a full GET_CMDLIB pull is actually needed.
+// DIRECT USB ONLY. Over the WCB bridge the pull is a multi-KB fragment transfer
+// that shares the config-send state machine and SUPPRESSES live telemetry (rc_hb/
+// rc_ch) for its whole duration (~tens of seconds for a big library) — which made
+// config + live channel + SBUS all look dead over WCB. So the library syncs only
+// over USB (fast, no size cap); over the bridge we rely on localStorage and the
+// manual "Save to NaviCore" button. See the note on _cmdlibDroidSig.
 function requestCmdlibMetaFromBoard() {
-  if (!writer && !sharedActive) return;
+  if (!writer || viaWcbActive || sharedActive) return;   // pure Direct USB only
   sendJSON({ type: 'GET_CMDLIB_META' }, /*silent=*/true).catch(() => {});
 }
 async function saveCmdlibToBoard() {
