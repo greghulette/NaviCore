@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.12:39.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.12:51.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4280,32 +4280,42 @@ function renderWcbStatus(online) {
 
 // silent=true skips the terminal echo — used for background polls like the
 // WCB-status poll that fires every 3s and would otherwise spam the log.
+// Serializes ALL sendLine I/O. A large write is paced into chunks (below), and
+// without this a CONCURRENT send (the 3 s WCB status poll, the PING keepalive, a
+// fragment burst) would slip its bytes BETWEEN those chunks — corrupting the line
+// mid-stream. That silently mangled OTA DATA chunks ("base64 error -44 — chunk
+// too big" at a random offset). One line goes out fully before the next starts.
+let _sendChain = Promise.resolve();
 async function sendLine(msg, silent = false) {
-  // Shared-port mode: hand the line to the hub (the leader tab writes it to the real
-  // WCB port; a follower relays it to the leader). No local writer in this tab.
-  if (sharedActive) {
-    if (!silent) appendTerminalLine('> ' + msg, 'tx');
-    // AWAIT the hub write so multi-fragment SET_CONFIG sends stay flow-controlled —
-    // without the await they burst and overwhelm the WCB's ESP-NOW TX queue (drops).
-    if (sharedHub) await sharedHub.send(msg + '\n');
-    return;
-  }
-  if (!writer) return;
+  if (!sharedActive && !writer) return;   // not connected — nothing to send
   if (!silent) appendTerminalLine('> ' + msg, 'tx');
-  const encoded = new TextEncoder().encode(msg + '\n');
-  // Pace a LARGE single-line write. The RC's USB-CDC RX buffer is only a few KB;
-  // dumping a ~10 KB line all at once (a full SET_CONFIG or a SET_CMDLIB library
-  // save) overflows it before loop() drains, dropping bytes mid-JSON → the RC
-  // reports "JSON parse failed (InvalidInput)". Chunk + yield so loop() drains
-  // between chunks. Small writes (the overwhelming common case) go in one shot.
-  const USB_CHUNK = 512;
-  if (encoded.length <= USB_CHUNK) {
-    await writer.write(encoded);
-  } else {
-    for (let i = 0; i < encoded.length; i += USB_CHUNK) {
-      await writer.write(encoded.subarray(i, Math.min(i + USB_CHUNK, encoded.length)));
-      await new Promise(r => setTimeout(r, 4));   // let the RC's loop() drain the RX buffer
+  const prev = _sendChain;
+  let release;
+  _sendChain = new Promise(r => (release = r));
+  await prev;                             // wait for the previous send to finish (atomicity)
+  try {
+    // Shared-port mode: hand the line to the hub (the leader writes it to the real
+    // WCB port). AWAIT so multi-fragment sends stay flow-controlled.
+    if (sharedActive) {
+      if (sharedHub) await sharedHub.send(msg + '\n');
+      return;
     }
+    if (!writer) return;                  // disconnected while queued
+    const encoded = new TextEncoder().encode(msg + '\n');
+    // Pace a LARGE single-line write so the RC's few-KB USB-CDC RX buffer can't
+    // overflow before loop() drains it (a ~10 KB SET_CONFIG / SET_CMDLIB otherwise
+    // dropped bytes → "JSON parse failed"). Small writes go in one shot.
+    const USB_CHUNK = 512;
+    if (encoded.length <= USB_CHUNK) {
+      await writer.write(encoded);
+    } else {
+      for (let i = 0; i < encoded.length; i += USB_CHUNK) {
+        await writer.write(encoded.subarray(i, Math.min(i + USB_CHUNK, encoded.length)));
+        await new Promise(r => setTimeout(r, 4));   // let the RC's loop() drain the RX buffer
+      }
+    }
+  } finally {
+    release();                            // let the next queued send proceed
   }
 }
 
