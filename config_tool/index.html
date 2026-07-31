@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.09:55.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.11:00.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3782,6 +3782,7 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
 
   await sendJSON({ type: 'GET_CONFIG' });
   await new Promise(r => setTimeout(r, 400));
+  requestCmdlibFromBoard();   // pull the droid's stored private command library (fire-and-forget; older fw just won't reply)
   await sendJSON({ type: 'START_MONITOR' });
   isMonitoring = true;
   // Push current debug-chip state to the firmware so it knows which
@@ -3899,6 +3900,7 @@ async function connectSharedPort() {
   for (let i = 0; i < 6 && !_pongSeen; i++) { await sendJSON({ type: 'PING' }); await new Promise(r => setTimeout(r, 500)); }
   await sendJSON({ type: 'GET_CONFIG' });
   await new Promise(r => setTimeout(r, 400));
+  requestCmdlibFromBoard();   // pull the droid's stored private command library (fire-and-forget; older fw just won't reply)
   await sendJSON({ type: 'START_MONITOR' });
   isMonitoring = true;
   sendDebugFlagsToBoard();
@@ -7256,6 +7258,25 @@ function handleBoardMessage(line) {
     return;
   }
 
+  // The droid's stored private command library (GET_CMDLIB reply). Merge it into
+  // the live catalog + cache to localStorage so it's there offline too. Arrives
+  // once on connect; older firmware never sends it (we keep localStorage).
+  if (msg.type === 'CMDLIB') {
+    try {
+      const added = _cmdlibMergeLibraryData(msg.data || {});
+      if (added) { _cmdlibSaveCustom(msg.data || {}); _cmdlibNormalize(); }
+      const modal = document.getElementById('cmdlib-modal');
+      if (modal && modal.classList.contains('open') && document.getElementById('cmdlib-search')) _cmdlibShowList();
+      appendTerminalLine('< [cmdlib] loaded ' + added + ' custom board(s) from the NaviCore', 'rx');
+    } catch (e) { console.warn('CMDLIB merge failed', e); }
+    return;
+  }
+  if (msg.type === 'ACK' && msg.of === 'SET_CMDLIB') {
+    appendTerminalLine(msg.ok ? '< [cmdlib] ✓ saved to the NaviCore — it now travels to any browser that connects'
+                              : '< [cmdlib] ✗ save failed on the NaviCore (flash write error)', 'rx');
+    return;
+  }
+
   if (msg.type === 'PWM_UPDATE') {
     try {
       if (msg.sbus) updateSbusStatus(msg.sbus);
@@ -10574,6 +10595,7 @@ function _cmdlibShowList() {
     `<div style="padding:12px 16px 0;display:flex;gap:8px;align-items:center">
        <input type="text" id="cmdlib-search" placeholder="Search commands…" style="flex:1;box-sizing:border-box">
        <button type="button" id="cmdlib-import" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Import a command library .json (our schema or a DroidNet board file)">Import…</button>
+       <button type="button" id="cmdlib-save-board" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Save your custom (· custom) boards to the connected NaviCore's flash, so they travel to any browser/machine that connects to that droid">Save to NaviCore</button>
      </div>
      <details style="margin:10px 16px 0">
        <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Check online for a newer library (optional — a full library is already loaded)</summary>
@@ -10588,6 +10610,14 @@ function _cmdlibShowList() {
   search.oninput = () => _cmdlibRenderList(search.value);
   document.getElementById('cmdlib-import').onclick = () => document.getElementById('cmdlib-import-file').click();
   document.getElementById('cmdlib-fetch').onclick = _cmdlibFetchClicked;
+  // Save-to-NaviCore is only meaningful while connected — disable + explain otherwise.
+  const saveBtn = document.getElementById('cmdlib-save-board');
+  if (saveBtn) {
+    const connected = !!writer || sharedActive;
+    saveBtn.disabled = !connected;
+    if (!connected) saveBtn.title = 'Connect to a NaviCore first to save your custom boards to it';
+    saveBtn.onclick = () => saveCmdlibToBoard();
+  }
   _cmdlibRenderList('');
   search.focus();
 }
@@ -11143,6 +11173,30 @@ function _cmdlibRemoveCustom(boardId) {
 function _cmdlibCustomIds() {
   const store = _cmdlibLoadCustom();
   return new Set((store && Array.isArray(store.boards) ? store.boards : []).map(b => b && b.id).filter(Boolean));
+}
+
+// ── Sync custom boards with the NaviCore (flash /cmdlib.json) ─────────────────
+// The droid can store your private boards so they travel to any browser/machine
+// that connects. requestCmdlibFromBoard() pulls them on connect (the CMDLIB reply
+// is merged in handleBoardMessage); saveCmdlibToBoard() pushes the current
+// localStorage set to the droid. localStorage stays the local cache. Older
+// firmware simply never answers GET_CMDLIB, so we transparently keep localStorage.
+function requestCmdlibFromBoard() {
+  if (!writer && !sharedActive) return;
+  sendJSON({ type: 'GET_CMDLIB' }, /*silent=*/true).catch(() => {});
+}
+async function saveCmdlibToBoard() {
+  if (!writer && !sharedActive) { appendTerminalLine('· save: not connected to a NaviCore', 'rx'); return; }
+  const store = _cmdlibLoadCustom() || { schema: 'navicore-command-library/v1', enums: {}, boards: [] };
+  const n = (store.boards || []).length;
+  if (!n) { alert('No custom boards to save yet — Import one first.'); return; }
+  try {
+    // `data` MUST be the last field — the RC extracts it by substring (SET_CMDLIB).
+    await sendJSON({ type: 'SET_CMDLIB', data: store });
+    appendTerminalLine('> [cmdlib] saving ' + n + ' custom board(s) to the NaviCore…', 'tx');
+  } catch (e) {
+    appendTerminalLine('· save to NaviCore failed: ' + ((e && e.message) || e), 'rx');
+  }
 }
 
 function _cmdlibImport(file) {
