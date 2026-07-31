@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.12:18.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.12:39.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4428,7 +4428,7 @@ let _wcbKeepaliveTimer = null;
 // total ~150 bytes, comfortably under 187.  Must match
 // rcTelemetry::FRAG_CHUNK_BYTES so reassembly logic stays balanced.
 const FRAG_CHUNK_BYTES = 80;
-const FRAG_MAX_PARTS   = 192;   // MUST match rcTelemetry::FRAG_MAX_PARTS (rc_telemetry.h); 192 × 80 = 15 KB
+const FRAG_MAX_PARTS   = 384;   // MUST match rcTelemetry::FRAG_MAX_PARTS (rc_telemetry.h); 384 × 80 = 30 KB
 // Hard cap on the envelope JSON length (sans the ;w<id>, prefix).  Bridge
 // will silently strip the CRC suffix and the RC will drop the packet if
 // this is exceeded.  Bail loudly client-side so we notice if the chunk
@@ -7280,10 +7280,11 @@ function handleBoardMessage(line) {
     if (!msg.size || !msg.hash) {
       appendTerminalLine('< [cmdlib] NaviCore has no stored library', 'rx');
     } else if (sig === _cmdlibGetDroidSig() && haveLocal) {
-      appendTerminalLine('< [cmdlib] in sync with the NaviCore — skipping pull', 'rx');
+      appendTerminalLine('< [cmdlib] in sync with the NaviCore', 'rx');
     } else {
-      appendTerminalLine('< [cmdlib] NaviCore library differs (' + Math.round((msg.size || 0) / 1024) + ' KB) — pulling…', 'rx');
-      sendJSON({ type: 'GET_CMDLIB' }, /*silent=*/true).catch(() => {});
+      // NOTIFY only — never auto-pull (that muted telemetry on every connect).
+      // The user pulls on demand via the "Load from NaviCore" button.
+      appendTerminalLine('< [cmdlib] NaviCore has a different library (' + Math.round((msg.size || 0) / 1024) + ' KB) — open the command library and click "Load from NaviCore" to pull it', 'rx');
     }
     return;
   }
@@ -10626,6 +10627,7 @@ function _cmdlibShowList() {
     `<div style="padding:12px 16px 0;display:flex;gap:8px;align-items:center">
        <input type="text" id="cmdlib-search" placeholder="Search commands…" style="flex:1;box-sizing:border-box">
        <button type="button" id="cmdlib-import" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Import a command library .json (our schema or a DroidNet board file)">Import…</button>
+       <button type="button" id="cmdlib-load-board" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Pull the command library stored on the connected NaviCore (over USB or the WCB mesh). Over the mesh this pauses live telemetry for ~30-60 s while it transfers.">Load from NaviCore</button>
        <button type="button" id="cmdlib-save-board" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Save your custom (· custom) boards to the connected NaviCore's flash, so they travel to any browser/machine that connects to that droid">Save to NaviCore</button>
      </div>
      <details style="margin:10px 16px 0">
@@ -10641,10 +10643,16 @@ function _cmdlibShowList() {
   search.oninput = () => _cmdlibRenderList(search.value);
   document.getElementById('cmdlib-import').onclick = () => document.getElementById('cmdlib-import-file').click();
   document.getElementById('cmdlib-fetch').onclick = _cmdlibFetchClicked;
-  // Save-to-NaviCore is only meaningful while connected — disable + explain otherwise.
+  // Load/Save to the NaviCore are only meaningful while connected — disable otherwise.
+  const connected = !!writer || sharedActive;
+  const loadBtn = document.getElementById('cmdlib-load-board');
+  if (loadBtn) {
+    loadBtn.disabled = !connected;
+    if (!connected) loadBtn.title = 'Connect to a NaviCore first to load its stored library';
+    loadBtn.onclick = () => loadCmdlibFromBoard();
+  }
   const saveBtn = document.getElementById('cmdlib-save-board');
   if (saveBtn) {
-    const connected = !!writer || sharedActive;
     saveBtn.disabled = !connected;
     if (!connected) saveBtn.title = 'Connect to a NaviCore first to save your custom boards to it';
     saveBtn.onclick = () => saveCmdlibToBoard();
@@ -11216,17 +11224,24 @@ function _cmdlibCustomIds() {
 // a connect can compare and skip the (potentially slow) full pull when unchanged.
 function _cmdlibGetDroidSig() { try { return localStorage.getItem('nc_cmdlib_droid_sig') || ''; } catch (e) { return ''; } }
 function _cmdlibSetDroidSig(sig) { try { localStorage.setItem('nc_cmdlib_droid_sig', String(sig)); } catch (e) {} }
-// On connect, ask only for the cheap signature; the CMDLIB_META handler decides
-// whether a full GET_CMDLIB pull is actually needed.
-// DIRECT USB ONLY. Over the WCB bridge the pull is a multi-KB fragment transfer
-// that shares the config-send state machine and SUPPRESSES live telemetry (rc_hb/
-// rc_ch) for its whole duration (~tens of seconds for a big library) — which made
-// config + live channel + SBUS all look dead over WCB. So the library syncs only
-// over USB (fast, no size cap); over the bridge we rely on localStorage and the
-// manual "Save to NaviCore" button. See the note on _cmdlibDroidSig.
+// On connect, ask ONLY for the cheap signature (one tiny packet, safe on any
+// transport). The CMDLIB_META handler then just NOTIFIES if the droid's library
+// differs — it never auto-pulls. The full pull is a deliberate, on-demand action
+// (the "Load from NaviCore" button), because over the WCB bridge it's a multi-KB
+// fragment transfer that shares the config-send machine and mutes live telemetry
+// for its duration — fine when YOU trigger it, not on every connect.
 function requestCmdlibMetaFromBoard() {
-  if (!writer || viaWcbActive || sharedActive) return;   // pure Direct USB only
+  if (!writer && !sharedActive) return;
   sendJSON({ type: 'GET_CMDLIB_META' }, /*silent=*/true).catch(() => {});
+}
+// Manual, on-demand pull of the droid's command library (over USB or the WCB
+// bridge). The transfer suppresses live telemetry while it runs — acceptable for
+// a user-initiated one-shot. Merged + cached by the CMDLIB handler.
+function loadCmdlibFromBoard() {
+  if (!writer && !sharedActive) { appendTerminalLine('· load: not connected to a NaviCore', 'rx'); return; }
+  const overBridge = viaWcbActive || sharedActive;
+  appendTerminalLine('> [cmdlib] loading library from the NaviCore' + (overBridge ? ' over the mesh — this pauses live telemetry for ~30-60 s…' : '…'), 'tx');
+  sendJSON({ type: 'GET_CMDLIB' }, /*silent=*/true).catch((e) => appendTerminalLine('· load failed: ' + ((e && e.message) || e), 'rx'));
 }
 async function saveCmdlibToBoard() {
   if (!writer && !sharedActive) { appendTerminalLine('· save: not connected to a NaviCore', 'rx'); return; }
