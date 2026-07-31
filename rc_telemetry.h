@@ -123,14 +123,14 @@ constexpr size_t   FRAG_CHUNK_BYTES  = 80;   // underlying-JSON bytes per fragme
 // action chains + maestro slots + ...) fits.  Worst-case envelope size
 // per session: 192 × sizeof(String) ≈ 3 KB pointer overhead until any
 // fragment actually arrives; reasonable for the ESP32-S3's heap.
-// uint16_t (not uint8_t) — 384 exceeds 255, so this and every fragment count/index
-// derived from it (FragSession.total/got, the reassembly loop counters) must be
-// uint16_t. 384 × 80 = 30 KB, enough for a large command library over the WCB
-// bridge. The RECEIVE pool is `String parts[FRAG_MAX_PARTS] × FRAG_POOL_SIZE` of
-// static DRAM (≈18 KB at 384×3) — verified fine at runtime (the S3 stays on the
-// mesh at 384; an earlier "off the mesh" was tool-side traffic on connect, not
-// this). The library pull is a manual, on-demand action, not part of connect.
-constexpr uint16_t FRAG_MAX_PARTS    = 384;  // 384 × 80 = 30 KB max fragmented payload
+// uint16_t so this CAN exceed 255 if ever raised — but DO NOT raise it naively.
+// The RECEIVE pool is `String parts[FRAG_MAX_PARTS] × FRAG_POOL_SIZE` of STATIC
+// DRAM (≈10 KB at 192×3, ≈19 KB at 384×3). At 384 the RC CRASH-LOOPED ~2 s after
+// boot (heap starved for the config-load's ~96 KB doc → panic → reboot → repeat);
+// 192 is stable. A bigger bridge payload must come from a HEAP-allocated
+// reassembly buffer sized to the actual transfer, NOT a bigger static array.
+// Over-15 KB command libraries load/save over Direct USB (no cap there).
+constexpr uint16_t FRAG_MAX_PARTS    = 192;  // 192 × 80 = 15 KB max fragmented payload (STABLE — see above)
 constexpr uint8_t  FRAG_POOL_SIZE    = 3;    // concurrent reassembly sessions
 constexpr uint32_t FRAG_TIMEOUT_MS   = 5000;
 
