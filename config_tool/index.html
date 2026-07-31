@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.18:10.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.18:18.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -11264,7 +11264,7 @@ function loadCmdlibFromBoard() {
 // slow config / library pull streams in over the mesh. Auto-hides on completion or
 // if the transfer stalls. USB pulls aren't fragmented, so this is WCB-only by nature.
 let _fragProgTimer = null;
-function _fragProgress(got, total) {
+function _fragProgress(got, total, label) {
   let el = document.getElementById('frag-progress');
   if (!el) {
     if (!document.getElementById('frag-progress-style')) {
@@ -11291,7 +11291,7 @@ function _fragProgress(got, total) {
   }
   el.style.display = 'flex';
   const pct = total ? Math.round(got / total * 100) : 0;
-  document.getElementById('frag-progress-label').textContent = 'Loading over WCB';
+  document.getElementById('frag-progress-label').textContent = label || 'Loading over WCB';
   document.getElementById('frag-progress-pct').textContent = pct + '%';
   document.getElementById('frag-progress-bar').style.width = pct + '%';
   document.getElementById('frag-progress-count').textContent = got + ' / ' + total + ' packets';
@@ -11373,11 +11373,14 @@ async function sendCmdlibBulk(libJson) {
     const off = q * BULK_CHUNK_RAW;
     return '{"bc":' + sid + ',"q":' + q + ',"s":"' + _bulkB64(bytes.subarray(off, Math.min(off + BULK_CHUNK_RAW, total))) + '"}';
   };
+  const label = 'Saving library to NaviCore';
   const sendAll = async () => {
     for (let q = 0; q < n; q++) { await _bulkLine(chunkEnv(q)); await _bulkPace();
+      _fragProgress(q + 1, n, label);
       if ((q & 63) === 63) appendTerminalLine('· [cmdlib] sent ' + (q + 1) + '/' + n, 'rx'); }
   };
   try {
+    _fragProgress(0, n, label);   // show the loading screen the instant Save is clicked
     await _bulkLine(beginEnv); await _bulkPace();
     await sendAll();
     let round = 0, doneRetries = 0, noProgress = 0, lastGot = -1, resend = null;
@@ -11402,10 +11405,12 @@ async function sendCmdlibBulk(libJson) {
         if (msg.got <= lastGot) { if (++noProgress > 8) throw new Error('transfer stalled — try Direct USB'); }
         else { noProgress = 0; lastGot = msg.got; }
       }
+      _fragProgress(typeof msg.got === 'number' ? msg.got : n, n, label);
       appendTerminalLine('· [cmdlib] ' + (typeof msg.got === 'number' ? msg.got : '?') + '/' + n + ' chunks, ' + miss.length + ' missing', 'rx');
       resend = miss.length ? miss : null;
     }
   } finally {
+    _fragProgressDone();
     if (_bulkActive && _bulkActive.awaitTimer) clearTimeout(_bulkActive.awaitTimer);
     _bulkActive = null;
   }
