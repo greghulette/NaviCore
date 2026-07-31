@@ -4293,7 +4293,20 @@ async function sendLine(msg, silent = false) {
   if (!writer) return;
   if (!silent) appendTerminalLine('> ' + msg, 'tx');
   const encoded = new TextEncoder().encode(msg + '\n');
-  await writer.write(encoded);
+  // Pace a LARGE single-line write. The RC's USB-CDC RX buffer is only a few KB;
+  // dumping a ~10 KB line all at once (a full SET_CONFIG or a SET_CMDLIB library
+  // save) overflows it before loop() drains, dropping bytes mid-JSON → the RC
+  // reports "JSON parse failed (InvalidInput)". Chunk + yield so loop() drains
+  // between chunks. Small writes (the overwhelming common case) go in one shot.
+  const USB_CHUNK = 512;
+  if (encoded.length <= USB_CHUNK) {
+    await writer.write(encoded);
+  } else {
+    for (let i = 0; i < encoded.length; i += USB_CHUNK) {
+      await writer.write(encoded.subarray(i, Math.min(i + USB_CHUNK, encoded.length)));
+      await new Promise(r => setTimeout(r, 4));   // let the RC's loop() drain the RX buffer
+    }
+  }
 }
 
 // ── Via WCB bridge state ────────────────────────────────────────────────────
