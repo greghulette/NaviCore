@@ -92,8 +92,9 @@ bool   rcConfigFromJSON(const String& json);
 bool   rcConfigFromJSON(const JsonObject& doc);   // JsonObject overload — skip the double-parse
 bool   rcConfigSaveNVS();   // legacy NVS save (migration source only)
 bool   rcConfigSaveLFS();   // primary: persist config to /config.json on LittleFS
-bool   rcCmdlibSaveLFS(const String& json);   // persist the config tool's private command library to /cmdlib.json
-bool   rcCmdlibLoadLFS(String& out);          // read /cmdlib.json (raw JSON) — false if missing/empty
+bool     rcCmdlibSaveLFS(const String& json); // persist the config tool's private command library to /cmdlib.json
+bool     rcCmdlibLoadLFS(String& out);        // read /cmdlib.json (raw JSON) — false if missing/empty
+uint32_t rcCmdlibHash(const String& s);       // FNV-1a signature of the stored library (change-detection)
 
 namespace rcTelemetry {
 
@@ -122,7 +123,14 @@ constexpr size_t   FRAG_CHUNK_BYTES  = 80;   // underlying-JSON bytes per fragme
 // action chains + maestro slots + ...) fits.  Worst-case envelope size
 // per session: 192 × sizeof(String) ≈ 3 KB pointer overhead until any
 // fragment actually arrives; reasonable for the ESP32-S3's heap.
-constexpr uint8_t  FRAG_MAX_PARTS    = 192;  // 192 × 80 = 15 KB max payload
+// uint16_t (not uint8_t) — 384 exceeds 255, so the type MUST hold >255, as must
+// every fragment count/index derived from it (FragSession.total/got, the
+// reassembly loop counters). 384 × 80 = 30 KB, enough for a large command
+// library over the WCB bridge (a ~30 KB blob is ~384 fragments × 150 ms ≈ 58 s
+// worst case — rare, and gated by the CMDLIB signature check so it only runs when
+// the library actually changed). Static cost: 3 sessions × 384 × sizeof(String)
+// ≈ 18 KB of pointer overhead (idle), fine on the S3.
+constexpr uint16_t FRAG_MAX_PARTS    = 384;  // 384 × 80 = 30 KB max fragmented payload
 constexpr uint8_t  FRAG_POOL_SIZE    = 3;    // concurrent reassembly sessions
 constexpr uint32_t FRAG_TIMEOUT_MS   = 5000;
 
@@ -137,8 +145,8 @@ constexpr bool     RC_TELEM_VERBOSE  = false;
 
 struct FragSession {
   uint16_t sid;          // 0 = slot free
-  uint8_t  total;        // expected fragment count
-  uint8_t  got;          // received so far
+  uint16_t total;        // expected fragment count (can exceed 255 — see FRAG_MAX_PARTS)
+  uint16_t got;          // received so far
   uint8_t  senderID;     // who sent the fragments (for the SET_CONFIG ack)
   uint32_t expireAt;     // millis() when this session is reclaimed
   String   parts[FRAG_MAX_PARTS];
@@ -154,7 +162,7 @@ struct FragSession {
 inline FragSession _fragPool[FRAG_POOL_SIZE] = {};
 inline uint16_t    _nextOutSid = 1;            // sender-side sid generator
 
-inline FragSession* _findOrAllocSession(uint16_t sid, uint8_t total, uint8_t senderID) {
+inline FragSession* _findOrAllocSession(uint16_t sid, uint16_t total, uint8_t senderID) {
   const uint32_t now = millis();
   FragSession* freeSlot = nullptr;
   // First pass: reclaim expired slots BEFORE the sid-match check.  If we
@@ -184,7 +192,7 @@ inline FragSession* _findOrAllocSession(uint16_t sid, uint8_t total, uint8_t sen
   // FragSession{} default-construction already zeroed `received[]`, but
   // when we re-claim a slot that previously had a different sid we want
   // to be sure no stale flags carry over.  Cheap belt-and-braces.
-  for (uint8_t i = 0; i < FRAG_MAX_PARTS; i++) freeSlot->received[i] = false;
+  for (uint16_t i = 0; i < FRAG_MAX_PARTS; i++) freeSlot->received[i] = false;
   return freeSlot;
 }
 
@@ -233,6 +241,10 @@ inline uint8_t _pendingGetConfigSender = 0;
 // _pendingGetConfigSender (both drive the ONE _outSend fragment machine, so
 // tick() arms whichever is pending only when _outSend is idle).
 inline uint8_t _pendingGetCmdlibSender = 0;
+// GET_CMDLIB_META requester — a tiny one-packet reply (size+hash), no fragment
+// machine involved; answered from tick() (Core 1) to keep the flash read off the
+// Core-0 receive callback.
+inline uint8_t _pendingGetCmdlibMetaSender = 0;
 
 // Deferred bridged WCB_STATUS reply. handle() runs in the WCB_Client receive
 // callback (Core 0 WiFi task); building the status fires ?WHOAMI ESP-NOW sends
@@ -379,9 +391,15 @@ inline bool _startGetCmdlibSend(uint8_t target) {
   String body;
   if (!rcCmdlibLoadLFS(body) || body.length() == 0)
     body = "{\"boards\":[],\"enums\":{}}";
+  // Carry the size + signature so the tool can cache "this is what the droid
+  // has" and skip re-pulling next time (see the CMDLIB_META check). `data` is
+  // still LAST — harmless here (the tool parses the whole reassembled message).
+  char meta[64];
+  snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
+           (unsigned)body.length(), (unsigned)rcCmdlibHash(body));
   String wrapped;
-  wrapped.reserve(body.length() + 24);
-  wrapped += "{\"type\":\"CMDLIB\",\"data\":";
+  wrapped.reserve(body.length() + 72);
+  wrapped += meta;
   wrapped += body;
   wrapped += "}";
   return _startFragSend(target, wrapped, "CMDLIB");
@@ -631,14 +649,16 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     bool ok = false;
     int k = json.indexOf("\"data\":");
     int end = json.lastIndexOf('}');
+    uint32_t h = 0, sz = 0;
     if (k >= 0 && end > k + 7) {
       String lib = json.substring(k + 7, end);
       lib.trim();
-      if (lib.length() > 0) ok = rcCmdlibSaveLFS(lib);
+      if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
     }
     Serial.printf("[RC] SET_CMDLIB → %s\n", ok ? "saved to LittleFS" : "SAVE FAILED / empty");
-    char ack[72];
-    snprintf(ack, sizeof(ack), "{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s}", ok ? "true" : "false");
+    char ack[96];
+    snprintf(ack, sizeof(ack), "{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}",
+             ok ? "true" : "false", (unsigned)sz, (unsigned)h);
     if (wcb) wcb->send(senderID, ack);
     return;
   }
@@ -704,6 +724,19 @@ inline void tick() {
     const uint8_t to = _pendingGetCmdlibSender;
     _pendingGetCmdlibSender = 0;
     _startGetCmdlibSend(to);   // false = nothing to send (bailed) — already cleared
+  }
+  // GET_CMDLIB_META — one tiny packet (size + signature) so the tool can skip a
+  // re-pull when its cache already matches. Flash read done here on Core 1. Only
+  // when the fragment machine is idle, so it never interleaves with a transfer.
+  if (_pendingGetCmdlibMetaSender != 0 && !_outSend.active) {
+    const uint8_t to = _pendingGetCmdlibMetaSender;
+    _pendingGetCmdlibMetaSender = 0;
+    String lib; uint32_t h = 0, sz = 0;
+    if (rcCmdlibLoadLFS(lib) && lib.length()) { sz = lib.length(); h = rcCmdlibHash(lib); }
+    char buf[72];
+    snprintf(buf, sizeof(buf), "{\"type\":\"CMDLIB_META\",\"size\":%u,\"hash\":%u}", (unsigned)sz, (unsigned)h);
+    if (wcb) wcb->send(to, buf);
+    return;   // one reply this tick
   }
   if (_pumpGetConfigSend()) return;   // a send is in progress this tick — suppress telemetry
 
@@ -1066,7 +1099,7 @@ inline bool handle(uint8_t senderID, const char* command) {
     if (f < 1 || total < 1 || total > FRAG_MAX_PARTS || f > total || sid == 0) {
       return true;   // malformed envelope — drop silently
     }
-    FragSession* sess = _findOrAllocSession((uint16_t)sid, (uint8_t)total, senderID);
+    FragSession* sess = _findOrAllocSession((uint16_t)sid, (uint16_t)total, senderID);
     if (!sess) {
       Serial.println("[RC] Fragment pool exhausted — dropping");
       return true;
@@ -1075,7 +1108,7 @@ inline bool handle(uint8_t senderID, const char* command) {
     // the same sid that disagrees on 'of' is malformed/spoofed — its 'f' could
     // index past the real part set and inflate 'got' to false-complete the
     // session with missing/stale parts. Drop the mismatched fragment.
-    if ((uint8_t)total != sess->total) return true;
+    if ((uint16_t)total != sess->total) return true;
     // Use the explicit received[] flag rather than parts[].length() so an
     // empty slice (legitimately possible if the sender ever produces one)
     // can't masquerade as "not yet received" on duplicate arrivals.
@@ -1099,13 +1132,13 @@ inline bool handle(uint8_t senderID, const char* command) {
     // the got counter alone to decide reassembly is ready.
     bool complete = sess->got >= sess->total;
     if (complete)
-      for (uint8_t i = 0; i < sess->total; i++)
+      for (uint16_t i = 0; i < sess->total; i++)
         if (!sess->received[i]) { complete = false; break; }
     if (complete) {
       // Reassemble — concatenate all parts in order.
       String full;
       full.reserve(sess->total * FRAG_CHUNK_BYTES);
-      for (uint8_t i = 0; i < sess->total; i++) full += sess->parts[i];
+      for (uint16_t i = 0; i < sess->total; i++) full += sess->parts[i];
       uint8_t fromId = sess->senderID;
       *sess = FragSession{};   // free the slot before stashing
       Serial.printf("[RC] frag sid=%u COMPLETE, deferring %u bytes to main loop\n",
@@ -1246,6 +1279,11 @@ inline bool handle(uint8_t senderID, const char* command) {
   // (tick arms whichever is pending only when the fragment machine is idle).
   if (!strcmp(type, "GET_CMDLIB")) {
     if (_pendingGetCmdlibSender == 0) _pendingGetCmdlibSender = senderID;
+    return true;
+  }
+  // GET_CMDLIB_META — cheap signature so the tool decides whether to pull.
+  if (!strcmp(type, "GET_CMDLIB_META")) {
+    _pendingGetCmdlibMetaSender = senderID;   // answered from tick() (Core 1)
     return true;
   }
 

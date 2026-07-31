@@ -1630,6 +1630,17 @@ bool rcCmdlibLoadLFS(String& out) {
   return out.length() > 0;
 }
 
+// FNV-1a 32-bit hash of a string — the config tool's "is my cached copy current?"
+// signature. Computed by the RC over the stored library bytes and reported back
+// (opaque to the tool, which just compares it) so a connect can skip re-pulling
+// an unchanged library. Same bytes in → same value on every call.
+uint32_t rcCmdlibHash(const String& s) {
+  uint32_t h = 2166136261u;                 // FNV offset basis
+  const size_t n = s.length();
+  for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
+  return h;
+}
+
 // Returns true only if EVERY NVS value was written successfully.
 bool rcConfigSaveNVS() {
   bool ok = true;
