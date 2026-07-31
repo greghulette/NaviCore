@@ -2284,7 +2284,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.11:25.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.11:51.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3782,7 +3782,7 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
 
   await sendJSON({ type: 'GET_CONFIG' });
   await new Promise(r => setTimeout(r, 400));
-  requestCmdlibFromBoard();   // pull the droid's stored private command library (fire-and-forget; older fw just won't reply)
+  requestCmdlibMetaFromBoard();   // check the droid's library signature; pull only if it differs (fire-and-forget; older fw just won't reply)
   await sendJSON({ type: 'START_MONITOR' });
   isMonitoring = true;
   // Push current debug-chip state to the firmware so it knows which
@@ -3900,7 +3900,7 @@ async function connectSharedPort() {
   for (let i = 0; i < 6 && !_pongSeen; i++) { await sendJSON({ type: 'PING' }); await new Promise(r => setTimeout(r, 500)); }
   await sendJSON({ type: 'GET_CONFIG' });
   await new Promise(r => setTimeout(r, 400));
-  requestCmdlibFromBoard();   // pull the droid's stored private command library (fire-and-forget; older fw just won't reply)
+  requestCmdlibMetaFromBoard();   // check the droid's library signature; pull only if it differs (fire-and-forget; older fw just won't reply)
   await sendJSON({ type: 'START_MONITOR' });
   isMonitoring = true;
   sendDebugFlagsToBoard();
@@ -4428,7 +4428,7 @@ let _wcbKeepaliveTimer = null;
 // total ~150 bytes, comfortably under 187.  Must match
 // rcTelemetry::FRAG_CHUNK_BYTES so reassembly logic stays balanced.
 const FRAG_CHUNK_BYTES = 80;
-const FRAG_MAX_PARTS   = 192;   // matches RC firmware (rc_telemetry.h); 192 × 80 = 15 KB
+const FRAG_MAX_PARTS   = 384;   // MUST match rcTelemetry::FRAG_MAX_PARTS (rc_telemetry.h); 384 × 80 = 30 KB
 // Hard cap on the envelope JSON length (sans the ;w<id>, prefix).  Bridge
 // will silently strip the CRC suffix and the RC will drop the packet if
 // this is exceeded.  Bail loudly client-side so we notice if the chunk
@@ -7271,13 +7271,30 @@ function handleBoardMessage(line) {
     return;
   }
 
+  // Cheap library signature from the droid (GET_CMDLIB_META reply). Pull the full
+  // library ONLY when it differs from what we last synced — so an everyday connect
+  // to a droid we already match skips the (possibly ~tens-of-seconds) transfer.
+  if (msg.type === 'CMDLIB_META') {
+    const sig = String(msg.hash || 0);
+    const haveLocal = !!_cmdlibLoadCustom();
+    if (!msg.size || !msg.hash) {
+      appendTerminalLine('< [cmdlib] NaviCore has no stored library', 'rx');
+    } else if (sig === _cmdlibGetDroidSig() && haveLocal) {
+      appendTerminalLine('< [cmdlib] in sync with the NaviCore — skipping pull', 'rx');
+    } else {
+      appendTerminalLine('< [cmdlib] NaviCore library differs (' + Math.round((msg.size || 0) / 1024) + ' KB) — pulling…', 'rx');
+      sendJSON({ type: 'GET_CMDLIB' }, /*silent=*/true).catch(() => {});
+    }
+    return;
+  }
   // The droid's stored private command library (GET_CMDLIB reply). Merge it into
-  // the live catalog + cache to localStorage so it's there offline too. Arrives
-  // once on connect; older firmware never sends it (we keep localStorage).
+  // the live catalog + cache to localStorage; record the droid's signature so the
+  // next connect can skip the pull. Older firmware never sends it (we keep localStorage).
   if (msg.type === 'CMDLIB') {
     try {
       const added = _cmdlibMergeLibraryData(msg.data || {});
       if (added) { _cmdlibSaveCustom(msg.data || {}); _cmdlibNormalize(); }
+      if (typeof msg.hash !== 'undefined') _cmdlibSetDroidSig(msg.hash);
       const modal = document.getElementById('cmdlib-modal');
       if (modal && modal.classList.contains('open') && document.getElementById('cmdlib-search')) _cmdlibShowList();
       appendTerminalLine('< [cmdlib] loaded ' + added + ' custom board(s) from the NaviCore', 'rx');
@@ -7285,6 +7302,7 @@ function handleBoardMessage(line) {
     return;
   }
   if (msg.type === 'ACK' && msg.of === 'SET_CMDLIB') {
+    if (msg.ok && typeof msg.hash !== 'undefined') _cmdlibSetDroidSig(msg.hash);   // now in sync with the droid
     appendTerminalLine(msg.ok ? '< [cmdlib] ✓ saved to the NaviCore — it now travels to any browser that connects'
                               : '< [cmdlib] ✗ save failed on the NaviCore (flash write error)', 'rx');
     return;
@@ -11194,9 +11212,15 @@ function _cmdlibCustomIds() {
 // is merged in handleBoardMessage); saveCmdlibToBoard() pushes the current
 // localStorage set to the droid. localStorage stays the local cache. Older
 // firmware simply never answers GET_CMDLIB, so we transparently keep localStorage.
-function requestCmdlibFromBoard() {
+// The droid's library signature (size+hash) the tool last synced with. Stored so
+// a connect can compare and skip the (potentially slow) full pull when unchanged.
+function _cmdlibGetDroidSig() { try { return localStorage.getItem('nc_cmdlib_droid_sig') || ''; } catch (e) { return ''; } }
+function _cmdlibSetDroidSig(sig) { try { localStorage.setItem('nc_cmdlib_droid_sig', String(sig)); } catch (e) {} }
+// On connect, ask only for the cheap signature; the CMDLIB_META handler decides
+// whether a full GET_CMDLIB pull is actually needed.
+function requestCmdlibMetaFromBoard() {
   if (!writer && !sharedActive) return;
-  sendJSON({ type: 'GET_CMDLIB' }, /*silent=*/true).catch(() => {});
+  sendJSON({ type: 'GET_CMDLIB_META' }, /*silent=*/true).catch(() => {});
 }
 async function saveCmdlibToBoard() {
   if (!writer && !sharedActive) { appendTerminalLine('· save: not connected to a NaviCore', 'rx'); return; }
