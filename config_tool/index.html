@@ -994,7 +994,8 @@
     <button class="btn btn-ghost" id="btn-hwsetup" type="button">Config</button>
     <button class="btn btn-ghost" id="btn-export-cfg" type="button">Export</button>
     <button class="btn btn-ghost" id="btn-import-cfg" type="button">Import</button>
-    <button class="btn btn-ghost" id="btn-cloud-backup" type="button" title="Encrypted cloud backup / restore of your config — persists (no expiry), private to your WCB password, keeps the last 10">☁ Cloud</button>
+    <!-- Cloud backup has NO visible button — it's a hidden feature. Trigger: click
+         the "NaviCore" wordmark 4× quickly (wired near the other toolbar handlers). -->
     <button class="btn btn-ghost" id="btn-cheatsheet" type="button" title="Printable control cheat sheet — what every button / switch / knob does (HTML or PDF)">📋 Cheat Sheet</button>
     <button class="btn btn-ghost" id="btn-terminal" type="button" title="Open terminal">⌨ Terminal</button>
     <button class="btn btn-ghost" id="btn-clips" type="button" title="Record/replay clip library" onclick="openClipsModal()">🎬 Clips</button>
@@ -2285,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.17:30.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.17:54.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7272,9 +7273,11 @@ function handleBoardMessage(line) {
       sess.parts[f - 1] = msg.s || '';
       sess.got++;
       sess.expireAt = Date.now() + FRAG_TIMEOUT_MS;
+      if (sess.total >= 4) _fragProgress(sess.got, sess.total);   // visible bar for slow multi-packet pulls (config over WCB)
     }
     if (sess.got >= sess.total) {
       _fragSessions.delete(sid);
+      _fragProgressDone();
       const full = sess.parts.join('');
       console.log(`[frag] sid ${sid} COMPLETE — ${sess.total} parts, ${full.length} bytes → applying`);
       handleBoardMessage(full);   // recurse with the reassembled payload
@@ -11256,6 +11259,35 @@ function loadCmdlibFromBoard() {
   appendTerminalLine('> [cmdlib] loading library from the NaviCore' + (overBridge ? ' over the mesh — this pauses live telemetry for ~30-60 s…' : '…'), 'tx');
   sendJSON({ type: 'GET_CMDLIB' }, /*silent=*/true).catch((e) => appendTerminalLine('· load failed: ' + ((e && e.message) || e), 'rx'));
 }
+// ── Reassembly progress indicator (multi-packet pulls over the WCB bridge) ────
+// The fragment reassembler knows got/total, so show a small floating bar while a
+// slow config / library pull streams in over the mesh. Auto-hides on completion or
+// if the transfer stalls. USB pulls aren't fragmented, so this is WCB-only by nature.
+let _fragProgTimer = null;
+function _fragProgress(got, total) {
+  let el = document.getElementById('frag-progress');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'frag-progress';
+    el.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9998;background:var(--panel,#1e1e24);color:var(--fg,#e8e8ea);border:1px solid var(--border,#3a3a44);border-radius:8px;padding:6px 12px;font-size:12.5px;box-shadow:0 6px 20px rgba(0,0,0,.45);display:flex;align-items:center;gap:9px';
+    el.innerHTML = '<span id="frag-progress-label" style="white-space:nowrap"></span>'
+      + '<span style="width:130px;height:6px;background:var(--border,#33333c);border-radius:3px;overflow:hidden;display:inline-block">'
+      + '<span id="frag-progress-bar" style="display:block;height:100%;width:0;background:var(--accent,#4ea1ff);transition:width .12s"></span></span>';
+    document.body.appendChild(el);
+  }
+  el.style.display = 'flex';
+  const pct = total ? Math.round(got / total * 100) : 0;
+  document.getElementById('frag-progress-label').textContent = 'Loading over WCB… ' + got + '/' + total + ' (' + pct + '%)';
+  document.getElementById('frag-progress-bar').style.width = pct + '%';
+  clearTimeout(_fragProgTimer);
+  _fragProgTimer = setTimeout(_fragProgressDone, 6000);   // auto-hide if the stream stalls
+}
+function _fragProgressDone() {
+  clearTimeout(_fragProgTimer);
+  const el = document.getElementById('frag-progress');
+  if (el) el.style.display = 'none';
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Bulk command-library upload over the WCB mesh (selective-NACK)
 //  --------------------------------------------------------------------------
@@ -13142,7 +13174,22 @@ document.getElementById('btn-defaults').addEventListener('click', async () => {
 
 document.getElementById('btn-export-cfg').addEventListener('click', exportConfigCsv);
 document.getElementById('btn-import-cfg').addEventListener('click', () => document.getElementById('cfg-import-file').click());
-document.getElementById('btn-cloud-backup').addEventListener('click', cfgOpenCloudModal);
+// Cloud backup is a HIDDEN feature — no visible button. Secret trigger: click the
+// "NaviCore" wordmark 4× quickly. Invisible (no hint, not Tab-focusable), and 4
+// clicks won't collide with the browser's triple-click text-select or happen by
+// accident. (The backup's data is encrypted under your WCB password regardless.)
+(() => {
+  const brand = document.querySelector('.brand-word');
+  if (!brand) return;
+  brand.style.userSelect = 'none';        // suppress the multi-click text highlight
+  let clicks = 0, timer = null;
+  brand.addEventListener('click', () => {
+    clicks++;
+    clearTimeout(timer);
+    if (clicks >= 4) { clicks = 0; cfgOpenCloudModal(); return; }
+    timer = setTimeout(() => { clicks = 0; }, 900);
+  });
+})();
 document.getElementById('btn-cheatsheet').addEventListener('click', openCheatSheet);
 // Launching from inside Config: close the Config modal first so calibration
 // gets the foreground cleanly instead of stacking modal on top of modal.
