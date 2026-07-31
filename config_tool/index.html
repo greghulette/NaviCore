@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.17:54.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.18:10.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -11267,18 +11267,34 @@ let _fragProgTimer = null;
 function _fragProgress(got, total) {
   let el = document.getElementById('frag-progress');
   if (!el) {
+    if (!document.getElementById('frag-progress-style')) {
+      const st = document.createElement('style');
+      st.id = 'frag-progress-style';
+      st.textContent = '@keyframes fragspin{to{transform:rotate(360deg)}}';
+      document.head.appendChild(st);
+    }
     el = document.createElement('div');
     el.id = 'frag-progress';
-    el.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9998;background:var(--panel,#1e1e24);color:var(--fg,#e8e8ea);border:1px solid var(--border,#3a3a44);border-radius:8px;padding:6px 12px;font-size:12.5px;box-shadow:0 6px 20px rgba(0,0,0,.45);display:flex;align-items:center;gap:9px';
-    el.innerHTML = '<span id="frag-progress-label" style="white-space:nowrap"></span>'
-      + '<span style="width:130px;height:6px;background:var(--border,#33333c);border-radius:3px;overflow:hidden;display:inline-block">'
-      + '<span id="frag-progress-bar" style="display:block;height:100%;width:0;background:var(--accent,#4ea1ff);transition:width .12s"></span></span>';
+    // Full-screen dim scrim + big centered card = an unmistakable "loading" state.
+    // pointer-events:none so it can never trap the UI if it ever lingers.
+    el.style.cssText = 'position:fixed;inset:0;z-index:9998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.32);pointer-events:none';
+    el.innerHTML =
+      '<div style="background:var(--panel,#1e1e24);color:var(--fg,#e8e8ea);border:2px solid var(--accent,#4ea1ff);border-radius:16px;padding:26px 34px;min-width:300px;box-shadow:0 0 0 5px rgba(78,161,255,.18),0 18px 55px rgba(0,0,0,.6);text-align:center">'
+      +   '<div style="display:flex;align-items:center;justify-content:center;gap:11px;font-size:15px;font-weight:600;margin-bottom:14px">'
+      +     '<span style="display:inline-block;width:18px;height:18px;border:3px solid var(--border,#444);border-top-color:var(--accent,#4ea1ff);border-radius:50%;animation:fragspin .7s linear infinite"></span>'
+      +     '<span id="frag-progress-label"></span></div>'
+      +   '<div id="frag-progress-pct" style="font-size:40px;font-weight:800;line-height:1;color:var(--accent,#4ea1ff);margin-bottom:14px"></div>'
+      +   '<div style="width:300px;max-width:72vw;height:12px;background:var(--border,#33333c);border-radius:6px;overflow:hidden;margin:0 auto">'
+      +     '<span id="frag-progress-bar" style="display:block;height:100%;width:0;background:var(--accent,#4ea1ff);border-radius:6px;transition:width .15s"></span></div>'
+      +   '<div id="frag-progress-count" style="font-size:12.5px;color:var(--muted,#9a9aa2);margin-top:12px"></div></div>';
     document.body.appendChild(el);
   }
   el.style.display = 'flex';
   const pct = total ? Math.round(got / total * 100) : 0;
-  document.getElementById('frag-progress-label').textContent = 'Loading over WCB… ' + got + '/' + total + ' (' + pct + '%)';
+  document.getElementById('frag-progress-label').textContent = 'Loading over WCB';
+  document.getElementById('frag-progress-pct').textContent = pct + '%';
   document.getElementById('frag-progress-bar').style.width = pct + '%';
+  document.getElementById('frag-progress-count').textContent = got + ' / ' + total + ' packets';
   clearTimeout(_fragProgTimer);
   _fragProgTimer = setTimeout(_fragProgressDone, 6000);   // auto-hide if the stream stalls
 }
