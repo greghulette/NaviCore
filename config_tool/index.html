@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.18:18.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.18:40.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10640,8 +10640,8 @@ function closeCmdLibrary() {
 function _cmdlibShowList() {
   const body = document.getElementById('cmdlib-body');
   body.innerHTML =
-    `<div style="padding:12px 16px 0;display:flex;gap:8px;align-items:center">
-       <input type="text" id="cmdlib-search" placeholder="Search commands…" style="flex:1;box-sizing:border-box">
+    `<div style="padding:12px 16px 0;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+       <input type="text" id="cmdlib-search" placeholder="Search commands…" style="flex:1 1 180px;min-width:180px;box-sizing:border-box">
        <button type="button" id="cmdlib-import" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Import a command library .json (our schema or a DroidNet board file)">Import…</button>
        <button type="button" id="cmdlib-load-board" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Pull the command library stored on the connected NaviCore (over USB or the WCB mesh). Over the mesh this pauses live telemetry for ~30-60 s while it transfers.">Load from NaviCore</button>
        <button type="button" id="cmdlib-save-board" class="btn btn-ghost" style="padding:6px 10px;white-space:nowrap" title="Save your custom (· custom) boards to the connected NaviCore's flash, so they travel to any browser/machine that connects to that droid">Save to NaviCore</button>
@@ -13691,20 +13691,52 @@ async function otaUpdateOverWcb() {
     if (!ack || ack.status !== 0)
       throw new Error('target rejected BEGIN (chip family / no OTA slot / offline / unreachable?)');
 
-    // DATA — ACK-paced; follow the target's authoritative contiguous cursor. A
-    // dropped DATA/ACK is resent from the cursor (idempotent) instead of aborting.
+    // DATA — WINDOWED (pipelined) Go-Back-N over the target's cursor. The target
+    // queues up to 12 packets, writes contiguously, no-ops anything out-of-order,
+    // and ALWAYS ACKs its write cursor (navicore_ota.h). So rather than send-one-
+    // wait-one (~1 packet per mesh round-trip → ~20 min for a 1 MB image), we send
+    // a WINDOW of packets ahead and let the cursor ACKs pull it along; on a gap
+    // (cursor stuck) we rewind to the cursor and resend. Sender-only — works on the
+    // firmware already on the target. Throughput self-tunes to the target's drain
+    // rate; WINDOW < the 12-deep queue so we never cause our own overflow drops.
     setStatus('OTA-WCB: streaming…');
-    let offset = 0, stalls = 0;
-    while (offset < size) {
-      const slice = bytes.subarray(offset, Math.min(offset + CHUNK, size));
-      const got = await otaSendAwaitAck(`?OTA,DATA,${target},${session},${offset},${toB64(slice)}`, 3000, 8);
-      if (!got) throw new Error(`no ACK after retries at ${offset} — target unreachable`);
-      if (got.status !== 0) throw new Error(`target write error (status ${got.status}) at ${got.offset}`);
-      const before = offset;
-      offset = got.offset;                 // authoritative cursor (handles gaps/dups/rewind)
-      if (offset === before) { if (++stalls > 60) throw new Error(`stalled at ${offset} — target not advancing`); }
-      else stalls = 0;
-      setProgress(offset, size);
+    const WINDOW  = 8;      // packets in flight (< the target's 12-deep RX queue)
+    const PACE_MS = 12;     // small gap between sends so a burst can't flood the relay/USB
+    let confirmed = 0;      // target's ACK'd write cursor (bytes)
+    let nextSend  = 0;      // next offset to transmit (bytes)
+    let noAdvance = 0;      // consecutive cursor-stuck ACKs → the packet at `confirmed` is lost
+    let idleAcks  = 0;      // consecutive ACK timeouts → hard stall
+    while (confirmed < size) {
+      // Fill the window (send-ahead, don't wait per packet).
+      while (nextSend < size && (nextSend - confirmed) < WINDOW * CHUNK) {
+        const slice = bytes.subarray(nextSend, Math.min(nextSend + CHUNK, size));
+        await sendLine(`?OTA,DATA,${target},${session},${nextSend},${toB64(slice)}`, true);
+        nextSend += CHUNK;
+        if (PACE_MS) await new Promise(r => setTimeout(r, PACE_MS));
+      }
+      // Consume one cursor ACK (buffered ones return immediately).
+      let m;
+      try { m = await _otaAwaitMarker(2000); }
+      catch (_) {                                   // no ACK → resend the window from the cursor
+        if (++idleAcks > 8) throw new Error(`stalled at ${confirmed} of ${size} — target not advancing`);
+        nextSend = confirmed; noAdvance = 0;
+        continue;
+      }
+      idleAcks = 0;
+      const a = parseAck(m);
+      if (!a) throw new Error('unexpected response during stream');
+      if (a.session !== session || a.src !== target) continue;               // foreign / stale — ignore
+      if (a.status !== 0) throw new Error(`target write error (status ${a.status}) at ${a.offset}`);
+      if (a.offset > confirmed) {                   // cursor advanced
+        confirmed = a.offset; noAdvance = 0;
+        setProgress(confirmed, size);
+      } else if (a.offset === confirmed && nextSend > confirmed) {
+        // Target rejected an ahead-of-cursor packet → a gap at `confirmed`. Once a
+        // whole window's worth is rejected, the packet at `confirmed` is truly lost:
+        // rewind and resend from there (a reorder would advance first, resetting this).
+        if (++noAdvance >= WINDOW - 1) { nextSend = confirmed; noAdvance = 0; }
+      }
+      // a.offset < confirmed → stale/duplicate ACK; ignore.
     }
 
     // END — verify (SHA) + switch boot slot; the target reboots remotely. Resend
