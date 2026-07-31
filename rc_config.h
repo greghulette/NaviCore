@@ -1589,8 +1589,12 @@ bool rcConfigLoadLFS() {
 // The RC stores this JSON OPAQUELY — it never parses or uses it. It's the config
 // tool's private command-library boards, kept on the droid so they travel to any
 // browser/machine that connects. Saved/served verbatim; the tool owns the shape.
-static const char* RC_CMDLIB_PATH     = "/cmdlib.json";
-static const char* RC_CMDLIB_TMP_PATH = "/cmdlib.json.tmp";
+static const char* RC_CMDLIB_PATH      = "/cmdlib.json";
+static const char* RC_CMDLIB_TMP_PATH  = "/cmdlib.json.tmp";
+// Bulk-transfer staging file — DISTINCT from RC_CMDLIB_TMP_PATH so a concurrent
+// old-style rcCmdlibSaveLFS() (which truncates+renames+removes the .tmp) can never
+// unlink the inode a multi-second bulk session is still seek-writing.
+static const char* RC_CMDLIB_BULK_TMP  = "/cmdlib.json.bulk.tmp";
 
 // Atomic write (tmp + rename + on-flash size verify), same discipline as the
 // config save so a power loss can't corrupt the live file. `json` is the raw
@@ -1638,6 +1642,29 @@ uint32_t rcCmdlibHash(const String& s) {
   uint32_t h = 2166136261u;                 // FNV offset basis
   const size_t n = s.length();
   for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
+  return h;
+}
+
+// Streamed FNV-1a over a FILE (O(1) RAM) — byte-for-byte identical to
+// rcCmdlibHash() without loading the file into a String. Used by the bulk sink to
+// verify a streamed library against the sender's expected hash. `bytes` (if
+// non-null) receives the total size read.
+uint32_t rcCmdlibHashFile(const char* path, size_t* bytes = nullptr) {
+  if (bytes) *bytes = 0;
+  if (!g_lfsReady) return 0;
+  File f = LittleFS.open(path, "r");
+  if (!f) return 0;
+  uint32_t h = 2166136261u;
+  uint8_t  buf[256];
+  size_t   total = 0;
+  while (f.available()) {
+    size_t n = f.read(buf, sizeof(buf));
+    if (n == 0) break;
+    for (size_t i = 0; i < n; i++) { h ^= buf[i]; h *= 16777619u; }
+    total += n;
+  }
+  f.close();
+  if (bytes) *bytes = total;
   return h;
 }
 

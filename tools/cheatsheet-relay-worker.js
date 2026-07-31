@@ -16,6 +16,11 @@
 //   5. Copy the Worker URL (https://navicore-cheatsheet.<you>.workers.dev) into
 //      config_tool/index.html → CS_QR_ENDPOINT.
 //
+//  Two roles share this one Worker + KV namespace:
+//   • POST / + GET /<key>  → cheat sheets: 1-day auto-delete, random keys.
+//   • PUT/GET /cfg/<key>   → config backups: PERSISTENT (no TTL), client-encrypted,
+//                            key derived from the user's WCB password. Opaque here.
+//
 //  Abuse guards (all here, tune the constants): 1 MB size cap, 1-day auto-delete,
 //  a per-IP hourly rate limit, an optional shared token, and unguessable keys.
 //  Free-tier headroom is huge (100k reads/day, 1k KV writes/day) — each upload is
@@ -28,9 +33,12 @@ const RATE_MAX     = 20;             // uploads allowed per IP per window
 const RATE_WINDOW  = 60 * 60;        // rate-limit window: 1 hour
 const KEY_LEN      = 64;             // max path length we'll look up
 
+const CFG_MAX_BYTES = 256 * 1024;    // per config-backup slot cap (encrypted config is ~15-30 KB)
+const CFG_KEY_LEN   = 128;           // max /cfg/<key> length (64-hex base + suffix)
+
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
-  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+  'Access-Control-Allow-Methods': 'POST, GET, PUT, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, X-CS-Token',
   'Access-Control-Max-Age':       '86400',
 };
@@ -48,6 +56,43 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+
+    // ── /cfg/<key> → PERSISTENT (no-TTL) encrypted config-backup slots ──────────
+    // Unlike cheat sheets (which auto-expire), config backups persist until
+    // overwritten. The client (config_tool) derives an unguessable key from the
+    // user's WCB password, AES-GCM-encrypts the config in the browser, and keeps a
+    // rolling ring of slots + a manifest — so this route is a dumb key→value store
+    // over a `cfg:` KV prefix. Values are opaque ciphertext to the Worker.
+    if (url.pathname.startsWith('/cfg/')) {
+      if (!env.CS) return json({ error: 'KV binding "CS" is missing — see setup step 3' }, 500);
+      const cfgKey = url.pathname.slice('/cfg/'.length);
+      if (!cfgKey || cfgKey.length > CFG_KEY_LEN || !/^[a-z0-9_]+$/i.test(cfgKey))
+        return json({ error: 'bad key' }, 400);
+      const kvKey = 'cfg:' + cfgKey;
+
+      if (request.method === 'GET') {
+        const val = await env.CS.get(kvKey);
+        if (val == null) return json({ error: 'not found' }, 404);
+        return new Response(val, { headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store', ...CORS } });
+      }
+      if (request.method === 'PUT' || request.method === 'POST') {
+        if (env.UPLOAD_TOKEN && request.headers.get('X-CS-Token') !== env.UPLOAD_TOKEN)
+          return json({ error: 'bad or missing token' }, 403);
+        // Share the cheat-sheet per-IP hourly rate limit so a leaked token can't
+        // fill KV. Config backups are rare (a handful a day), so 20/hr is ample.
+        const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+        const rlKey = 'rl:' + ip;
+        const count = parseInt((await env.CS.get(rlKey)) || '0', 10) || 0;
+        if (count >= RATE_MAX) return json({ error: 'rate limit reached — try again later' }, 429);
+        const body = await request.text();
+        if (!body) return json({ error: 'empty body' }, 400);
+        if (body.length > CFG_MAX_BYTES) return json({ error: 'too large' }, 413);
+        await env.CS.put(kvKey, body);   // NO expirationTtl → persists indefinitely
+        await env.CS.put(rlKey, String(count + 1), { expirationTtl: RATE_WINDOW });
+        return json({ ok: true });
+      }
+      return new Response('Method not allowed', { status: 405, headers: CORS });
+    }
 
     // ── GET /<key> → serve the stored cheat sheet ──
     if (request.method === 'GET') {

@@ -383,25 +383,124 @@ inline bool _startGetConfigSend(uint8_t target) {
   return _startFragSend(target, wrapped, "CONFIG");
 }
 
+// ── Bulk-transfer sink: stream a large command library straight to LittleFS ──
+// Registered via wcb->onBulkBegin/onBulkChunk/onBulkComplete. ALL THREE fire on
+// the LOOP task (from wcb->update()), so blocking flash I/O here is safe. We
+// stage into RC_CMDLIB_BULK_TMP (distinct from the atomic-save tmp so a
+// concurrent rcCmdlibSaveLFS can't unlink the inode we hold open) and rename onto
+// /cmdlib.json only after the streamed hash verifies. Peak RAM is O(1): one File
+// handle + one 96-byte chunk — never the whole library. The library is opaque, so
+// nothing is parsed here.
+inline File     _bulkFile;
+inline bool     _bulkFileOpen = false;
+inline uint16_t _bulkFileSid  = 0;
+
+// onBulkBegin — open + pre-extend the staging file. Return true to accept.
+inline bool bulkBegin(uint8_t senderID, uint16_t sid, uint32_t totalLen,
+                      uint16_t totalChunks, uint32_t hash, const char* tag) {
+  (void)senderID; (void)hash;
+  if (strcmp(tag, "cmdlib") != 0) return false;   // only the command library, for now
+  if (!g_lfsReady) return false;
+  if (_bulkFileOpen) { _bulkFile.close(); _bulkFileOpen = false; }
+  LittleFS.remove(RC_CMDLIB_BULK_TMP);            // clear any stale staging file
+  _bulkFile = LittleFS.open(RC_CMDLIB_BULK_TMP, "w+");
+  if (!_bulkFile) return false;
+  // Pre-extend to totalLen with zeros so an out-of-order seek-write always lands
+  // INSIDE the file (never past EOF). Every byte is later overwritten by a chunk.
+  uint8_t z[256] = {0};
+  uint32_t remaining = totalLen;
+  while (remaining) {
+    size_t w = remaining < sizeof(z) ? (size_t)remaining : sizeof(z);
+    if (_bulkFile.write(z, w) != w) {
+      _bulkFile.close(); _bulkFileOpen = false; LittleFS.remove(RC_CMDLIB_BULK_TMP);
+      Serial.println("[RC] bulk cmdlib: pre-extend write failed — rejecting");
+      return false;
+    }
+    remaining -= (uint32_t)w;
+  }
+  _bulkFile.flush();
+  _bulkFileOpen = true;
+  _bulkFileSid  = sid;
+  Serial.printf("[RC] bulk cmdlib begin: sid=%u %u bytes / %u chunks\n",
+                (unsigned)sid, (unsigned)totalLen, (unsigned)totalChunks);
+  return true;
+}
+
+// onBulkChunk — the library derives `offset` from the chunk index; seek + write.
+inline void bulkChunk(uint16_t sid, uint32_t offset, const uint8_t* data, uint16_t len) {
+  if (!_bulkFileOpen || sid != _bulkFileSid) return;
+  _bulkFile.seek(offset);
+  _bulkFile.write(data, len);
+}
+
+// onBulkComplete — verify the streamed hash + atomically publish, or clean up.
+inline bool bulkComplete(uint16_t sid, bool allReceived, uint32_t totalLen, uint32_t hash) {
+  (void)totalLen;
+  if (!_bulkFileOpen || sid != _bulkFileSid) {
+    if (!allReceived) LittleFS.remove(RC_CMDLIB_BULK_TMP);
+    return false;
+  }
+  _bulkFile.flush();
+  _bulkFile.close();
+  _bulkFileOpen = false;
+  if (!allReceived) {
+    LittleFS.remove(RC_CMDLIB_BULK_TMP);
+    Serial.printf("[RC] bulk cmdlib sid=%u aborted/timed out — staging discarded\n", (unsigned)sid);
+    return false;
+  }
+  size_t   onDisk = 0;
+  uint32_t got    = rcCmdlibHashFile(RC_CMDLIB_BULK_TMP, &onDisk);
+  if (got != hash) {
+    Serial.printf("[RC] bulk cmdlib sid=%u hash mismatch (got %u want %u, %u B) — discarded\n",
+                  (unsigned)sid, (unsigned)got, (unsigned)hash, (unsigned)onDisk);
+    LittleFS.remove(RC_CMDLIB_BULK_TMP);
+    return false;
+  }
+  // rename overwrites the live file (same as rcCmdlibSaveLFS's proven path).
+  if (!LittleFS.rename(RC_CMDLIB_BULK_TMP, RC_CMDLIB_PATH)) {
+    Serial.printf("[RC] bulk cmdlib sid=%u rename failed — previous kept\n", (unsigned)sid);
+    LittleFS.remove(RC_CMDLIB_BULK_TMP);
+    return false;
+  }
+  Serial.printf("[RC] bulk cmdlib sid=%u published (%u bytes, hash %u)\n",
+                (unsigned)sid, (unsigned)onDisk, (unsigned)hash);
+  return true;
+}
+
 // Arm a fragmented CMDLIB send (the config tool's private command library) to
-// `target`. Reads /cmdlib.json; sends an empty library if the file is missing so
-// the tool always gets a definitive answer. Shares _outSend with CONFIG — only
-// one send is in flight at a time (the pending-slot guards serialize them).
+// `target`. Streams /cmdlib.json into the wrapped payload (no separate full-file
+// String copy) and hashes it O(1) via rcCmdlibHashFile; sends an empty library if
+// the file is missing so the tool always gets a definitive answer. Shares _outSend
+// with CONFIG — only one send is in flight at a time (pending-slot guards serialize).
 inline bool _startGetCmdlibSend(uint8_t target) {
-  String body;
-  if (!rcCmdlibLoadLFS(body) || body.length() == 0)
-    body = "{\"boards\":[],\"enums\":{}}";
-  // Carry the size + signature so the tool can cache "this is what the droid
-  // has" and skip re-pulling next time (see the CMDLIB_META check). `data` is
-  // still LAST — harmless here (the tool parses the whole reassembled message).
-  char meta[64];
-  snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
-           (unsigned)body.length(), (unsigned)rcCmdlibHash(body));
+  size_t   sz = 0;
+  uint32_t h  = 0;
+  bool haveFile = g_lfsReady && LittleFS.exists(RC_CMDLIB_PATH);
+  if (haveFile) { h = rcCmdlibHashFile(RC_CMDLIB_PATH, &sz); if (sz == 0) haveFile = false; }
   String wrapped;
-  wrapped.reserve(body.length() + 72);
-  wrapped += meta;
-  wrapped += body;
-  wrapped += "}";
+  if (!haveFile) {
+    String empty = "{\"boards\":[],\"enums\":{}}";
+    char meta[80];
+    snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
+             (unsigned)empty.length(), (unsigned)rcCmdlibHash(empty));
+    wrapped.reserve(empty.length() + 80);
+    wrapped += meta; wrapped += empty; wrapped += "}";
+  } else {
+    // size + signature so the tool can cache "this is what the droid has" and skip
+    // re-pulling an unchanged library (see the CMDLIB_META check).
+    char meta[80];
+    snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
+             (unsigned)sz, (unsigned)h);
+    wrapped.reserve(sz + 80);
+    wrapped += meta;
+    File f = LittleFS.open(RC_CMDLIB_PATH, "r");   // stream the file in — no whole-file body copy
+    if (f) {
+      uint8_t buf[256];
+      while (f.available()) { size_t n = f.read(buf, sizeof(buf)); if (n == 0) break; wrapped.concat((const char*)buf, n); }
+      f.close();
+    }
+    wrapped += "}";
+  }
   return _startFragSend(target, wrapped, "CMDLIB");
 }
 

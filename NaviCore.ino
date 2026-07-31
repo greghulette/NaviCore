@@ -3268,6 +3268,10 @@ void setup() {
   // is a one-time migration source. LittleFS removes the NVS 4000-byte-per-value
   // limit that silently dropped densely-mapped modes.
   rcConfigBeginLFS();
+  // Clear any bulk-transfer staging file left by a reboot mid-push — its
+  // pre-extended zeros would otherwise waste flash until the next transfer.
+  // (bulkBegin also truncates it, so this only reclaims space early.)
+  if (g_lfsReady) LittleFS.remove(RC_CMDLIB_BULK_TMP);
   if (!rcConfigLoadLFS()) {
     if (g_lfsReady && LittleFS.exists(RC_CFG_PATH)) {
       // The file EXISTS but didn't load (parse error / transient low memory).
@@ -3393,6 +3397,11 @@ void setup() {
     forgetPeerQueue    = xQueueCreate(4, sizeof(uint8_t));       // FORGET_PEER (Via-WCB) → drainForgetPeer()
     wcb->onCommand(onWCBCommand);   // queues must be live BEFORE the callback that feeds them
     wcb->onRawPacket(naviota::otaRawPacketHook);   // OTA control/data structs (55/243 B) over the mesh
+    // Bulk command-library push (config tool → mesh → LittleFS). These fire on the
+    // LOOP task from wcb->update(), so the streamed flash writes are safe.
+    wcb->onBulkBegin(rcTelemetry::bulkBegin);
+    wcb->onBulkChunk(rcTelemetry::bulkChunk);
+    wcb->onBulkComplete(rcTelemetry::bulkComplete);
     // Create the OTA packet queue here (Core 1) instead of lazily inside the
     // Core-0 RX callback, so the very first OTA frame can't be lost to the
     // create/publish race. The lazy-create in enqueueOtaPacket() stays as a fallback.
