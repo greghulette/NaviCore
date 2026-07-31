@@ -123,14 +123,14 @@ constexpr size_t   FRAG_CHUNK_BYTES  = 80;   // underlying-JSON bytes per fragme
 // action chains + maestro slots + ...) fits.  Worst-case envelope size
 // per session: 192 × sizeof(String) ≈ 3 KB pointer overhead until any
 // fragment actually arrives; reasonable for the ESP32-S3's heap.
-// uint16_t (not uint8_t) — 384 exceeds 255, so the type MUST hold >255, as must
-// every fragment count/index derived from it (FragSession.total/got, the
-// reassembly loop counters). 384 × 80 = 30 KB, enough for a large command
-// library over the WCB bridge (a ~30 KB blob is ~384 fragments × 150 ms ≈ 58 s
-// worst case — rare, and gated by the CMDLIB signature check so it only runs when
-// the library actually changed). Static cost: 3 sessions × 384 × sizeof(String)
-// ≈ 18 KB of pointer overhead (idle), fine on the S3.
-constexpr uint16_t FRAG_MAX_PARTS    = 384;  // 384 × 80 = 30 KB max fragmented payload
+// uint16_t (not uint8_t) so the type can hold >255 if this is ever raised again;
+// every fragment count/index derived from it is uint16_t too. NOTE: the RECEIVE
+// pool is `String parts[FRAG_MAX_PARTS] × FRAG_POOL_SIZE` of STATIC DRAM — raising
+// this balloons that (384×3 ≈ +18 KB), which starved ESP-NOW's init at boot and
+// knocked the RC off the mesh. Kept at 192 (15 KB) for that reason; a bigger
+// bridge payload needs a HEAP-allocated reassembly buffer, not a bigger static
+// array. Over-15KB command libraries save/load over Direct USB (no cap there).
+constexpr uint16_t FRAG_MAX_PARTS    = 192;  // 192 × 80 = 15 KB max fragmented payload
 constexpr uint8_t  FRAG_POOL_SIZE    = 3;    // concurrent reassembly sessions
 constexpr uint32_t FRAG_TIMEOUT_MS   = 5000;
 
