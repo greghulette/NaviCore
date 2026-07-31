@@ -994,6 +994,7 @@
     <button class="btn btn-ghost" id="btn-hwsetup" type="button">Config</button>
     <button class="btn btn-ghost" id="btn-export-cfg" type="button">Export</button>
     <button class="btn btn-ghost" id="btn-import-cfg" type="button">Import</button>
+    <button class="btn btn-ghost" id="btn-cloud-backup" type="button" title="Encrypted cloud backup / restore of your config — persists (no expiry), private to your WCB password, keeps the last 10">☁ Cloud</button>
     <button class="btn btn-ghost" id="btn-cheatsheet" type="button" title="Printable control cheat sheet — what every button / switch / knob does (HTML or PDF)">📋 Cheat Sheet</button>
     <button class="btn btn-ghost" id="btn-terminal" type="button" title="Open terminal">⌨ Terminal</button>
     <button class="btn btn-ghost" id="btn-clips" type="button" title="Record/replay clip library" onclick="openClipsModal()">🎬 Clips</button>
@@ -2284,7 +2285,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.13:22.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.17:30.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7318,6 +7319,8 @@ function handleBoardMessage(line) {
                               : '< [cmdlib] ✗ save failed on the NaviCore (flash write error)', 'rx');
     return;
   }
+  // Bulk-transfer back-channel (STATUS / need-BEGIN / FINAL) for a mesh library push.
+  if (typeof msg.bs === 'number') { _bulkOnStatus(msg); return; }
 
   if (msg.type === 'PWM_UPDATE') {
     try {
@@ -11253,13 +11256,138 @@ function loadCmdlibFromBoard() {
   appendTerminalLine('> [cmdlib] loading library from the NaviCore' + (overBridge ? ' over the mesh — this pauses live telemetry for ~30-60 s…' : '…'), 'tx');
   sendJSON({ type: 'GET_CMDLIB' }, /*silent=*/true).catch((e) => appendTerminalLine('· load failed: ' + ((e && e.message) || e), 'rx'));
 }
+// ═══════════════════════════════════════════════════════════════════════════
+//  Bulk command-library upload over the WCB mesh (selective-NACK)
+//  --------------------------------------------------------------------------
+//  Streams a library too big for the 15 KB fragment path straight into the RC's
+//  /cmdlib.json (O(1) RAM on the droid). Wire matches WCB_Client's bulk facility:
+//    BEGIN {"bb":sid,"n":,"t":,"g":"cmdlib","h":}  CHUNK {"bc":sid,"q":,"s":"b64"}
+//    DONE  {"bd":sid,"r":round}
+//  RC → us:  STATUS {"bs":sid,"got":,"r":,"miss":[]}, need-BEGIN {"bs":sid,"nb":1},
+//    FINAL {"bs":sid,"done":1,"ok":,"hash":,"r":}. WE drive liveness: re-DONE on a
+//  timeout, resend only the gaps the RC reports, give up after no progress.
+const BULK_CHUNK_RAW  = 96;     // MUST match WCB_BULK_CHUNK_RAW
+const BULK_MAX_CHUNKS = 512;    // MUST match WCB_BULK_MAX_CHUNKS
+const BULK_ENV_MAX    = 187;    // relay structCommand cap (matches FRAG_MAX_ENV_BYTES)
+let _bulkActive = null;         // { sid, awaitResolve, awaitTimer, pending } while running
+
+const _bulkPace = () => new Promise(r => setTimeout(r, 150));
+
+// FNV-1a 32-bit over RAW bytes — byte-for-byte identical to rcCmdlibHash on the RC.
+// Math.imul + >>>0 keeps it a true uint32 (a plain *= loses low bits past 2^53).
+function _bulkFnv1a(bytes) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 16777619) >>> 0; }
+  return h >>> 0;
+}
+// Binary-safe base64 of a byte slice — NEVER via TextDecoder (that would mangle a
+// chunk that splits a multi-byte UTF-8 char; the file is reassembled by offset).
+function _bulkB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+function _bulkOnStatus(msg) {          // called from handleBoardMessage on any {"bs":..}
+  if (!_bulkActive || msg.bs !== _bulkActive.sid) return;
+  if (_bulkActive.awaitResolve) {
+    clearTimeout(_bulkActive.awaitTimer);
+    const r = _bulkActive.awaitResolve; _bulkActive.awaitResolve = null;
+    r(msg);
+  } else {
+    _bulkActive.pending = msg;         // arrived before we awaited (e.g. an early FINAL) — buffer it
+  }
+}
+function _bulkAwait(timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (_bulkActive.pending) { const m = _bulkActive.pending; _bulkActive.pending = null; resolve(m); return; }
+    _bulkActive.awaitResolve = resolve;
+    _bulkActive.awaitTimer = setTimeout(() => { _bulkActive.awaitResolve = null; reject(new Error('timeout')); }, timeoutMs);
+  });
+}
+async function _bulkLine(env) {
+  if (new TextEncoder().encode(env).length > BULK_ENV_MAX)
+    throw new Error('bulk envelope over ' + BULK_ENV_MAX + ' B');
+  await sendLine(';w' + RC_WCB_DEVICE_ID + ',' + env, /*silent=*/true);
+}
+// Push `libJson` to the RC via the bulk facility. Resolves {ok,hash} or throws.
+async function sendCmdlibBulk(libJson) {
+  if (_bulkActive) throw new Error('a library upload is already in progress');
+  const bytes = new TextEncoder().encode(libJson);
+  const total = bytes.length;
+  const n = Math.ceil(total / BULK_CHUNK_RAW);
+  if (n < 1 || n > BULK_MAX_CHUNKS)
+    throw new Error('library needs ' + n + ' chunks (max ' + BULK_MAX_CHUNKS + ') — use Direct USB');
+  const hash = _bulkFnv1a(bytes);
+  const sid  = 1 + Math.floor(Math.random() * 60000);   // nonce, never 0
+  _bulkActive = { sid, awaitResolve: null, awaitTimer: null, pending: null };
+  const beginEnv = '{"bb":' + sid + ',"n":' + n + ',"t":' + total + ',"g":"cmdlib","h":' + hash + '}';
+  const chunkEnv = (q) => {
+    const off = q * BULK_CHUNK_RAW;
+    return '{"bc":' + sid + ',"q":' + q + ',"s":"' + _bulkB64(bytes.subarray(off, Math.min(off + BULK_CHUNK_RAW, total))) + '"}';
+  };
+  const sendAll = async () => {
+    for (let q = 0; q < n; q++) { await _bulkLine(chunkEnv(q)); await _bulkPace();
+      if ((q & 63) === 63) appendTerminalLine('· [cmdlib] sent ' + (q + 1) + '/' + n, 'rx'); }
+  };
+  try {
+    await _bulkLine(beginEnv); await _bulkPace();
+    await sendAll();
+    let round = 0, doneRetries = 0, noProgress = 0, lastGot = -1, resend = null;
+    while (true) {
+      round++;
+      if (resend) { for (const q of resend) { await _bulkLine(chunkEnv(q)); await _bulkPace(); } }
+      await _bulkLine('{"bd":' + sid + ',"r":' + round + '}');
+      let msg;
+      try { msg = await _bulkAwait(1500); }
+      catch (e) { if (++doneRetries > 6) throw new Error('no reply from the NaviCore — try Direct USB'); resend = null; continue; }
+      doneRetries = 0;
+      if (msg.done) {                                    // FINAL (round-agnostic)
+        if (msg.ok) return { ok: true, hash: (msg.hash >>> 0) };
+        throw new Error('NaviCore rejected the library (hash mismatch)');
+      }
+      if (msg.nb) {                                      // need-BEGIN — resend BEGIN + all chunks
+        await _bulkLine(beginEnv); await _bulkPace(); await sendAll(); resend = null; continue;
+      }
+      if (typeof msg.r === 'number' && msg.r < round) continue;   // stale STATUS from an earlier round
+      const miss = Array.isArray(msg.miss) ? msg.miss.filter(q => Number.isInteger(q) && q >= 0 && q < n) : [];
+      if (typeof msg.got === 'number') {
+        if (msg.got <= lastGot) { if (++noProgress > 8) throw new Error('transfer stalled — try Direct USB'); }
+        else { noProgress = 0; lastGot = msg.got; }
+      }
+      appendTerminalLine('· [cmdlib] ' + (typeof msg.got === 'number' ? msg.got : '?') + '/' + n + ' chunks, ' + miss.length + ' missing', 'rx');
+      resend = miss.length ? miss : null;
+    }
+  } finally {
+    if (_bulkActive && _bulkActive.awaitTimer) clearTimeout(_bulkActive.awaitTimer);
+    _bulkActive = null;
+  }
+}
+
 async function saveCmdlibToBoard() {
   if (!writer && !sharedActive) { appendTerminalLine('· save: not connected to a NaviCore', 'rx'); return; }
   const store = _cmdlibLoadCustom() || { schema: 'navicore-command-library/v1', enums: {}, boards: [] };
   const n = (store.boards || []).length;
   if (!n) { alert('No custom boards to save yet — Import one first.'); return; }
+  const overBridge = viaWcbActive || sharedActive;
+  if (overBridge) {
+    // Over the mesh: stream via the bulk facility (O(1) RAM on the droid, any size).
+    if (_bulkActive) { appendTerminalLine('· [cmdlib] an upload is already running', 'rx'); return; }
+    const libJson = JSON.stringify(store);
+    const kb = Math.round(new TextEncoder().encode(libJson).length / 1024 * 10) / 10;
+    appendTerminalLine('> [cmdlib] streaming ' + n + ' board(s) (' + kb + ' KB) to the NaviCore over the mesh…', 'tx');
+    try {
+      const res = await sendCmdlibBulk(libJson);
+      if (res && res.ok) {
+        _cmdlibSetDroidSig(res.hash);
+        appendTerminalLine('< [cmdlib] ✓ saved to the NaviCore (mesh) — it now travels to any browser that connects', 'rx');
+      }
+    } catch (e) {
+      appendTerminalLine('< [cmdlib] ✗ mesh save failed: ' + ((e && e.message) || e), 'rx');
+    }
+    return;
+  }
   try {
-    // `data` MUST be the last field — the RC extracts it by substring (SET_CMDLIB).
+    // Direct USB: single paced write. `data` MUST be last — the RC extracts it by substring.
     await sendJSON({ type: 'SET_CMDLIB', data: store });
     appendTerminalLine('> [cmdlib] saving ' + n + ' custom board(s) to the NaviCore…', 'tx');
   } catch (e) {
@@ -13014,6 +13142,7 @@ document.getElementById('btn-defaults').addEventListener('click', async () => {
 
 document.getElementById('btn-export-cfg').addEventListener('click', exportConfigCsv);
 document.getElementById('btn-import-cfg').addEventListener('click', () => document.getElementById('cfg-import-file').click());
+document.getElementById('btn-cloud-backup').addEventListener('click', cfgOpenCloudModal);
 document.getElementById('btn-cheatsheet').addEventListener('click', openCheatSheet);
 // Launching from inside Config: close the Config modal first so calibration
 // gets the foreground cleanly instead of stacking modal on top of modal.
@@ -15355,6 +15484,179 @@ function openCheatSheet() {
 // are the real abuse guard.
 const CS_QR_ENDPOINT = 'https://navicore-cheatsheet.greg-hulette.workers.dev';
 const CS_QR_TOKEN    = 'jf;af7kljaf8LJK*RELKFja;fff';
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ☁ Cloud config backup — persistent, client-encrypted, private to your password
+//  ----------------------------------------------------------------------------
+//  Reuses the cheat-sheet Cloudflare Worker (CS_QR_ENDPOINT), but its /cfg/ route
+//  stores WITHOUT a TTL. Everything private lives in the WCB password:
+//    • the KV slot base is SHA-256(password) → unguessable, so nobody can even
+//      FIND your backups without it;
+//    • the config is AES-GCM encrypted in THIS browser (PBKDF2 key from the same
+//      password) → the Worker / Cloudflare only ever see ciphertext.
+//  A rolling ring of CFG_BACKUP_MAX slots keeps your last N exports; slot reuse
+//  overwrites the oldest. Restore prompts for the password (the tool may be blank
+//  for disaster recovery), lists the backups by date, decrypts the pick, applies it.
+//
+//  Caveats: strength == your WCB password's entropy; changing that password
+//  orphans older backups (they live under the OLD password's slot). Convenience
+//  cloud copy, not a vault — keep your Export files too.
+const CFG_BACKUP_MAX   = 10;
+const CFG_SLOT_SALT    = 'navicore-cfg-slot-v1';
+const CFG_KEY_SALT     = 'navicore-cfg-key-v1';
+const CFG_PBKDF2_ITERS = 150000;
+
+// SHA-256(slotSalt|pw) as 64-hex → the unguessable base for this password's slots.
+async function _cfgSlotBase(pw) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(CFG_SLOT_SALT + '|' + pw));
+  return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+// PBKDF2(pw) → AES-GCM-256 key. Distinct salt from the slot so the two never equal.
+async function _cfgKey(pw) {
+  const enc  = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: enc.encode(CFG_KEY_SALT), iterations: CFG_PBKDF2_ITERS, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function _cfgEncrypt(pw, plaintext) {
+  const key = await _cfgKey(pw);
+  const iv  = crypto.getRandomValues(new Uint8Array(12));
+  const ct  = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext)));
+  const out = new Uint8Array(iv.length + ct.length);
+  out.set(iv, 0); out.set(ct, iv.length);
+  return btoa(String.fromCharCode.apply(null, out));
+}
+async function _cfgDecrypt(pw, b64) {
+  const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const key = await _cfgKey(pw);
+  const pt  = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, key, raw.slice(12));
+  return new TextDecoder().decode(pt);
+}
+// Worker I/O on the /cfg/<key> route.
+async function _cfgPut(key, body) {
+  const r = await fetch(CS_QR_ENDPOINT + '/cfg/' + key, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/octet-stream', 'X-CS-Token': CS_QR_TOKEN },
+    body });
+  if (!r.ok) throw new Error('upload failed (' + r.status + ')');
+}
+async function _cfgFetch(key) {
+  const r = await fetch(CS_QR_ENDPOINT + '/cfg/' + key, { headers: { 'X-CS-Token': CS_QR_TOKEN } });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error('fetch failed (' + r.status + ')');
+  return r.text();
+}
+async function _cfgLoadManifest(base) {
+  try {
+    const m = await _cfgFetch(base + 'm');
+    const o = m ? JSON.parse(m) : null;
+    return (o && Array.isArray(o.list)) ? o : { next: 0, list: [] };
+  } catch (e) { return { next: 0, list: [] }; }
+}
+function _cfgSecureContextOk() {
+  if (window.crypto && crypto.subtle) return true;
+  alert('Cloud backup needs a secure context (https:// or localhost). Open the tool over https and try again.');
+  return false;
+}
+// Back up the CURRENT live config under `pw` (defaults to the config's WCB password).
+async function cfgBackup(pw) {
+  if (!_cfgSecureContextOk()) return;
+  pw = pw || (config.wcbNetwork && config.wcbNetwork.password) || '';
+  if (!pw) throw new Error('set a WCB password first — it encrypts the backup');
+  const base     = await _cfgSlotBase(pw);
+  const manifest = await _cfgLoadManifest(base);
+  const idx      = manifest.next % CFG_BACKUP_MAX;
+  const blob     = await _cfgEncrypt(pw, JSON.stringify({ v: 1, savedAt: Date.now(), config }));
+  await _cfgPut(base + 's' + idx, blob);
+  manifest.list = manifest.list.filter(e => e.i !== idx);   // slot reuse overwrites the oldest
+  manifest.list.push({ i: idx, ts: Date.now(), size: blob.length });
+  if (manifest.list.length > CFG_BACKUP_MAX) manifest.list = manifest.list.slice(-CFG_BACKUP_MAX);
+  manifest.next = (idx + 1) % CFG_BACKUP_MAX;
+  await _cfgPut(base + 'm', JSON.stringify(manifest));
+  return manifest;
+}
+// Restore backup slot `i` under `pw`, apply it to the tool (mirrors the CONFIG-load
+// refresh) and leave it as an unsaved change so the user can review + Save to push it.
+async function cfgRestore(pw, i) {
+  if (!_cfgSecureContextOk()) return;
+  const base = await _cfgSlotBase(pw);
+  const blob = await _cfgFetch(base + 's' + i);
+  if (!blob) throw new Error('that backup slot is empty');
+  let obj;
+  try { obj = JSON.parse(await _cfgDecrypt(pw, blob)); }
+  catch (e) { throw new Error('decryption failed — wrong password or corrupted backup'); }
+  if (!obj || !obj.config) throw new Error('backup contained no config');
+  applyConfig(obj.config);
+  _configLoaded = true;   // let Save push it after connecting (baseline left as-is → reads as changed)
+  if (typeof _syncMaestroChFromConfig === 'function') _syncMaestroChFromConfig();
+  if (typeof renderMaestroLocations === 'function')   renderMaestroLocations();
+  if (typeof renderWledSlots === 'function')          renderWledSlots();
+  return obj;
+}
+// Modal: password field + "back up now" + a dated list of existing backups to restore.
+function cfgOpenCloudModal() {
+  if (!_cfgSecureContextOk()) return;
+  const existing = document.getElementById('cfg-cloud-modal');
+  if (existing) existing.remove();
+  const ov = document.createElement('div');
+  ov.id = 'cfg-cloud-modal';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999';
+  const defPw = (config.wcbNetwork && config.wcbNetwork.password) || '';
+  ov.innerHTML =
+    '<div style="background:var(--panel,#1e1e24);color:var(--fg,#e8e8ea);max-width:560px;width:92%;max-height:86vh;overflow:auto;border-radius:12px;padding:20px 22px;box-shadow:0 12px 48px rgba(0,0,0,.5)">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+    + '<h3 style="margin:0;font-size:17px">☁ Cloud config backup</h3>'
+    + '<button id="cfg-cloud-close" style="background:none;border:none;color:inherit;font-size:22px;cursor:pointer;line-height:1">×</button></div>'
+    + '<p style="margin:2px 0 14px;color:var(--muted,#9a9aa2);font-size:12.5px">Encrypted in your browser with your WCB password. Persists (no expiry). Keeps the last '
+    + CFG_BACKUP_MAX + '; the oldest is overwritten. Convenience copy — keep your Export files too.</p>'
+    + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">'
+    + '<input id="cfg-cloud-pw" type="password" placeholder="WCB password" value="' + defPw.replace(/"/g, '&quot;') + '" style="flex:1;padding:7px 9px;border-radius:7px;border:1px solid var(--border,#3a3a44);background:var(--bg,#141418);color:inherit">'
+    + '<button id="cfg-cloud-list" class="btn btn-ghost" style="padding:7px 12px">List</button></div>'
+    + '<div style="margin-bottom:14px"><button id="cfg-cloud-backup" class="btn btn-blue" style="padding:7px 14px">⤴ Back up current config now</button></div>'
+    + '<div id="cfg-cloud-status" style="font-size:12.5px;color:var(--muted,#9a9aa2);min-height:16px;margin-bottom:8px"></div>'
+    + '<div id="cfg-cloud-list-wrap"></div></div>';
+  document.body.appendChild(ov);
+  const $  = id => document.getElementById(id);
+  const setStatus = (t, err) => { const s = $('cfg-cloud-status'); s.textContent = t; s.style.color = err ? '#e5737b' : 'var(--muted,#9a9aa2)'; };
+  const close = () => ov.remove();
+  ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  $('cfg-cloud-close').addEventListener('click', close);
+
+  async function renderList() {
+    const pw = $('cfg-cloud-pw').value;
+    if (!pw) { setStatus('Enter your WCB password to list or back up.', true); return; }
+    setStatus('Loading backups…');
+    let manifest;
+    try { manifest = await _cfgLoadManifest(await _cfgSlotBase(pw)); }
+    catch (e) { setStatus('Could not reach the backup service.', true); return; }
+    const wrap = $('cfg-cloud-list-wrap');
+    const list = manifest.list.slice().sort((a, b) => b.ts - a.ts);
+    if (!list.length) { wrap.innerHTML = '<div style="color:var(--muted,#9a9aa2);font-size:12.5px;padding:6px 0">No backups yet for this password.</div>'; setStatus(''); return; }
+    wrap.innerHTML = list.map(e =>
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border,#33333c)">'
+      + '<span style="font-size:13px">' + new Date(e.ts).toLocaleString()
+      + '<span style="color:var(--muted,#9a9aa2)"> · ' + (Math.round((e.size || 0) / 1024 * 10) / 10) + ' KB</span></span>'
+      + '<button class="btn btn-ghost cfg-cloud-restore" data-i="' + e.i + '" style="padding:5px 12px">Restore</button></div>').join('');
+    setStatus('');
+    wrap.querySelectorAll('.cfg-cloud-restore').forEach(b => b.addEventListener('click', async () => {
+      if (!confirm('Restore this backup? It replaces the config in the tool (you can still review before Saving to the NaviCore).')) return;
+      setStatus('Decrypting…');
+      try {
+        await cfgRestore($('cfg-cloud-pw').value, +b.dataset.i);
+        close();
+        appendTerminalLine('< [backup] cloud config restored — review it, then Save to push it to the NaviCore', 'rx');
+      } catch (e) { setStatus(e.message || 'restore failed', true); }
+    }));
+  }
+  $('cfg-cloud-list').addEventListener('click', renderList);
+  $('cfg-cloud-backup').addEventListener('click', async () => {
+    setStatus('Encrypting + uploading…');
+    try { await cfgBackup($('cfg-cloud-pw').value); setStatus('✓ Backed up.'); renderList(); }
+    catch (e) { setStatus(e.message || 'backup failed', true); }
+  });
+  if (defPw) renderList();
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Threshold panel toggle
