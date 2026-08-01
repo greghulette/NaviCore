@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.20:56.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">01.01:01.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4230,6 +4230,7 @@ function _maybeRequestWcbMeta() {
   const now = Date.now();
   if ((now - _wcbMetaReqAt) < 5000) return;      // throttle
   _wcbMetaTries++; _wcbMetaReqAt = now;
+  _fragSilent = true;   // this is a background fetch — don't pop the loading scrim for it
   sendJSON({ type: 'GET_WCB_META' }, /*silent=*/true).catch(() => {});
 }
 
@@ -7186,6 +7187,8 @@ function _gcExpiredFragments() {
     if (now >= sess.expireAt) {
       console.warn(`[frag] sid ${sid} EXPIRED — only got ${sess.got}/${sess.total} parts; the fragmented reply (e.g. CONFIG) never completed`);
       _fragSessions.delete(sid);
+      _fragProgressDone();     // clear any stuck scrim + timer if the shown session expired
+      _fragSilent = false;     // don't let a timed-out background fetch suppress a later user pull
     }
   }
 }
@@ -7316,11 +7319,12 @@ function handleBoardMessage(line) {
       sess.parts[f - 1] = msg.s || '';
       sess.got++;
       sess.expireAt = Date.now() + FRAG_TIMEOUT_MS;
-      if (sess.total >= 8) _fragProgress(sess.got, sess.total);   // visible bar for slow multi-packet pulls (config/cmdlib); skips the small WCB_META fetch
+      if (sess.total >= 8 && !_fragSilent) _fragProgress(sess.got, sess.total);   // visible bar for slow user-initiated pulls (config/cmdlib); skips the background WCB_META fetch
     }
     if (sess.got >= sess.total) {
       _fragSessions.delete(sid);
       _fragProgressDone();
+      _fragSilent = false;   // this fetch is done — a later user pull shows the scrim again
       const full = sess.parts.join('');
       console.log(`[frag] sid ${sid} COMPLETE — ${sess.total} parts, ${full.length} bytes → applying`);
       handleBoardMessage(full);   // recurse with the reassembled payload
@@ -11322,6 +11326,11 @@ function loadCmdlibFromBoard() {
 // slow config / library pull streams in over the mesh. Auto-hides on completion or
 // if the transfer stalls. USB pulls aren't fragmented, so this is WCB-only by nature.
 let _fragProgTimer = null;
+// Set while a BACKGROUND fragmented fetch is in flight (the auto WCB_META pull) so
+// the reassembler doesn't pop the full-screen loading scrim for it. The RC sends one
+// fragmented payload at a time (single _outSend), so this only ever gates that fetch;
+// cleared on completion / expiry so a later user-initiated CONFIG/CMDLIB pull shows it.
+let _fragSilent = false;
 function _fragProgress(got, total, label) {
   let el = document.getElementById('frag-progress');
   if (!el) {
@@ -11454,8 +11463,13 @@ async function sendCmdlibBulk(libJson) {
         if (msg.ok) return { ok: true, hash: (msg.hash >>> 0) };
         throw new Error('NaviCore rejected the library (hash mismatch)');
       }
-      if (msg.nb) {                                      // need-BEGIN — resend BEGIN + all chunks
-        await _bulkLine(beginEnv); await _bulkPace(); await sendAll(); resend = null; continue;
+      if (msg.nb) {                                      // need-BEGIN — RC lost the session; resend BEGIN + all chunks
+        // The RC's `got` restarts at 0 after the resent BEGIN, so reset the stall
+        // trackers too — otherwise got<=lastGot(stale high-water) fires every round
+        // and false-aborts "transfer stalled" while got is genuinely climbing.
+        // Do NOT reset `round` — it's still used below to discard stale STATUS.
+        await _bulkLine(beginEnv); await _bulkPace(); await sendAll();
+        resend = null; lastGot = -1; noProgress = 0; continue;
       }
       if (typeof msg.r === 'number' && msg.r < round) continue;   // stale STATUS from an earlier round
       const miss = Array.isArray(msg.miss) ? msg.miss.filter(q => Number.isInteger(q) && q >= 0 && q < n) : [];
@@ -13801,6 +13815,15 @@ async function otaUpdateOverWcb() {
       // a.offset < confirmed → stale/duplicate ACK; ignore.
     }
 
+    // Drain any DATA-phase ACKs still buffered (the windowed loop emits more ACKs
+    // than it consumes: resends, dups, reorders). If left, END's otaSendAwaitAck —
+    // which returns a buffered marker immediately and matches only session+src, not
+    // offset — could resolve against a leftover status-0 cursor ACK and report
+    // "verified" even when the target's SHA verify actually fails. Safe to clear:
+    // END hasn't been sent yet, so no genuine END ACK can be waiting here.
+    _otaPendingMarkers = [];
+    _otaMarkerResolver = null;
+
     // Transfer complete — log the time + throughput so a future run can be
     // compared against it (a regression would show up as a lower KB/s here).
     {
@@ -15695,7 +15718,13 @@ async function _cfgEncrypt(pw, plaintext) {
   const ct  = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext)));
   const out = new Uint8Array(iv.length + ct.length);
   out.set(iv, 0); out.set(ct, iv.length);
-  return btoa(String.fromCharCode.apply(null, out));
+  // Chunk the byte→string conversion: fromCharCode.apply over a whole large array
+  // spreads every byte as an argument and RangeErrors past the engine's arg cap
+  // (~65k on Safari). 0x8000-byte strides via subarray (a view, no copy) scale to
+  // any config size. (_bulkB64 / OTA toB64 already avoid the whole-array apply.)
+  let s = '';
+  for (let i = 0; i < out.length; i += 0x8000) s += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+  return btoa(s);
 }
 async function _cfgDecrypt(pw, b64) {
   const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
@@ -15718,11 +15747,16 @@ async function _cfgFetch(key) {
   return r.text();
 }
 async function _cfgLoadManifest(base) {
-  try {
-    const m = await _cfgFetch(base + 'm');
-    const o = m ? JSON.parse(m) : null;
-    return (o && Array.isArray(o.list)) ? o : { next: 0, list: [] };
-  } catch (e) { return { next: 0, list: [] }; }
+  // Return the empty ring ONLY for a true 404 (no manifest yet / first use). A
+  // transient fetch error (5xx / network) or a corrupt body must PROPAGATE — else
+  // cfgBackup would mistake it for "no backups", overwrite slot 0, and rewrite a
+  // 1-entry manifest over the real one, silently orphaning every prior backup.
+  const m = await _cfgFetch(base + 'm');   // throws on non-404 errors → caller aborts
+  if (m == null) return { next: 0, list: [] };
+  let o;
+  try { o = JSON.parse(m); }
+  catch (e) { throw new Error('backup index is corrupted — aborting so existing backups are not overwritten'); }
+  return (o && Array.isArray(o.list)) ? o : { next: 0, list: [] };
 }
 function _cfgSecureContextOk() {
   if (window.crypto && crypto.subtle) return true;
@@ -15779,7 +15813,8 @@ function cfgOpenCloudModal() {
     + '<h3 style="margin:0;font-size:17px">☁ Cloud config backup</h3>'
     + '<button id="cfg-cloud-close" style="background:none;border:none;color:inherit;font-size:22px;cursor:pointer;line-height:1">×</button></div>'
     + '<p style="margin:2px 0 14px;color:var(--muted,#9a9aa2);font-size:12.5px">Encrypted in your browser with your WCB password. Persists (no expiry). Keeps the last '
-    + CFG_BACKUP_MAX + '; the oldest is overwritten. Convenience copy — keep your Export files too.</p>'
+    + CFG_BACKUP_MAX + '; the oldest is overwritten. Convenience copy — keep your Export files too. '
+    + '<b>Use a strong, unique password</b>: the slot + key come only from it, so anyone who picks the same password shares (and can read/overwrite) the same cloud slots.</p>'
     + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">'
     + '<input id="cfg-cloud-pw" type="password" placeholder="WCB password" value="' + defPw.replace(/"/g, '&quot;') + '" style="flex:1;padding:7px 9px;border-radius:7px;border:1px solid var(--border,#3a3a44);background:var(--bg,#141418);color:inherit">'
     + '<button id="cfg-cloud-list" class="btn btn-ghost" style="padding:7px 12px">List</button></div>'

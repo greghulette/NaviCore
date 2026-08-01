@@ -273,10 +273,17 @@ inline uint8_t _pendingWcbStatusSender = 0;
 // now spread across thousands of non-blocking loop() iterations.
 constexpr uint32_t FRAG_PACING_MS = 150;
 
+// Which requester a given _outSend job serves. The pump uses this to clear ONLY
+// that requester's pending slot on completion — CMDLIB/WCB_META manage their own
+// slots up-front, so an untyped clear would wrongly zero a GET_CONFIG queued during
+// a CMDLIB/WCB_META send and drop it.
+enum OutboundKind { OS_CONFIG, OS_CMDLIB, OS_WCB_META };
+
 // In-progress send state.  One outstanding send at a time — the requester
 // re-issues GET_CONFIG if it times out, so we never need to queue two.
 struct OutboundSend {
-  bool     active     = false;
+  bool         active   = false;
+  OutboundKind kind     = OS_CONFIG;   // which requester this job serves (see the pump)
   uint8_t  targetID   = 0;
   uint16_t sid        = 0;
   uint16_t total      = 0;   // total fragment count
@@ -352,7 +359,7 @@ inline void _outSendReset() {
 // same tick. Shared by CONFIG and CMDLIB (the fragment/reassembly layer is
 // payload-agnostic: the reassembled payload's own "type" tells the tool apart).
 // `what` is only for the log line.
-inline bool _startFragSend(uint8_t target, const String& wrapped, const char* what) {
+inline bool _startFragSend(uint8_t target, const String& wrapped, const char* what, OutboundKind kind) {
   if (!wcb || target == 0) return false;
 
   // Split into codepoint-safe chunks (each <= FRAG_CHUNK_BYTES bytes, never cutting
@@ -398,6 +405,7 @@ inline bool _startFragSend(uint8_t target, const String& wrapped, const char* wh
   _outSend.lastSendMs = millis() - FRAG_PACING_MS;
   _outSend.payload    = wrapped;
   _outSend.fileBacked = false;   // String-backed (CONFIG / WCB_META)
+  _outSend.kind       = kind;
 
   Serial.printf("[RC] %s send START: %u bytes → %u fragments to W%u (sid=%u)\n",
                 what, (unsigned)wrapped.length(), (unsigned)total, (unsigned)target, (unsigned)sid);
@@ -410,7 +418,7 @@ inline bool _startFragSend(uint8_t target, const String& wrapped, const char* wh
 // ONE streaming pass; the file is held open for the whole send and closed + deleted
 // by _outSendReset on complete/abort. Ceiling is FRAG_SEND_MAX_PARTS × FRAG_CHUNK_BYTES
 // (~40 KB) — bails to "use Direct USB" past that.
-inline bool _startFragSendFile(uint8_t target, const char* path, const char* what) {
+inline bool _startFragSendFile(uint8_t target, const char* path, const char* what, OutboundKind kind) {
   if (!wcb || target == 0 || !g_lfsReady) return false;
   File f = LittleFS.open(path, "r");
   if (!f) return false;
@@ -449,6 +457,7 @@ inline bool _startFragSendFile(uint8_t target, const char* path, const char* wha
   if (_nextOutSid == 0) _nextOutSid = 1;
   _outSend.active     = true;
   _outSend.fileBacked = true;
+  _outSend.kind       = kind;
   _outSend.srcFile    = f;                 // held open for the whole send
   _outSend.targetID   = target;
   _outSend.sid        = sid;
@@ -472,7 +481,7 @@ inline bool _startGetConfigSend(uint8_t target) {
   wrapped += ",\"data\":";
   wrapped += body;
   wrapped += "}";
-  return _startFragSend(target, wrapped, "CONFIG");
+  return _startFragSend(target, wrapped, "CONFIG", OS_CONFIG);
 }
 
 // ── Bulk-transfer sink: stream a large command library straight to LittleFS ──
@@ -596,7 +605,7 @@ inline bool _startGetCmdlibSend(uint8_t target) {
   }
   out.flush();
   out.close();
-  return _startFragSendFile(target, RC_CMDLIB_SEND_TMP, "CMDLIB");   // frees the tmp on complete/abort
+  return _startFragSendFile(target, RC_CMDLIB_SEND_TMP, "CMDLIB", OS_CMDLIB);   // frees the tmp on complete/abort
 }
 
 // Advance the in-progress send by at most one fragment, paced at
@@ -611,18 +620,20 @@ inline bool _pumpGetConfigSend() {
     return true;   // pacing — active, but nothing to send this tick
   }
   if (!_sendFragment(_outSend.next)) {
-    Serial.println("[RC] CONFIG send ABORTED (fragment build error)");
+    Serial.println("[RC] send ABORTED (fragment build error)");
+    const bool wasConfig = (_outSend.kind == OS_CONFIG);
     _outSendReset();                  // free payload / close+delete staging file, then reset
-    _pendingGetConfigSender = 0;
+    if (wasConfig) _pendingGetConfigSender = 0;   // CMDLIB/WCB_META own their slots — don't drop a GET_CONFIG queued mid-send
     return false;
   }
   _outSend.lastSendMs = now;
   _outSend.next++;
   if (_outSend.next >= _outSend.total) {
-    Serial.printf("[RC] CONFIG send COMPLETE: %u fragments (sid=%u)\n",
+    Serial.printf("[RC] send COMPLETE: %u fragments (sid=%u)\n",
                   (unsigned)_outSend.total, (unsigned)_outSend.sid);
+    const bool wasConfig = (_outSend.kind == OS_CONFIG);
     _outSendReset();                  // free payload / close+delete staging file, then reset
-    _pendingGetConfigSender = 0;
+    if (wasConfig) _pendingGetConfigSender = 0;   // only CONFIG's requester is cleared here
     return false;
   }
   return true;   // more fragments remain
@@ -927,7 +938,7 @@ inline void tick() {
   if (_pendingGetWcbMetaSender != 0 && !_outSend.active) {
     const uint8_t to = _pendingGetWcbMetaSender;
     _pendingGetWcbMetaSender = 0;
-    _startFragSend(to, buildWcbMeta(), "WCB_META");
+    _startFragSend(to, buildWcbMeta(), "WCB_META", OS_WCB_META);
   }
   // GET_CMDLIB_META — one tiny packet (size + signature) so the tool can skip a
   // re-pull when its cache already matches. Flash read done here on Core 1. Only
