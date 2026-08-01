@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.19:54.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.20:09.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4211,6 +4211,12 @@ function forgetLearnedPeer(id, btnEl) {
 // already carry names, so this only fires when bridged and something is actually missing.
 function _maybeRequestWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already carries names/labels
+  // Let the config pull finish FIRST. WCB_META shares the RC's single fragment
+  // machine with GET_CONFIG and adds mesh traffic; firing it during the connect-time
+  // config pull was starving/dropping it. _configLoaded flips true only once the
+  // CONFIG reply lands (reset to false on disconnect), so this makes the metadata a
+  // strictly-secondary background fetch that can't interfere with the config load.
+  if (!_configLoaded) return;
   if (_wcbMetaTries >= 8) return;                // gave up — a board may simply be un-named
   const q = wcbQuantity || (config.wcbNetwork && config.wcbNetwork.quantity) || 0;
   const upper = Math.max(q, (wcbKnown && wcbKnown.length) || 0);
