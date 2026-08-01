@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.20:09.Q.JUL.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.20:56.Q.JUL.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4479,7 +4479,11 @@ let _wcbKeepaliveTimer = null;
 // total ~150 bytes, comfortably under 187.  Must match
 // rcTelemetry::FRAG_CHUNK_BYTES so reassembly logic stays balanced.
 const FRAG_CHUNK_BYTES = 80;
-const FRAG_MAX_PARTS   = 192;   // MUST match rcTelemetry::FRAG_MAX_PARTS (rc_telemetry.h); 192 × 80 = 15 KB (384 crash-looped the RC)
+const FRAG_MAX_PARTS   = 192;   // SEND cap (SET_CONFIG upload): MUST match the RC's RECEIVE pool (rcTelemetry::FRAG_MAX_PARTS); 192 × 80 = 15 KB
+// RECEIVE cap: the RC can SEND a bigger fragmented download (CONFIG / CMDLIB / WCB_META)
+// because its send side is a cheap offset table, not the big receive pool
+// (rcTelemetry::FRAG_SEND_MAX_PARTS). The browser has ample RAM, so accept up to this.
+const FRAG_MAX_PARTS_RECV = 512;   // 512 × 80 = 40 KB max fragmented download
 // Hard cap on the envelope JSON length (sans the ;w<id>, prefix).  Bridge
 // will silently strip the CRC suffix and the RC will drop the packet if
 // this is exceeded.  Bail loudly client-side so we notice if the chunk
@@ -7291,7 +7295,7 @@ function handleBoardMessage(line) {
     // throw RangeError; an out-of-range `f` writes a bogus slot and inflates
     // `got` so the session "completes" with missing parts → garbled payload.
     const of  = msg.of, f = msg.f, sid = msg.sid;
-    if (!Number.isInteger(of)  || of < 1 || of > FRAG_MAX_PARTS) return;
+    if (!Number.isInteger(of)  || of < 1 || of > FRAG_MAX_PARTS_RECV) return;
     if (!Number.isInteger(f)   || f  < 1 || f  > of)             return;
     if (!Number.isInteger(sid) || sid < 0)                       return;
 

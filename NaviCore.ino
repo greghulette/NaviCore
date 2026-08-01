@@ -3271,7 +3271,7 @@ void setup() {
   // Clear any bulk-transfer staging file left by a reboot mid-push — its
   // pre-extended zeros would otherwise waste flash until the next transfer.
   // (bulkBegin also truncates it, so this only reclaims space early.)
-  if (g_lfsReady) LittleFS.remove(RC_CMDLIB_BULK_TMP);
+  if (g_lfsReady) { LittleFS.remove(RC_CMDLIB_BULK_TMP); LittleFS.remove(RC_CMDLIB_SEND_TMP); }
   if (!rcConfigLoadLFS()) {
     if (g_lfsReady && LittleFS.exists(RC_CFG_PATH)) {
       // The file EXISTS but didn't load (parse error / transient low memory).

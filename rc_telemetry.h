@@ -130,7 +130,13 @@ constexpr size_t   FRAG_CHUNK_BYTES  = 80;   // underlying-JSON bytes per fragme
 // 192 is stable. A bigger bridge payload must come from a HEAP-allocated
 // reassembly buffer sized to the actual transfer, NOT a bigger static array.
 // Over-15 KB command libraries load/save over Direct USB (no cap there).
-constexpr uint16_t FRAG_MAX_PARTS    = 192;  // 192 × 80 = 15 KB max fragmented payload (STABLE — see above)
+constexpr uint16_t FRAG_MAX_PARTS    = 192;  // RECEIVE pool cap (String parts[]×3) — DO NOT raise (crashes at 384)
+// SEND-side cap is SEPARATE and larger. The sender only needs a uint16_t offset
+// table (chunkOff[FRAG_SEND_MAX_PARTS+1] ≈ 1 KB static), NOT the big receive String
+// pool — so an RC→tool DOWNLOAD (CONFIG / CMDLIB / WCB_META) can carry more than the
+// 15 KB the receive path holds. The tool (browser, ample RAM) accepts up to this many
+// on receive (FRAG_MAX_PARTS_RECV there). Upload (tool→RC SET_CONFIG) still fits 192.
+constexpr uint16_t FRAG_SEND_MAX_PARTS = 512; // 512 × 80 = 40 KB max fragmented SEND (offset table only — cheap)
 constexpr uint8_t  FRAG_POOL_SIZE    = 3;    // concurrent reassembly sessions
 constexpr uint32_t FRAG_TIMEOUT_MS   = 5000;
 
@@ -276,8 +282,10 @@ struct OutboundSend {
   uint16_t total      = 0;   // total fragment count
   uint16_t next       = 0;   // index of the next fragment to send (0-based)
   uint32_t lastSendMs = 0;   // millis() of the last fragment sent
-  String   payload;          // full wrapped CONFIG JSON, held for the send
-  uint16_t chunkOff[FRAG_MAX_PARTS + 1] = {0};   // codepoint-safe byte boundaries: slice idx = [chunkOff[idx], chunkOff[idx+1])
+  String   payload;          // String-backed mode (CONFIG / WCB_META): the whole wrapped JSON
+  File     srcFile;          // file-backed mode (CMDLIB download): read slices from here (O(1) RAM)
+  bool     fileBacked = false;  // true → slice from srcFile; false → slice from payload
+  uint16_t chunkOff[FRAG_SEND_MAX_PARTS + 1] = {0};   // codepoint-safe byte boundaries: slice idx = [chunkOff[idx], chunkOff[idx+1])
 };
 inline OutboundSend _outSend;
 
@@ -291,7 +299,18 @@ inline bool _sendFragment(uint16_t idx) {
   // reassembles by concatenating slices and would otherwise show U+FFFD.
   const size_t off = _outSend.chunkOff[idx];
   const size_t end = _outSend.chunkOff[idx + 1];
-  String slice = _outSend.payload.substring(off, end);
+  String slice;
+  if (_outSend.fileBacked) {
+    // O(1) send: read this chunk straight from the staging file (CMDLIB download).
+    uint8_t rb[FRAG_CHUNK_BYTES + 4];
+    size_t want = (end > off) ? (end - off) : 0;
+    if (want > sizeof(rb)) want = sizeof(rb);               // chunkOff guarantees <= FRAG_CHUNK_BYTES
+    _outSend.srcFile.seek(off);
+    size_t got = _outSend.srcFile.read(rb, want);
+    slice.concat((const char*)rb, got);
+  } else {
+    slice = _outSend.payload.substring(off, end);           // String-backed (CONFIG / WCB_META)
+  }
 
   // ArduinoJson escapes quotes / backslashes / control chars in the slice.
   StaticJsonDocument<300> env;
@@ -316,6 +335,17 @@ inline bool _sendFragment(uint16_t idx) {
   return true;
 }
 
+// Reset the outbound-send state. For a file-backed send (CMDLIB download) this
+// closes + deletes the staging file first; a String-backed send just frees its
+// payload via the struct reset. Use this everywhere a send completes or aborts.
+inline void _outSendReset() {
+  if (_outSend.fileBacked) {
+    if (_outSend.srcFile) _outSend.srcFile.close();
+    if (g_lfsReady) LittleFS.remove(RC_CMDLIB_SEND_TMP);
+  }
+  _outSend = OutboundSend{};
+}
+
 // Arm a fragmented send of an ALREADY-WRAPPED payload (a full {"type":...} JSON
 // message) to `target`. Returns false if it can't be sent (empty / too many
 // fragments); true if armed. Does NOT send the first fragment — the pump does,
@@ -333,7 +363,7 @@ inline bool _startFragSend(uint8_t target, const String& wrapped, const char* wh
   {
     size_t i = 0; const size_t N = wrapped.length();
     _outSend.chunkOff[0] = 0;
-    while (i < N && total < FRAG_MAX_PARTS) {
+    while (i < N && total < FRAG_SEND_MAX_PARTS) {
       size_t take = 0;
       while (i + take < N) {
         unsigned char c = (unsigned char)wrapped[i + take];
@@ -345,12 +375,12 @@ inline bool _startFragSend(uint8_t target, const String& wrapped, const char* wh
       i += take; total++;
       _outSend.chunkOff[total] = (uint16_t)i;
     }
-    if (i < N) total = (size_t)FRAG_MAX_PARTS + 1;    // didn't fit within the part budget — force the bail
+    if (i < N) total = (size_t)FRAG_SEND_MAX_PARTS + 1;    // didn't fit within the part budget — force the bail
   }
-  if (total == 0 || total > FRAG_MAX_PARTS) {
+  if (total == 0 || total > FRAG_SEND_MAX_PARTS) {
     Serial.printf("[RC] %s send bailed: %u bytes needs > %u fragments. "
                   "Use Direct USB for this size.\n",
-                  what, (unsigned)wrapped.length(), (unsigned)FRAG_MAX_PARTS);
+                  what, (unsigned)wrapped.length(), (unsigned)FRAG_SEND_MAX_PARTS);
     return false;
   }
 
@@ -367,9 +397,67 @@ inline bool _startFragSend(uint8_t target, const String& wrapped, const char* wh
   // even if millis() < FRAG_PACING_MS (can't happen post-boot, but free).
   _outSend.lastSendMs = millis() - FRAG_PACING_MS;
   _outSend.payload    = wrapped;
+  _outSend.fileBacked = false;   // String-backed (CONFIG / WCB_META)
 
   Serial.printf("[RC] %s send START: %u bytes → %u fragments to W%u (sid=%u)\n",
                 what, (unsigned)wrapped.length(), (unsigned)total, (unsigned)target, (unsigned)sid);
+  return true;
+}
+
+// Like _startFragSend, but STREAMS the payload from a FILE (O(1) RAM) instead of
+// holding it in a String — for the CMDLIB download, which can be large. `path` must
+// hold the COMPLETE wrapped payload. Codepoint-safe chunk boundaries are computed in
+// ONE streaming pass; the file is held open for the whole send and closed + deleted
+// by _outSendReset on complete/abort. Ceiling is FRAG_SEND_MAX_PARTS × FRAG_CHUNK_BYTES
+// (~40 KB) — bails to "use Direct USB" past that.
+inline bool _startFragSendFile(uint8_t target, const char* path, const char* what) {
+  if (!wcb || target == 0 || !g_lfsReady) return false;
+  File f = LittleFS.open(path, "r");
+  if (!f) return false;
+  const size_t N = f.size();
+  if (N == 0) { f.close(); return false; }
+  size_t total = 0, pos = 0;
+  _outSend.chunkOff[0] = 0;
+  uint8_t rb[FRAG_CHUNK_BYTES + 4];
+  while (pos < N && total < FRAG_SEND_MAX_PARTS) {
+    f.seek(pos);
+    size_t avail = N - pos;
+    size_t want  = (avail < sizeof(rb)) ? avail : sizeof(rb);
+    size_t got   = f.read(rb, want);
+    if (got == 0) break;
+    size_t take = 0;
+    while (take < got) {
+      unsigned char c = rb[take];
+      size_t cp = (c < 0x80) ? 1 : ((c >> 5) == 0x6) ? 2 : ((c >> 4) == 0xE) ? 3 : ((c >> 3) == 0x1E) ? 4 : 1;
+      if (take + cp > FRAG_CHUNK_BYTES) break;
+      if (take + cp > got) break;      // char runs past the read window — end the chunk here
+      take += cp;
+    }
+    if (take == 0) take = 1;           // pathological lone continuation byte — make progress
+    pos += take; total++;
+    _outSend.chunkOff[total] = (uint16_t)pos;
+  }
+  if (pos < N) total = (size_t)FRAG_SEND_MAX_PARTS + 1;   // didn't fit within the part budget — bail
+  if (total == 0 || total > FRAG_SEND_MAX_PARTS) {
+    Serial.printf("[RC] %s file-send bailed: %u bytes needs > %u fragments. Use Direct USB.\n",
+                  what, (unsigned)N, (unsigned)FRAG_SEND_MAX_PARTS);
+    f.close();
+    LittleFS.remove(path);
+    return false;
+  }
+  uint16_t sid = _nextOutSid++;
+  if (_nextOutSid == 0) _nextOutSid = 1;
+  _outSend.active     = true;
+  _outSend.fileBacked = true;
+  _outSend.srcFile    = f;                 // held open for the whole send
+  _outSend.targetID   = target;
+  _outSend.sid        = sid;
+  _outSend.total      = (uint16_t)total;
+  _outSend.next       = 0;
+  _outSend.lastSendMs = millis() - FRAG_PACING_MS;
+  _outSend.payload    = String();          // unused in file-backed mode
+  Serial.printf("[RC] %s file-send START: %u bytes → %u fragments to W%u (sid=%u)\n",
+                what, (unsigned)N, (unsigned)total, (unsigned)target, (unsigned)sid);
   return true;
 }
 
@@ -472,40 +560,43 @@ inline bool bulkComplete(uint16_t sid, bool allReceived, uint32_t totalLen, uint
 }
 
 // Arm a fragmented CMDLIB send (the config tool's private command library) to
-// `target`. Streams /cmdlib.json into the wrapped payload (no separate full-file
-// String copy) and hashes it O(1) via rcCmdlibHashFile; sends an empty library if
-// the file is missing so the tool always gets a definitive answer. Shares _outSend
-// with CONFIG — only one send is in flight at a time (pending-slot guards serialize).
+// `target`. Builds the wrapped {"type":"CMDLIB",...,"data":<lib>} payload into a
+// STAGING FILE — streaming /cmdlib.json through it so a large library never sits in
+// a RAM String — then sends it fragmented straight from that file (O(1) RAM). Sends
+// an empty library if none is stored so the tool always gets a definitive answer.
+// Shares _outSend with CONFIG — only one send is in flight at a time.
 inline bool _startGetCmdlibSend(uint8_t target) {
+  if (!g_lfsReady) return false;
   size_t   sz = 0;
   uint32_t h  = 0;
-  bool haveFile = g_lfsReady && LittleFS.exists(RC_CMDLIB_PATH);
+  bool haveFile = LittleFS.exists(RC_CMDLIB_PATH);
   if (haveFile) { h = rcCmdlibHashFile(RC_CMDLIB_PATH, &sz); if (sz == 0) haveFile = false; }
-  String wrapped;
-  if (!haveFile) {
-    String empty = "{\"boards\":[],\"enums\":{}}";
-    char meta[80];
-    snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
-             (unsigned)empty.length(), (unsigned)rcCmdlibHash(empty));
-    wrapped.reserve(empty.length() + 80);
-    wrapped += meta; wrapped += empty; wrapped += "}";
-  } else {
+  LittleFS.remove(RC_CMDLIB_SEND_TMP);
+  File out = LittleFS.open(RC_CMDLIB_SEND_TMP, "w");
+  if (!out) { Serial.println("[RC] CMDLIB: cannot open send-staging file"); return false; }
+  char meta[80];
+  if (haveFile) {
     // size + signature so the tool can cache "this is what the droid has" and skip
     // re-pulling an unchanged library (see the CMDLIB_META check).
-    char meta[80];
     snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
              (unsigned)sz, (unsigned)h);
-    wrapped.reserve(sz + 80);
-    wrapped += meta;
-    File f = LittleFS.open(RC_CMDLIB_PATH, "r");   // stream the file in — no whole-file body copy
-    if (f) {
+    out.print(meta);
+    File in = LittleFS.open(RC_CMDLIB_PATH, "r");
+    if (in) {
       uint8_t buf[256];
-      while (f.available()) { size_t n = f.read(buf, sizeof(buf)); if (n == 0) break; wrapped.concat((const char*)buf, n); }
-      f.close();
+      while (in.available()) { size_t n = in.read(buf, sizeof(buf)); if (n == 0) break; out.write(buf, n); }
+      in.close();
     }
-    wrapped += "}";
+    out.print("}");
+  } else {
+    const char* empty = "{\"boards\":[],\"enums\":{}}";
+    snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
+             (unsigned)strlen(empty), (unsigned)rcCmdlibHash(String(empty)));
+    out.print(meta); out.print(empty); out.print("}");
   }
-  return _startFragSend(target, wrapped, "CMDLIB");
+  out.flush();
+  out.close();
+  return _startFragSendFile(target, RC_CMDLIB_SEND_TMP, "CMDLIB");   // frees the tmp on complete/abort
 }
 
 // Advance the in-progress send by at most one fragment, paced at
@@ -521,7 +612,7 @@ inline bool _pumpGetConfigSend() {
   }
   if (!_sendFragment(_outSend.next)) {
     Serial.println("[RC] CONFIG send ABORTED (fragment build error)");
-    _outSend = OutboundSend{};        // free payload + reset
+    _outSendReset();                  // free payload / close+delete staging file, then reset
     _pendingGetConfigSender = 0;
     return false;
   }
@@ -530,7 +621,7 @@ inline bool _pumpGetConfigSend() {
   if (_outSend.next >= _outSend.total) {
     Serial.printf("[RC] CONFIG send COMPLETE: %u fragments (sid=%u)\n",
                   (unsigned)_outSend.total, (unsigned)_outSend.sid);
-    _outSend = OutboundSend{};        // free payload + reset
+    _outSendReset();                  // free payload / close+delete staging file, then reset
     _pendingGetConfigSender = 0;
     return false;
   }

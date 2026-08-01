@@ -1595,6 +1595,10 @@ static const char* RC_CMDLIB_TMP_PATH  = "/cmdlib.json.tmp";
 // old-style rcCmdlibSaveLFS() (which truncates+renames+removes the .tmp) can never
 // unlink the inode a multi-second bulk session is still seek-writing.
 static const char* RC_CMDLIB_BULK_TMP  = "/cmdlib.json.bulk.tmp";
+// Download staging — the wrapped {"type":"CMDLIB",...,"data":<lib>} payload is
+// built here and streamed out fragmented, so a large library never sits in a RAM
+// String on the RC (O(1) send). Overwritten each pull; cleaned at boot.
+static const char* RC_CMDLIB_SEND_TMP  = "/cmdlib.send.tmp";
 
 // Atomic write (tmp + rename + on-flash size verify), same discipline as the
 // config save so a power loss can't corrupt the live file. `json` is the raw
