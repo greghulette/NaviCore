@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.10:43.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.11:32.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4549,6 +4549,15 @@ function _utf8Chunks(str, maxBytes) {
 // per-fragment ACK), silently failing the save with no ACK back.
 let _bridgeUploadInFlight = false;
 async function sendJSON(obj, silent = false) {
+  // Stamp every machine-originated message with an additive top-level "sys":1.
+  // The WCB Wizard shares the bridge WCB's USB serial port with this tool, and
+  // hides any line matching /"sys":\s*1\b/ — so this one field silences all of
+  // the tool's chatter (current AND future) in the Wizard with no further Wizard
+  // changes. It's ORTHOGONAL to `type`: every consumer switches on the exact
+  // type string, so an added field is ignored by all existing readers and is
+  // fully backward-compatible. Single choke point — covers all typed requests,
+  // both serialize paths (direct-USB + via-WCB), and the fragmenter below.
+  obj = { ...obj, sys: 1 };
   if (!viaWcbActive) {
     await sendLine(JSON.stringify(obj), silent);
     return;
@@ -11524,6 +11533,12 @@ function _bulkAwait(timeoutMs) {
   });
 }
 async function _bulkLine(env) {
+  // Stamp the Wizard's hide marker onto the bulk envelope (these carry no `type`).
+  // Splice after the opening `{` — the base64 `s` never contains `{`, so only the
+  // brace matches. Do it BEFORE the size check so an oversized stamped env is caught
+  // here rather than silently CRC-truncated on the wire (a full {"bc"} chunk is
+  // ~155 B + 8 → ~163, well under BULK_ENV_MAX 187).
+  env = env.replace('{', '{"sys":1,');
   if (new TextEncoder().encode(env).length > BULK_ENV_MAX)
     throw new Error('bulk envelope over ' + BULK_ENV_MAX + ' B');
   await sendLine(';w' + RC_WCB_DEVICE_ID + ',' + env, /*silent=*/true);
