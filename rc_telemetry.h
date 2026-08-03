@@ -827,11 +827,20 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     // JsonObject overload that reads `data` in-place from our parsed tree.
     Serial.printf("[RC] SET_CONFIG → applying via rcConfigFromJSON(JsonObject) "
                   "(heap=%u bytes free)\n", (unsigned)ESP.getFreeHeap());
+    // Idle-task breather. A large config over the WCB bridge makes this whole tick()
+    // run long (parse → apply → flash save, aggravated by reassembly memory pressure)
+    // — long enough that Core 1's idle task can starve and trip the Task Watchdog
+    // (reset reason 6, seen on oversized relay Saves). delay(1) lets idle run and feed
+    // its WDT between the heavy steps. Harmless on the fast USB path — config saves are
+    // rare and user-initiated. (The granular per-button Save diff is the real fix that
+    // keeps these payloads small; this is the safety net if one is still large.)
+    delay(1);
     bool ok = rcConfigFromJSON(data);
     Serial.printf("[RC] SET_CONFIG → rcConfigFromJSON returned %s "
                   "(heap=%u bytes free)\n", ok ? "true" : "false",
                   (unsigned)ESP.getFreeHeap());
     if (ok) {
+      delay(1);   // another idle-task breather right before the blocking flash write (see above)
       bool saved = rcConfigSaveLFS();
       if (!saved) ok = false;   // surface the save failure in the ACK below
       Serial.println(saved ? "[RC] SET_CONFIG → applied + saved to LittleFS"
