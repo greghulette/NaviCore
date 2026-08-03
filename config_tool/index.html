@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">01.01:01.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.09:45.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3953,6 +3953,10 @@ async function disconnect() {
     // Drop any pending save state — the ACK we were waiting for can
     // never arrive now.  Avoids a stale watchdog firing seconds later
     // on a torn-down session.
+    if (_pendingSaveBaseline) {
+      _dismissToast(_saveToast); _saveToast = null;
+      showToast('Disconnected before the save was confirmed — reconnect and re-Save', 'warn');
+    }
     _pendingSaveBaseline = null;
     if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
     // Stop the Via-WCB keep-alive PING timer so it doesn't keep firing
@@ -5639,9 +5643,11 @@ async function _tlSave() {
 
     clip.dirty = false;
     _tlSetStatus(`Saved ✓ (${events.length} events)`);
+    showToast(`Timeline "${clip.name}" saved to NaviCore (${events.length} events)`, 'success');
     clipsRefresh();
   } catch (e) {
     _tlSetStatus('Save FAILED: ' + e.message);
+    showToast('Timeline save failed — ' + e.message, 'error');
     sendRcCli('?REC,EDITCANCEL');
   } finally {
     clip.uploading = false;
@@ -7367,6 +7373,8 @@ function handleBoardMessage(line) {
     if (msg.ok && typeof msg.hash !== 'undefined') _cmdlibSetDroidSig(msg.hash);   // now in sync with the droid
     appendTerminalLine(msg.ok ? '< [cmdlib] ✓ saved to the NaviCore — it now travels to any browser that connects'
                               : '< [cmdlib] ✗ save failed on the NaviCore (flash write error)', 'rx');
+    _dismissToast(_cmdlibToast); _cmdlibToast = null;
+    showToast(msg.ok ? 'Command library saved to NaviCore' : 'Library save failed (flash write error)', msg.ok ? 'success' : 'error');
     return;
   }
   // Bulk-transfer back-channel (STATUS / need-BEGIN / FINAL) for a mesh library push.
@@ -7670,6 +7678,8 @@ function handleBoardMessage(line) {
       _pendingSaveBaseline = null;
       if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
       appendTerminalLine('< [config] Refresh loaded fresh board state — in-flight Save baseline discarded (re-Save if needed).', 'rx');
+      _dismissToast(_saveToast); _saveToast = null;
+      showToast('Refresh loaded fresh board state — re-Save if you had unsaved edits', 'warn');
     }
     // Maestro-channel migration, ORDER-CRITICAL: fold any localStorage-era
     // import into config AFTER the baseline (so the diff sees it and Save
@@ -7687,6 +7697,14 @@ function handleBoardMessage(line) {
     // Re-snapshot the baseline to the fully-settled config so a flash alone never prompts;
     // a genuine edit made afterward still diffs against this and still warns.
     if (_postFlashReload) { _postFlashReload = false; _configBaseline = _deepClone(config); }
+    // A freshly-reloaded CONFIG that follows a Reset-to-Defaults confirms the
+    // reset actually landed — resolve its pending toast now.
+    if (_pendingDefaultsReset) {
+      _pendingDefaultsReset = false;
+      if (_pendingDefaultsTimer) { clearTimeout(_pendingDefaultsTimer); _pendingDefaultsTimer = null; }
+      _dismissToast(_defaultsToast); _defaultsToast = null;
+      showToast('Reset to factory defaults', 'success');
+    }
     return;
   }
   if (msg.type === 'ACK') {
@@ -7700,6 +7718,8 @@ function handleBoardMessage(line) {
         appendTerminalLine('< [config] Save NACK\'d by board — baseline NOT advanced', 'rx');
         _pendingSaveBaseline = null;
         if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
+        _dismissToast(_saveToast); _saveToast = null;
+        showToast('Save rejected by NaviCore — not saved', 'error');
       }
       return;
     }
@@ -7713,6 +7733,8 @@ function handleBoardMessage(line) {
       if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
       const elapsed = Date.now() - _pendingSaveStartedAt;
       appendTerminalLine(`< [config] Save ACK\'d (${elapsed} ms) — baseline advanced`, 'rx');
+      _dismissToast(_saveToast); _saveToast = null;
+      showToast('Config saved to NaviCore', 'success');
     }
     return;
   }
@@ -11489,25 +11511,40 @@ async function sendCmdlibBulk(libJson) {
 }
 
 async function saveCmdlibToBoard() {
-  if (!writer && !sharedActive) { appendTerminalLine('· save: not connected to a NaviCore', 'rx'); return; }
+  if (!writer && !sharedActive) {
+    appendTerminalLine('· save: not connected to a NaviCore', 'rx');
+    showToast('Not connected to a NaviCore — nothing saved', 'error');
+    return;
+  }
   const store = _cmdlibLoadCustom() || { schema: 'navicore-command-library/v1', enums: {}, boards: [] };
   const n = (store.boards || []).length;
   if (!n) { alert('No custom boards to save yet — Import one first.'); return; }
   const overBridge = viaWcbActive || sharedActive;
   if (overBridge) {
     // Over the mesh: stream via the bulk facility (O(1) RAM on the droid, any size).
-    if (_bulkActive) { appendTerminalLine('· [cmdlib] an upload is already running', 'rx'); return; }
+    if (_bulkActive) {
+      appendTerminalLine('· [cmdlib] an upload is already running', 'rx');
+      showToast('A library upload is already running', 'warn');
+      return;
+    }
     const libJson = JSON.stringify(store);
     const kb = Math.round(new TextEncoder().encode(libJson).length / 1024 * 10) / 10;
     appendTerminalLine('> [cmdlib] streaming ' + n + ' board(s) (' + kb + ' KB) to the NaviCore over the mesh…', 'tx');
+    // No "Saving…" toast here — the mesh push shows the full-screen progress bar.
+    // Just report the terminal result (success/failure) as a toast.
     try {
       const res = await sendCmdlibBulk(libJson);
       if (res && res.ok) {
         _cmdlibSetDroidSig(res.hash);
         appendTerminalLine('< [cmdlib] ✓ saved to the NaviCore (mesh) — it now travels to any browser that connects', 'rx');
+        showToast('Command library saved to NaviCore (mesh)', 'success');
+      } else {
+        // sendCmdlibBulk resolved without ok — treat as a failed/incomplete push.
+        showToast('Library mesh save did not complete — try again', 'error');
       }
     } catch (e) {
       appendTerminalLine('< [cmdlib] ✗ mesh save failed: ' + ((e && e.message) || e), 'rx');
+      showToast('Library mesh save failed — try again', 'error');
     }
     return;
   }
@@ -11515,8 +11552,12 @@ async function saveCmdlibToBoard() {
     // Direct USB: single paced write. `data` MUST be last — the RC extracts it by substring.
     await sendJSON({ type: 'SET_CMDLIB', data: store });
     appendTerminalLine('> [cmdlib] saving ' + n + ' custom board(s) to the NaviCore…', 'tx');
+    // Persistent "Saving…" toast — resolved by the SET_CMDLIB ACK handler.
+    _dismissToast(_cmdlibToast);
+    _cmdlibToast = showToast('Saving command library to NaviCore…', 'info', 15000);
   } catch (e) {
     appendTerminalLine('· save to NaviCore failed: ' + ((e && e.message) || e), 'rx');
+    showToast('Failed to send the library to NaviCore', 'error');
   }
 }
 
@@ -13121,6 +13162,54 @@ function _diffConfigBranches(current, baseline) {
   return out;
 }
 
+// ── Toast notifications ──────────────────────────────────────────────────────
+// Transient corner toasts so a Save/Apply reports its REAL result (driven by the
+// board's ACK), not just a terminal line the user never sees. kind ∈
+// success|error|warn|info. Click to dismiss; auto-dismisses (errors/warns linger).
+// ms:0 → persistent (a pending "Saving…" toast resolved later). Theme-aware.
+function showToast(msg, kind = 'info', ms) {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    host.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:10000;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none';
+    document.body.appendChild(host);
+  }
+  const C = ({
+    success: { c: '#3ecf8e', ic: '✓' },
+    error:   { c: '#e5737b', ic: '✗' },
+    warn:    { c: '#e6b34d', ic: '⚠' },
+    info:    { c: '#5cb0ff', ic: '•' },
+  })[kind] || { c: '#5cb0ff', ic: '•' };
+  const t = document.createElement('div');
+  t.style.cssText = 'pointer-events:auto;cursor:pointer;max-width:340px;display:flex;align-items:flex-start;gap:9px;background:var(--panel,#1e1e24);color:var(--text,var(--fg,#e8e8ea));border:1px solid ' + C.c + ';border-left:4px solid ' + C.c + ';border-radius:9px;padding:10px 13px;font-size:13px;line-height:1.35;box-shadow:0 6px 22px rgba(0,0,0,.4);opacity:0;transform:translateY(8px);transition:opacity .18s ease,transform .18s ease';
+  const icon = document.createElement('span');
+  icon.style.cssText = 'color:' + C.c + ';font-weight:700;flex:0 0 auto';
+  icon.textContent = C.ic;
+  const body = document.createElement('span');
+  body.textContent = msg;   // textContent → the message can never inject markup
+  t.appendChild(icon); t.appendChild(body);
+  host.appendChild(t);
+  requestAnimationFrame(() => { t.style.opacity = '1'; t.style.transform = 'translateY(0)'; });
+  let gone = false;
+  t._dismiss = () => {
+    if (gone) return; gone = true;
+    if (t._timer) clearTimeout(t._timer);
+    t.style.opacity = '0'; t.style.transform = 'translateY(8px)';
+    setTimeout(() => t.remove(), 200);
+  };
+  t.addEventListener('click', t._dismiss);
+  const dur = (ms === undefined) ? ((kind === 'error' || kind === 'warn') ? 6000 : 3500) : ms;
+  if (dur > 0) t._timer = setTimeout(t._dismiss, dur);
+  return t;
+}
+function _dismissToast(ref) { if (ref && ref._dismiss) ref._dismiss(); }
+let _saveToast = null;     // the pending config "Saving to NaviCore…" toast, resolved on ACK / NACK / timeout
+let _cmdlibToast = null;   // the pending command-library "Saving…" toast, resolved on SET_CMDLIB ACK
+let _defaultsToast = null; // the pending "Resetting to defaults…" toast, resolved when fresh CONFIG returns
+let _pendingDefaultsReset = false;   // a RESET_DEFAULTS is awaiting its confirming CONFIG reload
+let _pendingDefaultsTimer = null;    // watchdog for a missing post-reset CONFIG
+
 async function saveConfigToBoard() {
   if (!_configLoaded) {
     const proceed = confirm(
@@ -13139,6 +13228,7 @@ async function saveConfigToBoard() {
   // current one resolves — the user just waits a few seconds.
   if (_pendingSaveBaseline) {
     appendTerminalLine('< [config] A save is still awaiting confirmation — wait for it to finish, then Save again.', 'rx');
+    showToast('A save is still in progress — wait for it to finish', 'warn');
     return;
   }
   // Defensive parse: don't let `|| 500` silently rewrite a legitimately-0
@@ -13200,14 +13290,17 @@ async function saveConfigToBoard() {
       // The only edit was WCB Network, and it can't travel over the very bridge
       // we'd send it on. Say so plainly instead of "No changes to save".
       appendTerminalLine('< [config] WCB Network changes can only be saved over a DIRECT USB connection — not over Via WCB. Connect via USB, then Save again.', 'rx');
+      showToast('WCB Network changes need a Direct USB connection — not saved', 'warn');
     } else {
       console.log('saveConfigToBoard: no changes since last load — skipping');
       appendTerminalLine('< [config] No changes to save', 'rx');
+      showToast('No changes to save', 'info');
     }
     return;
   }
   if (wcbStrippedOverBridge) {
     appendTerminalLine('< [config] Note: WCB Network changes were NOT sent (only possible over Direct USB). Saving the other changes.', 'rx');
+    showToast('WCB Network changes skipped (need Direct USB) — saving the rest', 'warn');
   }
 
   const branches = Object.keys(payload).join(', ');
@@ -13228,6 +13321,13 @@ async function saveConfigToBoard() {
   }
   _pendingSaveStartedAt = Date.now();
 
+  // Persistent "Saving…" toast — resolved to a success/error/warn toast by the
+  // SET_CONFIG ACK / NACK / watchdog paths. Give it a 15 s auto-dismiss (longer
+  // than the 12 s watchdog) so it can never leak if every resolution path is
+  // somehow missed (e.g. a Refresh drops the pending baseline mid-flight).
+  _dismissToast(_saveToast);
+  _saveToast = showToast('Saving to NaviCore…', 'info', 15000);
+
   await sendJSON({ type: 'SET_CONFIG', data: payload });
   appendTerminalLine(`< [config] Save sent (branches: ${branches}) — awaiting ACK`, 'rx');
 
@@ -13243,6 +13343,8 @@ async function saveConfigToBoard() {
         'Save may not have completed.  Try Refresh to verify, or re-Save.',
         'rx');
       console.warn('SET_CONFIG ACK timeout — baseline NOT advanced');
+      _dismissToast(_saveToast); _saveToast = null;
+      showToast('No response from NaviCore — save may not have completed. Try Refresh to verify.', 'warn');
     }
     _pendingSaveTimer = null;
   }, 12000);
@@ -13260,6 +13362,21 @@ document.getElementById('btn-hwsetup-save').addEventListener('click', saveConfig
 
 document.getElementById('btn-defaults').addEventListener('click', async () => {
   if (!confirm('Reset all button mappings to factory defaults?')) return;
+  // RESET_DEFAULTS has no dedicated ACK — the board resets, then we re-pull.
+  // The returning CONFIG is the real confirmation the reset landed, so resolve
+  // the toast there (see the _pendingDefaultsReset branch in the CONFIG handler).
+  _dismissToast(_defaultsToast);
+  _defaultsToast = showToast('Resetting to factory defaults…', 'info', 12000);
+  _pendingDefaultsReset = true;
+  if (_pendingDefaultsTimer) clearTimeout(_pendingDefaultsTimer);
+  _pendingDefaultsTimer = setTimeout(() => {
+    if (_pendingDefaultsReset) {
+      _pendingDefaultsReset = false;
+      _dismissToast(_defaultsToast); _defaultsToast = null;
+      showToast('No response after reset — try Refresh to verify', 'warn');
+    }
+    _pendingDefaultsTimer = null;
+  }, 12000);
   await sendJSON({ type: 'RESET_DEFAULTS' });
   await new Promise(r => setTimeout(r, 300));
   await sendJSON({ type: 'GET_CONFIG' });
