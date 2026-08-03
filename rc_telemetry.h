@@ -1289,7 +1289,7 @@ inline String buildWcbMeta() {
   const int selfId = rcConfig.wcbNetwork.deviceId;
   const int hi = wcbHighestKnown(q);
   String s; s.reserve(320);
-  s += "{\"type\":\"WCB_META\",\"aliases\":[";
+  s += "{\"sys\":1,\"type\":\"WCB_META\",\"aliases\":[";   // sys:1 to match the other JSON emitters (Wizard mute)
   for (int i = 1; i <= hi; i++) {
     if (i > 1) s += ',';
     s += '"'; s += (i == selfId) ? "" : wcbAlias(i); s += '"';
