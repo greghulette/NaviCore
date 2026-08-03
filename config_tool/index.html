@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.10:10.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.10:43.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4161,6 +4161,11 @@ function startWcbStatusPoll() {
   // up and the firmware answers GET_WCB_STATUS over the mesh. (sharedActive is
   // set before this poll starts; viaWcbActive is set just after, so gate on both.)
   wcbStatusTimer = setInterval(() => {
+    // Hold the poll while a bridged config/library upload is mid-send — a
+    // GET_WCB_STATUS packet slotting between SET_CONFIG fragments congests the
+    // mesh and can drop one, silently failing the save. The panel just holds its
+    // last state for the few seconds the upload takes.
+    if (_bridgeUploadInFlight || _bulkActive) return;
     if (isWcbConfigured() || viaWcbActive || sharedActive) {
       sendJSON({ type: 'GET_WCB_STATUS' }, /*silent=*/true).catch(() => {});
     } else {
@@ -4217,6 +4222,7 @@ function forgetLearnedPeer(id, btnEl) {
 // already carry names, so this only fires when bridged and something is actually missing.
 function _maybeRequestWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already carries names/labels
+  if (_bridgeUploadInFlight || _bulkActive) return;   // never fragment a WCB_META download into an in-flight upload
   // Let the config pull finish FIRST. WCB_META shares the RC's single fragment
   // machine with GET_CONFIG and adds mesh traffic; firing it during the connect-time
   // config pull was starving/dropping it. _configLoaded flips true only once the
@@ -4253,6 +4259,7 @@ function _maybeRequestWcbMeta() {
 function _maybeResyncWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already refreshes labels every 3 s
   if (!_configLoaded) return;                    // stay strictly secondary to the connect-time config pull
+  if (_bridgeUploadInFlight || _bulkActive) return;   // and never spawn a fragmented WCB_META download during an upload
   const now = Date.now();
   if ((now - _wcbMetaResyncAt) < 30000) return;  // at most once per ~30 s
   _wcbMetaResyncAt = now;
@@ -4535,6 +4542,12 @@ function _utf8Chunks(str, maxBytes) {
   return chunks;
 }
 
+// True only while a bridged (Via WCB) MULTI-FRAGMENT send is mid-flight. The
+// background pollers (3 s WCB status, 30 s WCB_META) read this and skip their
+// sends, so a status/meta packet can't slot between SET_CONFIG fragments and
+// congest the mesh into a dropped fragment — which the RC can't recover (no
+// per-fragment ACK), silently failing the save with no ACK back.
+let _bridgeUploadInFlight = false;
 async function sendJSON(obj, silent = false) {
   if (!viaWcbActive) {
     await sendLine(JSON.stringify(obj), silent);
@@ -4587,6 +4600,13 @@ async function sendJSON(obj, silent = false) {
     appendTerminalLine('< [config] ' + msg, 'error');   // surface it, don't fail silently
     return;
   }
+  // Quiesce the background bridged polls for the WHOLE multi-fragment send (see
+  // _bridgeUploadInFlight): their single-packet lines otherwise interleave the
+  // fragment stream, and the added ESP-NOW congestion drops a fragment → the RC's
+  // reassembly times out → the save silently fails with no ACK. Cleared in finally
+  // so a mid-send disconnect / abort can't leave the pollers stuck off.
+  _bridgeUploadInFlight = true;
+  try {
   for (let i = 0; i < total; i++) {
     // Bail mid-send if the user disconnected — sendLine would throw on a
     // torn-down writer anyway, but catching it here avoids the spurious
@@ -4624,6 +4644,9 @@ async function sendJSON(obj, silent = false) {
     //   2. Move bridge-side outbound to a true queue with rate limiting
     // For now, simple source-side rate limiting is the right tradeoff.
     await new Promise(r => setTimeout(r, 150));
+  }
+  } finally {
+    _bridgeUploadInFlight = false;   // resume the background polls
   }
 }
 
@@ -9636,21 +9659,57 @@ function setActionTier(tier) {
 
 const MAX_ACTIONS_PER_TIER = 5;
 
-// A per-tier cheat-sheet note input (plain-language caption). tierKey: 1/2/3 (button
-// taps) or 'p0'/'p1'/'p2' (switch positions). Capped at 19 chars to match the
-// firmware's RcTier.note[20]; read back on save as t<N>note / p<N>note.
+// A per-tier "Action Name" input (the sequence's plain-language name; doubles as
+// the cheat-sheet caption). tierKey: 1/2/3 (button taps) or 'p0'/'p1'/'p2' (switch
+// positions). Capped at 19 chars — the firmware stores it in a FIXED RcTier.note[20]
+// buffer (19 chars + null), so the cap is a struct field, NOT a LittleFS limit. A
+// live "N/19" counter surfaces that cap. Read back on save as t<N>note / p<N>note.
+// A ▶ Test button replays this whole tier's action sequence live (see testTier).
+const TIER_NOTE_CAP = 19;   // = RcTier.note[20] − 1 (null). Bump BOTH if the firmware field grows.
 function _buildTierNoteEl(tierKey, noteVal) {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'margin:0 0 8px';
+
+  // Header line: "Action Name" on the left; a live char-count + a ▶ Test button
+  // on the right (Test next to the name, as requested).
+  const head = document.createElement('div');
+  head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px';
   const lbl = document.createElement('label');
-  lbl.textContent = 'Note (for the cheat sheet)';
-  lbl.style.cssText = 'font-size:11px;color:var(--muted);display:block;margin-bottom:2px';
+  lbl.textContent = 'Action Name';
+  lbl.setAttribute('for', `tier-note-${tierKey}`);
+  lbl.style.cssText = 'font-size:11px;color:var(--muted)';
+  const right = document.createElement('div');
+  right.style.cssText = 'display:flex;align-items:center;gap:8px';
+  const count = document.createElement('span');
+  count.id = `tier-note-count-${tierKey}`;
+  count.style.cssText = 'font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums';
+  const testBtn = document.createElement('button');
+  testBtn.type = 'button';
+  testBtn.className = 'btn btn-ghost';
+  testBtn.style.cssText = 'padding:3px 10px;font-size:12px;line-height:1.1';
+  testBtn.textContent = '▶ Test';
+  testBtn.title = 'Play this whole sequence live on the connected NaviCore — each action fires through the real press path, honoring its pre-fire delay, so the timing matches a real trigger.';
+  testBtn.onclick = () => testTier(tierKey, testBtn);
+  right.appendChild(count); right.appendChild(testBtn);
+  head.appendChild(lbl); head.appendChild(right);
+
   const inp = document.createElement('input');
-  inp.type = 'text'; inp.id = `tier-note-${tierKey}`; inp.maxLength = 19;
+  inp.type = 'text'; inp.id = `tier-note-${tierKey}`; inp.maxLength = TIER_NOTE_CAP;
   inp.value = noteVal || '';
-  inp.placeholder = 'Plain-language caption — e.g. "Happy greeting"';
+  inp.placeholder = 'Name this sequence — e.g. "Happy greeting"';
   inp.style.cssText = 'width:100%;box-sizing:border-box;font-size:12px';
-  wrap.appendChild(lbl); wrap.appendChild(inp);
+
+  // Live "N/19" counter — mirrors the fixed firmware cap so the field never
+  // silently refuses the 20th key without explanation. Amber once it's full.
+  const updateCount = () => {
+    const n = inp.value.length;
+    count.textContent = n + '/' + TIER_NOTE_CAP;
+    count.style.color = (n >= TIER_NOTE_CAP) ? '#e6b34d' : 'var(--muted)';
+  };
+  inp.addEventListener('input', updateCount);
+  updateCount();
+
+  wrap.appendChild(head); wrap.appendChild(inp);
   return wrap;
 }
 
@@ -12251,6 +12310,59 @@ async function testActionRow(tier, ai, btn) {
   }
 }
 
+// ▶ Test (whole tier) — replay this tier's ENTIRE action sequence live on the
+// connected NaviCore, in order, honoring each action's pre-fire delay (delayMs), so
+// it plays "as if triggered" — delays and all. Reuses the per-action TEST_ACTION
+// path (the RC dispatches each through the real button-press path), so what you
+// see/hear matches the saved sequence. Recorder controls (record/play/stop) drive
+// the recorder, not a device, so they're skipped. Timing note: over the WCB bridge
+// each action is its own packet so inter-step gaps include a little radio latency;
+// over Direct USB the delays are exact.
+let _tierTestRunning = false;
+async function testTier(tierKey, btn) {
+  if (_tierTestRunning) { appendTerminalLine('· test: a sequence test is already running', 'rx'); return; }
+  if (!writer && !sharedActive) {
+    appendTerminalLine('· test: not connected — connect to a NaviCore first', 'rx');
+    showToast('Not connected — connect to a NaviCore to test', 'error');
+    return;
+  }
+  const acts = collectTierActions(tierKey).filter(a => a && a.type);
+  if (!acts.length) {
+    appendTerminalLine('· test: no actions to play in this sequence', 'rx');
+    showToast('No actions to test in this sequence', 'info');
+    return;
+  }
+  const name = (document.getElementById(`tier-note-${tierKey}`)?.value || '').trim();
+  _tierTestRunning = true;
+  if (btn) { btn.disabled = true; btn.classList.add('fired'); }
+  appendTerminalLine('▶ [test] playing ' + acts.length + ' action(s)' + (name ? ' — "' + name + '"' : ''), 'tx');
+  let fired = 0, skipped = 0;
+  try {
+    for (let i = 0; i < acts.length; i++) {
+      const a = acts[i];
+      // Pre-fire delay: wait THEN fire (matches firmware RcAction.delayMs semantics).
+      const d = +(a.delay || a.delayMs || 0);
+      if (d > 0) await new Promise(r => setTimeout(r, d));
+      if (a.type === 'record' || a.type === 'play' || a.type === 'stop') {
+        appendTerminalLine('· [test] step ' + (i + 1) + ': "' + a.type + '" is a recorder control — skipped', 'rx');
+        skipped++;
+        continue;
+      }
+      const { delay, delayMs, note, ...core } = a;   // fire the action itself (delay already applied above)
+      await sendJSON({ type: 'TEST_ACTION', action: core });
+      fired++;
+    }
+    appendTerminalLine('◀ [test] sequence complete — ' + fired + ' fired' + (skipped ? ', ' + skipped + ' skipped' : ''), 'rx');
+    showToast('Tested' + (name ? ' “' + name + '”' : ' sequence') + ' — ' + fired + ' action' + (fired === 1 ? '' : 's') + ' fired' + (skipped ? ', ' + skipped + ' skipped' : ''), 'success');
+  } catch (e) {
+    appendTerminalLine('· [test] failed: ' + ((e && e.message) || e), 'rx');
+    showToast('Sequence test failed — ' + ((e && e.message) || e), 'error');
+  } finally {
+    _tierTestRunning = false;
+    if (btn) { btn.disabled = false; setTimeout(() => btn.classList.remove('fired'), 300); }
+  }
+}
+
 function collectTierActions(tier) {
   const rows = document.getElementById(`rows-${tier}`);
   if (!rows) return [];
@@ -13365,9 +13477,17 @@ async function saveConfigToBoard() {
         '< [config] WARNING: no ACK received for SET_CONFIG within 12 s. ' +
         'Save may not have completed.  Try Refresh to verify, or re-Save.',
         'rx');
-      console.warn('SET_CONFIG ACK timeout — baseline NOT advanced');
+      console.warn('SET_CONFIG ACK timeout — clearing pending baseline so a retry is not blocked');
+      // Free the pending-save lock so the next Save isn't stranded behind the
+      // overlap guard ("A save is still in progress"). We genuinely don't know if
+      // the board applied it, so do NOT advance the baseline: a late ACK now no-ops
+      // (its guard sees no pending baseline), and the user's next Save re-diffs and
+      // re-sends — idempotent on the board, and safer than advancing to an
+      // unconfirmed state. With the polls now quiesced during the send, a retry
+      // usually lands cleanly.
+      _pendingSaveBaseline = null;
       _dismissToast(_saveToast); _saveToast = null;
-      showToast('No response from NaviCore — save may not have completed. Try Refresh to verify.', 'warn');
+      showToast('No response from NaviCore — the save may not have gone through. Verify over USB, or just Save again.', 'warn');
     }
     _pendingSaveTimer = null;
   }, 12000);
