@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.09:45.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.10:10.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4108,6 +4108,7 @@ let wcbTemporary   = [];   // per-board "this slot advertised the WDP temporary 
 let _wcbMetaTries  = 0;    // GET_WCB_META attempts this session (bounded so we don't pester a nameless board)
 let _wcbMetaReqAt  = 0;    // last GET_WCB_META request time (throttle)
 let _wcbLastOnline = [];   // last online[] so a WCB_META reply can re-render immediately
+let _wcbMetaResyncAt = 0;  // last PERIODIC WCB_META re-pull — bridged auto-refresh so a label/alias EDITED after connect shows up (see _maybeResyncWcbMeta)
 // After a forget, a WCB_STATUS reply the RC BUILT before it processed the forget
 // still carries known[id]=1. sendJSON is fire-and-forget (no response
 // correlation), so that stale reply can land just after we optimistically remove
@@ -4143,6 +4144,7 @@ function startWcbStatusPoll() {
   wcbEverSeen = new Set();          // fresh per-session memory
   wcbSelfId   = 0;
   _wcbMetaTries = 0; _wcbMetaReqAt = 0; _wcbLastOnline = [];   // re-fetch aliases + port labels over the bridge this session
+  _wcbMetaResyncAt = Date.now();   // start the periodic re-sync clock now → first auto-refresh ~30s in, after the connect burst
   wcbAliases  = [];
   wcbPortLabels = [];
   wcbKnown    = null;               // drop the previous board's slot mask (else it lingers until the first reply)
@@ -4235,6 +4237,26 @@ function _maybeRequestWcbMeta() {
   if ((now - _wcbMetaReqAt) < 5000) return;      // throttle
   _wcbMetaTries++; _wcbMetaReqAt = now;
   _fragSilent = true;   // this is a background fetch — don't pop the loading scrim for it
+  sendJSON({ type: 'GET_WCB_META' }, /*silent=*/true).catch(() => {});
+}
+
+// Slow background re-pull of WCB_META (aliases + serial-port labels) over the bridge,
+// so a label/alias EDITED on a WCB *after* we connected actually appears. Necessary
+// because (a) the lean 3 s WCB_STATUS omits labels over the bridge, and (b) the
+// _maybeRequestWcbMeta burst above self-terminates once every board has a cached
+// alias — its "missing" test never looks at port labels — so without this a
+// mid-session change would never refresh until the user reconnects / hard-refreshes.
+// Bridged-only: over USB the 3 s status already carries labels inline. Fires at most
+// once per ~30 s (the WCB re-advertises a changed label within ~1 s, so 30 s bounds
+// the tool-visible lag); costs one small fragmented reply per interval. Throttled on
+// SEND so a dropped reply just retries on the next interval rather than storming.
+function _maybeResyncWcbMeta() {
+  if (!viaWcbActive && !sharedActive) return;    // USB status already refreshes labels every 3 s
+  if (!_configLoaded) return;                    // stay strictly secondary to the connect-time config pull
+  const now = Date.now();
+  if ((now - _wcbMetaResyncAt) < 30000) return;  // at most once per ~30 s
+  _wcbMetaResyncAt = now;
+  _fragSilent = true;   // background fetch — don't pop the loading scrim
   sendJSON({ type: 'GET_WCB_META' }, /*silent=*/true).catch(() => {});
 }
 
@@ -7619,6 +7641,7 @@ function handleBoardMessage(line) {
     _wcbLastOnline = Array.isArray(msg.online) ? msg.online : [];
     renderWcbStatus(_wcbLastOnline);
     _maybeRequestWcbMeta();   // pull aliases + port labels over the bridge (cached, bounded)
+    _maybeResyncWcbMeta();    // …and re-pull them every ~30s so an edited label/alias refreshes without a reconnect
     return;
   }
   // WCB_META — the per-board aliases + serial-port labels that don't fit the
