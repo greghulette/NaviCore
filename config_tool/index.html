@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.10:39.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.10:43.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4161,6 +4161,11 @@ function startWcbStatusPoll() {
   // up and the firmware answers GET_WCB_STATUS over the mesh. (sharedActive is
   // set before this poll starts; viaWcbActive is set just after, so gate on both.)
   wcbStatusTimer = setInterval(() => {
+    // Hold the poll while a bridged config/library upload is mid-send — a
+    // GET_WCB_STATUS packet slotting between SET_CONFIG fragments congests the
+    // mesh and can drop one, silently failing the save. The panel just holds its
+    // last state for the few seconds the upload takes.
+    if (_bridgeUploadInFlight || _bulkActive) return;
     if (isWcbConfigured() || viaWcbActive || sharedActive) {
       sendJSON({ type: 'GET_WCB_STATUS' }, /*silent=*/true).catch(() => {});
     } else {
@@ -4217,6 +4222,7 @@ function forgetLearnedPeer(id, btnEl) {
 // already carry names, so this only fires when bridged and something is actually missing.
 function _maybeRequestWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already carries names/labels
+  if (_bridgeUploadInFlight || _bulkActive) return;   // never fragment a WCB_META download into an in-flight upload
   // Let the config pull finish FIRST. WCB_META shares the RC's single fragment
   // machine with GET_CONFIG and adds mesh traffic; firing it during the connect-time
   // config pull was starving/dropping it. _configLoaded flips true only once the
@@ -4253,6 +4259,7 @@ function _maybeRequestWcbMeta() {
 function _maybeResyncWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already refreshes labels every 3 s
   if (!_configLoaded) return;                    // stay strictly secondary to the connect-time config pull
+  if (_bridgeUploadInFlight || _bulkActive) return;   // and never spawn a fragmented WCB_META download during an upload
   const now = Date.now();
   if ((now - _wcbMetaResyncAt) < 30000) return;  // at most once per ~30 s
   _wcbMetaResyncAt = now;
@@ -4535,6 +4542,12 @@ function _utf8Chunks(str, maxBytes) {
   return chunks;
 }
 
+// True only while a bridged (Via WCB) MULTI-FRAGMENT send is mid-flight. The
+// background pollers (3 s WCB status, 30 s WCB_META) read this and skip their
+// sends, so a status/meta packet can't slot between SET_CONFIG fragments and
+// congest the mesh into a dropped fragment — which the RC can't recover (no
+// per-fragment ACK), silently failing the save with no ACK back.
+let _bridgeUploadInFlight = false;
 async function sendJSON(obj, silent = false) {
   if (!viaWcbActive) {
     await sendLine(JSON.stringify(obj), silent);
@@ -4587,6 +4600,13 @@ async function sendJSON(obj, silent = false) {
     appendTerminalLine('< [config] ' + msg, 'error');   // surface it, don't fail silently
     return;
   }
+  // Quiesce the background bridged polls for the WHOLE multi-fragment send (see
+  // _bridgeUploadInFlight): their single-packet lines otherwise interleave the
+  // fragment stream, and the added ESP-NOW congestion drops a fragment → the RC's
+  // reassembly times out → the save silently fails with no ACK. Cleared in finally
+  // so a mid-send disconnect / abort can't leave the pollers stuck off.
+  _bridgeUploadInFlight = true;
+  try {
   for (let i = 0; i < total; i++) {
     // Bail mid-send if the user disconnected — sendLine would throw on a
     // torn-down writer anyway, but catching it here avoids the spurious
@@ -4624,6 +4644,9 @@ async function sendJSON(obj, silent = false) {
     //   2. Move bridge-side outbound to a true queue with rate limiting
     // For now, simple source-side rate limiting is the right tradeoff.
     await new Promise(r => setTimeout(r, 150));
+  }
+  } finally {
+    _bridgeUploadInFlight = false;   // resume the background polls
   }
 }
 
@@ -13454,9 +13477,17 @@ async function saveConfigToBoard() {
         '< [config] WARNING: no ACK received for SET_CONFIG within 12 s. ' +
         'Save may not have completed.  Try Refresh to verify, or re-Save.',
         'rx');
-      console.warn('SET_CONFIG ACK timeout — baseline NOT advanced');
+      console.warn('SET_CONFIG ACK timeout — clearing pending baseline so a retry is not blocked');
+      // Free the pending-save lock so the next Save isn't stranded behind the
+      // overlap guard ("A save is still in progress"). We genuinely don't know if
+      // the board applied it, so do NOT advance the baseline: a late ACK now no-ops
+      // (its guard sees no pending baseline), and the user's next Save re-diffs and
+      // re-sends — idempotent on the board, and safer than advancing to an
+      // unconfirmed state. With the polls now quiesced during the send, a retry
+      // usually lands cleanly.
+      _pendingSaveBaseline = null;
       _dismissToast(_saveToast); _saveToast = null;
-      showToast('No response from NaviCore — save may not have completed. Try Refresh to verify.', 'warn');
+      showToast('No response from NaviCore — the save may not have gone through. Verify over USB, or just Save again.', 'warn');
     }
     _pendingSaveTimer = null;
   }, 12000);
