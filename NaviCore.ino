@@ -1662,7 +1662,7 @@ void drainTestAction() {
     ok = rcTestAction(tdoc["action"].as<JsonObject>());
   if (sender >= 1 && sender <= WCB_MAX_BOARDS && wcb && wcbReady) {
     char ack[64];
-    snprintf(ack, sizeof(ack), "{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}", ok ? "true" : "false");
+    snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}", ok ? "true" : "false");
     wcb->send(sender, ack);
   }
 }

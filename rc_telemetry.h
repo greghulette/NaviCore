@@ -841,7 +841,7 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     }
     char ack[100];
     snprintf(ack, sizeof(ack),
-      "{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"id\":%u,\"ok\":%s}",
+      "{\"sys\":1,\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"id\":%u,\"ok\":%s}",
       rcConfig.wcbNetwork.deviceId, ok ? "true" : "false");
     if (wcb) wcb->send(senderID, ack);
     return;
@@ -862,7 +862,7 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     }
     Serial.printf("[RC] SET_CMDLIB → %s\n", ok ? "saved to LittleFS" : "SAVE FAILED / empty");
     char ack[96];
-    snprintf(ack, sizeof(ack), "{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}",
+    snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}",
              ok ? "true" : "false", (unsigned)sz, (unsigned)h);
     if (wcb) wcb->send(senderID, ack);
     return;
@@ -949,7 +949,7 @@ inline void tick() {
     String lib; uint32_t h = 0, sz = 0;
     if (rcCmdlibLoadLFS(lib) && lib.length()) { sz = lib.length(); h = rcCmdlibHash(lib); }
     char buf[72];
-    snprintf(buf, sizeof(buf), "{\"type\":\"CMDLIB_META\",\"size\":%u,\"hash\":%u}", (unsigned)sz, (unsigned)h);
+    snprintf(buf, sizeof(buf), "{\"sys\":1,\"type\":\"CMDLIB_META\",\"size\":%u,\"hash\":%u}", (unsigned)sz, (unsigned)h);
     if (wcb) wcb->send(to, buf);
     return;   // one reply this tick
   }
@@ -1003,7 +1003,7 @@ inline void tick() {
       (sbusLastFrameMs == 0) ? 99999UL : (now - sbusLastFrameMs);
     char buf[220];
     snprintf(buf, sizeof(buf),
-      "{\"type\":\"rc_hb\",\"id\":%u,\"fw\":\"%s\",\"up\":%lu,"
+      "{\"sys\":1,\"type\":\"rc_hb\",\"id\":%u,\"fw\":\"%s\",\"up\":%lu,"
        "\"mode\":%d,\"model\":%u,"
        "\"sbusFps\":%d,\"sbusAge\":%lu,\"sbusLost\":%s,\"sbusFail\":%s}",
       id, FW_VERSION,
@@ -1025,7 +1025,7 @@ inline void tick() {
     _lastCh = now;
     char buf[240];
     int  len = snprintf(buf, sizeof(buf),
-      "{\"type\":\"rc_ch\",\"id\":%u,\"ch\":[", id);
+      "{\"sys\":1,\"type\":\"rc_ch\",\"id\":%u,\"ch\":[", id);
     if (len < 0 || len >= (int)sizeof(buf)) return;   // header itself overflowed — bail
     // Always emit 24 channels.  sbusValues[] is normally 0..2047 (11-bit
     // SBUS), but it's a signed int with no hard clamp, so guard against a
@@ -1064,7 +1064,7 @@ inline void emitTrig(int mode, int btn, int tap) {
   if (!wcb || !wcbReady) return;
   char buf[120];
   snprintf(buf, sizeof(buf),
-    "{\"type\":\"rc_trig\",\"id\":%u,\"mode\":%d,\"btn\":%d,\"tap\":%d}",
+    "{\"sys\":1,\"type\":\"rc_trig\",\"id\":%u,\"mode\":%d,\"btn\":%d,\"tap\":%d}",
     rcConfig.wcbNetwork.deviceId, mode, btn, tap);
   wcb->broadcast(buf, false);   // best-effort: monitor display telemetry, not a must-land command
 }
@@ -1076,7 +1076,7 @@ inline void emitMode(int mode) {
   if (!wcb || !wcbReady) return;
   char buf[80];
   snprintf(buf, sizeof(buf),
-    "{\"type\":\"rc_mode\",\"id\":%u,\"mode\":%d}",
+    "{\"sys\":1,\"type\":\"rc_mode\",\"id\":%u,\"mode\":%d}",
     rcConfig.wcbNetwork.deviceId, mode);
   wcb->broadcast(buf, false);   // best-effort: monitor display telemetry (sibling of rc_trig)
 }
@@ -1215,7 +1215,7 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
   int hi = wcbHighestKnownExcl(q, relayId);
   if (maxHi > 0 && hi > maxHi) hi = maxHi;
   size_t len = snprintf(buf, n,
-      "{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"relay\":%d",
+      "{\"sys\":1,\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"relay\":%d",
       q, selfId, (int)relayId);
   // The relaying node itself is deliberately kept OUT of the online/known/clients
   // arrays (it's a transport hop, not a managed board — see wcbHighestKnownExcl),
@@ -1444,7 +1444,7 @@ inline bool handle(uint8_t senderID, const char* command) {
   if (!strcmp(type, "PING")) {
     char buf[180];
     snprintf(buf, sizeof(buf),
-      "{\"type\":\"PONG\",\"id\":%u,\"version\":\"%s\",\"model\":%u,\"mode\":%d}",
+      "{\"sys\":1,\"type\":\"PONG\",\"id\":%u,\"version\":\"%s\",\"model\":%u,\"mode\":%d}",
       rcConfig.wcbNetwork.deviceId, FW_VERSION,
       rcConfig.txModel, FunctionSwState);
     wcb->send(senderID, buf);
