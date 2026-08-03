@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.11:32.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.11:49.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -13302,11 +13302,41 @@ function _diffConfigBranches(current, baseline) {
   const keys = new Set([...Object.keys(current), ...Object.keys(baseline)]);
   for (const key of keys) {
     if (_stringifyStable(current[key]) !== _stringifyStable(baseline[key])) {
-      // Only include if `current` actually has the key.  A baseline-only
-      // key means the GUI dropped the branch (unusual); send null and
-      // let the firmware decide.  In our current code paths this never
-      // fires, so it's a defensive default.
-      out[key] = (key in current) ? current[key] : null;
+      if (key === 'mappings') {
+        // SUB-DIFF the button mappings: ship ONLY the buttons that changed, not
+        // all 108. `mappings` is one branch, so without this a single-action edit
+        // marks the whole branch dirty and ships every button — ~40 fragments over
+        // the WCB bridge, which is exactly what overloads the RC (task-watchdog
+        // reset) on a relay Save. The firmware's mappings loop (rc_config.h ~1240)
+        // rebuilds each PRESENT button key wholesale and leaves absent ones
+        // untouched, so a partial object is correct and turns that into ~1-2
+        // fragments. Guard against an empty sub-diff so we never ship `mappings:{}`.
+        const md = _diffMappings(current.mappings, baseline.mappings);
+        if (Object.keys(md).length) out.mappings = md;
+      } else {
+        // Only include if `current` actually has the key.  A baseline-only
+        // key means the GUI dropped the branch (unusual); send null and
+        // let the firmware decide.  In our current code paths this never
+        // fires, so it's a defensive default.
+        out[key] = (key in current) ? current[key] : null;
+      }
+    }
+  }
+  return out;
+}
+
+// Per-button diff for the `mappings` object: return only the button keys that
+// changed / were added / were deleted since the baseline. A deleted button (in
+// baseline, gone from current) is shipped as `{}` so the firmware memset-clears
+// that slot rather than leaving the stale mapping in place (an absent key is
+// "leave untouched" firmware-side). See _diffConfigBranches for why this matters.
+function _diffMappings(current, baseline) {
+  const cur = current || {}, base = baseline || {};
+  const out = {};
+  const keys = new Set([...Object.keys(cur), ...Object.keys(base)]);
+  for (const k of keys) {
+    if (_stringifyStable(cur[k]) !== _stringifyStable(base[k])) {
+      out[k] = (k in cur) ? cur[k] : {};
     }
   }
   return out;
