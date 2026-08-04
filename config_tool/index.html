@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.02:46.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.09:01.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2583,7 +2583,7 @@
         <button class="cfg-tab"        type="button" data-tab="maestro">Maestro</button>
         <button class="cfg-tab"        type="button" data-tab="wled">WLED</button>
         <button class="cfg-tab"        type="button" data-tab="smoothing">Smoothing</button>
-        <button class="cfg-tab"        type="button" data-tab="serial">Baud Rates</button>
+        <button class="cfg-tab"        type="button" data-tab="serial">Serial Ports</button>
         <button class="cfg-tab"        type="button" data-tab="firmware">Firmware</button>
       </nav>
       <div class="cfg-content">
@@ -2907,7 +2907,7 @@
               <b>Local port</b> (a WLED wired to one of this controller's aux serial ports, S3/S4/S5) or a
               <b>Remote WCB</b> (a WLED hosted on another board; the command is forwarded over ESP-NOW).
               WLED wants <b>115200 baud</b> — only <b>S3 (the hardware UART)</b> is reliable that fast;
-              set the port's baud in the <b>Baud Rates</b> tab. A bare <code>;L,VERB</code> (no id) drives the lowest-id local WLED.
+              set the port's baud in the <b>Serial Ports</b> tab. A bare <code>;L,VERB</code> (no id) drives the lowest-id local WLED.
             </div>
           </div>
         </section>
@@ -2931,66 +2931,43 @@
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
-             Baud Rates tab — S2 (Maestro) + S3/S4/S5 baud rates.
+             Serial Ports tab — per-port baud + advertised (WDP) label for S2 (Maestro) + S3/S4/S5.
              ════════════════════════════════════════════════════════════ -->
         <section class="cfg-pane" id="cfg-pane-serial">
-          <h2 class="cfg-pane-title">Baud Rates</h2>
+          <h2 class="cfg-pane-title">Serial Ports</h2>
           <div class="sb-section">
-            <div class="wcb-send-row">
-              <label>Maestro (S2):</label>
-              <input type="number" id="aux-baud-maestro" min="1200" max="115200" step="100" value="115200"
-                     style="width:80px;font-size:12px"
-                     title="Local Maestro bus (Serial2 hardware UART). Must match each wired Maestro's Serial Settings (or its Detect Baud mode). Remote/Kyber Maestros are unaffected."
-                     oninput="config.auxBaud.maestro = Math.max(1200, Math.min(115200, parseInt(this.value,10)||115200))">
-            </div>
-            <div class="wcb-send-row">
-              <label id="lbl-baud-s3">S3 baud:</label>
-              <input type="number" id="aux-baud-s3" min="1200" max="115200" step="100" value="9600"
-                     style="width:80px;font-size:12px"
-                     title="S3 line rate. S3 is the hardware UART0 (both boards), so it can exceed 57600 (up to 115200). 9600 for HCR; 38400 for an MP3 Trigger v2."
-                     oninput="config.auxBaud.S3 = Math.max(1200, Math.min(115200, parseInt(this.value,10)||9600))">
-            </div>
-            <div class="wcb-send-row">
-              <label id="lbl-baud-s4">S4 baud:</label>
-              <input type="number" id="aux-baud-s4" min="1200" max="57600" step="100" value="9600"
-                     style="width:80px;font-size:12px"
-                     title="S4 line rate. 9600 for HCR; 38400 for an MP3 Trigger v2. Keep ≤57600 (bit-banged SoftwareSerial)."
-                     oninput="config.auxBaud.S4 = Math.max(1200, Math.min(57600, parseInt(this.value,10)||9600))">
-            </div>
-            <div class="wcb-send-row" id="row-baud-s5">
-              <label id="lbl-baud-s5">S5 baud:</label>
-              <input type="number" id="aux-baud-s5" min="1200" max="57600" step="100" value="9600"
-                     style="width:80px;font-size:12px"
-                     title="S5 line rate — NaviCore v2 'Serial 3' (GPIO38/47) or WCB 3.2 'Serial 5' (GPIO9/10), bit-banged SoftwareSerial. 9600 for HCR; 38400 for an MP3 Trigger v2. Keep ≤57600."
-                     oninput="config.auxBaud.S5 = Math.max(1200, Math.min(57600, parseInt(this.value,10)||9600))">
-            </div>
-            <div class="noconn" style="margin-top:4px"><b>Maestro (S2)</b> = local Pololu Maestro bus (up to 115200). <b>S3</b> runs on the hardware UART0 (both boards) so it can exceed 57600 (up to 115200); <b>S4/S5</b> are bit-banged SoftwareSerial (≤57600). All are aux ports for HCR-local / MP3-local / Serial actions (one port = one device = one baud). On <b>NaviCore v2</b> they're the silkscreen <b>Serial 1/2/3</b>; on <b>WCB 3.2</b> they map to its <b>Serial 3/4/5</b> headers. Reboot (or re-save) for changes to take effect.</div>
-          </div>
-
-          <h2 class="cfg-pane-title" style="margin-top:16px">Port Labels <span style="font-size:11px;font-weight:normal;color:var(--muted)">— advertised on the WCB mesh (WDP)</span></h2>
-          <div class="sb-section">
-            <div class="wcb-send-row">
-              <label>Maestro (S2):</label>
-              <input type="text" id="slabel-2" maxlength="24" style="width:160px;font-size:12px"
-                     title="What's wired to this port. Rides the WDP advert so every WCB + the Wizard show it. Blank = auto."
-                     oninput="setSerialLabel(2, this.value)">
-            </div>
-            <div class="wcb-send-row">
-              <label>S3:</label>
-              <input type="text" id="slabel-3" maxlength="24" style="width:160px;font-size:12px"
-                     title="What's wired to S3. Blank = auto (HCR/MP3/WLED if a dest routes here)." oninput="setSerialLabel(3, this.value)">
-            </div>
-            <div class="wcb-send-row">
-              <label>S4:</label>
-              <input type="text" id="slabel-4" maxlength="24" style="width:160px;font-size:12px"
-                     title="What's wired to S4. Blank = auto." oninput="setSerialLabel(4, this.value)">
-            </div>
-            <div class="wcb-send-row" id="row-slabel-s5">
-              <label>S5:</label>
-              <input type="text" id="slabel-5" maxlength="24" style="width:160px;font-size:12px"
-                     title="What's wired to S5. Blank = auto." oninput="setSerialLabel(5, this.value)">
-            </div>
-            <div class="noconn" style="margin-top:4px">Name what's attached to each NaviCore serial port. These ride NaviCore's WDP advert, so every WCB and the Wizard see them — the mirror of how NaviCore reads back the WCBs' own port labels. <b>Blank = auto:</b> the local Maestro shows "Maestro", and S3/S4/S5 show <b>HCR/MP3/WLED</b> when a destination is routed to that port. A saved override wins. Reboot or re-save to update the advert.</div>
+            <table class="serial-ports-table" style="border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--border,#33333c)">
+                  <th style="padding:4px 12px 5px 0">Port</th>
+                  <th style="padding:4px 16px 5px 0">Baud</th>
+                  <th style="padding:4px 0 5px 0">Label <span style="font-weight:normal;font-size:11px">— advertised on the mesh (WDP)</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="padding:4px 12px 4px 0"><b>Maestro (S2)</b></td>
+                  <td style="padding:4px 16px 4px 0"><input type="number" id="aux-baud-maestro" min="1200" max="115200" step="100" value="115200" style="width:88px;font-size:12px" title="Local Maestro bus (Serial2 hardware UART). Must match each wired Maestro's Serial Settings (or its Detect Baud mode). Remote/Kyber Maestros are unaffected." oninput="config.auxBaud.maestro = Math.max(1200, Math.min(115200, parseInt(this.value,10)||115200))"></td>
+                  <td style="padding:4px 0"><input type="text" id="slabel-2" maxlength="24" style="width:190px;font-size:12px" title="What's wired to this port. Rides the WDP advert so every WCB + the Wizard show it. Blank = auto." oninput="setSerialLabel(2, this.value)"></td>
+                </tr>
+                <tr>
+                  <td style="padding:4px 12px 4px 0"><span id="lbl-baud-s3">S3</span></td>
+                  <td style="padding:4px 16px 4px 0"><input type="number" id="aux-baud-s3" min="1200" max="115200" step="100" value="9600" style="width:88px;font-size:12px" title="S3 line rate. S3 is the hardware UART0 (both boards), so it can exceed 57600 (up to 115200). 9600 for HCR; 38400 for an MP3 Trigger v2." oninput="config.auxBaud.S3 = Math.max(1200, Math.min(115200, parseInt(this.value,10)||9600))"></td>
+                  <td style="padding:4px 0"><input type="text" id="slabel-3" maxlength="24" style="width:190px;font-size:12px" title="What's wired to S3. Blank = auto (HCR/MP3/WLED if a dest routes here)." oninput="setSerialLabel(3, this.value)"></td>
+                </tr>
+                <tr>
+                  <td style="padding:4px 12px 4px 0"><span id="lbl-baud-s4">S4</span></td>
+                  <td style="padding:4px 16px 4px 0"><input type="number" id="aux-baud-s4" min="1200" max="57600" step="100" value="9600" style="width:88px;font-size:12px" title="S4 line rate. 9600 for HCR; 38400 for an MP3 Trigger v2. Keep ≤57600 (bit-banged SoftwareSerial)." oninput="config.auxBaud.S4 = Math.max(1200, Math.min(57600, parseInt(this.value,10)||9600))"></td>
+                  <td style="padding:4px 0"><input type="text" id="slabel-4" maxlength="24" style="width:190px;font-size:12px" title="What's wired to S4. Blank = auto." oninput="setSerialLabel(4, this.value)"></td>
+                </tr>
+                <tr id="row-baud-s5">
+                  <td style="padding:4px 12px 4px 0"><span id="lbl-baud-s5">S5</span></td>
+                  <td style="padding:4px 16px 4px 0"><input type="number" id="aux-baud-s5" min="1200" max="57600" step="100" value="9600" style="width:88px;font-size:12px" title="S5 line rate — NaviCore v2 'Serial 3' (GPIO38/47) or WCB 3.2 'Serial 5' (GPIO9/10), bit-banged SoftwareSerial. 9600 for HCR; 38400 for an MP3 Trigger v2. Keep ≤57600." oninput="config.auxBaud.S5 = Math.max(1200, Math.min(57600, parseInt(this.value,10)||9600))"></td>
+                  <td style="padding:4px 0"><input type="text" id="slabel-5" maxlength="24" style="width:190px;font-size:12px" title="What's wired to S5. Blank = auto." oninput="setSerialLabel(5, this.value)"></td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="noconn" style="margin-top:8px"><b>Maestro (S2)</b> = local Pololu Maestro bus (up to 115200). <b>S3</b> is the hardware UART0 (both boards) so it can exceed 57600 (up to 115200); <b>S4/S5</b> are bit-banged SoftwareSerial (≤57600). One port = one device = one baud (HCR-local / MP3-local / Serial actions). On <b>NaviCore v2</b> they're silkscreen <b>Serial 1/2/3</b>; on <b>WCB 3.2</b> they map to its <b>Serial 3/4/5</b> headers. <b>Label</b> rides the WDP advert so WCBs + the Wizard show what's attached — blank = auto (the local Maestro shows "Maestro"; S3/S4/S5 show HCR/MP3/WLED when a dest routes there). Reboot or re-save to apply.</div>
           </div>
         </section>
 
@@ -8564,15 +8541,16 @@ function applyAuxBaudUI() {
   applyBaudRateLabels();
 }
 
-// Board-aware labels for the Baud Rates pane: NaviCore v2 (boardType 0) shows
+// Board-aware labels for the Serial Ports pane: NaviCore v2 (boardType 0) shows
 // "Serial 1/2/3"; WCB 3.2 (boardType 1) shows "S3/S4/S5". Both boards now have a
 // third aux port, so the S5 row is always visible.
 function applyBaudRateLabels() {
   const v2 = (config.boardType | 0) === 0;
   const set = (id, t) => { const e = document.getElementById(id); if (e) e.textContent = t; };
-  set('lbl-baud-s3', v2 ? 'Serial 1 baud:' : 'S3 baud:');
-  set('lbl-baud-s4', v2 ? 'Serial 2 baud:' : 'S4 baud:');
-  set('lbl-baud-s5', v2 ? 'Serial 3 baud:' : 'S5 baud:');
+  // Port-name cells in the Serial Ports table — no " baud:" now that Baud is its own column.
+  set('lbl-baud-s3', v2 ? 'Serial 1' : 'S3');
+  set('lbl-baud-s4', v2 ? 'Serial 2' : 'S4');
+  set('lbl-baud-s5', v2 ? 'Serial 3' : 'S5');
   const row5 = document.getElementById('row-baud-s5');
   if (row5) row5.style.display = '';   // both boards have S5 now
 }
