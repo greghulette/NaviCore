@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.23:18.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.02:46.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2966,6 +2966,32 @@
             </div>
             <div class="noconn" style="margin-top:4px"><b>Maestro (S2)</b> = local Pololu Maestro bus (up to 115200). <b>S3</b> runs on the hardware UART0 (both boards) so it can exceed 57600 (up to 115200); <b>S4/S5</b> are bit-banged SoftwareSerial (≤57600). All are aux ports for HCR-local / MP3-local / Serial actions (one port = one device = one baud). On <b>NaviCore v2</b> they're the silkscreen <b>Serial 1/2/3</b>; on <b>WCB 3.2</b> they map to its <b>Serial 3/4/5</b> headers. Reboot (or re-save) for changes to take effect.</div>
           </div>
+
+          <h2 class="cfg-pane-title" style="margin-top:16px">Port Labels <span style="font-size:11px;font-weight:normal;color:var(--muted)">— advertised on the WCB mesh (WDP)</span></h2>
+          <div class="sb-section">
+            <div class="wcb-send-row">
+              <label>Maestro (S2):</label>
+              <input type="text" id="slabel-2" maxlength="24" style="width:160px;font-size:12px"
+                     title="What's wired to this port. Rides the WDP advert so every WCB + the Wizard show it. Blank = auto."
+                     oninput="setSerialLabel(2, this.value)">
+            </div>
+            <div class="wcb-send-row">
+              <label>S3:</label>
+              <input type="text" id="slabel-3" maxlength="24" style="width:160px;font-size:12px"
+                     title="What's wired to S3. Blank = auto (HCR/MP3/WLED if a dest routes here)." oninput="setSerialLabel(3, this.value)">
+            </div>
+            <div class="wcb-send-row">
+              <label>S4:</label>
+              <input type="text" id="slabel-4" maxlength="24" style="width:160px;font-size:12px"
+                     title="What's wired to S4. Blank = auto." oninput="setSerialLabel(4, this.value)">
+            </div>
+            <div class="wcb-send-row" id="row-slabel-s5">
+              <label>S5:</label>
+              <input type="text" id="slabel-5" maxlength="24" style="width:160px;font-size:12px"
+                     title="What's wired to S5. Blank = auto." oninput="setSerialLabel(5, this.value)">
+            </div>
+            <div class="noconn" style="margin-top:4px">Name what's attached to each NaviCore serial port. These ride NaviCore's WDP advert, so every WCB and the Wizard see them — the mirror of how NaviCore reads back the WCBs' own port labels. <b>Blank = auto:</b> the local Maestro shows "Maestro", and S3/S4/S5 show <b>HCR/MP3/WLED</b> when a destination is routed to that port. A saved override wins. Reboot or re-save to update the advert.</div>
+          </div>
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
@@ -3526,7 +3552,48 @@ let config = {
   // Aux SoftwareSerial port baud — single source of truth for S3/S4 line rate.
   // HCR-local, MP3-local, and Serial actions all use the port at this baud.
   auxBaud:       { S3: 9600, S4: 9600, S5: 9600, maestro: 115200 },
+  // Per-serial-port WDP labels — what's wired to each NaviCore port, advertised on
+  // the mesh so WCBs + the Wizard show it. Keyed by WDP port number: "2"=local
+  // Maestro (S2), "3"/"4"/"5"=S3/S4/S5. Stores the USER OVERRIDE only; a missing key
+  // = auto-derive (Maestro; HCR/MP3/WLED from the routed dest). Firmware mirror:
+  // rcConfig.serialLabels / rcSerialLabel.
+  serialLabels:  {},
 };
+
+// ── NaviCore serial-port WDP labels ─────────────────────────────────────────
+// Auto-derived label for a WDP port — JS mirror of the firmware's rcSerialLabelAuto:
+// 2 = local Maestro, 3/4/5 = S3/S4/S5 → HCR/MP3/WLED from the routed dest. "" = none.
+function _serialLabelAuto(port) {
+  if (port === 2) return 'Maestro';
+  if (port >= 3 && port <= 5) {
+    const sn = 'S' + port;
+    if (config.hcrDest && config.hcrDest.transport === 'serial' && config.hcrDest.port === sn) return 'HCR';
+    if (config.mp3Dest && config.mp3Dest.transport === 'serial' && config.mp3Dest.port === sn) return 'MP3';
+    if (Array.isArray(config.wledSlots) && config.wledSlots.some(w => w && w.configured && (+w.wcb || 0) === 0 && (+w.port || 0) === port)) return 'WLED';
+  }
+  return '';
+}
+// Write a per-port OVERRIDE into config (blank → remove it so the port falls back to
+// auto). Refreshes the input placeholder to show the current auto hint.
+function setSerialLabel(port, value) {
+  if (!config.serialLabels || typeof config.serialLabels !== 'object') config.serialLabels = {};
+  const v = String(value == null ? '' : value).slice(0, 24);
+  if (v.trim()) config.serialLabels[String(port)] = v;
+  else          delete config.serialLabels[String(port)];
+  const inp = document.getElementById('slabel-' + port);
+  if (inp) { const a = _serialLabelAuto(port); inp.placeholder = a ? ('auto: ' + a) : '(unlabeled)'; }
+}
+// Fill the Port Labels inputs from config (override value) + auto-derived placeholder.
+function renderSerialLabels() {
+  const sl = (config.serialLabels && typeof config.serialLabels === 'object') ? config.serialLabels : {};
+  [2, 3, 4, 5].forEach(p => {
+    const inp = document.getElementById('slabel-' + p);
+    if (!inp) return;
+    inp.value = sl[String(p)] || '';
+    const a = _serialLabelAuto(p);
+    inp.placeholder = a ? ('auto: ' + a) : '(unlabeled)';
+  });
+}
 
 const modeLabels = ['', 'SW Down (Mode 1)', 'SW Mid (Mode 2)', 'SW Up (Mode 3)'];
 // 18 physical matrix buttons (index 1-18). Index 19 ("Unassigned") is kept
@@ -7905,6 +7972,10 @@ function applyConfig(data) {
   if (data.auxBaud) {
     config.auxBaud = { ...config.auxBaud, ...data.auxBaud };
   }
+  // Per-port WDP labels (overrides). Full-replace: absent = old firmware → clear to
+  // {} (all auto), so it can't read as a false dirty diff against a stale set.
+  config.serialLabels = (data.serialLabels && typeof data.serialLabels === 'object') ? { ...data.serialLabels } : {};
+  renderSerialLabels();
   document.getElementById('tapwin-input').value = config.tapWindowMs;
   { const cr = document.getElementById('chrate-input');
     if (cr) { const hz = Math.max(1, Math.min(20, config.chRateHz ?? 5));
@@ -15268,6 +15339,7 @@ function handleConfigImportFile(event) {
                      ? config.wledSlots.map(s => ({ ...s }))
                      : Array.from({ length: NUM_WLED_SLOTS }, () => ({ id: 0, port: 0, wcb: 0, configured: false })),
         auxBaud: config.auxBaud ? { ...config.auxBaud } : { S3: 9600, S4: 9600, maestro: 115200 },
+        serialLabels: (config.serialLabels && typeof config.serialLabels === 'object') ? { ...config.serialLabels } : {},
       };
       let csvHadHcrDest = false;
       let csvHadMaestros = false;
