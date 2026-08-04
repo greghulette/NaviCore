@@ -487,6 +487,23 @@ struct RcSmoothProfile {
   RcSmoothEntry entries[RC_NUM_MAESTROS][32];   // [maestroId-1][channel]
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Port-label slots (rcConfig.serialLabels)
+// ─────────────────────────────────────────────────────────────────────────────
+// One slot per labelable NaviCore port, indexed by FIRMWARE port so the config is
+// independent of the mesh numbering. The three aux headers carry firmware names
+// S3/S4/S5 (silkscreened "Serial 1/2/3" on a NaviCore v2) and are the ports the
+// mesh addresses as S1/S2/S3; the local Maestro is a binary bus, so it gets a
+// label but no text-addressable port. JSON keys match auxBaud's: "S3","S4","S5",
+// "maestro".
+#define RC_SLBL_S3       0
+#define RC_SLBL_S4       1
+#define RC_SLBL_S5       2
+#define RC_SLBL_MAESTRO  3
+#define RC_NUM_SLBL      4
+// JSON key per slot — index with RC_SLBL_*. Order must match the defines above.
+static const char* const RC_SLBL_KEYS[RC_NUM_SLBL] = { "S3", "S4", "S5", "maestro" };
+
 struct RcConfig {
   uint8_t        txModel;        // RcTxModel — drives GUI layout + defaults
   // Per-build hardware option flag — meaningful only when txModel == TX_MODEL_X20.
@@ -526,12 +543,21 @@ struct RcConfig {
   // Maestro's Serial Settings (or its "Detect baud" mode). Remote/Kyber
   // Maestros are unaffected — that path is binary over ESP-NOW.
   uint32_t       maestroBaud;
-  // Per-serial-port WDP labels — what's attached to each of NaviCore's ports, so
-  // WCBs + the Wizard show it (advertised as WDP PORTLABEL TLVs, same as the WCB
-  // boards). Index = WDP port 1-5 minus 1: [0]=port1 (SBUS), [1]=port2 (local
-  // Maestro), [2]=S3, [3]=S4, [4]=S5. Stores the USER OVERRIDE only; "" = fall back
-  // to the auto-derived default (see rcSerialLabel/rcSerialLabelAuto).
-  char           serialLabels[5][25];
+  // Per-port WDP labels — what's attached to each of NaviCore's ports, so WCBs +
+  // the Wizard show it (advertised as WDP PORTLABEL TLVs, same as the WCB boards).
+  // Indexed by RC_SLBL_* — the FIRMWARE port, not the mesh port number, so the two
+  // numbering schemes stay independent (see rcSerialLabel / rcWdpPortForLabel).
+  // Stores the USER OVERRIDE only; "" = fall back to the auto-derived default.
+  char           serialLabels[RC_NUM_SLBL][25];
+  // Per-aux-port mesh bridging — makes S3/S4/S5 full mesh citizens the way a WCB's
+  // serial ports are. Indexed like auxBaud: [0]=S3, [1]=S4, [2]=S5.
+  //   bcastOut : a broadcast command arriving over the mesh is written OUT this port.
+  //   bcastIn  : a line arriving ON this port is broadcast to the mesh (and out the
+  //              other bcastOut ports), exactly as a WCB rebroadcasts serial input.
+  // Both default OFF — a port only joins the broadcast domain when asked to. Targeted
+  // writes (`;w20,;s<n><cmd>`) are always accepted and need neither flag.
+  bool           serialBcastOut[3];
+  bool           serialBcastIn[3];
   // Remote skip-if-running gate: how long a mesh-relayed Maestro "busy" (:MQR moving-state)
   // reply stays valid. If the last reply is older than this — or none has arrived (e.g. the
   // WCB relay isn't up yet) — the gate FAILS OPEN and the action fires anyway. Default 250.
@@ -729,6 +755,8 @@ void rcConfigLoadDefaults() {
   rcConfig.auxBaud[2] = 9600;   // S5 (NaviCore v2 "Serial 3")
   rcConfig.maestroBaud = LOCAL_MAESTRO_BAUD_RATE;   // local Maestro bus (Serial2)
   memset(rcConfig.serialLabels, 0, sizeof(rcConfig.serialLabels));   // no overrides → all ports auto-derive
+  memset(rcConfig.serialBcastOut, 0, sizeof(rcConfig.serialBcastOut));   // no port bridges the mesh broadcast
+  memset(rcConfig.serialBcastIn,  0, sizeof(rcConfig.serialBcastIn));    // domain until explicitly enabled
 
   // Default Maestro slots — all 8 disabled until user enables them in the
   // GUI Maestro Locations panel.  Device numbers default to match the slot
@@ -1147,17 +1175,28 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   auxObj["S4"]      = rcConfig.auxBaud[1];
   auxObj["S5"]      = rcConfig.auxBaud[2];
   auxObj["maestro"] = rcConfig.maestroBaud;   // local Maestro bus (Serial2)
-  // Per-serial-port OVERRIDE labels — only the non-empty ones, keyed by WDP port.
-  // Literal keys (flash) so ArduinoJson stores them safely; values point into the
-  // persistent rcConfig (serialized before it can change), same as auxObj/hcrDest.
+  // Per-port OVERRIDE labels — only the non-empty ones, keyed by FIRMWARE port
+  // exactly like auxBaud above ("S3"/"S4"/"S5"/"maestro"), so the stored config is
+  // independent of the mesh S1-S3 numbering. Literal keys (flash) so ArduinoJson
+  // stores them safely; values point into the persistent rcConfig (serialized
+  // before it can change), same as auxObj/hcrDest.
   {
-    static const char* const PK[5] = { "1", "2", "3", "4", "5" };
     JsonObject slObj;
     bool created = false;
-    for (int p = 1; p <= 5; p++) {
-      if (!rcConfig.serialLabels[p - 1][0]) continue;
+    for (int s = 0; s < RC_NUM_SLBL; s++) {
+      if (!rcConfig.serialLabels[s][0]) continue;
       if (!created) { slObj = doc.createNestedObject("serialLabels"); created = true; }
-      slObj[PK[p - 1]] = rcConfig.serialLabels[p - 1];
+      slObj[RC_SLBL_KEYS[s]] = rcConfig.serialLabels[s];
+    }
+  }
+  // Per-aux-port mesh bridging, keyed by firmware port like auxBaud. Always emitted
+  // in full (3 ports x 2 flags is cheap) so the tool never has to guess a default.
+  {
+    JsonObject bcObj = doc.createNestedObject("serialBcast");
+    for (int i = 0; i < 3; i++) {
+      JsonObject p = bcObj.createNestedObject(RC_SLBL_KEYS[i]);   // "S3"/"S4"/"S5"
+      p["out"] = rcConfig.serialBcastOut[i];
+      p["in"]  = rcConfig.serialBcastIn[i];
     }
   }
 
@@ -1472,16 +1511,33 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     rcConfig.auxBaud[2] = (uint32_t)(auxObj["S5"]      | rcConfig.auxBaud[2]);
     rcConfig.maestroBaud = (uint32_t)(auxObj["maestro"] | rcConfig.maestroBaud);
   }
-  // Per-serial-port override labels, keyed by WDP port "1".."5". Guarded by
-  // containsKey so a diff-save that omits it can't wipe them; FULL-replace when
-  // present so clearing a label (dropping its key) is honored.
+  // Per-port override labels, keyed by firmware port ("S3"/"S4"/"S5"/"maestro").
+  // Guarded by containsKey so a diff-save that omits it can't wipe them;
+  // FULL-replace when present so clearing a label (dropping its key) is honored.
+  // An unrecognized key is ignored — a config written before the keys moved from
+  // WDP port numbers ("1".."5") leaves the labels empty, so every port falls back
+  // to its auto-derived default rather than silently landing on the wrong port.
   if (doc.containsKey("serialLabels")) {
     memset(rcConfig.serialLabels, 0, sizeof(rcConfig.serialLabels));
     JsonObject slObj = doc["serialLabels"];
     for (JsonPair kv : slObj) {
-      int port = atoi(kv.key().c_str());
-      if (port >= 1 && port <= 5)
-        strlcpy(rcConfig.serialLabels[port - 1], kv.value() | "", sizeof(rcConfig.serialLabels[0]));
+      for (int s = 0; s < RC_NUM_SLBL; s++) {
+        if (strcmp(kv.key().c_str(), RC_SLBL_KEYS[s]) != 0) continue;
+        strlcpy(rcConfig.serialLabels[s], kv.value() | "", sizeof(rcConfig.serialLabels[0]));
+        break;
+      }
+    }
+  }
+  // Per-aux-port mesh bridging. containsKey-guarded (a diff-save that omits it keeps
+  // the current flags) and per-flag defaulted to the current value, so a partial
+  // object only changes what it actually carries.
+  if (doc.containsKey("serialBcast")) {
+    JsonObject bcObj = doc["serialBcast"];
+    for (int i = 0; i < 3; i++) {
+      if (!bcObj.containsKey(RC_SLBL_KEYS[i])) continue;
+      JsonObject p = bcObj[RC_SLBL_KEYS[i]];
+      rcConfig.serialBcastOut[i] = p["out"] | rcConfig.serialBcastOut[i];
+      rcConfig.serialBcastIn[i]  = p["in"]  | rcConfig.serialBcastIn[i];
     }
   }
   // A switch's channel/positions may have changed — re-seed switchPrevPos on the
@@ -1501,26 +1557,52 @@ bool rcConfigFromJSON(const String& json) {
   return rcConfigFromJSON(doc.as<JsonObject>());
 }
 
-// ── WDP serial-port labels ───────────────────────────────────────────────────
-// The effective label to advertise for a WDP port (1-5): the USER OVERRIDE if set,
-// else an auto-derived default from what the config routes to that port. Port map:
-// 1 = SBUS (no auto label), 2 = local Maestro (Serial2), 3/4/5 = S3/S4/S5.
+// ── Port labels + mesh port numbering ────────────────────────────────────────
+// NaviCore uses TWO port numbering schemes and they are deliberately distinct:
+//
+//   FIRMWARE port  S3/S4/S5  — the aux UARTs as this code, the config JSON, and
+//                              hcrDest/mp3Dest/wledSlots.serialPort name them.
+//   MESH port      S1/S2/S3  — what the rest of the mesh addresses, matching the
+//                              NaviCore v2 silkscreen ("Serial 1/2/3"). This is
+//                              what a WCB means in `;w20,;s2<cmd>` and what WDP
+//                              PORTLABEL advertises, so a WCB prints "S2".
+//
+// rcFwPortForMesh/rcMeshPortForFw convert; every mesh-facing path converts once at
+// the boundary and works in firmware numbering internally.
+inline int rcFwPortForMesh(int meshPort) {                  // S1/S2/S3 → S3/S4/S5
+  return (meshPort >= 1 && meshPort <= 3) ? meshPort + 2 : 0;
+}
+inline int rcMeshPortForFw(int fwPort) {                    // S3/S4/S5 → S1/S2/S3
+  return (fwPort >= 3 && fwPort <= 5) ? fwPort - 2 : 0;
+}
+
+// The effective label for a port-label slot (RC_SLBL_*): the USER OVERRIDE if set,
+// else an auto-derived default from what the config routes to that port.
 // rcAdvertiseSerialLabels() (NaviCore.ino) pushes these to WCB_Client::setPortLabel
 // so WCBs + the Wizard see what's attached to each NaviCore port.
-inline const char* rcSerialLabelAuto(int port) {
-  if (port == 2) return "Maestro";                          // local Maestro on Serial2
-  if (port >= 3 && port <= 5) {
-    if (rcConfig.hcrDest.transport == 0 && rcConfig.hcrDest.target[0] == 'S' && atoi(rcConfig.hcrDest.target + 1) == port) return "HCR";
-    if (rcConfig.mp3Dest.transport == 0 && rcConfig.mp3Dest.target[0] == 'S' && atoi(rcConfig.mp3Dest.target + 1) == port) return "MP3";
+inline const char* rcSerialLabelAuto(int slot) {
+  if (slot == RC_SLBL_MAESTRO) return "Maestro";            // local Maestro on Serial2
+  if (slot >= RC_SLBL_S3 && slot <= RC_SLBL_S5) {
+    int fwPort = slot + 3;                                  // slot 0/1/2 → firmware S3/S4/S5
+    if (rcConfig.hcrDest.transport == 0 && rcConfig.hcrDest.target[0] == 'S' && atoi(rcConfig.hcrDest.target + 1) == fwPort) return "HCR";
+    if (rcConfig.mp3Dest.transport == 0 && rcConfig.mp3Dest.target[0] == 'S' && atoi(rcConfig.mp3Dest.target + 1) == fwPort) return "MP3";
     for (int i = 0; i < RC_NUM_WLED; i++)
-      if (rcConfig.wledSlots[i].configured && rcConfig.wledSlots[i].remoteWCB == 0 && rcConfig.wledSlots[i].serialPort == port) return "WLED";
+      if (rcConfig.wledSlots[i].configured && rcConfig.wledSlots[i].remoteWCB == 0 && rcConfig.wledSlots[i].serialPort == fwPort) return "WLED";
   }
   return "";
 }
-inline const char* rcSerialLabel(int port) {
-  if (port < 1 || port > 5) return "";
-  if (rcConfig.serialLabels[port - 1][0]) return rcConfig.serialLabels[port - 1];   // user override wins
-  return rcSerialLabelAuto(port);
+inline const char* rcSerialLabel(int slot) {
+  if (slot < 0 || slot >= RC_NUM_SLBL) return "";
+  if (rcConfig.serialLabels[slot][0]) return rcConfig.serialLabels[slot];   // user override wins
+  return rcSerialLabelAuto(slot);
+}
+// Which WDP PORTLABEL port number a label slot is advertised under. The three aux
+// headers go out as the mesh ports that address them (S1/S2/S3); the Maestro takes
+// port 4 — visible in ?WDP,LIST and the Wizard, but not a port `;s<n>` can reach.
+inline int rcWdpPortForLabel(int slot) {
+  if (slot >= RC_SLBL_S3 && slot <= RC_SLBL_S5) return slot + 1;   // → WDP 1/2/3
+  if (slot == RC_SLBL_MAESTRO)                  return 4;
+  return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

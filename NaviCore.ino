@@ -252,6 +252,62 @@ static inline void auxEnd(Stream* p, bool isHw) {
 }
 // SBUS OUT uses the real UART0 (Serial0) — see setup() and SBUS_OUT_PIN above.
 
+// The Stream backing a FIRMWARE port number (3/4/5). nullptr when the port doesn't
+// exist on the active board. Mesh port numbers must go through rcFwPortForMesh()
+// first — this takes firmware numbering only.
+static inline Stream* auxStreamFor(int fwPort) {
+  switch (fwPort) {
+    case 3:  return s3;
+    case 4:  return s4;
+    case 5:  return s5;
+    default: return nullptr;
+  }
+}
+
+// =============================================================================
+//  Mesh ↔ serial bridge
+// =============================================================================
+// Makes NaviCore's aux ports behave like a WCB's on the mesh, in both directions:
+//
+//   TARGETED   `;w20,;s<n><cmd>` on any WCB → we write <cmd> out mesh port n.
+//              Always accepted, no config needed — the same one-hop route a WCB
+//              honors for `;w2;s4<cmd>`.
+//   BROADCAST  A mesh broadcast (a command with no `;` / `?` / `#` prefix) is
+//              written out every port with bcastOut set; a line read from a port
+//              with bcastIn set is broadcast to the mesh AND out the other
+//              bcastOut ports. Both are per-port opt-in (rcConfig.serialBcast*).
+//
+// EVERY write is deferred to loop() through this queue. onWCBCommand runs on the
+// Core-0 WiFi task, and S4/S5 are bit-banged SoftwareSerial — a write there blocks
+// with interrupts off for the whole frame time (~1 ms per 10 chars at 9600), which
+// on the WiFi task would stall ESP-NOW and on either core would jitter the ~111 fps
+// SBUS path. The queue is the same cross-core hop pattern as remoteCliQueue.
+//
+// text[] is sized to the 200-char mesh command payload (WCB_Client's structCommand
+// cap), so a forwarded command is never truncated in transit.
+struct SerialFwdMsg { uint8_t fwPort; char text[201]; };
+QueueHandle_t serialFwdQueue = nullptr;
+
+// =============================================================================
+//  Mesh → local Maestro  (inbound ";M")
+// =============================================================================
+// A WCB holding a remote-Maestro proxy that points at us forwards the command as
+// PLAIN TEXT, verbatim — `;M<id><seq>` for a subroutine, `;M<dev>,<verb>[,args]`
+// for everything else (WCB_Maestro.cpp builds those strings and unicasts them).
+// So NaviCore accepts exactly the grammar a WCB accepts, and it does that by
+// handing the text straight to WcbMaestro::build() rather than re-implementing
+// the verb table — one parser, shared by both firmwares, no drift.
+//
+// Deferred to Core 1 for two reasons: Serial2 writes race the dispatch caches
+// that processSbus() touches, and a get* query blocks up to 25 ms waiting on the
+// Maestro's reply (maestroLocalQuery). Neither belongs on the Core-0 WiFi task.
+//
+// text[] comfortably holds the longest legal line — ";MG127,20,getPosition,127"
+// is 25 chars. An over-long line is DROPPED at enqueue rather than truncated: a
+// clipped command could otherwise re-parse as a different, still-valid one.
+struct MaestroCmdMsg { uint8_t sender; char text[48]; };
+QueueHandle_t maestroCmdQueue = nullptr;
+
 // =============================================================================
 //  HCR Vocalizer routing
 //
@@ -884,6 +940,15 @@ static void maestroRestartScript(uint8_t id, uint8_t sub) {
   maestroWrite(id, 0xA7, &sub, 1);
   maeSmoothInvalidateSlot(id);   // a device-side script may change speed/accel we can't see — re-apply on next stick move
 }
+// Restart Script at Subroutine WITH parameter (Pololu 0x28) — the value is pushed on
+// the Maestro's script stack. Shared by the local ";M<id>,subParam" action and the
+// inbound-mesh handler so there is ONE implementation of the frame.
+static void maestroSubParam(uint8_t id, uint8_t sub, uint16_t param) {
+  if (param > 16383) param = 16383;
+  uint8_t p[3] = { sub, (uint8_t)(param & 0x7F), (uint8_t)((param >> 7) & 0x7F) };
+  maestroWrite(id, 0xA8, p, 3);  // 0xA8 & 0x7F = 0x28 → {0xAA,dev,0x28,sub,pl,ph} == WcbMaestro::buildSubParam
+  maeSmoothInvalidateSlot(id);   // a device-side script may change speed/accel we can't see
+}
 
 // Zero speed/accel on every passthrough channel of Maestro `id` that has
 // smoothing enabled, so a Maestro script runs at full / its own speed instead
@@ -1045,12 +1110,7 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
   else if (strcmp(tok, "subParam") == 0) {   // Restart Script at Subroutine WITH parameter (Pololu 0x28)
     char* sN = strtok(nullptr, ",");         // subroutine 0-127
     char* sP = strtok(nullptr, ",");         // parameter 0-16383, pushed on the Maestro's script stack
-    if (sN && sP) {
-      uint16_t param = (uint16_t)atoi(sP); if (param > 16383) param = 16383;
-      uint8_t p[3] = { (uint8_t)atoi(sN), (uint8_t)(param & 0x7F), (uint8_t)((param >> 7) & 0x7F) };
-      maestroWrite(id, 0xA8, p, 3);          // 0xA8 & 0x7F = 0x28 → {0xAA,dev,0x28,sub,pl,ph} == WcbMaestro::buildSubParam
-      maeSmoothInvalidateSlot(id);           // a device-side script may change speed/accel we can't see
-    }
+    if (sN && sP) maestroSubParam(id, (uint8_t)atoi(sN), (uint16_t)atoi(sP));
   }
 }
 
@@ -2169,6 +2229,57 @@ static void __attribute__((noinline)) queueRemoteCli(uint8_t relay, const char* 
   xQueueSend(remoteCliQueue, &m, 0);   // non-blocking; drop under load
 }
 
+// ── Mesh → serial ────────────────────────────────────────────────────────────
+// Enqueue one write for the aux port `fwPort` (firmware numbering). Safe to call
+// from the Core-0 ESP-NOW callback; drainSerialFwd()/auxTxPump() do the actual
+// (blocking, bit-banged) I/O on Core 1. noinline keeps the 201-byte SerialFwdMsg
+// off the caller's frame, same discipline as queueRemoteCli.
+static void __attribute__((noinline)) queueSerialFwd(uint8_t fwPort, const char* text) {
+  if (!serialFwdQueue || !text || !text[0]) return;
+  SerialFwdMsg m;
+  m.fwPort = fwPort;
+  strlcpy(m.text, text, sizeof(m.text));
+  xQueueSend(serialFwdQueue, &m, 0);   // non-blocking; drop under load
+}
+
+// Enqueue an inbound ";M" line for drainMaestroCmd() (loop, Core 1). Safe to call from
+// the Core-0 ESP-NOW callback; noinline keeps the MaestroCmdMsg off that frame (same
+// discipline as queueRemoteCli/queueSerialFwd). An over-long line is dropped rather
+// than truncated — see the MaestroCmdMsg comment.
+static void __attribute__((noinline)) queueMaestroCmd(uint8_t sender, const char* text) {
+  if (!maestroCmdQueue || !text || !text[0]) return;
+  MaestroCmdMsg m;
+  if (strlen(text) >= sizeof(m.text)) return;
+  m.sender = sender;
+  strlcpy(m.text, text, sizeof(m.text));
+  xQueueSend(maestroCmdQueue, &m, 0);   // non-blocking; drop under load
+}
+
+// True when a device owns this aux port — an HCR, MP3 Trigger or WLED is routed to
+// it. rcSerialLabelAuto() already derives exactly that from the routing config, so
+// it's the single source of truth for both the advertised label and this check.
+// The broadcast fan-out skips these ports the way a WCB skips its own device ports:
+// the owning driver frames its traffic, and broadcast chatter would corrupt it. A
+// TARGETED `;s<n>` write is never skipped — that's an explicit operator instruction.
+static bool auxPortHasDevice(int fwPort) {
+  if (fwPort < 3 || fwPort > 5) return false;
+  return rcSerialLabelAuto(fwPort - 3)[0] != '\0';   // slot RC_SLBL_S3..RC_SLBL_S5
+}
+
+// Fan a broadcast command out to every aux port that opted in. `exceptFwPort` is the
+// port it arrived on (0 when it came off the mesh), so a line read from S3 is never
+// echoed straight back out S3. Core-0 safe — it only enqueues.
+static void queueSerialBroadcastOut(const char* text, int exceptFwPort) {
+  for (int i = 0; i < 3; i++) {
+    int fwPort = i + 3;
+    if (fwPort == exceptFwPort)      continue;
+    if (!rcConfig.serialBcastOut[i]) continue;   // port hasn't joined the broadcast domain
+    if (!auxStreamFor(fwPort))       continue;   // not present on this board
+    if (auxPortHasDevice(fwPort))    continue;   // HCR/MP3/WLED owns the wire
+    queueSerialFwd((uint8_t)fwPort, text);
+  }
+}
+
 // Enqueue a remote TRIGGER for drainRemoteTriggers() (loop, Core 1). Called from
 // rcTelemetry::handle() on the Core-0 ESP-NOW callback; noinline keeps the POD
 // off that callback's stack frame (same discipline as queueRemoteCli). Args are
@@ -2237,6 +2348,48 @@ void onWCBCommand(uint8_t senderID, const char* command) {
   if (command && strncmp(command, ":MQR,", 5) == 0) {
     dlog(DBG_MAESTRO, "[DISPATCH] Maestro RX reply  %s\n", command);   // gated + infrequent
     maeConsumeRemoteReply(command + 5); return;
+  }
+
+  // ── Mesh → local Maestro: inbound `;M...` ───────────────────────────────────
+  // A WCB whose remote-Maestro proxy points at us forwards the command as plain
+  // text, verbatim (`;M35`, `;M3,goHome`, `;MG3,2,getMovingState`). Enqueue only —
+  // the parse, the Serial2 write and any query readback all run on Core 1.
+  if (command && command[0] == ';' && (command[1] == 'M' || command[1] == 'm')) {
+    queueMaestroCmd(senderID, command);   // noinline — keeps the buffer off this frame
+    return;
+  }
+
+  // ── Mesh → serial: targeted `;s<n><payload>` ────────────────────────────────
+  // A WCB routing `;w20,;s2<cmd>` delivers exactly ";s2<cmd>" here — the `;w20,`
+  // is stripped by the sending board, the rest arrives verbatim. <n> is the MESH
+  // port (S1-S3 = the NaviCore v2 silkscreen), converted to the firmware port the
+  // Streams are keyed by. The payload is written raw + CR, no comma stripping —
+  // byte-identical to what the same command would put on a WCB's port.
+  if (command && command[0] == ';' && (command[1] == 's' || command[1] == 'S') &&
+      command[2] >= '0' && command[2] <= '9') {
+    int meshPort = command[2] - '0';
+    int fwPort   = rcFwPortForMesh(meshPort);
+    if (fwPort == 0) {
+      dlog(DBG_SERIAL, "[DISPATCH] Serial route: S%d is not a NaviCore port (S1-S3)\n", meshPort);
+    } else if (!auxStreamFor(fwPort)) {
+      dlog(DBG_SERIAL, "[DISPATCH] Serial route: S%d not available on this board\n", meshPort);
+    } else {
+      queueSerialFwd((uint8_t)fwPort, command + 3);   // deferred to loop — see SerialFwdMsg
+    }
+    return;
+  }
+
+  // ── Mesh → serial: broadcast ────────────────────────────────────────────────
+  // Everything above claimed the prefixed traffic (JSON management, `?`/`#` CLI,
+  // `:MQR` replies, `;` routes), so an unprefixed command is a mesh BROADCAST —
+  // the same rule the WCB firmware applies before calling processBroadcastCommand.
+  // It goes out every port that opted in (none by default). Never re-broadcast to
+  // the mesh: this arrived from there, and the out-path is mesh→serial only, so
+  // there is no loop to break.
+  if (command && command[0] && command[0] != ';') {
+    queueSerialBroadcastOut(command, 0);
+    // fall through — the log below still shows it, which is what makes an
+    // unexpected broadcast visible instead of silently swallowed.
   }
 
   // Unhandled (legacy/unknown) WCB command.  This runs in the ESP-NOW
@@ -2688,19 +2841,41 @@ bool execCliLine(const String& line) {
 // parser would live. Ports are drained every loop so their FIFOs never overflow;
 // the dlog is a no-op (nothing sent) unless the Serial debug chip is on.
 #define AUX_RX_BUF 128
+// One assembled chunk off an aux port. `terminated` is true only for a real CR/LF
+// line — a buffer-full or idle flush is a FRAGMENT, shown on the terminal but never
+// broadcast, because a command is a line (the same rule processIncomingSerial uses
+// on a WCB). Runs on Core 1 (loop), so broadcasting from here is safe.
+static void auxRxLine(int idx, const char* buf, bool terminated) {
+  dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s]  %s\n", auxPortLabel(idx), buf);
+  if (!terminated || !rcConfig.serialBcastIn[idx]) return;
+
+  // ── Serial → mesh: broadcast in ───────────────────────────────────────────
+  // This port is in the broadcast domain, so the line goes where it would go on a
+  // WCB: out to the whole mesh, and out our OTHER opted-in ports (never back down
+  // the one it came from). Unensured — this is a repeating console/device stream,
+  // not a command worth spending a pending slot and retransmits on.
+  int fwPort = idx + 3;
+  // A device-owned port is skipped here for the same reason the fan-out skips it:
+  // an HCR's status frames or an MP3 Trigger's replies are that driver's protocol,
+  // not commands, and spraying them across the mesh would be noise at best.
+  if (auxPortHasDevice(fwPort)) return;
+  if (wcb && wcbReady) wcb->broadcast(buf, /*ensured=*/false);
+  queueSerialBroadcastOut(buf, fwPort);
+  dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s] → mesh broadcast\n", auxPortLabel(idx));
+}
 static void auxRxPollPort(Stream* p, int idx, char* buf, uint8_t& len, unsigned long& lastMs) {
   if (!p) return;
   while (p->available()) {
     int c = p->read();
     lastMs = millis();
     if (c == '\n' || c == '\r') {
-      if (len) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s]  %s\n", auxPortLabel(idx), buf); len = 0; }
+      if (len) { buf[len] = 0; auxRxLine(idx, buf, true); len = 0; }
     } else {
-      if (len >= AUX_RX_BUF - 1) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s]  %s\n", auxPortLabel(idx), buf); len = 0; }
+      if (len >= AUX_RX_BUF - 1) { buf[len] = 0; auxRxLine(idx, buf, false); len = 0; }
       buf[len++] = (c >= 32 && c < 127) ? (char)c : '.';   // sanitize non-printable for the terminal
     }
   }
-  if (len && (millis() - lastMs) > 60) { buf[len] = 0; dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s]  %s\n", auxPortLabel(idx), buf); len = 0; }
+  if (len && (millis() - lastMs) > 60) { buf[len] = 0; auxRxLine(idx, buf, false); len = 0; }
 }
 static void pollAuxSerialRx() {
   static char b3[AUX_RX_BUF], b4[AUX_RX_BUF], b5[AUX_RX_BUF];
@@ -3170,14 +3345,51 @@ static void printBootTelemetry() {
                 g_bootAttempts > 1 ? "   <-- board retried/reset before this boot" : "");
 }
 
-// Push the effective label for each NaviCore serial port (WDP ports 1-5: 2=local
-// Maestro, 3/4/5=S3/S4/S5) into WCB_Client so it rides the WDP advert — the WCBs +
-// the Wizard then show what's attached to NaviCore, just like they do for a WCB.
+// Push what's attached to this NaviCore into the WDP advert, so the WCBs + the
+// Wizard see it exactly as they see another WCB's. Two things ride along:
+//
+//   • Port labels — the three aux headers advertise under the MESH port numbers
+//     that address them (WDP 1/2/3 = firmware S3/S4/S5 = the v2 silkscreen's
+//     "Serial 1/2/3"), so a WCB printing "S2  HCR" names the same port an
+//     operator would type in `;w20,;s2<cmd>`. The local Maestro takes WDP port 4:
+//     visible in ?WDP,LIST, but not a port `;s<n>` can reach (it's a binary bus).
+//     WDP port 5 is unused and explicitly cleared.
+//   • Local Maestro IDs + bus baud — the same MAESTRO/MAESTRO_CFG TLVs a WCB
+//     emits, so every board knows which Maestros live here.
+//
 // Called at boot (after setIdentity) and after every SET_CONFIG apply. WCB_Client
-// dedupes unchanged labels and re-broadcasts changed ones promptly.
+// dedupes unchanged values and re-broadcasts changed ones promptly.
 void rcAdvertiseSerialLabels() {
   if (!wcb) return;
-  for (int p = 1; p <= 5; p++) wcb->setPortLabel((uint8_t)p, rcSerialLabel(p));
+  for (int s = 0; s < RC_NUM_SLBL; s++)
+    wcb->setPortLabel((uint8_t)rcWdpPortForLabel(s), rcSerialLabel(s));
+  wcb->setPortLabel(5, "");                 // NaviCore has no 5th labelable port
+
+  // Every LOCAL Maestro (type 1 = wired to Serial2), advertised by its POLOLU DEVICE
+  // NUMBER — that is what the mesh means by a Maestro id. On a WCB the id in ;M<id>
+  // goes straight onto the wire as the Pololu device byte, and it is a MULTICAST
+  // address: every Maestro carrying that device number, on any port of any board,
+  // runs the command. Several boards legitimately host the same device number, and
+  // that is the point — so NaviCore joins that namespace by device, NOT by its own
+  // slot index (which is a purely local handle).
+  //
+  // Deduped: two type-1 slots sharing a device number are, on NaviCore's single
+  // Serial2 bus, necessarily the SAME physical Maestro — advertise it once. All local
+  // Maestros share that one bus, hence the one baud.
+  uint8_t  mIds[RC_NUM_MAESTROS];
+  uint32_t mBauds[RC_NUM_MAESTROS];
+  uint8_t  mCount = 0;
+  for (int i = 0; i < RC_NUM_MAESTROS; i++) {
+    if (rcConfig.maestros[i].type != 1) continue;
+    const uint8_t dev = rcConfig.maestros[i].device;
+    bool dup = false;
+    for (uint8_t k = 0; k < mCount; k++) if (mIds[k] == dev) { dup = true; break; }
+    if (dup) continue;
+    mIds[mCount]   = dev;
+    mBauds[mCount] = rcConfig.maestroBaud;
+    mCount++;
+  }
+  wcb->setMaestroIds(mIds, mCount, mBauds);
 }
 
 void setup() {
@@ -3406,6 +3618,8 @@ void setup() {
     remoteTriggerQueue = xQueueCreate(8, sizeof(RemoteTrigger));
     remoteCliQueue     = xQueueCreate(3, sizeof(RemoteCliMsg));  // relayed CLI lines → drainRemoteCli()
     forgetPeerQueue    = xQueueCreate(4, sizeof(uint8_t));       // FORGET_PEER (Via-WCB) → drainForgetPeer()
+    serialFwdQueue     = xQueueCreate(4, sizeof(SerialFwdMsg));  // mesh→serial writes → drainSerialFwd()
+    maestroCmdQueue    = xQueueCreate(6, sizeof(MaestroCmdMsg)); // inbound ;M → drainMaestroCmd()
     wcb->onCommand(onWCBCommand);   // queues must be live BEFORE the callback that feeds them
     wcb->onRawPacket(naviota::otaRawPacketHook);   // OTA control/data structs (55/243 B) over the mesh
     // Bulk command-library push (config tool → mesh → LittleFS). These fire on the
@@ -3534,6 +3748,236 @@ void drainRemoteCli() {
   rcSerial.disarmCapture();
 }
 
+// ── Paced aux-port transmitter ───────────────────────────────────────────────
+// One in-flight message per aux port, clocked out a few bytes per loop() pass.
+//
+// Writing a whole command in one go is NOT an option here: S4/S5 are bit-banged
+// SoftwareSerial, whose write() blocks with interrupts disabled for the full frame
+// time. A 200-char command at 9600 baud is ~208 ms of that — over twenty missed
+// SBUS frames. So each pass hands a port only as many bytes as it can absorb
+// without holding the CPU past AUX_TX_BUDGET_US, and the rest waits for the next
+// pass. loop() runs far faster than any of these line rates, so a port still
+// transmits at its full baud; it just never blocks long enough to be noticed.
+//
+// One slot per port (not a shared queue drain) so a slow port can't hold up a fast
+// one mid-message. Messages for a port that's still busy stay in serialFwdQueue —
+// see drainSerialFwd for the head-of-line note.
+#define AUX_TX_BUDGET_US 500      // max blocking per port per loop() pass (~1/18 of an SBUS frame)
+struct SerialFwdTx { char text[202]; uint8_t len; uint8_t sent; };   // len 0 = idle
+static SerialFwdTx auxTx[3];
+
+// How many bytes port `idx` (0=S3, 1=S4, 2=S5) may take this pass.
+static int auxTxBudget(int idx) {
+  // S3 on the shared-SBUS boards is a real UART — write() is a memcpy into the
+  // driver's TX buffer and the hardware clocks it out in the background, so give
+  // it whatever the buffer will hold and never block on a full one.
+  if (idx == 0 && s3IsHw) {
+    int room = ((HardwareSerial*)s3)->availableForWrite();
+    return room > 0 ? room : 0;
+  }
+  // Bit-banged: bytes = budget_us * baud / (10 bits per byte * 1e6 us). Always at
+  // least 1 so a slow port still makes progress instead of stalling forever.
+  uint32_t baud = rcConfig.auxBaud[idx];
+  if (baud == 0) return 1;
+  int n = (int)(((uint64_t)AUX_TX_BUDGET_US * baud) / 10000000ULL);
+  return n < 1 ? 1 : n;
+}
+
+// Clock out whatever each port has pending, within its budget. Called every loop().
+static void auxTxPump() {
+  for (int i = 0; i < 3; i++) {
+    SerialFwdTx& t = auxTx[i];
+    if (t.len == 0) continue;
+    Stream* p = auxStreamFor(i + 3);
+    if (!p) { t.len = 0; continue; }               // port vanished (board profile) — drop it
+    int budget = auxTxBudget(i);
+    while (budget-- > 0 && t.sent < t.len) p->write((uint8_t)t.text[t.sent++]);
+    if (t.sent >= t.len) {
+      t.text[t.len - 1] = '\0';   // drop the framing CR — logging it would yank the terminal cursor
+      t.len = 0;
+      dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", auxPortLabel(i), t.text);
+    }
+  }
+}
+
+// Move queued mesh→serial writes into the per-port TX slots. Takes the head only
+// when its port is free: a message whose port is still transmitting stays queued
+// (and briefly blocks messages behind it — acceptable, since each one clears in
+// milliseconds and ordering per port is preserved either way).
+void drainSerialFwd() {
+  if (!serialFwdQueue) return;
+  SerialFwdMsg m;
+  while (xQueuePeek(serialFwdQueue, &m, 0) == pdTRUE) {
+    int idx = (int)m.fwPort - 3;
+    if (idx < 0 || idx > 2) { xQueueReceive(serialFwdQueue, &m, 0); continue; }   // bad port — discard
+    if (auxTx[idx].len != 0) break;                // port busy — leave it queued
+    xQueueReceive(serialFwdQueue, &m, 0);
+    size_t n = strlcpy(auxTx[idx].text, m.text, sizeof(auxTx[idx].text) - 1);
+    if (n > sizeof(auxTx[idx].text) - 2) n = sizeof(auxTx[idx].text) - 2;
+    auxTx[idx].text[n++]  = '\r';                  // same framing a WCB's writeSerialString gives
+    auxTx[idx].text[n]    = '\0';
+    auxTx[idx].len        = (uint8_t)n;
+    auxTx[idx].sent       = 0;
+  }
+  auxTxPump();
+}
+
+// ── Inbound ";M" execution (Core 1) ──────────────────────────────────────────
+// Drive ONE local Maestro slot from an already-parsed WcbCmd frame. Everything goes
+// through the named wrappers rather than a raw maestroWrite, so the channel guard,
+// the speed/accel caches, the record shadow and the idle-release re-arm all stay in
+// play exactly as they do for a locally-triggered action.
+//
+// The frame's own device byte (frame[1]) is DELIBERATELY ignored: it carries the
+// mesh id, which on NaviCore is the SLOT INDEX, while the wire needs the slot's
+// Pololu address. maestroWrite() supplies that itself from the slot.
+static void maeInboundActuate(uint8_t id, const uint8_t* frame, size_t n) {
+  const uint16_t arg14 = (n >= 6) ? (uint16_t)(frame[4] | ((uint16_t)frame[5] << 7)) : 0;
+  switch (frame[2]) {
+    case WcbMaestro::CMD_SET_TARGET:  maestroSetTarget(id, frame[3], arg14);            break;
+    case WcbMaestro::CMD_SET_SPEED:   maestroSetSpeed (id, frame[3], arg14);            break;
+    case WcbMaestro::CMD_SET_ACCEL:   maestroSetAccel (id, frame[3], (uint8_t)arg14);   break;
+    case WcbMaestro::CMD_GO_HOME:     maestroGoHome(id);                                break;
+    case WcbMaestro::CMD_STOP_SCRIPT: maestroStopScript(id);                            break;
+    // Straight to maestroRestartScript, NOT via executeMaestroCmd's "restartScript"
+    // branch — that one first runs applyScriptEasing(), which can emit up to 64 extra
+    // SetSpeed/SetAccel frames. A WCB's ;M35 puts exactly four bytes on the wire, and
+    // so must ours; inheriting the easing burst would be a silent behavioral fork.
+    case WcbMaestro::CMD_RESTART_SUB:   maestroRestartScript(id, frame[3]);             break;
+    case WcbMaestro::CMD_RESTART_SUB_P: maestroSubParam(id, frame[3], arg14);           break;
+    default: return;
+  }
+  dlog(DBG_MAESTRO, "[DISPATCH] Maestro slot %u (device %u) <- mesh  cmd 0x%02X\n",
+       id, rcConfig.maestros[id - 1].device, frame[2]);
+}
+
+// Service an inbound get* and unicast the answer back to `replyTo`. The reply is the
+// ";M!<var>=<value>" form a WCB's handleMaestroResult feeds into its RAM/IF state —
+// NOT ":MQR", which is what a WCB sends to the CONTROLLER. Here the roles are
+// reversed: NaviCore is the one answering a board. Variable names must match the
+// WCB's maestroGetInfo() exactly (m<id>moving / m<id>err / m<id>pos<ch>), and <id>
+// is echoed back as addressed, since the asker derived its variable name from it.
+static void maeInboundQuery(uint8_t id, const uint8_t* frame, uint8_t replyTo) {
+  WcbMaestro::ReplyKind kind; uint8_t len;
+  if (!WcbMaestro::replyInfo(frame[2], kind, len)) return;
+  // A query needs a SINGLE answer, so the 0/9 fan-out ids are illegal (the WCB rejects
+  // them the same way, WCB_Maestro.cpp:386) and a device shared by several slots is
+  // answered once, by the first that carries it — they are the same physical Maestro
+  // on NaviCore's single bus, so any of them gives the same reading.
+  if (id < 1) return;
+  uint8_t slotId = 0;
+  for (uint8_t s = 1; s <= RC_NUM_MAESTROS; s++)
+    if (rcConfig.maestros[s - 1].type == 1 && rcConfig.maestros[s - 1].device == id) { slotId = s; break; }
+  if (slotId == 0) {   // LOCAL only — no matching local device means nothing to read
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro: inbound query for device %u matches no local slot\n", id);
+    return;
+  }
+
+  const uint8_t ch  = (kind == WcbMaestro::ReplyKind::POS) ? frame[3] : 0;
+  uint8_t       rb[2];
+  const int     got = maestroLocalQuery(slotId, (uint8_t)(frame[2] | 0x80),
+                                        (kind == WcbMaestro::ReplyKind::POS) ? &ch : nullptr,
+                                        (kind == WcbMaestro::ReplyKind::POS) ? 1 : 0,
+                                        rb, WcbMaestro::replyLen(kind));
+  uint16_t val = 0;
+  if (got < (int)WcbMaestro::replyLen(kind) ||
+      !WcbMaestro::decodeReply(kind, rb, (size_t)got, val)) {
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u <- mesh query: timeout — no reply sent\n", id);
+    return;                                          // timeout → send nothing, as the WCB does
+  }
+  char res[40];
+  if      (kind == WcbMaestro::ReplyKind::MOV) snprintf(res, sizeof(res), ";M!m%umoving=%u", id, val);
+  else if (kind == WcbMaestro::ReplyKind::ERR) snprintf(res, sizeof(res), ";M!m%uerr=%u",    id, val);
+  else                                         snprintf(res, sizeof(res), ";M!m%upos%u=%u",  id, ch, val);
+  if (wcb && wcbReady && replyTo >= 1 && replyTo <= WCB_MAX_BOARDS) wcb->send(replyTo, res);
+  dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u <- mesh query -> WCB%u: %s\n", id, replyTo, res);
+}
+
+// Run one inbound ";M" line deferred from onWCBCommand (Core 0). All parsing is done
+// by WcbMaestro::build(), the SAME function the WCB firmware uses, so the two can
+// never drift on grammar, verb spelling, case-sensitivity or frame bytes.
+void drainMaestroCmd() {
+  if (!maestroCmdQueue) return;
+  MaestroCmdMsg m;
+  if (xQueueReceive(maestroCmdQueue, &m, 0) != pdTRUE) return;   // one per pass — a query can block 25 ms
+
+  const char* p = m.text + 1;          // skip ';' → points at 'M', which build() tolerates
+  uint8_t     replyTo = m.sender;
+  uint8_t     frame[WcbMaestro::MAX_FRAME];
+  size_t      n = 0;
+
+  if (p[1] == '!') {                   // ;M!<var>=<value> — a WCB pushing a get RESULT at us.
+    // That is WCB RAM/IF state; NaviCore has no variable namespace. Normally never
+    // arrives (a WCB sends us :MQR instead), so just note it and drop.
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro: ignoring inbound variable push  %s\n", m.text);
+    return;
+  }
+
+  if (p[1] == 'G' || p[1] == 'g') {
+    // ;MG<dev>,<replyTo>,<verb>[,<ch>] — a WCB forwarding a get to the board that
+    // hosts the Maestro. Strip the replyTo field back out and hand the rest to the
+    // library, exactly as the WCB's own handleMaestroGet reconstructs it.
+    const char* s  = p + 2;
+    const char* c1 = strchr(s,      ',');
+    const char* c2 = c1 ? strchr(c1 + 1, ',') : nullptr;
+    if (!c2) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro: malformed ;MG  %s\n", m.text); return; }
+    const int rt = atoi(c1 + 1);
+    if (rt < 1 || rt > WCB_MAX_BOARDS) {   // guards an injected/garbled reply-to
+      dlog(DBG_MAESTRO, "[DISPATCH] Maestro: ;MG bad replyTo %d\n", rt);
+      return;
+    }
+    replyTo = (uint8_t)rt;
+    char         body[sizeof(m.text)];
+    const size_t devLen = (size_t)(c1 - s);
+    if (devLen == 0 || devLen >= sizeof(body)) return;
+    memcpy(body, s, devLen);
+    const int bn = snprintf(body + devLen, sizeof(body) - devLen, ",%s", c2 + 1);
+    if (bn <= 0 || (size_t)bn >= sizeof(body) - devLen) return;
+    n = WcbMaestro::build(body, frame, sizeof(frame));
+  } else {
+    n = WcbMaestro::build(p, frame, sizeof(frame));
+  }
+
+  if (n == 0) {   // unknown verb / bad args — drop quietly, same as the WCB does
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro: unparseable inbound  %s\n", m.text);
+    return;
+  }
+
+  const uint8_t id = frame[1];         // the POLOLU DEVICE number parsed out of the text
+  WcbMaestro::ReplyKind kind; uint8_t rlen;
+  if (WcbMaestro::replyInfo(frame[2], kind, rlen)) { maeInboundQuery(id, frame, replyTo); return; }
+
+  // Actuation. The inbound id is a Pololu DEVICE number and it is a MULTICAST address:
+  // fire every local slot carrying it. More than one Maestro may legitimately share a
+  // device number across the mesh — that is a supported architecture, not a collision.
+  // Ids 0 and 9 are the reserved fan-out targets ("all" / "all local"); on NaviCore both
+  // mean every local Maestro, since NaviCore never re-broadcasts.
+  //
+  // Everything is gated on type == 1: maestroWrite routes ANY non-1 type to the mesh
+  // broadcast stream, so dispatching a remote slot here would push the frame back out
+  // over ESP-NOW — duplicate actuation on every Kyber board. NaviCore only advertises
+  // type-1 slots, so this gate is exactly the contract it published.
+  //
+  // Deduped by resolved device the way the WCB dedupes by physical destination
+  // (WCB_Maestro.cpp:96-106): NaviCore has ONE Maestro bus, so two type-1 slots sharing
+  // a device number are the same physical Maestro and must be written only once.
+  const bool fanOut = (id == 0 || id == 9);
+  uint8_t    fired[RC_NUM_MAESTROS];
+  uint8_t    nFired = 0;
+  for (uint8_t s = 1; s <= RC_NUM_MAESTROS; s++) {
+    const RcMaestroSlot& slot = rcConfig.maestros[s - 1];
+    if (slot.type != 1) continue;
+    if (!fanOut && slot.device != id) continue;
+    bool dup = false;
+    for (uint8_t k = 0; k < nFired; k++) if (fired[k] == slot.device) { dup = true; break; }
+    if (dup) continue;                       // same physical Maestro on the shared bus
+    fired[nFired++] = slot.device;
+    maeInboundActuate(s, frame, n);
+  }
+  if (nFired == 0)
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro: inbound device %u matches no local slot\n", id);
+}
+
 // onNeighbor callback — runs on the WiFi/ESP-NOW task (Core 0). Do the MINIMUM:
 // enqueue the WCB number; drainPeerEvents() (loop) does the rest. Only real WCBs
 // count as "peers" here — client devices (other controllers advertising via
@@ -3627,6 +4071,10 @@ void loop() {
   // config tool's Read-live readout — deferred here from the Core-0 consumer.
   maePumpRemoteEmits();
 
+  // Run one inbound ";M" command a WCB routed to a Maestro we host (deferred from the
+  // Core-0 receive callback). One per pass — a get* blocks up to 25 ms on the reply.
+  drainMaestroCmd();
+
   // New WCB peer detected on the mesh → fire the configured action + passive
   // alert (deferred here from the Core-0 onNeighbor callback). Cheap no-op idle.
   drainPeerEvents();
@@ -3676,9 +4124,14 @@ void loop() {
   // USB Serial input
   handleSerialInput();
 
-  // Aux-serial RX monitor — drain S3/S4/S5 and echo incoming lines under the
-  // "Serial" debug chip (write-only ports otherwise; groundwork for acting on it).
+  // Aux-serial RX monitor — drain S3/S4/S5, echo incoming lines under the "Serial"
+  // debug chip, and broadcast them to the mesh on any port with bcastIn set.
   pollAuxSerialRx();
+
+  // Mesh → serial: clock out whatever the bridge has queued for S3/S4/S5, a few
+  // bytes per pass so a bit-banged port never blocks long enough to cost an SBUS
+  // frame. Cheap no-op when nothing is pending.
+  drainSerialFwd();
 
   // HCR audio fades (fn 12/15) on a LOCALLY-wired HCR: advance any in-flight ramp
   // and emit the next SetVolume step. Cheap no-op when nothing is fading. A remote

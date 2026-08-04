@@ -42,6 +42,12 @@ assets-navicore/     NaviCore brand assets (logo, favicon, app icons)
 model/               FrSky X18 transmitter model file (download below)
 ```
 
+## Documentation
+
+- **Users** — the [NaviCore wiki](https://github.com/greghulette/NaviCore/wiki).
+- **Developers** — [`docs/`](docs/README.md): architecture, wire protocols, the
+  configuration model, config-tool internals, and the build/release pipeline.
+
 ## Required libraries
 
 Install via the Arduino Library Manager:
