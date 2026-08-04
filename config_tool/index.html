@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.14:40.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">03.23:18.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3959,6 +3959,14 @@ async function disconnect() {
     }
     _pendingSaveBaseline = null;
     if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
+    // Tear down the OTHER deferred-toast state machines too, so a Reset-to-Defaults
+    // or library save left mid-flight by the disconnect can't resolve its success
+    // toast on the RECONNECT's CONFIG load (a false "Reset to factory defaults", or
+    // a stale "Saving library…").
+    _pendingDefaultsReset = false;
+    if (_pendingDefaultsTimer) { clearTimeout(_pendingDefaultsTimer); _pendingDefaultsTimer = null; }
+    _dismissToast(_defaultsToast); _defaultsToast = null;
+    _dismissToast(_cmdlibToast);   _cmdlibToast   = null;
     // Stop the Via-WCB keep-alive PING timer so it doesn't keep firing
     // sendJSON() on a torn-down port.
     if (_wcbKeepaliveTimer) { clearInterval(_wcbKeepaliveTimer); _wcbKeepaliveTimer = null; }
@@ -7769,7 +7777,7 @@ function handleBoardMessage(line) {
       // the user's subsequent Save will diff against the ORIGINAL
       // baseline (last known good) instead of a baseline that includes
       // the rejected edits.
-      if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline) {
+      if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _pendingSaveId)) {
         appendTerminalLine('< [config] Save NACK\'d by board — baseline NOT advanced', 'rx');
         _pendingSaveBaseline = null;
         if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
@@ -7782,7 +7790,12 @@ function handleBoardMessage(line) {
     // and persisted the SET_CONFIG.  Advance the diff baseline to match
     // the state we sent, so subsequent Saves diff against current
     // on-board state (not the pre-Save Load baseline).
-    if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline) {
+    // saveId gate: only advance the baseline for the ACK of the save CURRENTLY in
+    // flight. A late ACK from an earlier (timed-out) save carries a stale saveId and
+    // is ignored, so it can't be misattributed to a newer save and advance the
+    // baseline to a snapshot the board never stored. (undefined saveId = firmware
+    // not yet reflashed → fall back to the old, un-correlated behavior.)
+    if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _pendingSaveId)) {
       _configBaseline = _pendingSaveBaseline;
       _pendingSaveBaseline = null;
       if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
@@ -12316,6 +12329,12 @@ async function testActionRow(tier, ai, btn) {
     appendTerminalLine('· test: not connected — connect to a NaviCore first', 'rx');
     return;
   }
+  // Don't interleave a TEST_ACTION into an in-flight bridged config/library upload.
+  if (_bridgeUploadInFlight || _bulkActive) {
+    appendTerminalLine('· test: a config/library upload is in progress — try again in a moment', 'rx');
+    showToast('Upload in progress — test again when it finishes', 'warn');
+    return;
+  }
   const { delay, note, ...core } = a;   // one-shot: fire now (no delay), drop the note; keeps it to one packet bridged
   try {
     await sendJSON({ type: 'TEST_ACTION', action: core });
@@ -12341,6 +12360,14 @@ async function testTier(tierKey, btn) {
     showToast('Not connected — connect to a NaviCore to test', 'error');
     return;
   }
+  // Don't inject TEST_ACTION packets into an in-flight bridged config/library
+  // upload — that's the exact fragment-stream interleaving the poll-quiesce guard
+  // exists to prevent (a stray packet drops a fragment → the save silently fails).
+  if (_bridgeUploadInFlight || _bulkActive) {
+    appendTerminalLine('· test: a config/library upload is in progress — try again in a moment', 'rx');
+    showToast('Upload in progress — test again when it finishes', 'warn');
+    return;
+  }
   const acts = collectTierActions(tierKey).filter(a => a && a.type);
   if (!acts.length) {
     appendTerminalLine('· test: no actions to play in this sequence', 'rx');
@@ -12362,6 +12389,12 @@ async function testTier(tierKey, btn) {
         appendTerminalLine('· [test] step ' + (i + 1) + ': "' + a.type + '" is a recorder control — skipped', 'rx');
         skipped++;
         continue;
+      }
+      // A Save/library upload can begin AFTER the loop started — re-check before
+      // each send so we never interleave a TEST_ACTION into a fragment stream.
+      if (_bridgeUploadInFlight || _bulkActive) {
+        appendTerminalLine('· [test] aborted — a config/library upload started mid-test', 'rx');
+        break;
       }
       const { delay, delayMs, note, ...core } = a;   // fire the action itself (delay already applied above)
       await sendJSON({ type: 'TEST_ACTION', action: core });
@@ -13500,6 +13533,7 @@ async function saveConfigToBoard() {
     _pendingSaveBaseline.wcbNetwork = _deepClone(_configBaseline.wcbNetwork);
   }
   _pendingSaveStartedAt = Date.now();
+  _pendingSaveId = ++_saveSeq;   // correlation id for this save (echoed back in the ACK)
 
   // Persistent "Saving…" toast — resolved to a success/error/warn toast by the
   // SET_CONFIG ACK / NACK / watchdog paths. Give it a 15 s auto-dismiss (longer
@@ -13508,7 +13542,7 @@ async function saveConfigToBoard() {
   _dismissToast(_saveToast);
   _saveToast = showToast('Saving to NaviCore…', 'info', 15000);
 
-  await sendJSON({ type: 'SET_CONFIG', data: payload });
+  await sendJSON({ type: 'SET_CONFIG', data: payload, saveId: _pendingSaveId });
   appendTerminalLine(`< [config] Save sent (branches: ${branches}) — awaiting ACK`, 'rx');
 
   // Watchdog: if no ACK in 12 s (longer than the worst-case 40-fragment
@@ -13525,11 +13559,13 @@ async function saveConfigToBoard() {
       console.warn('SET_CONFIG ACK timeout — clearing pending baseline so a retry is not blocked');
       // Free the pending-save lock so the next Save isn't stranded behind the
       // overlap guard ("A save is still in progress"). We genuinely don't know if
-      // the board applied it, so do NOT advance the baseline: a late ACK now no-ops
-      // (its guard sees no pending baseline), and the user's next Save re-diffs and
-      // re-sends — idempotent on the board, and safer than advancing to an
-      // unconfirmed state. With the polls now quiesced during the send, a retry
-      // usually lands cleanly.
+      // the board applied it, so do NOT advance the baseline. This is safe against a
+      // late ACK: if nothing is pending its ACK no-ops, and if a NEWER Save is now
+      // pending, the stale ACK's saveId won't match _pendingSaveId, so it can't be
+      // misattributed and advance the baseline to a snapshot the board never stored
+      // (see the saveId gate in the ACK handler). The user's next Save re-diffs and
+      // re-sends — idempotent on the board. With polls quiesced during the send, a
+      // retry usually lands cleanly.
       _pendingSaveBaseline = null;
       _dismissToast(_saveToast); _saveToast = null;
       showToast('No response from NaviCore — the save may not have gone through. Verify over USB, or just Save again.', 'warn');
@@ -13546,6 +13582,16 @@ async function saveConfigToBoard() {
 let _pendingSaveBaseline  = null;
 let _pendingSaveStartedAt = 0;
 let _pendingSaveTimer     = null;
+// Per-save correlation id. SET_CONFIG ACKs carry no natural correlation, so a
+// save whose ACK is merely DELAYED (>12 s watchdog) past a subsequent Save could
+// have its late ACK attributed to that newer save — advancing the baseline to a
+// snapshot the board never stored (silent data loss). Each Save stamps a fresh
+// id into the SET_CONFIG; the firmware echoes it in the ACK; the ACK/NACK handlers
+// ignore any reply whose id isn't the one currently in flight. (Firmware that
+// doesn't yet echo saveId → msg.saveId undefined → we fall back to the old
+// behavior, so this is safe to ship ahead of the reflash.)
+let _pendingSaveId = 0;
+let _saveSeq       = 0;
 document.getElementById('btn-hwsetup-save').addEventListener('click', saveConfigToBoard);
 
 document.getElementById('btn-defaults').addEventListener('click', async () => {
@@ -16142,7 +16188,7 @@ function cfgOpenCloudModal() {
   const ov = document.createElement('div');
   ov.id = 'cfg-cloud-modal';
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999';
-  const esc = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
+  const esc = s => escH(String(s == null ? '' : s));   // full &<>" escape: a bare '&' in a value= attr / data-note would otherwise entity-decode on read-back and corrupt the credential or note
   const inputCss = 'padding:7px 9px;border-radius:7px;border:1px solid var(--border,#3a3a44);background:var(--bg,#141418);color:inherit';
   ov.innerHTML =
     '<div style="background:var(--panel,#1e1e24);color:var(--fg,#e8e8ea);max-width:580px;width:92%;max-height:88vh;overflow:auto;border-radius:12px;padding:20px 22px;box-shadow:0 12px 48px rgba(0,0,0,.5)">'
