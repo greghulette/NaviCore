@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.09:01.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:22.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2931,7 +2931,8 @@
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
-             Serial Ports tab — per-port baud + advertised (WDP) label for S2 (Maestro) + S3/S4/S5.
+             Serial Ports tab — per-port baud, advertised (WDP) label, and
+             mesh broadcast bridging for the three aux ports + the Maestro bus.
              ════════════════════════════════════════════════════════════ -->
         <section class="cfg-pane" id="cfg-pane-serial">
           <h2 class="cfg-pane-title">Serial Ports</h2>
@@ -2940,34 +2941,49 @@
               <thead>
                 <tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--border,#33333c)">
                   <th style="padding:4px 12px 5px 0">Port</th>
+                  <th style="padding:4px 12px 5px 0" title="How the rest of the mesh addresses this port — the number in ;w20,;s&lt;n&gt;">Mesh</th>
                   <th style="padding:4px 16px 5px 0">Baud</th>
-                  <th style="padding:4px 0 5px 0">Label <span style="font-weight:normal;font-size:11px">— advertised on the mesh (WDP)</span></th>
+                  <th style="padding:4px 16px 5px 0">Label <span style="font-weight:normal;font-size:11px">— advertised on the mesh (WDP)</span></th>
+                  <th style="padding:4px 10px 5px 0;text-align:center" title="Write mesh broadcasts out this port">Bcast&nbsp;out</th>
+                  <th style="padding:4px 0 5px 0;text-align:center" title="Broadcast lines read from this port to the mesh">Bcast&nbsp;in</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <td style="padding:4px 12px 4px 0"><b>Maestro (S2)</b></td>
-                  <td style="padding:4px 16px 4px 0"><input type="number" id="aux-baud-maestro" min="1200" max="115200" step="100" value="115200" style="width:88px;font-size:12px" title="Local Maestro bus (Serial2 hardware UART). Must match each wired Maestro's Serial Settings (or its Detect Baud mode). Remote/Kyber Maestros are unaffected." oninput="config.auxBaud.maestro = Math.max(1200, Math.min(115200, parseInt(this.value,10)||115200))"></td>
-                  <td style="padding:4px 0"><input type="text" id="slabel-2" maxlength="24" style="width:190px;font-size:12px" title="What's wired to this port. Rides the WDP advert so every WCB + the Wizard show it. Blank = auto." oninput="setSerialLabel(2, this.value)"></td>
-                </tr>
-                <tr>
                   <td style="padding:4px 12px 4px 0"><span id="lbl-baud-s3">S3</span></td>
-                  <td style="padding:4px 16px 4px 0"><input type="number" id="aux-baud-s3" min="1200" max="115200" step="100" value="9600" style="width:88px;font-size:12px" title="S3 line rate. S3 is the hardware UART0 (both boards), so it can exceed 57600 (up to 115200). 9600 for HCR; 38400 for an MP3 Trigger v2." oninput="config.auxBaud.S3 = Math.max(1200, Math.min(115200, parseInt(this.value,10)||9600))"></td>
-                  <td style="padding:4px 0"><input type="text" id="slabel-3" maxlength="24" style="width:190px;font-size:12px" title="What's wired to S3. Blank = auto (HCR/MP3/WLED if a dest routes here)." oninput="setSerialLabel(3, this.value)"></td>
+                  <td style="padding:4px 12px 4px 0"><b>S1</b></td>
+                  <td style="padding:4px 16px 4px 0"><select id="aux-baud-s3" style="width:100px;font-size:12px" title="S3 line rate. S3 is the hardware UART0 (both boards), so it can exceed 57600 (up to 115200). 9600 for HCR; 38400 for an MP3 Trigger v2." onchange="setAuxBaud('S3', this.value)"></select></td>
+                  <td style="padding:4px 16px 4px 0"><input type="text" id="slabel-S3" maxlength="24" style="width:190px;font-size:12px" title="What's wired to this port. Rides the WDP advert so every WCB + the Wizard show it. Blank = auto (HCR/MP3/WLED if a dest routes here)." oninput="setSerialLabel('S3', this.value)"></td>
+                  <td style="padding:4px 10px 4px 0;text-align:center"><input type="checkbox" id="bcout-S3" title="A broadcast arriving over the mesh is written out this port." onchange="setSerialBcast('S3','out',this.checked)"></td>
+                  <td style="padding:4px 0;text-align:center"><input type="checkbox" id="bcin-S3" title="A line arriving on this port is broadcast to the whole mesh." onchange="setSerialBcast('S3','in',this.checked)"></td>
                 </tr>
                 <tr>
                   <td style="padding:4px 12px 4px 0"><span id="lbl-baud-s4">S4</span></td>
-                  <td style="padding:4px 16px 4px 0"><input type="number" id="aux-baud-s4" min="1200" max="57600" step="100" value="9600" style="width:88px;font-size:12px" title="S4 line rate. 9600 for HCR; 38400 for an MP3 Trigger v2. Keep ≤57600 (bit-banged SoftwareSerial)." oninput="config.auxBaud.S4 = Math.max(1200, Math.min(57600, parseInt(this.value,10)||9600))"></td>
-                  <td style="padding:4px 0"><input type="text" id="slabel-4" maxlength="24" style="width:190px;font-size:12px" title="What's wired to S4. Blank = auto." oninput="setSerialLabel(4, this.value)"></td>
+                  <td style="padding:4px 12px 4px 0"><b>S2</b></td>
+                  <td style="padding:4px 16px 4px 0"><select id="aux-baud-s4" style="width:100px;font-size:12px" title="S4 line rate. 9600 for HCR; 38400 for an MP3 Trigger v2. Capped at 57600 — this port is bit-banged SoftwareSerial." onchange="setAuxBaud('S4', this.value)"></select></td>
+                  <td style="padding:4px 16px 4px 0"><input type="text" id="slabel-S4" maxlength="24" style="width:190px;font-size:12px" title="What's wired to this port. Blank = auto." oninput="setSerialLabel('S4', this.value)"></td>
+                  <td style="padding:4px 10px 4px 0;text-align:center"><input type="checkbox" id="bcout-S4" title="A broadcast arriving over the mesh is written out this port." onchange="setSerialBcast('S4','out',this.checked)"></td>
+                  <td style="padding:4px 0;text-align:center"><input type="checkbox" id="bcin-S4" title="A line arriving on this port is broadcast to the whole mesh." onchange="setSerialBcast('S4','in',this.checked)"></td>
                 </tr>
                 <tr id="row-baud-s5">
                   <td style="padding:4px 12px 4px 0"><span id="lbl-baud-s5">S5</span></td>
-                  <td style="padding:4px 16px 4px 0"><input type="number" id="aux-baud-s5" min="1200" max="57600" step="100" value="9600" style="width:88px;font-size:12px" title="S5 line rate — NaviCore v2 'Serial 3' (GPIO38/47) or WCB 3.2 'Serial 5' (GPIO9/10), bit-banged SoftwareSerial. 9600 for HCR; 38400 for an MP3 Trigger v2. Keep ≤57600." oninput="config.auxBaud.S5 = Math.max(1200, Math.min(57600, parseInt(this.value,10)||9600))"></td>
-                  <td style="padding:4px 0"><input type="text" id="slabel-5" maxlength="24" style="width:190px;font-size:12px" title="What's wired to S5. Blank = auto." oninput="setSerialLabel(5, this.value)"></td>
+                  <td style="padding:4px 12px 4px 0"><b>S3</b></td>
+                  <td style="padding:4px 16px 4px 0"><select id="aux-baud-s5" style="width:100px;font-size:12px" title="S5 line rate — NaviCore v2 'Serial 3' (GPIO38/47) or WCB 3.2 'Serial 5' (GPIO9/10). 9600 for HCR; 38400 for an MP3 Trigger v2. Capped at 57600 — this port is bit-banged SoftwareSerial." onchange="setAuxBaud('S5', this.value)"></select></td>
+                  <td style="padding:4px 16px 4px 0"><input type="text" id="slabel-S5" maxlength="24" style="width:190px;font-size:12px" title="What's wired to this port. Blank = auto." oninput="setSerialLabel('S5', this.value)"></td>
+                  <td style="padding:4px 10px 4px 0;text-align:center"><input type="checkbox" id="bcout-S5" title="A broadcast arriving over the mesh is written out this port." onchange="setSerialBcast('S5','out',this.checked)"></td>
+                  <td style="padding:4px 0;text-align:center"><input type="checkbox" id="bcin-S5" title="A line arriving on this port is broadcast to the whole mesh." onchange="setSerialBcast('S5','in',this.checked)"></td>
+                </tr>
+                <tr>
+                  <td style="padding:4px 12px 4px 0"><b>Maestro</b></td>
+                  <td style="padding:4px 12px 4px 0" title="Advertised as WDP port 4 so WCBs see it, but the Maestro bus is binary — ;s&lt;n&gt; can't address it.">—</td>
+                  <td style="padding:4px 16px 4px 0"><select id="aux-baud-maestro" style="width:100px;font-size:12px" title="Local Maestro bus (Serial2 hardware UART). Must match each wired Maestro's Serial Settings (or its Detect Baud mode). This rate is advertised on the mesh, so WCBs can auto-build a route to these Maestros. Remote/Kyber Maestros are unaffected." onchange="setAuxBaud('maestro', this.value)"></select></td>
+                  <td style="padding:4px 16px 4px 0"><input type="text" id="slabel-maestro" maxlength="24" style="width:190px;font-size:12px" title="What's on the local Maestro bus. Rides the WDP advert so every WCB + the Wizard show it. Blank = auto." oninput="setSerialLabel('maestro', this.value)"></td>
+                  <td style="padding:4px 10px 4px 0;text-align:center;color:var(--muted)">—</td>
+                  <td style="padding:4px 0;text-align:center;color:var(--muted)">—</td>
                 </tr>
               </tbody>
             </table>
-            <div class="noconn" style="margin-top:8px"><b>Maestro (S2)</b> = local Pololu Maestro bus (up to 115200). <b>S3</b> is the hardware UART0 (both boards) so it can exceed 57600 (up to 115200); <b>S4/S5</b> are bit-banged SoftwareSerial (≤57600). One port = one device = one baud (HCR-local / MP3-local / Serial actions). On <b>NaviCore v2</b> they're silkscreen <b>Serial 1/2/3</b>; on <b>WCB 3.2</b> they map to its <b>Serial 3/4/5</b> headers. <b>Label</b> rides the WDP advert so WCBs + the Wizard show what's attached — blank = auto (the local Maestro shows "Maestro"; S3/S4/S5 show HCR/MP3/WLED when a dest routes there). Reboot or re-save to apply.</div>
+            <div class="noconn" style="margin-top:8px"><b>S3</b> is the hardware UART0 (both boards) so it can exceed 57600 (up to 115200); <b>S4/S5</b> are bit-banged SoftwareSerial (≤57600). One port = one device = one baud (HCR-local / MP3-local / Serial actions). On <b>NaviCore v2</b> they're silkscreen <b>Serial 1/2/3</b>; on <b>WCB 3.2</b> they map to its <b>Serial 3/4/5</b> headers. <b>Maestro</b> = local Pololu Maestro bus (up to 115200).<br><br><b>Mesh</b> is how the rest of the network addresses each port: from any WCB, <code>;w20,;s2&lt;cmd&gt;</code> writes <code>&lt;cmd&gt;</code> out the port shown as S2 — always available, no setting needed. <b>Bcast out</b> writes mesh broadcasts out that port; <b>Bcast in</b> broadcasts lines read from it to the whole mesh. Both are off by default, and a port an HCR / MP3 / WLED is routed to is skipped either way (its driver owns the wire). <b>Label</b> rides the WDP advert so WCBs + the Wizard show what's attached — blank = auto (the Maestro shows "Maestro"; the aux ports show HCR/MP3/WLED when a dest routes there). Reboot or re-save to apply.</div>
           </div>
         </section>
 
@@ -3529,46 +3545,85 @@ let config = {
   // Aux SoftwareSerial port baud — single source of truth for S3/S4 line rate.
   // HCR-local, MP3-local, and Serial actions all use the port at this baud.
   auxBaud:       { S3: 9600, S4: 9600, S5: 9600, maestro: 115200 },
-  // Per-serial-port WDP labels — what's wired to each NaviCore port, advertised on
-  // the mesh so WCBs + the Wizard show it. Keyed by WDP port number: "2"=local
-  // Maestro (S2), "3"/"4"/"5"=S3/S4/S5. Stores the USER OVERRIDE only; a missing key
-  // = auto-derive (Maestro; HCR/MP3/WLED from the routed dest). Firmware mirror:
-  // rcConfig.serialLabels / rcSerialLabel.
+  // Per-port WDP labels — what's wired to each NaviCore port, advertised on the mesh
+  // so WCBs + the Wizard show it. Keyed by FIRMWARE port, exactly like auxBaud above:
+  // "S3"/"S4"/"S5" = the three aux headers, "maestro" = the local Maestro bus. Stores
+  // the USER OVERRIDE only; a missing key = auto-derive (Maestro; HCR/MP3/WLED from
+  // the routed dest). Firmware mirror: rcConfig.serialLabels / rcSerialLabel.
   serialLabels:  {},
+  // Per-aux-port mesh broadcast bridging, same keys as auxBaud.
+  //   out : a broadcast arriving over the mesh is written out this port
+  //   in  : a line read from this port is broadcast to the whole mesh
+  // Both off by default — a port only joins the broadcast domain when asked to.
+  // Targeted writes (`;w20,;s<n><cmd>`) always work and need neither flag.
+  // Firmware mirror: rcConfig.serialBcastOut / serialBcastIn.
+  serialBcast:   { S3: { out: false, in: false },
+                   S4: { out: false, in: false },
+                   S5: { out: false, in: false } },
 };
 
-// ── NaviCore serial-port WDP labels ─────────────────────────────────────────
-// Auto-derived label for a WDP port — JS mirror of the firmware's rcSerialLabelAuto:
-// 2 = local Maestro, 3/4/5 = S3/S4/S5 → HCR/MP3/WLED from the routed dest. "" = none.
-function _serialLabelAuto(port) {
-  if (port === 2) return 'Maestro';
-  if (port >= 3 && port <= 5) {
-    const sn = 'S' + port;
-    if (config.hcrDest && config.hcrDest.transport === 'serial' && config.hcrDest.port === sn) return 'HCR';
-    if (config.mp3Dest && config.mp3Dest.transport === 'serial' && config.mp3Dest.port === sn) return 'MP3';
-    if (Array.isArray(config.wledSlots) && config.wledSlots.some(w => w && w.configured && (+w.wcb || 0) === 0 && (+w.port || 0) === port)) return 'WLED';
-  }
+// ── NaviCore port labels + mesh broadcast bridging ──────────────────────────
+// Slot keys are the FIRMWARE port names, same as auxBaud — "S3"/"S4"/"S5" for the
+// three aux headers plus "maestro". The mesh addresses those same aux ports as
+// S1/S2/S3 (the NaviCore v2 silkscreen); that mapping lives in the firmware, so
+// nothing here has to know it beyond the static "Mesh" column in the table.
+const SLBL_KEYS   = ['S3', 'S4', 'S5', 'maestro'];
+const SBCAST_KEYS = ['S3', 'S4', 'S5'];   // the Maestro bus is binary — not bridgeable
+// Auto-derived label for a slot — JS mirror of the firmware's rcSerialLabelAuto:
+// "maestro" is always the local Maestro; the aux ports derive HCR/MP3/WLED from the
+// routed dest. "" = none.
+function _serialLabelAuto(key) {
+  if (key === 'maestro') return 'Maestro';
+  if (SBCAST_KEYS.indexOf(key) < 0) return '';
+  const port = +key.slice(1);   // "S3" → 3
+  if (config.hcrDest && config.hcrDest.transport === 'serial' && config.hcrDest.port === key) return 'HCR';
+  if (config.mp3Dest && config.mp3Dest.transport === 'serial' && config.mp3Dest.port === key) return 'MP3';
+  if (Array.isArray(config.wledSlots) && config.wledSlots.some(w => w && w.configured && (+w.wcb || 0) === 0 && (+w.port || 0) === port)) return 'WLED';
   return '';
 }
 // Write a per-port OVERRIDE into config (blank → remove it so the port falls back to
 // auto). Refreshes the input placeholder to show the current auto hint.
-function setSerialLabel(port, value) {
+function setSerialLabel(key, value) {
   if (!config.serialLabels || typeof config.serialLabels !== 'object') config.serialLabels = {};
   const v = String(value == null ? '' : value).slice(0, 24);
-  if (v.trim()) config.serialLabels[String(port)] = v;
-  else          delete config.serialLabels[String(port)];
-  const inp = document.getElementById('slabel-' + port);
-  if (inp) { const a = _serialLabelAuto(port); inp.placeholder = a ? ('auto: ' + a) : '(unlabeled)'; }
+  if (v.trim()) config.serialLabels[key] = v;
+  else          delete config.serialLabels[key];
+  const inp = document.getElementById('slabel-' + key);
+  if (inp) { const a = _serialLabelAuto(key); inp.placeholder = a ? ('auto: ' + a) : '(unlabeled)'; }
 }
 // Fill the Port Labels inputs from config (override value) + auto-derived placeholder.
 function renderSerialLabels() {
   const sl = (config.serialLabels && typeof config.serialLabels === 'object') ? config.serialLabels : {};
-  [2, 3, 4, 5].forEach(p => {
-    const inp = document.getElementById('slabel-' + p);
+  SLBL_KEYS.forEach(key => {
+    const inp = document.getElementById('slabel-' + key);
     if (!inp) return;
-    inp.value = sl[String(p)] || '';
-    const a = _serialLabelAuto(p);
+    inp.value = sl[key] || '';
+    const a = _serialLabelAuto(key);
     inp.placeholder = a ? ('auto: ' + a) : '(unlabeled)';
+  });
+}
+// Normalize config.serialBcast to a full {S3,S4,S5} x {out,in} object so neither the
+// renderer nor a diff-save has to cope with a missing branch.
+function _serialBcast() {
+  if (!config.serialBcast || typeof config.serialBcast !== 'object') config.serialBcast = {};
+  SBCAST_KEYS.forEach(k => {
+    const p = config.serialBcast[k];
+    config.serialBcast[k] = { out: !!(p && p.out), in: !!(p && p.in) };
+  });
+  return config.serialBcast;
+}
+function setSerialBcast(key, which, val) {
+  const bc = _serialBcast();
+  if (bc[key]) bc[key][which] = !!val;
+}
+// Fill the Bcast out/in checkboxes from config.
+function renderSerialBcast() {
+  const bc = _serialBcast();
+  SBCAST_KEYS.forEach(k => {
+    const o = document.getElementById('bcout-' + k);
+    const i = document.getElementById('bcin-' + k);
+    if (o) o.checked = !!bc[k].out;
+    if (i) i.checked = !!bc[k].in;
   });
 }
 
@@ -7953,6 +8008,10 @@ function applyConfig(data) {
   // {} (all auto), so it can't read as a false dirty diff against a stale set.
   config.serialLabels = (data.serialLabels && typeof data.serialLabels === 'object') ? { ...data.serialLabels } : {};
   renderSerialLabels();
+  // Per-aux-port broadcast bridging. Same full-replace rule: absent = old firmware,
+  // which has no bridging at all, so every flag reads back off.
+  config.serialBcast = (data.serialBcast && typeof data.serialBcast === 'object') ? { ...data.serialBcast } : {};
+  renderSerialBcast();   // also normalizes the object to the full 3 x {out,in} shape
   document.getElementById('tapwin-input').value = config.tapWindowMs;
   { const cr = document.getElementById('chrate-input');
     if (cr) { const hz = Math.max(1, Math.min(20, config.chRateHz ?? 5));
@@ -8524,20 +8583,62 @@ function applyHcrDestUI() {
 // ── Serial port baud panel ─────────────────────────────────────────────────
 // Single source of truth for S3 (hardware UART0, up to 115200), S4/S5 (bit-banged
 // SoftwareSerial, clamp ≤57600), and the local Maestro bus on Serial2 (up to 115200).
+// ── Serial-port baud dropdowns ───────────────────────────────────────────────
+// Every port picks from a fixed list rather than a free number box. The list IS the
+// WDP wire baud table (WcbMaestro/WCB_WDP's WDP_BAUD_TABLE), because a baud outside
+// that table cannot be encoded in a WDP advert: it goes out as code 0xFF, every WCB
+// decodes it to 0, and the auto-config loop skips the device entirely — a silent
+// failure with no diagnostic on either end. That only actually bites the Maestro bus
+// today (it's the one rate NaviCore advertises), but using one vocabulary everywhere
+// keeps the ports consistent and leaves room for the other devices to be advertised.
+//
+// Per-port ceiling: S3 is the hardware UART0 so it reaches 115200; S4/S5 are
+// bit-banged SoftwareSerial and stop at 57600; the Maestro bus is Serial2, 115200.
+const WDP_BAUDS  = [1200, 2400, 9600, 14400, 19200, 38400, 57600, 115200];
+const AUX_BAUD_MAX = { S3: 115200, S4: 57600, S5: 57600, maestro: 115200 };
+
+function setAuxBaud(key, value) {
+  const v = parseInt(value, 10);
+  if (!isFinite(v) || v <= 0) return;
+  if (!config.auxBaud || typeof config.auxBaud !== 'object') config.auxBaud = {};
+  config.auxBaud[key] = v;
+}
+
+// (Re)build one port's option list, selecting the configured rate. A stored rate that
+// isn't in the table is NOT silently coerced — it's added as a flagged option so the
+// user sees what's set and why it may not be advertisable. Coercing someone's working
+// baud out from under them would be worse than showing an odd entry.
+function renderAuxBaudSelect(id, key, current) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const max  = AUX_BAUD_MAX[key] || 115200;
+  const opts = WDP_BAUDS.filter(b => b <= max);
+  el.innerHTML = '';
+  if (opts.indexOf(current) < 0) {
+    const o = document.createElement('option');
+    o.value = String(current);
+    o.textContent = current + (current > max ? ' (too fast for this port)' : ' (not advertisable)');
+    el.appendChild(o);
+  }
+  opts.forEach(b => {
+    const o = document.createElement('option');
+    o.value = String(b);
+    o.textContent = String(b);
+    el.appendChild(o);
+  });
+  el.value = String(current);
+}
+
 function applyAuxBaudUI() {
   const a = config.auxBaud || (config.auxBaud = { S3: 9600, S4: 9600, S5: 9600, maestro: 115200 });
-  a.S3 = Math.max(1200, Math.min(115200, parseInt(a.S3, 10) || 9600));   // S3 = hardware UART0 (both boards)
-  a.S4 = Math.max(1200, Math.min(57600, parseInt(a.S4, 10) || 9600));
-  a.S5 = Math.max(1200, Math.min(57600, parseInt(a.S5, 10) || 9600));
-  a.maestro = Math.max(1200, Math.min(115200, parseInt(a.maestro, 10) || 115200));
-  const s3 = document.getElementById('aux-baud-s3');
-  const s4 = document.getElementById('aux-baud-s4');
-  const s5 = document.getElementById('aux-baud-s5');
-  const ms = document.getElementById('aux-baud-maestro');
-  if (s3) s3.value = a.S3;
-  if (s4) s4.value = a.S4;
-  if (s5) s5.value = a.S5;
-  if (ms) ms.value = a.maestro;
+  a.S3 = parseInt(a.S3, 10) || 9600;   // S3 = hardware UART0 (both boards)
+  a.S4 = parseInt(a.S4, 10) || 9600;
+  a.S5 = parseInt(a.S5, 10) || 9600;
+  a.maestro = parseInt(a.maestro, 10) || 115200;
+  renderAuxBaudSelect('aux-baud-s3',      'S3',      a.S3);
+  renderAuxBaudSelect('aux-baud-s4',      'S4',      a.S4);
+  renderAuxBaudSelect('aux-baud-s5',      'S5',      a.S5);
+  renderAuxBaudSelect('aux-baud-maestro', 'maestro', a.maestro);
   applyBaudRateLabels();
 }
 
@@ -15318,6 +15419,12 @@ function handleConfigImportFile(event) {
                      : Array.from({ length: NUM_WLED_SLOTS }, () => ({ id: 0, port: 0, wcb: 0, configured: false })),
         auxBaud: config.auxBaud ? { ...config.auxBaud } : { S3: 9600, S4: 9600, maestro: 115200 },
         serialLabels: (config.serialLabels && typeof config.serialLabels === 'object') ? { ...config.serialLabels } : {},
+        // Deep-copied per port: a shallow spread would leave the {out,in} objects
+        // shared with the live config, so editing the import would mutate it.
+        serialBcast: Object.fromEntries(SBCAST_KEYS.map(k => {
+          const p = (config.serialBcast || {})[k];
+          return [k, { out: !!(p && p.out), in: !!(p && p.in) }];
+        })),
       };
       let csvHadHcrDest = false;
       let csvHadMaestros = false;
