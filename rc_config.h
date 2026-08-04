@@ -526,6 +526,12 @@ struct RcConfig {
   // Maestro's Serial Settings (or its "Detect baud" mode). Remote/Kyber
   // Maestros are unaffected — that path is binary over ESP-NOW.
   uint32_t       maestroBaud;
+  // Per-serial-port WDP labels — what's attached to each of NaviCore's ports, so
+  // WCBs + the Wizard show it (advertised as WDP PORTLABEL TLVs, same as the WCB
+  // boards). Index = WDP port 1-5 minus 1: [0]=port1 (SBUS), [1]=port2 (local
+  // Maestro), [2]=S3, [3]=S4, [4]=S5. Stores the USER OVERRIDE only; "" = fall back
+  // to the auto-derived default (see rcSerialLabel/rcSerialLabelAuto).
+  char           serialLabels[5][25];
   // Remote skip-if-running gate: how long a mesh-relayed Maestro "busy" (:MQR moving-state)
   // reply stays valid. If the last reply is older than this — or none has arrived (e.g. the
   // WCB relay isn't up yet) — the gate FAILS OPEN and the action fires anyway. Default 250.
@@ -722,6 +728,7 @@ void rcConfigLoadDefaults() {
   rcConfig.auxBaud[1] = 9600;   // S4
   rcConfig.auxBaud[2] = 9600;   // S5 (NaviCore v2 "Serial 3")
   rcConfig.maestroBaud = LOCAL_MAESTRO_BAUD_RATE;   // local Maestro bus (Serial2)
+  memset(rcConfig.serialLabels, 0, sizeof(rcConfig.serialLabels));   // no overrides → all ports auto-derive
 
   // Default Maestro slots — all 8 disabled until user enables them in the
   // GUI Maestro Locations panel.  Device numbers default to match the slot
@@ -1140,6 +1147,19 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   auxObj["S4"]      = rcConfig.auxBaud[1];
   auxObj["S5"]      = rcConfig.auxBaud[2];
   auxObj["maestro"] = rcConfig.maestroBaud;   // local Maestro bus (Serial2)
+  // Per-serial-port OVERRIDE labels — only the non-empty ones, keyed by WDP port.
+  // Literal keys (flash) so ArduinoJson stores them safely; values point into the
+  // persistent rcConfig (serialized before it can change), same as auxObj/hcrDest.
+  {
+    static const char* const PK[5] = { "1", "2", "3", "4", "5" };
+    JsonObject slObj;
+    bool created = false;
+    for (int p = 1; p <= 5; p++) {
+      if (!rcConfig.serialLabels[p - 1][0]) continue;
+      if (!created) { slObj = doc.createNestedObject("serialLabels"); created = true; }
+      slObj[PK[p - 1]] = rcConfig.serialLabels[p - 1];
+    }
+  }
 
   // Smoothing profiles — all 6 slots emitted (array index = profile id, so knob
   // refs stay aligned); entries are SPARSE (only channels with speed|accel).
@@ -1452,6 +1472,18 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     rcConfig.auxBaud[2] = (uint32_t)(auxObj["S5"]      | rcConfig.auxBaud[2]);
     rcConfig.maestroBaud = (uint32_t)(auxObj["maestro"] | rcConfig.maestroBaud);
   }
+  // Per-serial-port override labels, keyed by WDP port "1".."5". Guarded by
+  // containsKey so a diff-save that omits it can't wipe them; FULL-replace when
+  // present so clearing a label (dropping its key) is honored.
+  if (doc.containsKey("serialLabels")) {
+    memset(rcConfig.serialLabels, 0, sizeof(rcConfig.serialLabels));
+    JsonObject slObj = doc["serialLabels"];
+    for (JsonPair kv : slObj) {
+      int port = atoi(kv.key().c_str());
+      if (port >= 1 && port <= 5)
+        strlcpy(rcConfig.serialLabels[port - 1], kv.value() | "", sizeof(rcConfig.serialLabels[0]));
+    }
+  }
   // A switch's channel/positions may have changed — re-seed switchPrevPos on the
   // next SBUS frame so processSwitches doesn't fire a phantom action from a stale
   // prior position. (Boot already starts with this true.)
@@ -1467,6 +1499,28 @@ bool rcConfigFromJSON(const String& json) {
     return false;
   }
   return rcConfigFromJSON(doc.as<JsonObject>());
+}
+
+// ── WDP serial-port labels ───────────────────────────────────────────────────
+// The effective label to advertise for a WDP port (1-5): the USER OVERRIDE if set,
+// else an auto-derived default from what the config routes to that port. Port map:
+// 1 = SBUS (no auto label), 2 = local Maestro (Serial2), 3/4/5 = S3/S4/S5.
+// rcAdvertiseSerialLabels() (NaviCore.ino) pushes these to WCB_Client::setPortLabel
+// so WCBs + the Wizard see what's attached to each NaviCore port.
+inline const char* rcSerialLabelAuto(int port) {
+  if (port == 2) return "Maestro";                          // local Maestro on Serial2
+  if (port >= 3 && port <= 5) {
+    if (rcConfig.hcrDest.transport == 0 && rcConfig.hcrDest.target[0] == 'S' && atoi(rcConfig.hcrDest.target + 1) == port) return "HCR";
+    if (rcConfig.mp3Dest.transport == 0 && rcConfig.mp3Dest.target[0] == 'S' && atoi(rcConfig.mp3Dest.target + 1) == port) return "MP3";
+    for (int i = 0; i < RC_NUM_WLED; i++)
+      if (rcConfig.wledSlots[i].configured && rcConfig.wledSlots[i].remoteWCB == 0 && rcConfig.wledSlots[i].serialPort == port) return "WLED";
+  }
+  return "";
+}
+inline const char* rcSerialLabel(int port) {
+  if (port < 1 || port > 5) return "";
+  if (rcConfig.serialLabels[port - 1][0]) return rcConfig.serialLabels[port - 1];   // user override wins
+  return rcSerialLabelAuto(port);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

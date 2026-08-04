@@ -2820,6 +2820,7 @@ void handleSerialInput() {
             bool ok = rcConfigFromJSON(bigDoc["data"].as<JsonObject>());
             if (ok) {
               bool saved = rcConfigSaveLFS();
+              rcAdvertiseSerialLabels();   // a changed port label / HCR/MP3/WLED dest → re-advertise over WDP
               // Apply baud / SBUS-OUT changes live so HCR / MP3 / Maestro pick up
               // a new rate immediately — no reboot required. BUT the pin profile is
               // assigned only at boot (applyBoardProfile runs once in setup()), so if
@@ -3169,6 +3170,16 @@ static void printBootTelemetry() {
                 g_bootAttempts > 1 ? "   <-- board retried/reset before this boot" : "");
 }
 
+// Push the effective label for each NaviCore serial port (WDP ports 1-5: 2=local
+// Maestro, 3/4/5=S3/S4/S5) into WCB_Client so it rides the WDP advert — the WCBs +
+// the Wizard then show what's attached to NaviCore, just like they do for a WCB.
+// Called at boot (after setIdentity) and after every SET_CONFIG apply. WCB_Client
+// dedupes unchanged labels and re-broadcasts changed ones promptly.
+void rcAdvertiseSerialLabels() {
+  if (!wcb) return;
+  for (int p = 1; p <= 5; p++) wcb->setPortLabel((uint8_t)p, rcSerialLabel(p));
+}
+
 void setup() {
   // OTA brick-loop guard — MUST be the very first thing. A freshly-OTA'd image
   // boots in PENDING_VERIFY because app-rollback is enabled in the Arduino esp32
@@ -3414,6 +3425,7 @@ void setup() {
     wcb->setIdentity("NaviCore", FW_VERSION,
                      rcConfig.boardType == 0 ? "NaviCore v2" : "WCB 3.2",
                      "rc sbus maestro hcr");
+    rcAdvertiseSerialLabels();   // advertise what's on each NaviCore serial port (WDP PORTLABEL) — config override + auto-derive
     // Auto-join (default ON, set explicitly): discover + keep WCB peers live from
     // their WDP adverts, so wcb_quantity is only the pre-registered floor and the
     // fleet is reachable without it covering every board.

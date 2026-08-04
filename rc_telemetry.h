@@ -92,6 +92,7 @@ bool   rcConfigFromJSON(const String& json);
 bool   rcConfigFromJSON(const JsonObject& doc);   // JsonObject overload — skip the double-parse
 bool   rcConfigSaveNVS();   // legacy NVS save (migration source only)
 bool   rcConfigSaveLFS();   // primary: persist config to /config.json on LittleFS
+void   rcAdvertiseSerialLabels();   // push effective per-port labels to WCB_Client (WDP PORTLABEL) — def in NaviCore.ino
 bool     rcCmdlibSaveLFS(const String& json); // persist the config tool's private command library to /cmdlib.json
 bool     rcCmdlibLoadLFS(String& out);        // read /cmdlib.json (raw JSON) — false if missing/empty
 uint32_t rcCmdlibHash(const String& s);       // FNV-1a signature of the stored library (change-detection)
@@ -845,6 +846,7 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
       if (!saved) ok = false;   // surface the save failure in the ACK below
       Serial.println(saved ? "[RC] SET_CONFIG → applied + saved to LittleFS"
                            : "[RC] SET_CONFIG → applied but SAVE FAILED (not persisted)");
+      rcAdvertiseSerialLabels();   // config may have changed a port label / dest → re-advertise
     } else {
       Serial.println("[RC] SET_CONFIG → rcConfigFromJSON returned false");
     }
