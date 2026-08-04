@@ -848,10 +848,14 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     } else {
       Serial.println("[RC] SET_CONFIG → rcConfigFromJSON returned false");
     }
+    // Echo the tool's per-save correlation id (saveId) so a DELAYED ACK over the
+    // mesh can't be misattributed to a later Save on the tool side. Absent (old
+    // tool) → 0, which the tool treats as "no id". ack[100] has ample room (worst
+    // case ~81 bytes).
     char ack[100];
     snprintf(ack, sizeof(ack),
-      "{\"sys\":1,\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"id\":%u,\"ok\":%s}",
-      rcConfig.wcbNetwork.deviceId, ok ? "true" : "false");
+      "{\"sys\":1,\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"id\":%u,\"ok\":%s,\"saveId\":%ld}",
+      rcConfig.wcbNetwork.deviceId, ok ? "true" : "false", (long)(doc["saveId"] | 0));
     if (wcb) wcb->send(senderID, ack);
     return;
   }
