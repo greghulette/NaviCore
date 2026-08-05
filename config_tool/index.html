@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">05.00:43.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">05.01:29.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3979,22 +3979,20 @@ async function connectSharedPort() {
     // a NORMAL Connect (which grabs the port for itself, OUTSIDE the hub) instead of "Share
     // port across tabs", or the two tabs aren't same-origin. Say so plainly, and LEAVE the
     // hub so we're not left as a broken port-less leader blocking a real one.
-    const selfPromoted = sharedHub.role === 'leader';
     try { sharedHub.leave(); } catch (_) {}   // don't stay a port-less leader blocking a real one (see the lingering-follower squat)
     sharedActive = false;
     setConnected(false);
     // Persistent, visible notice (ms:0 → no auto-dismiss; a fast normal attach never reaches this block).
-    // A port-less config-tool tab is a FOLLOWER far more often than the leader, so surface the message in
-    // BOTH cases with one call-to-action rather than only alert()ing the rarer self-promoted tab.
+    // Lead with the primary remedy — share a board in the Wizard — since the hub's conditional-
+    // campaigning fix means a port-less tab no longer squats the lock, so "another tab holds it" is
+    // now the rare case. (Don't infer "I'm alone" from role: a port-less tab is never leader now.)
     if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }
     _shareWaitToast = showToast(
-      'Couldn’t attach to a shared WCB. Close any OTHER NaviCore config-tool tabs, or in the WCB ' +
-      'Wizard connect a board and choose “Share port across tabs” (or click Open) — then click Connect here again.',
+      'Couldn’t attach to a shared WCB. In the WCB Wizard, connect a board and choose “Share port ' +
+      'across tabs” (or click Open), then click Connect here again. If it still won’t attach, close ' +
+      'any other NaviCore config-tool tabs.',
       'warn', 0);
-    if (selfPromoted)
-      appendTerminalLine('· shared: no tab has opened a port yet — share one in the WCB Wizard, then reconnect.', 'sys');
-    else
-      appendTerminalLine('· shared: another config-tool tab is holding the session — close it, then reconnect.', 'sys');
+    appendTerminalLine('· shared: no shared port yet — share a board in the WCB Wizard (or close any other config-tool tab), then reconnect.', 'sys');
     return;
   }
   viaWcbActive = true;    // set the flag BEFORE setConnected starts the WCB-status poll, so its GET_WCB_STATUS wraps as ;w20 and reaches the RC
