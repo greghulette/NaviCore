@@ -316,11 +316,28 @@ inline void handleOtaDataPacket(const uint8_t *raw) {
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (!otaPktAuth(pkt.structPassword, pkt.targetWCB)) return;
   uint16_t len = pkt.dataLen > OTA_ESPNOW_PAYLOAD ? OTA_ESPNOW_PAYLOAD : pkt.dataLen;
+  // Any in-session frame — even a dup or an ahead-of-cursor packet from the browser's
+  // sliding window — proves the sender is still streaming, so keep the session alive.
+  // otaWrite() refreshes lastActivityMs only on a SUCCESSFUL contiguous write, so
+  // without this a window full of rejected-but-legitimate packets trips the 30 s idle
+  // abort on a transfer that was never actually stalled. (Same keep-alive the WCB's
+  // WCB_OTA.cpp carries; NaviCore's copy never got it, and the windowed sender made
+  // non-contiguous arrivals routine rather than exceptional.)
+  const bool inSession = (ota.active && pkt.sessionId == otaActiveSession());
+  if (inSession) ota.lastActivityMs = millis();
   // Write (no-op on out-of-order/dup), then ALWAYS ack the current cursor so the
   // browser learns where we are — covers a lost DATA (cursor stalls -> resend
   // from cursor) and a lost ACK (re-acked on the resent DATA).
   otaWrite(pkt.sessionId, pkt.fragOffset, pkt.data, len);
-  sendOtaAck(pkt.sourceWCB, pkt.sessionId, OTA_ST_OK, otaWrittenOffset());
+  // Report the session's REAL state. If it has already been torn down (idle abort,
+  // image overrun, flash write error) otaWrittenOffset() reads 0, and an OK+0 ACK is
+  // indistinguishable from a stale duplicate to the browser: it ignores it, times out,
+  // rewinds, resends, and is answered with OK+0 forever — a genuine infinite hang with
+  // no error and a frozen progress bar. OTA_ST_ERR makes it fail loudly instead.
+  // A frame for a DIFFERENT session is answered with its own id, which the browser
+  // filters out, so this cannot disturb a live transfer.
+  sendOtaAck(pkt.sourceWCB, pkt.sessionId, inSession ? OTA_ST_OK : OTA_ST_ERR,
+             otaWrittenOffset());
 }
 
 inline void handleOtaEndPacket(const uint8_t *raw) {
