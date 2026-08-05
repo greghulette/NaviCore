@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:22.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">05.00:43.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3968,6 +3968,7 @@ async function connectSharedPort() {
     sharedHub.on('log',   (m) => appendTerminalLine('· [hub] ' + m, 'sys'));
   }
   _sharedBuf = ''; _sharedDecoder = null;
+  if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }   // fresh attempt → drop any stale "couldn't attach" notice
   sharedHub.join();
   sharedActive = true;
   // Wait (bounded) for leader election + the shared port to actually open.
@@ -3979,22 +3980,26 @@ async function connectSharedPort() {
     // port across tabs", or the two tabs aren't same-origin. Say so plainly, and LEAVE the
     // hub so we're not left as a broken port-less leader blocking a real one.
     const selfPromoted = sharedHub.role === 'leader';
-    try { sharedHub.leave(); } catch (_) {}
+    try { sharedHub.leave(); } catch (_) {}   // don't stay a port-less leader blocking a real one (see the lingering-follower squat)
     sharedActive = false;
     setConnected(false);
-    if (selfPromoted) {
-      alert('No shared port found.\n\n' +
-            'To share one WCB across tabs, the OTHER tab (the WCB Wizard) must ALSO connect it via ' +
-            '“Share port across tabs”. A normal Connect grabs the port for itself and can’t be shared. ' +
-            'Both tabs must be on the same site (…github.io).\n\n' +
-            'In the Wizard: Connect → “Share port across tabs”, then reconnect here.');
-    } else {
-      appendTerminalLine('· shared: joined the session but no tab has opened the port yet — try again.', 'sys');
-    }
+    // Persistent, visible notice (ms:0 → no auto-dismiss; a fast normal attach never reaches this block).
+    // A port-less config-tool tab is a FOLLOWER far more often than the leader, so surface the message in
+    // BOTH cases with one call-to-action rather than only alert()ing the rarer self-promoted tab.
+    if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }
+    _shareWaitToast = showToast(
+      'Couldn’t attach to a shared WCB. Close any OTHER NaviCore config-tool tabs, or in the WCB ' +
+      'Wizard connect a board and choose “Share port across tabs” (or click Open) — then click Connect here again.',
+      'warn', 0);
+    if (selfPromoted)
+      appendTerminalLine('· shared: no tab has opened a port yet — share one in the WCB Wizard, then reconnect.', 'sys');
+    else
+      appendTerminalLine('· shared: another config-tool tab is holding the session — close it, then reconnect.', 'sys');
     return;
   }
   viaWcbActive = true;    // set the flag BEFORE setConnected starts the WCB-status poll, so its GET_WCB_STATUS wraps as ;w20 and reaches the RC
   setConnected(true);
+  if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }   // attached → clear any "couldn't attach" notice
   onViaWcbToggle(true);   // the shared port is a WCB gateway → relay ;w20 to the NaviCore (applies UI + 'Connected via WCB' text)
   // Handshake — mirror openPortAndStart's tail (PING for PONG, then config + monitor).
   _pongSeen = false;
@@ -4019,6 +4024,7 @@ async function disconnect() {
       isMonitoring = false;
       sharedActive = false;
       try { sharedHub?.leave(); } catch (_) {}
+      if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }   // manual disconnect → clear any "couldn't attach" notice
     } else {
       // Best-effort STOP_MONITOR — bounded so a back-pressured write can't hang.
       if (isMonitoring && writer) {
@@ -13570,6 +13576,7 @@ function _dismissToast(ref) { if (ref && ref._dismiss) ref._dismiss(); }
 let _saveToast = null;     // the pending config "Saving to NaviCore…" toast, resolved on ACK / NACK / timeout
 let _cmdlibToast = null;   // the pending command-library "Saving…" toast, resolved on SET_CMDLIB ACK
 let _defaultsToast = null; // the pending "Resetting to defaults…" toast, resolved when fresh CONFIG returns
+let _shareWaitToast = null; // persistent "couldn't attach to a shared WCB" notice; cleared on retry / success / disconnect
 let _pendingDefaultsReset = false;   // a RESET_DEFAULTS is awaiting its confirming CONFIG reload
 let _pendingDefaultsTimer = null;    // watchdog for a missing post-reset CONFIG
 
