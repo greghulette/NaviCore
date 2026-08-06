@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">05.01:29.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">05.22:33.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2352,6 +2352,7 @@
     <button class="dbg-chip" type="button" data-cat="wcb"     aria-pressed="false">WCB</button>
     <button class="dbg-chip" type="button" data-cat="hcr"     aria-pressed="false">HCR</button>
     <button class="dbg-chip" type="button" data-cat="mp3"     aria-pressed="false">MP3</button>
+    <button class="dbg-chip" type="button" data-cat="dfp"     aria-pressed="false" title="DFPlayer Mini ;D dispatch — local 10-byte frames out an aux port + remote forwards to a WCB">DFPlayer</button>
     <button class="dbg-chip" type="button" data-cat="wled"    aria-pressed="false" title="WLED ;L&lt;id&gt; dispatch — local JSON out an aux port + remote forwards to a WCB">WLED</button>
     <button class="dbg-chip" type="button" data-cat="serial"  aria-pressed="false" title="Serial-port activity, both directions: outgoing Serial actions AND incoming bytes on S3/S4/S5 (shown as '[DISPATCH] Serial RX <port>')">Serial</button>
   </div>
@@ -2578,8 +2579,7 @@
         <button class="cfg-tab"        type="button" data-tab="logical">Logical Buttons</button>
         <button class="cfg-tab"        type="button" data-tab="transmitter">Transmitter</button>
         <button class="cfg-tab"        type="button" data-tab="wcb">WCB Network</button>
-        <button class="cfg-tab"        type="button" data-tab="hcr">HCR</button>
-        <button class="cfg-tab"        type="button" data-tab="mp3">MP3 Trigger</button>
+        <button class="cfg-tab"        type="button" data-tab="audio">Audio</button>
         <button class="cfg-tab"        type="button" data-tab="maestro">Maestro</button>
         <button class="cfg-tab"        type="button" data-tab="wled">WLED</button>
         <button class="cfg-tab"        type="button" data-tab="smoothing">Smoothing</button>
@@ -2835,9 +2835,18 @@
         <!-- ════════════════════════════════════════════════════════════
              HCR tab — global HCR destination (every HCR action shares).
              ════════════════════════════════════════════════════════════ -->
-        <section class="cfg-pane" id="cfg-pane-hcr">
-          <h2 class="cfg-pane-title">HCR Destination</h2>
+        <section class="cfg-pane" id="cfg-pane-audio">
+          <h2 class="cfg-pane-title">Audio Devices</h2>
+          <div class="noconn" style="margin-bottom:10px">
+            Every sound device the droid can reach, in one place. Each destination is
+            <b>global</b> — an action of that type carries only the command, never a
+            destination, so this is set once and saved to the board. A device you don't
+            have costs nothing left alone.
+          </div>
+
+          <!-- ── HCR vocalizer ───────────────────────────────────────── -->
           <div class="sb-section">
+            <h3 style="margin:0 0 6px;font-size:13px">HCR Vocalizer</h3>
             <div class="wcb-send-row">
               <label>Via:</label>
               <select id="hcr-transport" onchange="renderHcrDestFields()" style="font-size:12px">
@@ -2846,16 +2855,12 @@
               </select>
             </div>
             <div class="wcb-send-row" id="hcr-dest-fields"></div>
-            <div class="noconn" style="margin-top:4px">All HCR actions route through this destination. Set once, save to board.</div>
+            <div class="noconn" style="margin-top:4px">All HCR actions route through this destination.</div>
           </div>
-        </section>
 
-        <!-- ════════════════════════════════════════════════════════════
-             MP3 Trigger tab — global MP3 destination.
-             ════════════════════════════════════════════════════════════ -->
-        <section class="cfg-pane" id="cfg-pane-mp3">
-          <h2 class="cfg-pane-title">MP3 Trigger Destination</h2>
+          <!-- ── SparkFun MP3 Trigger ────────────────────────────────── -->
           <div class="sb-section">
+            <h3 style="margin:0 0 6px;font-size:13px">MP3 Trigger</h3>
             <div class="wcb-send-row">
               <label>Via:</label>
               <select id="mp3-transport" onchange="renderMp3DestFields()" style="font-size:12px">
@@ -2864,7 +2869,22 @@
               </select>
             </div>
             <div class="wcb-send-row" id="mp3-dest-fields"></div>
-            <div class="noconn" style="margin-top:4px">All MP3 Trigger actions route here. <b>Serial</b> = MP3 Trigger wired to this controller's S3/S4/S5. <b>WCB</b> = wired to a WCB (configured there with <b>?MP3,S&lt;port&gt;</b>). Set once, save to board.</div>
+            <div class="noconn" style="margin-top:4px">All MP3 Trigger actions route here. <b>Serial</b> = MP3 Trigger wired to this controller's S3/S4/S5. <b>WCB</b> = wired to a WCB (configured there with <b>?MP3,S&lt;port&gt;</b>). A v2 Trigger wants that port at <b>38400</b>.</div>
+          </div>
+
+          <!-- ── DFPlayer Mini ───────────────────────────────────────── -->
+          <div class="sb-section">
+            <h3 style="margin:0 0 6px;font-size:13px">DFPlayer Mini</h3>
+            <div class="wcb-send-row">
+              <label>Via:</label>
+              <select id="dfp-transport" onchange="renderDfpDestFields()" style="font-size:12px">
+                <option value="serial">Serial (local)</option>
+                <option value="wcb">WCB</option>
+              </select>
+            </div>
+            <div class="wcb-send-row" id="dfp-dest-fields"></div>
+            <div id="dfp-baud-warn" class="noconn" style="margin-top:4px;display:none;color:var(--warn,#e0a030)"></div>
+            <div class="noconn" style="margin-top:4px">All DFPlayer actions route here. <b>Serial</b> = DFPlayer wired to this controller's S3/S4/S5. <b>WCB</b> = wired to a WCB (configured there with <b>?DFP,S&lt;port&gt;</b>). A DFPlayer's baud is fixed at <b>9600</b> by the module. Its volume scale is <b>0 = silent … 30 = loudest</b> — the inverse of the MP3 Trigger's.</div>
           </div>
         </section>
 
@@ -3537,6 +3557,10 @@ let config = {
   // transport 'serial' → local S3/S4 (port); 'wcb' → unicast WCB ID.
   // (Serial baud is NOT here — it's per-port in auxBaud below.)
   mp3Dest:       { transport: 'wcb', target: '2', port: 'S3' },
+  // Global DFPlayer Mini destination — every "DFPlayer" action routes here.
+  // Defaults LOCAL (firmware rcConfig.dfpDest matches): a DFPlayer is usually
+  // wired to the controller's own aux header, unlike the MP3 Trigger.
+  dfpDest:       { transport: 'serial', target: '2', port: 'S3' },
   // Per-id WLED routing table (mirror of firmware wledSlots[] / the WCB's
   // wledConfigs). Each slot: id 1-9, port 3/4/5 (local aux) OR wcb 1-20 (remote),
   // configured flag. All empty by default; edited in the WLED tab.
@@ -3578,6 +3602,7 @@ function _serialLabelAuto(key) {
   const port = +key.slice(1);   // "S3" → 3
   if (config.hcrDest && config.hcrDest.transport === 'serial' && config.hcrDest.port === key) return 'HCR';
   if (config.mp3Dest && config.mp3Dest.transport === 'serial' && config.mp3Dest.port === key) return 'MP3';
+  if (config.dfpDest && config.dfpDest.transport === 'serial' && config.dfpDest.port === key) return 'DFPlayer';
   if (Array.isArray(config.wledSlots) && config.wledSlots.some(w => w && w.configured && (+w.wcb || 0) === 0 && (+w.port || 0) === port)) return 'WLED';
   return '';
 }
@@ -3699,6 +3724,7 @@ const actionTypeLabels = {
   'serial':        'Serial port',
   'hcr':           'HCR Vocalizer',
   'mp3':           'MP3 Trigger',
+  'dfplayer':      'DFPlayer Mini',
   'wled':          'WLED Lighting',
   'record':        'Record (toggle)',
   'play':          'Play clip',
@@ -3797,6 +3823,61 @@ const mp3ArgBounds = {
   2: { min: 0, max: 255, label: 'File index' },
   6: { min: 0, max: 64,  label: 'Volume (0=loud)' },
 };
+
+// DFPlayer Mini (DFRobot / YX5300 clones) via the ";D,..." command set. fn codes
+// match the firmware RcDfpFn enum and WcbCmd's DfPlayerCodec::handle(). An action
+// carries fn + chan + track; which of chan/track is meaningful depends on fn —
+// see the two Sets below. Bounds MUST match dfpFormatCommand() in NaviCore.ino
+// and DfPlayerCodec::handle(), or the tool will happily author a command the
+// firmware then silently drops. (docs/DFPLAYER_DESIGN.md §3 is the table.)
+const dfpFnLabels = {
+  1:  'Play track',        // ;D,PLAY,<n>            track 1-2999 (global index)
+  2:  'Play folder/track', // ;D,FOLDER,<f>,<t>      chan=folder 1-99, track 1-255
+  3:  'Play /MP3 folder',  // ;D,MP3FOLDER,<n>       track 1-9999
+  4:  'Stop',              // ;D,STOP
+  5:  'Next',              // ;D,NEXT
+  6:  'Previous',          // ;D,PREV
+  7:  'Pause',             // ;D,PAUSE
+  8:  'Resume',            // ;D,RESUME
+  9:  'Set volume',        // ;D,VOL,<n>             track 0-30 — 0=SILENT, 30=LOUDEST
+  10: 'Volume up',         // ;D,VOLUP
+  11: 'Volume down',       // ;D,VOLDN
+  12: 'Loop track',        // ;D,LOOP,<n>            track 1-2999
+  13: 'Loop all',          // ;D,LOOPALL,<0|1>       chan 0/1
+  14: 'Loop folder',       // ;D,LOOPFOLDER,<f>      chan=folder 1-99
+  15: 'Random',            // ;D,RANDOM
+  16: 'Set EQ',            // ;D,EQ,<0-5>            chan
+  17: 'Select device',     // ;D,DEVICE,<n>          chan 1-5
+  18: 'Reset module',      // ;D,RESET
+};
+// Which functions use the numeric `track` field, and which use `chan`.
+// "Play folder/track" (2) is the only one that uses BOTH.
+const DFP_FN_USES_TRACK = new Set([1, 2, 3, 9, 12]);
+const DFP_FN_USES_CHAN  = new Set([2, 13, 14, 16, 17]);
+const dfpTrackBounds = {
+  1:  { min: 1, max: 2999, label: 'Track #',    def: 1 },
+  2:  { min: 1, max: 255,  label: 'Track',      def: 1 },
+  3:  { min: 1, max: 9999, label: '/MP3 index', def: 1 },
+  9:  { min: 0, max: 30,   label: 'Volume (0=silent, 30=loud)', def: 20 },
+  12: { min: 1, max: 2999, label: 'Track #',    def: 1 },
+};
+// chan fields: a numeric folder for 2/14, an enumerated dropdown for 13/16/17.
+const dfpChanBounds = {
+  2:  { min: 1, max: 99, label: 'Folder', def: 1 },
+  14: { min: 1, max: 99, label: 'Folder', def: 1 },
+};
+const dfpChanEnums = {
+  13: { label: 'Loop all', def: 1, opts: [[0, 'Off'], [1, 'On']] },
+  16: { label: 'EQ',       def: 0, opts: [[0, 'Normal'], [1, 'Pop'], [2, 'Rock'],
+                                          [3, 'Jazz'], [4, 'Classic'], [5, 'Bass']] },
+  17: { label: 'Device',   def: 2, opts: [[1, 'USB'], [2, 'SD card'], [3, 'AUX'],
+                                          [4, 'Sleep'], [5, 'Flash']] },
+};
+function dfpChanName(fn, v) {
+  const e = dfpChanEnums[+fn];
+  if (e) return (e.opts.find(o => o[0] === +v) || [, `${v}`])[1];
+  return `${v}`;
+}
 
 // Maestro commands (comma-delimited "cmd[]" format, fits in 32 chars).
 // label, arg fields ([{label, default, min, max}])
@@ -4808,6 +4889,7 @@ const DEBUG_CATEGORIES = [
                                             || /^\[WCBStream\].*(sendRaw|\(Raw\))/i.test(t) },
   { key: 'mp3',     bit: 1 << 4, match: t => /^\[DISPATCH\]\s*MP3/i.test(t) },
   { key: 'serial',  bit: 1 << 5, match: t => /^\[DISPATCH\]\s*Serial\s/i.test(t) },
+  { key: 'dfp',     bit: 1 << 6, match: t => /^\[DISPATCH\]\s*DFP/i.test(t) },
 ];
 
 // All chips OFF on every page load. Debug streams are an explicit per-
@@ -7996,6 +8078,9 @@ function applyConfig(data) {
     if (w.quantity !== undefined) w.quantity = +w.quantity;
     if (w.deviceId !== undefined) w.deviceId = +w.deviceId;
   }
+  if (data.dfpDest) {
+    config.dfpDest = { ...config.dfpDest, ...data.dfpDest };
+  }
   if (data.mp3Dest) {
     config.mp3Dest = { ...config.mp3Dest, ...data.mp3Dest };
   }
@@ -8030,6 +8115,7 @@ function applyConfig(data) {
   applyHcrDestUI();
   applyWcbNetworkUI();
   applyMp3DestUI();
+  applyDfpDestUI();
   applyAuxBaudUI();
   // The values we just loaded are what the running WCBClient on the board
   // was constructed with — snapshot them as the baseline for dirty tracking.
@@ -8704,6 +8790,75 @@ function renderMp3DestFields() {
     `;
     d.port = port;
     delete d.target; delete d.baud;
+  }
+}
+
+// ── DFPlayer Destination (Audio tab) ───────────────────────────────────────
+// Same dual-transport shape as MP3 above — 'serial' = local S3/S4/S5, 'wcb' =
+// unicast WCB ID — so the two read identically in the Audio pane. Differences
+// that matter: the firmware default is LOCAL S3 (a DFPlayer is usually soldered
+// to the controller itself), and the module's baud is FIXED at 9600, so a local
+// port set to anything else is called out rather than silently mis-driving it.
+const DFP_FIXED_BAUD = 9600;
+
+function applyDfpDestUI() {
+  const d = config.dfpDest
+    || (config.dfpDest = { transport: 'serial', target: '2', port: 'S3' });
+  const tSel = document.getElementById('dfp-transport');
+  if (tSel) tSel.value = d.transport || 'serial';
+  renderDfpDestFields();
+}
+
+function renderDfpDestFields() {
+  const wrap = document.getElementById('dfp-dest-fields');
+  if (!wrap) return;
+  const d = config.dfpDest
+    || (config.dfpDest = { transport: 'serial', target: '2', port: 'S3' });
+  const t = document.getElementById('dfp-transport')?.value || d.transport || 'serial';
+  d.transport = t;
+  if (t === 'wcb') {
+    let tgt = (d.target !== undefined ? parseInt(d.target, 10) : 2);
+    if (!Number.isFinite(tgt) || tgt < 1) tgt = 2;
+    if (tgt > 20) tgt = 20;
+    wrap.innerHTML = `
+      <label>WCB:</label>
+      <input type="number" id="dfp-target" min="1" max="20" value="${tgt}"
+             style="width:60px;font-size:12px"
+             title="Unicast WCB ID 1-20 — the WCB the DFPlayer is wired to (configured there with ?DFP,S<port>)"
+             oninput="config.dfpDest.target = String(Math.max(1, Math.min(20, parseInt(this.value,10)||1)))">
+    `;
+    d.target = String(tgt);
+    delete d.port;
+  } else {
+    const port = d.port || 'S3';
+    wrap.innerHTML = `
+      <label>Port:</label>
+      <select id="dfp-port" style="font-size:12px"
+              onchange="config.dfpDest.port = this.value; renderDfpBaudWarning()">
+        ${serialPorts.map(p => `<option value="${p.v}" ${p.v===port?'selected':''}>${_serialPortLabel(p.v)}</option>`).join('')}
+      </select>
+      <small style="color:var(--muted);font-size:10px">baud set in Serial Ports ↓</small>
+    `;
+    d.port = port;
+    delete d.target;
+  }
+  renderDfpBaudWarning();
+}
+
+// A DFPlayer only talks at 9600. Nothing in firmware enforces that — the port
+// opens at whatever Serial Ports says — so a mismatch is silent garbage on the
+// wire. Say so here, where the port was just picked.
+function renderDfpBaudWarning() {
+  const el = document.getElementById('dfp-baud-warn');
+  if (!el) return;
+  const d = config.dfpDest || {};
+  if (d.transport !== 'serial' || !d.port) { el.style.display = 'none'; return; }
+  const baud = (config.auxBaud && config.auxBaud[d.port]) || null;
+  if (baud && +baud !== DFP_FIXED_BAUD) {
+    el.textContent = `⚠ ${_serialPortLabel(d.port)} is set to ${baud} baud. A DFPlayer is fixed at ${DFP_FIXED_BAUD} — change it in Serial Ports or the module won't respond.`;
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
   }
 }
 
@@ -9673,6 +9828,15 @@ function actionSummary(a) {
     const fnLbl = mp3FnLabels[a.fn] || `fn${a.fn}`;
     core = MP3_FN_USES_ARG.has(+a.fn) ? `MP3 ${fnLbl} ${a.track ?? 0}` : `MP3 ${fnLbl}`;
   }
+  else if (a.type === 'dfplayer') {
+    const fnLbl = dfpFnLabels[a.fn] || `fn${a.fn}`;
+    const useC = DFP_FN_USES_CHAN.has(+a.fn), useT = DFP_FN_USES_TRACK.has(+a.fn);
+    // "Play folder/track" reads best as 3/12, the way the files are laid out on the card.
+    if (+a.fn === 2)   core = `DFPlayer ${fnLbl} ${a.chan ?? 0}/${a.track ?? 0}`;
+    else if (useC)     core = `DFPlayer ${fnLbl} ${dfpChanName(a.fn, a.chan ?? 0)}`;
+    else if (useT)     core = `DFPlayer ${fnLbl} ${a.track ?? 0}`;
+    else               core = `DFPlayer ${fnLbl}`;
+  }
   else if (a.type === 'record') core = a.cmd ? `Record "${escH(a.cmd)}"` : 'Record (toggle)';
   else if (a.type === 'play')   core = `Play${(+a.fn) ? ' ⟳' : ''}${a.cmd ? ' "' + escH(a.cmd) + '"' : ''}`;
   else if (a.type === 'stop')   core = 'Stop';
@@ -10449,6 +10613,61 @@ function renderMp3ArgField(container, fn, curVal) {
   else container.appendChild(g);
 }
 
+// Build (or rebuild) the chan + track widgets for a DFPlayer action. Unlike MP3
+// (one optional arg) a DFPlayer verb can take a folder AND a track, so this
+// mirrors renderHcrParamFields' two-widget shape: whichever of chan/track the
+// selected fn actually uses is drawn, the rest are removed.
+function renderDfpParamFields(container, fn, curChan, curTrack) {
+  const cid = container.id;
+  ['-dfpchan-group', '-dfptrack-group'].forEach(sfx => {
+    const old = document.getElementById(cid + sfx);
+    if (old) old.remove();
+  });
+
+  let anchor = container.querySelector('#' + cid + '-fn')?.parentElement || null;
+  const insertAfter = (g) => {
+    if (anchor && anchor.nextSibling) container.insertBefore(g, anchor.nextSibling);
+    else container.appendChild(g);
+    anchor = g;
+  };
+
+  // ── chan: folder number, or an enumerated dropdown (loop-all / EQ / device)
+  if (DFP_FN_USES_CHAN.has(+fn)) {
+    const e = dfpChanEnums[+fn];
+    let w, label;
+    if (e) {
+      label = e.label;
+      w = document.createElement('select');
+      e.opts.forEach(([v, lbl]) => {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = lbl;
+        if (+v === (curChan !== undefined && curChan !== null && curChan !== '' ? +curChan : e.def)) o.selected = true;
+        w.appendChild(o);
+      });
+    } else {
+      const b = dfpChanBounds[+fn] || { min: 0, max: 99, label: 'Value', def: 0 };
+      label = b.label;
+      w = document.createElement('input');
+      w.type = 'number'; w.min = b.min; w.max = b.max; w.style.width = '70px';
+      w.value = (curChan !== undefined && curChan !== null && curChan !== '') ? curChan : b.def;
+      w.title = `${b.label} (${b.min}-${b.max})`;
+    }
+    w.id = cid + '-chan';
+    const g = makeFieldGroup(label, w); g.id = cid + '-dfpchan-group'; insertAfter(g);
+  }
+
+  // ── track: track number / index / volume
+  if (DFP_FN_USES_TRACK.has(+fn)) {
+    const b = dfpTrackBounds[+fn] || { min: 0, max: 2999, label: 'Value', def: 0 };
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.min = b.min; inp.max = b.max; inp.style.width = '70px';
+    inp.id = cid + '-track';
+    inp.value = (curTrack !== undefined && curTrack !== null && curTrack !== '') ? curTrack : b.def;
+    inp.title = `${b.label} (${b.min}-${b.max})`;
+    const g = makeFieldGroup(b.label, inp); g.id = cid + '-dfptrack-group'; insertAfter(g);
+  }
+}
+
 // ── WCB Command Library ─────────────────────────────────────────────────────
 // A small, editable catalog of droid command TEMPLATES you can pick from when
 // configuring a "WCB unicast/broadcast" action, instead of memorising raw
@@ -10479,8 +10698,61 @@ const NC_CMDLIB_SEED = {
   // so ONE board covers both local and remote Maestros). The vendored `maestro-native`
   // has the SAME commands but addresses a raw `;W<wcb>;S<port>` WCB port, so
   // _cmdlibNormalize() drops it in favor of nc-maestro (no WCB/port numbers to type).
-  enums: {},
+  // Shared enum vocabulary — a param references one by id (`enum:'dfp.eq'`),
+  // matching the DroidNet schema so our boards and theirs merge cleanly.
+  enums: {
+    'dfp.onoff':  { label: 'Loop all', values: [ { code: '0', label: 'Off' }, { code: '1', label: 'On' } ] },
+    'dfp.eq':     { label: 'EQ preset', values: [
+      { code: '0', label: 'Normal' }, { code: '1', label: 'Pop' },  { code: '2', label: 'Rock' },
+      { code: '3', label: 'Jazz' },   { code: '4', label: 'Classic' }, { code: '5', label: 'Bass' } ] },
+    'dfp.device': { label: 'Storage', values: [
+      { code: '1', label: 'USB' },   { code: '2', label: 'SD card' }, { code: '3', label: 'AUX' },
+      { code: '4', label: 'Sleep' }, { code: '5', label: 'Flash' } ] },
+  },
   boards: [
+    // ── DFPlayer Mini (;D) ─────────────────────────────────────────────────
+    // NaviCore's own board — NOT upstream, so it lives here and not in the
+    // vendored MPL-2.0 snapshot. Curated from WcbCmd's DfPlayerCodec::handle()
+    // and the WCB's processDFPCommand(), which are the same parser.
+    //
+    // These author a WIRE command (";D,…") for a DFPlayer hosted on a WCB. A
+    // DFPlayer wired to THIS controller needs the native "DFPlayer Mini" action
+    // type instead: the module wants 10-byte binary frames, and ";D,PLAY,5" as
+    // text down a UART is just noise to it. The action editor is the primary
+    // authoring path; this board is for the mesh case.
+    { id:'wcb-dfplayer', name:'WCB · DFPlayer Mini', kind:'wcb-verb', commands: [
+      { id:'dfp.play', name:'Play Track', category:'Sound', template:';D,PLAY,{track}',
+        params:[ {name:'track', label:'Track # (1-2999)', type:'int', min:1, max:2999, default:1, required:true} ], examples:[';D,PLAY,1'], commentLabel:'DFP play' },
+      { id:'dfp.folder', name:'Play Folder/Track', category:'Sound', template:';D,FOLDER,{folder},{track}',
+        params:[ {name:'folder', label:'Folder (1-99)', type:'int', min:1, max:99, default:1, required:true},
+                 {name:'track', label:'Track (1-255)', type:'int', min:1, max:255, default:1, required:true} ], examples:[';D,FOLDER,1,2'], commentLabel:'DFP folder' },
+      { id:'dfp.mp3folder', name:'Play /MP3 Folder Track', category:'Sound', template:';D,MP3FOLDER,{index}',
+        params:[ {name:'index', label:'Index (1-9999)', type:'int', min:1, max:9999, default:1, required:true} ], examples:[';D,MP3FOLDER,1'], commentLabel:'DFP /MP3' },
+      { id:'dfp.stop', name:'Stop', category:'Sound', template:';D,STOP', params:[], examples:[';D,STOP'], commentLabel:'DFP stop' },
+      { id:'dfp.next', name:'Next Track', category:'Sound', template:';D,NEXT', params:[], examples:[';D,NEXT'], commentLabel:'DFP next' },
+      { id:'dfp.prev', name:'Previous Track', category:'Sound', template:';D,PREV', params:[], examples:[';D,PREV'], commentLabel:'DFP prev' },
+      { id:'dfp.pause', name:'Pause', category:'Sound', template:';D,PAUSE', params:[], examples:[';D,PAUSE'], commentLabel:'DFP pause' },
+      { id:'dfp.resume', name:'Resume', category:'Sound', template:';D,RESUME', params:[], examples:[';D,RESUME'], commentLabel:'DFP resume' },
+      { id:'dfp.random', name:'Play Random', category:'Sound', template:';D,RANDOM', params:[], examples:[';D,RANDOM'], commentLabel:'DFP random' },
+      // 0 = SILENT, 30 = LOUDEST — the INVERSE of the MP3 Trigger's 0-64 scale.
+      { id:'dfp.vol', name:'Set Volume', category:'Volume', template:';D,VOL,{level}',
+        params:[ {name:'level', label:'Volume (0=silent … 30=loudest)', type:'int', min:0, max:30, default:20, required:true} ], examples:[';D,VOL,20'], commentLabel:'DFP volume' },
+      { id:'dfp.volUp', name:'Volume Up', category:'Volume', template:';D,VOLUP', params:[], examples:[';D,VOLUP'], commentLabel:'DFP vol up' },
+      { id:'dfp.volDown', name:'Volume Down', category:'Volume', template:';D,VOLDN', params:[], examples:[';D,VOLDN'], commentLabel:'DFP vol down' },
+      { id:'dfp.loop', name:'Loop Track', category:'Loop', template:';D,LOOP,{track}',
+        params:[ {name:'track', label:'Track # (1-2999)', type:'int', min:1, max:2999, default:1, required:true} ], examples:[';D,LOOP,1'], commentLabel:'DFP loop' },
+      { id:'dfp.loopAll', name:'Loop All', category:'Loop', template:';D,LOOPALL,{on}',
+        params:[ {name:'on', label:'Loop all', enum:'dfp.onoff', default:'1', required:true} ], examples:[';D,LOOPALL,1'], commentLabel:'DFP loop all' },
+      { id:'dfp.loopFolder', name:'Loop Folder', category:'Loop', template:';D,LOOPFOLDER,{folder}',
+        params:[ {name:'folder', label:'Folder (1-99)', type:'int', min:1, max:99, default:1, required:true} ], examples:[';D,LOOPFOLDER,1'], commentLabel:'DFP loop folder' },
+      { id:'dfp.eq', name:'Set EQ', category:'System', template:';D,EQ,{eq}',
+        params:[ {name:'eq', label:'EQ preset', enum:'dfp.eq', default:'0', required:true} ], examples:[';D,EQ,0'], commentLabel:'DFP EQ' },
+      { id:'dfp.device', name:'Select Device', category:'System', template:';D,DEVICE,{dev}',
+        params:[ {name:'dev', label:'Storage', enum:'dfp.device', default:'2', required:true} ], examples:[';D,DEVICE,2'], commentLabel:'DFP device' },
+      { id:'dfp.reset', name:'Reset Module', category:'System', template:';D,RESET', params:[], examples:[';D,RESET'], commentLabel:'DFP reset' },
+      { id:'dfp.status', name:'Query Status', category:'System', template:';D,STATUS', params:[], examples:[';D,STATUS'], commentLabel:'DFP status' },
+    ], categories:['Sound','Volume','Loop','System'] },
+
     { id:'wcb-wled', name:'WLED Lighting', kind:'wcb-verb', commands: [
       // ;L<id>,<verb> — <id> (1-9) selects the WLED; the WCB (WCB_WLED.cpp
       // processWLEDRuntimeCommand) / NaviCore route that id to its slot (a local UART
@@ -10739,6 +11011,7 @@ function _cmdlibConfigDest(board, mode) {
   const id = board && board.id;
   const d = (id === 'wcb-hcr' || id === 'hcr-native') ? (config && config.hcrDest)
           : (id === 'wcb-mp3')                        ? (config && config.mp3Dest)
+          : (id === 'wcb-dfplayer')                   ? (config && config.dfpDest)
           // A custom board can declare a fixed home (e.g. the Leia Projector's WCB
           // id): dest:{target:6} defaults its "Send to" to unicast WCB 6, so you
           // don't re-pick it every time. Still fully overridable on the action row.
@@ -10759,7 +11032,7 @@ function _cmdlibConfigDest(board, mode) {
 // back to the previous default. Matched normalized (case/punctuation-insensitive).
 const NC_BOARD_DEVICE_LABELS = {
   'wcb-hcr': ['H-CR'], 'hcr-native': ['H-CR'],
-  'wcb-mp3': ['MP3 Trigger'],
+  'wcb-mp3': ['MP3 Trigger'], 'wcb-dfplayer': ['DFPlayer'],
   'ia-magic-panel': ['Magic Panel(IA)'], 'pd-magic-panel': ['Magic Panel(PRINTDRD)'],
   'rseries-logic': ['R-Series Logics'],
   'maestro': ['Maestro'], 'maestro-native': ['Maestro'], 'nc-maestro-wcb': ['Maestro'], 'nc-maestro': ['Maestro'],
@@ -11496,7 +11769,7 @@ const NC_CMDLIB_SUPERSEDE = {
 };
 const NC_CMDLIB_ORDER_TOP = [
   'navicore',
-  'wcb-hcr', 'hcr-native', 'wcb-mp3', 'chirp',
+  'wcb-hcr', 'hcr-native', 'wcb-mp3', 'wcb-dfplayer', 'chirp',
   'nc-maestro-wcb', 'nc-maestro',   // via-WCB (;M sequence + verbs) up top; raw Pololu beside it. Both upstream maestro boards superseded.
   'flthy-hps', 'psi-pro', 'rseries-logic', 'ia-magic-panel', 'pd-magic-panel',
   'r2uppityspinner-alt', 'roam-a-dome',
@@ -12313,6 +12586,25 @@ function appendActionFields(container, action) {
     container.appendChild(makeFieldGroup('Function', fnSel));
     renderMp3ArgField(container, +(action.fn || 1), action.track);
     _appendChangeTypeLink(container);
+  } else if (type === 'dfplayer') {
+    // Native editor (NOT legacy, unlike the mp3 one above): a LOCAL DFPlayer needs
+    // this action type. The command library authors wire commands, and ";D,PLAY,5"
+    // written as text to a serial port means nothing to a DFPlayer — it wants the
+    // 10-byte binary frame that only the RA_DFPLAYER executor produces.
+    const fnSel = document.createElement('select');
+    fnSel.id = fid + '-fn';
+    fnSel.style.minWidth = '150px';
+    Object.entries(dfpFnLabels).forEach(([v, lbl]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = lbl;
+      if (+v === (+action.fn || 1)) o.selected = true;
+      fnSel.appendChild(o);
+    });
+    // Re-render chan + track whenever the function changes (defaults, not carried over).
+    fnSel.onchange = () => renderDfpParamFields(container, +fnSel.value, undefined, undefined);
+    container.appendChild(makeFieldGroup('Function', fnSel));
+    renderDfpParamFields(container, +(action.fn || 1), action.chan, action.track);
+    _appendChangeTypeLink(container);
   } else if (type === 'record') {
     // Record/replay control — toggles capture. Clip name = which saved clip this
     // records into. Combo: pick a known clip from the dropdown or type a new name.
@@ -12440,6 +12732,16 @@ function readActionFromFid(fid, type, extras) {
     const trackEl  = document.getElementById(fid + '-track');
     const track    = trackEl ? +(trackEl.value || 0) : 0;
     return { type, fn, track, ...extras };
+  }
+  if (type === 'dfplayer') {
+    // Destination is global (config.dfpDest). Action carries fn + chan + track;
+    // a verb that uses neither (STOP/NEXT/PAUSE/…) has no widget → both are 0.
+    const fn      = +(document.getElementById(fid + '-fn')?.value || 1);
+    const chanEl  = document.getElementById(fid + '-chan');
+    const trackEl = document.getElementById(fid + '-track');
+    const chan    = chanEl  ? +(chanEl.value  || 0) : 0;
+    const track   = trackEl ? +(trackEl.value || 0) : 0;
+    return { type, fn, chan, track, ...extras };
   }
   if (type === 'wled') {
     // Routing is global (config.wledSlots, WLED tab). The action carries only the
@@ -13804,6 +14106,7 @@ function openHwSetup() {
   applyWcbNetworkUI();
   applyHcrDestUI();
   applyMp3DestUI();
+  applyDfpDestUI();
   applyAuxBaudUI();
   renderMaestroLocations();
   renderWledSlots();
@@ -13895,6 +14198,10 @@ function closeHwSetup() {
 // and persists the choice in localStorage so reopening the modal lands
 // where the user was last working.
 function setConfigTab(name) {
+  // The separate HCR and MP3 Trigger tabs were folded into one Audio tab. A
+  // localStorage entry from before that would fall through to the 'channels'
+  // fallback below, dumping the user somewhere unrelated — remap instead.
+  if (name === 'hcr' || name === 'mp3' || name === 'dfplayer') name = 'audio';
   const tabs  = document.querySelectorAll('#cfg-tabs .cfg-tab');
   const panes = document.querySelectorAll('.cfg-content .cfg-pane');
   let found = false;
@@ -13909,6 +14216,7 @@ function setConfigTab(name) {
   if (name === 'serial')  applyBaudRateLabels();     // board-aware S3/S4/S5 ↔ Serial 1/2/3 labels
   if (name === 'smoothing') renderSmoothingPane();   // build the profile editor when opened
   if (name === 'wcb')       renderPeerEventEditor();  // build the new-peer action editor when opened
+  if (name === 'audio')     renderDfpBaudWarning();   // re-check the DFPlayer port's baud (Serial Ports may have changed it)
   if (!found) setConfigTab('channels');   // fallback if stored name is stale
   else try { localStorage.setItem('rcConfigLastTab', name); } catch {}
 }
@@ -15215,6 +15523,17 @@ function exportConfigCsv() {
     }
   }
 
+  // Global DFPlayer Mini destination — same shape as the MP3 Trigger above.
+  if (config.dfpDest) {
+    const d = config.dfpDest;
+    rows.push(csvRow(pad(['config','dfpTransport','','' + (d.transport || 'serial')])));
+    if ((d.transport || 'serial') === 'wcb') {
+      rows.push(csvRow(pad(['config','dfpTarget','','' + (d.target || '2')])));
+    } else {
+      rows.push(csvRow(pad(['config','dfpPort','','' + (d.port || 'S3')])));
+    }
+  }
+
   // Serial port baud (S3/S4/S5 + local Maestro bus) — single source of truth.
   if (config.auxBaud) {
     rows.push(csvRow(pad(['config','auxBaudS3','','' + (config.auxBaud.S3 || 9600)])));
@@ -15418,6 +15737,8 @@ function handleConfigImportFile(event) {
                       : { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20 },
         mp3Dest: config.mp3Dest ? { ...config.mp3Dest }
                                  : { transport: 'wcb', target: '2', port: 'S3' },
+        dfpDest: config.dfpDest ? { ...config.dfpDest }
+                                 : { transport: 'serial', target: '2', port: 'S3' },
         // Preserve the in-memory WLED routing table unless the CSV carries 'wled' rows.
         wledSlots: Array.isArray(config.wledSlots)
                      ? config.wledSlots.map(s => ({ ...s }))
@@ -15564,7 +15885,23 @@ function handleConfigImportFile(event) {
             } else if (control === 'mp3target') {
               imported.mp3Dest.target = String(Math.max(1, Math.min(20, parseInt(raw, 10) || 2)));
             } else if (control === 'mp3port') {
-              imported.mp3Dest.port = (String(raw).toUpperCase() === 'S4') ? 'S4' : 'S3';
+              // S3/S4/S5 — S5 was previously collapsed to S3 here, silently moving
+              // an MP3 Trigger wired to Serial 3 on every export/import round-trip.
+              const p = String(raw).toUpperCase();
+              imported.mp3Dest.port = (p === 'S4' || p === 'S5') ? p : 'S3';
+            }
+          } else if (control === 'dfptransport' || control === 'dfptarget' ||
+                     control === 'dfpport') {
+            imported.dfpDest = imported.dfpDest
+              || { transport: 'serial', target: '2', port: 'S3' };
+            const raw = value || cellStr(row, indexes.channel) || '';   // string read — see the mp3 note above
+            if (control === 'dfptransport') {
+              imported.dfpDest.transport = (String(raw).toLowerCase() === 'wcb') ? 'wcb' : 'serial';
+            } else if (control === 'dfptarget') {
+              imported.dfpDest.target = String(Math.max(1, Math.min(20, parseInt(raw, 10) || 2)));
+            } else if (control === 'dfpport') {
+              const p = String(raw).toUpperCase();
+              imported.dfpDest.port = (p === 'S4' || p === 'S5') ? p : 'S3';
             }
           } else if (control === 'auxbauds3' || control === 'auxbauds4' || control === 'auxbauds5') {
             imported.auxBaud = imported.auxBaud || { S3: 9600, S4: 9600, S5: 9600, maestro: 115200 };
@@ -15806,6 +16143,7 @@ function handleConfigImportFile(event) {
       applyHcrDestUI();
       applyWcbNetworkUI();
       applyMp3DestUI();
+      applyDfpDestUI();
       applyAuxBaudUI();
       { const bsel = document.getElementById('board-select');
         if (bsel) bsel.value = String(config.boardType | 0); }   // reflect imported board profile
@@ -16517,6 +16855,7 @@ applyUnitToggle();
 applyHcrDestUI();
 applyWcbNetworkUI();
 applyMp3DestUI();
+applyDfpDestUI();
 applyAuxBaudUI();
 renderMaestroLocations();
 renderWledSlots();
