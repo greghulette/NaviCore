@@ -80,6 +80,7 @@ of its own.
 | 3 | `DBG_HCR` | HCR |
 | 4 | `DBG_MP3` | MP3 |
 | 5 | `DBG_SERIAL` | Aux serial TX/RX |
+| 6 | `DBG_DFP` | DFPlayer Mini `;D` dispatch |
 
 Default 0 — every `[DISPATCH]` log is compiled in but costs nothing until enabled. Log
 sites use `dlog(BIT, fmt, …)`, which wraps `vlogf()` and drops the line rather than block
@@ -292,8 +293,15 @@ with no WCB firmware change. Lines are capped at 160 chars and hard-wrapped.
 | Maestro (NaviCore action `cmd`) | `setTarget,ch,pos` · `goHome` · `stopScript` · `restartScript,n` · `setSpeed,ch,v` · `setAccel,ch,v` | `pos` in ¼ µs |
 | Maestro (Pololu bytes) | `0x84` target · `0x87` speed · `0x89` accel · `0xA2` home · `0xA4` stop · `0xA7` restart-sub · `0x90` get-pos · `0x93` moving · `0xA1` errors | built by `WcbCmd`/`WcbMaestro` |
 | MP3 Trigger | `;A,<VERB>[,arg]` | `;A,PLAY,3`, `;A,VOL,20` (0 = loudest, 64 = silent) |
+| DFPlayer Mini | `;D,<VERB>[,arg[,arg]]` | `;D,PLAY,3`, `;D,FOLDER,1,2`, `;D,VOL,20` (**0 = silent, 30 = loudest**) |
 | WLED | `;L<id>,<verb>` | bare `;L,` (id 0) targets the lowest-id local slot |
 | HCR | angle-bracket frames | `<OH80,QEH>` |
+
+`;D` is the DFPlayer's own verb letter — the WCB dispatch's taken letters are
+`S W C M P A H L V D`. On the wire a DFPlayer command is a 10-byte binary frame
+(`7E FF 06 CMD ACK PH PL CK CK EF`), built by `WcbCmd`'s `DfPlayerCodec`; the `;D` text
+form only ever travels **between** boards, never down the wire to the module. Full verb
+table in [DFPLAYER_DESIGN.md §3](DFPLAYER_DESIGN.md#3-wire-format).
 
 Maestro speed/accel are **sticky limits**, not moves: they shape every later move on that
 channel until reset to 0. See [MAESTRO_ACTIONS.md](MAESTRO_ACTIONS.md) for the unit maths.
@@ -322,4 +330,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-05 | _(uncommitted)_ | Added the `;D` DFPlayer verb to the device-command table (10-byte binary frame on the wire; `;D` text only travels between boards) and `DBG_DFP` = bit 6 to the debug bitmask. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

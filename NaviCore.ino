@@ -459,6 +459,7 @@ static uint32_t g_dbgFlags = 0;
 #define DBG_HCR        (1u << 3)
 #define DBG_MP3        (1u << 4)
 #define DBG_SERIAL     (1u << 5)
+#define DBG_DFP        (1u << 6)   // DFPlayer Mini ;D dispatch (local frames + remote forwards)
 // Category-gated log. ##__VA_ARGS__ swallows the trailing comma when only
 // a fmt is passed. Wraps vlogf so it inherits the same non-blocking USB
 // back-pressure handling (see vlogf() definition).
@@ -1503,6 +1504,124 @@ static void executeMp3Action(const RcAction& a) {
   dlog(DBG_MP3, "[DISPATCH] MP3→WCB%u  %s  %s\n", target, cmd.c_str(), ok ? "OK" : "FAIL");
 }
 
+// Build the ";D,<CMD>" DFPlayer verb for an RA_DFPLAYER action — the SINGLE
+// producer for BOTH transports, exactly as mp3FormatCommand() is for ;A: sent
+// verbatim to a WCB (remote), and ALSO fed to g_dfp.handle() for the local-serial
+// path (see executeDfpAction), so one command string drives the player identically
+// over the mesh or on a local UART. Mirrors WcbCmd's DfPlayerCodec::handle() verb
+// set. Returns "" for an unknown fn or out-of-range arg.
+//
+// The bounds here MUST match DfPlayerCodec::handle()'s — an action that is valid
+// locally has to be valid remotely and vice-versa, so a garbage folder/track/volume
+// is never forwarded to a WCB that would only reject it. See
+// docs/DFPLAYER_DESIGN.md §3 for the verb table.
+static String dfpFormatCommand(uint8_t fn, int8_t chan, int16_t track) {
+  switch (fn) {
+    case DFP_PLAY:
+      if (track < 1 || track > 2999) return "";                    // global track index
+      return String(";D,PLAY,") + track;
+    case DFP_FOLDER:
+      if (chan < 1 || chan > 99 || track < 1 || track > 255) return "";
+      return String(";D,FOLDER,") + (int)chan + "," + track;       // /01/002.mp3 layout
+    case DFP_MP3FOLDER:
+      if (track < 1 || track > 9999) return "";                    // the reserved /MP3 folder
+      return String(";D,MP3FOLDER,") + track;
+    case DFP_STOP:      return ";D,STOP";
+    case DFP_NEXT:      return ";D,NEXT";
+    case DFP_PREV:      return ";D,PREV";
+    case DFP_PAUSE:     return ";D,PAUSE";
+    case DFP_RESUME:    return ";D,RESUME";
+    case DFP_VOL:
+      // 0 = SILENT, 30 = LOUDEST — the INVERSE of the MP3 Trigger's scale above.
+      // Do not "harmonise" these; each action type carries its device's own scale.
+      if (track < 0 || track > 30) return "";
+      return String(";D,VOL,") + track;
+    case DFP_VOLUP:     return ";D,VOLUP";
+    case DFP_VOLDN:     return ";D,VOLDN";
+    case DFP_LOOP:
+      if (track < 1 || track > 2999) return "";
+      return String(";D,LOOP,") + track;
+    case DFP_LOOPALL:
+      if (chan < 0 || chan > 1) return "";
+      return String(";D,LOOPALL,") + (int)chan;
+    case DFP_LOOPFOLDER:
+      if (chan < 1 || chan > 99) return "";
+      return String(";D,LOOPFOLDER,") + (int)chan;
+    case DFP_RANDOM:    return ";D,RANDOM";
+    case DFP_EQ:
+      if (chan < 0 || chan > 5) return "";                         // Normal/Pop/Rock/Jazz/Classic/Bass
+      return String(";D,EQ,") + (int)chan;
+    case DFP_DEVICE:
+      if (chan < 1 || chan > 5) return "";                         // 1 USB 2 SD 3 AUX 4 sleep 5 flash
+      return String(";D,DEVICE,") + (int)chan;
+    case DFP_RESET:     return ";D,RESET";
+    default:            return "";
+  }
+}
+
+// ── Local DFPlayer Mini serial driver ───────────────────────────────────────
+// Used when rcConfig.dfpDest.transport == 0 (DFPlayer wired to this board's
+// S3/S4/S5). The 10-byte frame protocol (7E FF 06 CMD ACK PH PL CKH CKL EF, with
+// checksum = -(sum of bytes 1..6)) lives in the shared WcbCmd DfPlayerCodec — the
+// SAME parser a WCB runs on its receive side. executeDfpAction() formats the ;D
+// verb (dfpFormatCommand) and hands it to g_dfp.handle(), so a locally-wired
+// DFPlayer and one reached over the mesh consume byte-identical serial.
+//
+// No g_dfp.poll(), matching the local MP3 path: fire-and-forget, no ONFIN/RX. The
+// DFRobot library is deliberately NOT a dependency — its sendStack() delay(10)
+// (ACK off) or blocking wait (ACK on) would both wreck the ~9 ms SBUS cadence.
+// At the DFPlayer's fixed 9600 baud a frame takes ~10.4 ms to shift out, so
+// back-to-back commands in one loop() pass are paced by the UART itself.
+static DfPlayerCodec g_dfp;
+
+// Dispatch an RA_DFPLAYER action. Destination is GLOBAL (rcConfig.dfpDest).
+//   transport 0 = local serial (S3/S4/S5) — drive the DFPlayer directly here.
+//   transport 1 = WCB unicast — ";D,..." command to one WCB whose own DFPlayer
+//                 driver (configured there via ?DFP,S<port>) does the serial.
+static void executeDfpAction(const RcAction& a) {
+  const RcDfpDest& dest = rcConfig.dfpDest;
+
+  if (dest.transport == 0) {
+    // ── Local serial transport ───────────────────────────────────────────
+    Stream* p = nullptr;
+    if      (!strcmp(dest.target, "S3")) p = s3;
+    else if (!strcmp(dest.target, "S4")) p = s4;
+    else if (!strcmp(dest.target, "S5")) p = s5;
+    if (!p) {
+      dlog(DBG_DFP, "[DISPATCH] DFP-local: unknown serial port '%s' — skipped\n", dest.target);
+      return;
+    }
+    String cmd = dfpFormatCommand(a.fn, a.chan, a.track);
+    if (cmd.length() == 0) {
+      dlog(DBG_DFP, "[DISPATCH] DFP-local: bad/out-of-range fn=%u chan=%d track=%d — skipped\n",
+            a.fn, a.chan, a.track);
+      return;
+    }
+    g_dfp.begin(*p);                          // rebind — the resolved port can change per action
+    bool ok = g_dfp.handle(cmd.c_str() + 1);  // skip leading ';' (handle tolerates the 'D' verb)
+    dlog(DBG_DFP, "[DISPATCH] DFP→%s  fn=%u chan=%d track=%d vol=%u  %s\n",
+          dest.target, a.fn, a.chan, a.track, g_dfp.volume(), ok ? "OK" : "FAIL");
+    return;
+  }
+
+  // ── WCB unicast transport ──────────────────────────────────────────────
+  if (!wcb || !wcbReady) { dlog(DBG_DFP, "[DISPATCH] DFP: WCB not ready — skipped\n"); return; }
+  String cmd = dfpFormatCommand(a.fn, a.chan, a.track);
+  if (cmd.length() == 0) {
+    dlog(DBG_DFP, "[DISPATCH] DFP: bad fn=%u — skipped\n", a.fn);
+    return;
+  }
+  uint8_t target = (uint8_t)atoi(dest.target);
+  if (target < 1 || target > WCB_MAX_BOARDS) {
+    dlog(DBG_DFP, "[DISPATCH] DFP: target '%s' invalid — set DFPlayer Destination to a "
+          "WCB ID 1-%d in the config tool. Not sent.\n",
+          dest.target, WCB_MAX_BOARDS);
+    return;
+  }
+  bool ok = wcb->send(target, cmd.c_str());
+  dlog(DBG_DFP, "[DISPATCH] DFP→WCB%u  %s  %s\n", target, cmd.c_str(), ok ? "OK" : "FAIL");
+}
+
 // Dispatch an RA_WLED action. The ";L<id>,<verb>" command in a.cmd (authored via
 // the command library) selects a slot in the GLOBAL wledSlots[] routing table —
 // NaviCore's mirror of the WCB's wledConfigs. Routing follows the WCB
@@ -1654,6 +1773,9 @@ static void rcExecuteActionNow(const RcAction& a) {
       break;
     case RA_MP3:
       executeMp3Action(a);
+      break;
+    case RA_DFPLAYER:
+      executeDfpAction(a);
       break;
     case RA_WLED:
       executeWledAction(a);
@@ -2255,8 +2377,9 @@ static void __attribute__((noinline)) queueMaestroCmd(uint8_t sender, const char
   xQueueSend(maestroCmdQueue, &m, 0);   // non-blocking; drop under load
 }
 
-// True when a device owns this aux port — an HCR, MP3 Trigger or WLED is routed to
-// it. rcSerialLabelAuto() already derives exactly that from the routing config, so
+// True when a device owns this aux port — an HCR, MP3 Trigger, DFPlayer or WLED is
+// routed to it. rcSerialLabelAuto() already derives exactly that from the routing
+// config, so a new device type is covered here the moment it is added there, and so
 // it's the single source of truth for both the advertised label and this check.
 // The broadcast fan-out skips these ports the way a WCB skips its own device ports:
 // the owning driver frames its traffic, and broadcast chatter would corrupt it. A

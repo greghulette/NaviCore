@@ -67,8 +67,13 @@ Link loss (sleep, unplug) is caught by `handleLinkLost()` → `tryAutoReconnect(
 
 ## 3. Layout
 
-Twelve tabs (`data-tab=…`): **general, channels, logical, transmitter, wcb, hcr, mp3,
+Eleven tabs (`data-tab=…`): **general, channels, logical, transmitter, wcb, audio,
 maestro, wled, smoothing, serial, firmware**, plus modal editors:
+
+**audio** holds all three sound destinations — HCR vocalizer, MP3 Trigger, DFPlayer Mini —
+in one pane. It replaced the separate `hcr` and `mp3` tabs; `setConfigTab()` remaps those
+stored names (and `dfplayer`) to `audio`, because a stale `rcConfigLastTab` in localStorage
+would otherwise hit the unknown-name fallback and dump the user on **channels**.
 
 | Editor | Entry point |
 |---|---|
@@ -146,6 +151,11 @@ cmdlib/
                                             RoamADome, UppitySpinner, AstroPixels, …)
   navicore/manifest.json  + navicore.json   NaviCore-native verbs (record / play / stop)
 ```
+
+`cmdlib/droidnet/` is a **vendored, unmodified MPL-2.0 snapshot** — NaviCore's own boards
+never go in there. They live inline in `NC_CMDLIB_SEED` in `index.html`; `wcb-dfplayer`
+(the `;D` verb set) is one of them. A param's `enum` field is a **string id** into the
+library-level `enums` map, not an inline list.
 
 Each command declares `id, name, safety, encoder, template, params[], examples,
 commentLabel, category`, plus routing metadata (`class`, `nativeWrapper`,
@@ -227,4 +237,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-05 | _(uncommitted)_ | Separate `hcr` + `mp3` tabs merged into one **audio** tab (twelve tabs → eleven), with a stale-`rcConfigLastTab` remap; noted that NaviCore's own command-library boards live in `NC_CMDLIB_SEED`, never in the vendored MPL-2.0 snapshot, and that a param's `enum` is a string id. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

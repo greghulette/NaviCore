@@ -283,14 +283,20 @@ An `RcAction` is `{type, target[6], cmd[96], delayMs, note[20], skipRunning, fn,
 | `RA_RECORD` (8) / `RA_PLAY` (9) / `RA_STOP` (10) | `navirec` control (deferred to Core 1) | — never captured into a clip |
 | `RA_SMOOTH_OVERRIDE` (11) | global passthrough smoothing latch | runtime only |
 | `RA_WLED` (12) | `executeWledAction` → `;L<id>,<verb>` | per-id routing in `wledSlots` |
+| `RA_DFPLAYER` (13) | `executeDfpAction` → `;D,…` | **global** `dfpDest` — local aux port or a WCB |
 
-HCR and MP3 destinations are **global, not per-action** — an action carries only
+HCR, MP3 and DFPlayer destinations are **global, not per-action** — an action carries only
 `fn`/`chan`/`track`. Maestro slots 1–8 are logical: each slot stores `{type, device,
 channels[]}` and a *Remote* slot is reached by mesh, disambiguated by the on-wire Pololu
 device number.
 
-Device byte-building for Maestro/MP3/WLED/HCR lives in the shared **`WcbCmd`** library, so
-NaviCore and the WCB firmware emit identical bytes from one source.
+Device byte-building for Maestro/MP3/WLED/HCR/DFPlayer lives in the shared **`WcbCmd`**
+library, so NaviCore and the WCB firmware emit identical bytes from one source.
+
+The MP3 Trigger and the DFPlayer Mini are **separate action types on purpose**, not one
+audio device with a mode flag: their verb sets differ, and their volume scales are inverse
+(MP3 Trigger `0` = loudest … `64` = inaudible; DFPlayer `0` = silent … `30` = loudest). A
+droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
 
 ---
 
@@ -300,7 +306,7 @@ NaviCore and the WCB firmware emit identical bytes from one source.
 |---|---|---|
 | **USB-CDC** (native, `HWCDC`) | Config tool "Direct USB", CLI, OTA-local | Wrapped by `RcSerial` tee. `#define Serial rcSerial` — include order in `NaviCore.ino` matters |
 | **Serial2 / UART2** | Local Pololu Maestro | Binary Pololu protocol, baud from `rcConfig.maestroBaud` |
-| **S3 / S4 / S5** | HCR, MP3, WLED, raw serial actions | S3 = hardware UART0; S4/S5 SoftwareSerial. One port = one device = one baud |
+| **S3 / S4 / S5** | HCR, MP3, DFPlayer, WLED, raw serial actions | S3 = hardware UART0; S4/S5 SoftwareSerial. One port = one device = one baud (a DFPlayer's is fixed at 9600) |
 | **UART1** | SBUS IN + OUT | 100 k 8E2 inverted, shared, byte-teed |
 | **ESP-NOW / WCB mesh** | Remote actions, config bridge, telemetry, OTA, RTERM, bulk transfer | 250 B MTU; **187 B effective payload cap** after the bridge's CRC suffix |
 
@@ -342,4 +348,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-05 | _(uncommitted)_ | `RA_DFPLAYER` (13) added to the executor table + `dfpDest`; noted why it is a separate type from `RA_MP3` (inverse volume scales, different verb sets). |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

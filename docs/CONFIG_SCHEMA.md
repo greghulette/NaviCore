@@ -67,7 +67,8 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 | `hcrDest` | `RcHcrDest` | **Global** HCR destination |
 | `maestros[8]` | `RcMaestroSlot` | `{type, device, channels[32]}` |
 | `wcbNetwork` | `RcWcbNetwork` | Mesh credentials (runtime; `wcb_config.h` only seeds defaults) |
-| `mp3Dest` | `RcMp3Dest` | **Global** MP3 destination |
+| `mp3Dest` | `RcMp3Dest` | **Global** MP3 Trigger destination |
+| `dfpDest` | `RcDfpDest` | **Global** DFPlayer Mini destination — `{transport, target}`, defaults local `S3` |
 | `wledSlots[4]` | `RcWledSlot` | Per-id WLED routing |
 | `auxBaud[3]` | `uint32_t` | `[0]`=S3, `[1]`=S4, `[2]`=S5 |
 | `maestroBaud` | `uint32_t` | Serial2 line rate |
@@ -121,9 +122,19 @@ A knob/slider/joystick axis is a *source* with up to 10 *outputs*:
 
 ### Destinations are global, not per-action
 
-`hcrDest` (`transport` 0 = local `S3`/`S4`/`S5`, 1 = WCB with `wcbPort`) and `mp3Dest`
-(0 = local serial, 1 = WCB unicast) are configured once. HCR/MP3 actions carry only
-`fn`/`chan`/`track`. WLED is different — routing is **per id** in `wledSlots[]`.
+`hcrDest` (`transport` 0 = local `S3`/`S4`/`S5`, 1 = WCB with `wcbPort`), `mp3Dest` and
+`dfpDest` (both 0 = local serial, 1 = WCB unicast) are configured once. HCR/MP3/DFPlayer
+actions carry only `fn`/`chan`/`track`. WLED is different — routing is **per id** in
+`wledSlots[]`.
+
+All three live in the config tool's single **Audio** tab. `dfpDest` defaults to *local `S3`*
+where `mp3Dest` defaults to *WCB 2* — a DFPlayer is usually soldered to the controller's own
+aux header, an MP3 Trigger usually is not.
+
+**The two audio players' volume scales are inverse.** MP3 Trigger: `0` = loudest …
+`64` = inaudible. DFPlayer: `0` = silent … `30` = loudest. Nothing converts between them —
+each action type carries its own device's native value, and copying a number from one to the
+other is always wrong. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
 
 ### Maestro slots are logical
 
@@ -136,7 +147,9 @@ acts on — they exist so the tool's labels travel with the config.
 
 `serialLabels[5]` maps to WDP ports 1–5: `[0]` SBUS, `[1]` local Maestro, `[2]`–`[4]` =
 S3/S4/S5. An empty string falls back to `rcSerialLabelAuto()`, which derives a label from
-what the config routes there (`Maestro`, `HCR`, `MP3`, `WLED`). `rcSerialLabel()` applies
+what the config routes there (`Maestro`, `HCR`, `MP3`, `DFPlayer`, `WLED`). That one
+function is also what `auxPortHasDevice()` reads, so a device added there is automatically
+excluded from the serial broadcast fan-out — there is no second list. `rcSerialLabel()` applies
 override-then-auto and `rcAdvertiseSerialLabels()` pushes all five to
 `WCB_Client::setPortLabel()`.
 
@@ -193,7 +206,10 @@ highest-risk category of edit in the repo.
 | `RC_KNOB_LABELS[]` | knob source table | `S1,S2,LS,RS,S3,J1..J4,J5,J6` |
 | `RC_SWITCH_LABELS[]` | switch table | `SA..SJ` |
 | `RcTxModel` enum | per-model metadata tables | model ids |
-| `RcActionType` enum | action-type dropdown + `_normActionType` | 0–12 |
+| `RcActionType` enum | action-type dropdown + `_normActionType` | 0–13 |
+| `RcDfpFn` enum | `dfpFnLabels` + `DFP_FN_USES_CHAN`/`_TRACK` + bounds | 1–18 |
+| `dfpFormatCommand()` arg ranges | `dfpTrackBounds` / `dfpChanBounds` | must equal `DfPlayerCodec::handle()`'s |
+| `DBG_DFP` | `DEBUG_CATEGORIES` `dfp` bit | `1 << 6` |
 | `rcTelemetry::FRAG_CHUNK_BYTES` | `FRAG_CHUNK_BYTES` | 80 |
 | `rcTelemetry::FRAG_MAX_PARTS` | `FRAG_MAX_PARTS` | 192 (upload) |
 | `rcTelemetry::FRAG_SEND_MAX_PARTS` | `FRAG_MAX_PARTS_RECV` | 512 (download) |
@@ -241,4 +257,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-05 | _(uncommitted)_ | Added `dfpDest` (`RcDfpDest`), recorded the inverse MP3-Trigger/DFPlayer volume scales, and added four new rows to the cross-file invariants table (`RcActionType` now 0–13, `RcDfpFn`, the duplicated arg ranges, `DBG_DFP`). |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

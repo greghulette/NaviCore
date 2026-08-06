@@ -56,6 +56,14 @@ enum RcActionType : uint8_t {
                               // authored via the command library. Per-id routing lives
                               // in RcConfig::wledSlots: id 1-9 → a local aux port OR a
                               // remote WCB; bare ";L," (id 0) = lowest-id LOCAL slot.
+  RA_DFPLAYER          = 13,  // DFPlayer Mini (DFRobot / YX5300 clones) — the OTHER audio
+                               //   device. fn = RcDfpFn; chan/track = its arguments.
+                               //   Sent as a ";D,..." WCB command to RcConfig::dfpDest,
+                               //   or spoken directly on a local aux port. Deliberately
+                               //   NOT a mode of RA_MP3: the verb sets differ and the
+                               //   volume scales are INVERSE (DFPlayer 0=silent..30=loud
+                               //   vs MP3 Trigger 0=loud..64=silent). See
+                               //   docs/DFPLAYER_DESIGN.md §2.
 };
 
 // MP3 Trigger function codes, stored in RcAction::fn for RA_MP3 actions.
@@ -69,6 +77,33 @@ enum RcMp3Fn : uint8_t {
   MP3_VOL    = 6,   // ;A,VOL,<n>          0=loudest .. 64=inaudible
   MP3_VOLUP  = 7,   // ;A,VOLUP
   MP3_VOLDN  = 8,   // ;A,VOLDN
+};
+
+// DFPlayer Mini function codes, stored in RcAction::fn for RA_DFPLAYER actions.
+// Map 1:1 to the ";D,<CMD>" set parsed by WcbCmd's DfPlayerCodec::handle() — the
+// SAME codec a WCB runs on its receive side, so one command string drives the
+// player identically over the mesh or on a local UART.
+//   chan  = folder / EQ mode / device id / loop-all flag  (see each row)
+//   track = track number, /MP3 index, or volume value
+enum RcDfpFn : uint8_t {
+  DFP_PLAY       = 1,   // ;D,PLAY,<track>          track 1-2999 (global index)
+  DFP_FOLDER     = 2,   // ;D,FOLDER,<f>,<t>        chan = folder 1-99, track 1-255
+  DFP_MP3FOLDER  = 3,   // ;D,MP3FOLDER,<n>         track 1-9999 (the /MP3 folder)
+  DFP_STOP       = 4,   // ;D,STOP
+  DFP_NEXT       = 5,   // ;D,NEXT
+  DFP_PREV       = 6,   // ;D,PREV
+  DFP_PAUSE      = 7,   // ;D,PAUSE
+  DFP_RESUME     = 8,   // ;D,RESUME
+  DFP_VOL        = 9,   // ;D,VOL,<n>               track 0-30 — 0=SILENT, 30=LOUDEST
+  DFP_VOLUP      = 10,  // ;D,VOLUP
+  DFP_VOLDN      = 11,  // ;D,VOLDN
+  DFP_LOOP       = 12,  // ;D,LOOP,<track>          track 1-2999, repeats forever
+  DFP_LOOPALL    = 13,  // ;D,LOOPALL,<0|1>         chan = 0 off / 1 on
+  DFP_LOOPFOLDER = 14,  // ;D,LOOPFOLDER,<f>        chan = folder 1-99
+  DFP_RANDOM     = 15,  // ;D,RANDOM
+  DFP_EQ         = 16,  // ;D,EQ,<0-5>              chan: 0 Normal 1 Pop 2 Rock 3 Jazz 4 Classic 5 Bass
+  DFP_DEVICE     = 17,  // ;D,DEVICE,<n>            chan: 1 USB 2 SD 3 AUX 4 sleep 5 flash
+  DFP_RESET      = 18,  // ;D,RESET
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,7 +136,9 @@ struct RcAction {
   // RcConfig::hcrDest — every HCR action shares it.  See RcHcrDest.
   // RA_HCR: HCR function/params.  RA_MP3 reuses fn + track (see RcMp3Fn):
   //   fn = MP3 function code, track = numeric arg (track #, index, or volume),
-  //   chan unused.  Zero for all non-HCR/MP3 action types.
+  //   chan unused.  RA_DFPLAYER reuses all three (see RcDfpFn): fn = DFPlayer
+  //   function code, chan = folder / EQ / device / flag, track = track number or
+  //   volume.  Zero for all non-HCR/MP3/DFPlayer action types.
   uint8_t fn;             // HCR function number (2=SetEmotion, 3=Trigger, 4=Stimulate,
                           //   5=Overload, 6=Muse, 7=Muse-gap, 8=Stop, 9=StopEmote,
                           //   10=OverrideEmotions, 11=ResetEmotions, 13=SetMuse,
@@ -343,6 +380,27 @@ struct RcMp3Dest {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Global DFPlayer Mini destination — every RA_DFPLAYER action shares this.
+//  Same dual-transport model as RcMp3Dest:
+//    transport = 0 : LOCAL serial — DFPlayer wired to this board's S3/S4/S5.
+//                    target = "S3"/"S4"/"S5"; the RC firmware speaks the
+//                    DFPlayer's 10-byte frame protocol directly (WcbCmd
+//                    DfPlayerCodec).
+//    transport = 1 : WCB unicast — target = WCB ID "1".."20". Sends a
+//                    ";D,..." WCB command; that WCB's own DFPlayer driver
+//                    (configured there via ?DFP,S<port>) does the serial work.
+//  Broadcast is intentionally not offered (one DFPlayer, known location) —
+//  same reasoning as the MP3 Trigger above.
+//  A DFPlayer's baud is FIXED at 9600 by the module, so the port carrying one
+//  must have RcConfig::auxBaud set to 9600. Nothing enforces that in firmware;
+//  the config tool warns.
+// ─────────────────────────────────────────────────────────────────────────────
+struct RcDfpDest {
+  uint8_t  transport;     // 0 = local serial (S3/S4/S5), 1 = WCB unicast
+  char     target[6];     // serial: "S3"/"S4"/"S5"  ·  wcb: WCB ID "1"-"20"
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  WLED destinations (RC_NUM_WLED slots) — NaviCore's per-id WLED routing table,
 //  mirroring the WCB's wledConfigs[]. Buttons/switches fire an RA_WLED action
 //  carrying a ";L<id>,<verb>" string; executeWledAction() looks the id up here and
@@ -533,6 +591,7 @@ struct RcConfig {
   RcMaestroSlot  maestros[RC_NUM_MAESTROS];  // ID 1-8 → maestros[0..7]
   RcWcbNetwork   wcbNetwork;
   RcMp3Dest      mp3Dest;
+  RcDfpDest      dfpDest;                 // global DFPlayer Mini destination (the other audio device)
   RcWledSlot     wledSlots[RC_NUM_WLED];  // per-id WLED routing table (id 1-9 → local port | remote WCB)
   // Aux serial port baud — [0]=S3 (hardware UART0), [1]=S4, [2]=S5 (S4/S5
   // SoftwareSerial). One source of truth for the port line rate; HCR / MP3-local /
@@ -743,6 +802,13 @@ void rcConfigLoadDefaults() {
   rcConfig.mp3Dest.transport = 1;
   strlcpy(rcConfig.mp3Dest.target, "2", sizeof(rcConfig.mp3Dest.target));
 
+  // Default global DFPlayer destination — LOCAL S3 (no effect until the user adds
+  // RA_DFPLAYER actions). Local is the sensible default here where the MP3 Trigger
+  // defaults to a WCB: a DFPlayer is cheap enough to be soldered straight onto the
+  // controller's own aux header, which is the common build.
+  rcConfig.dfpDest.transport = 0;
+  strlcpy(rcConfig.dfpDest.target, "S3", sizeof(rcConfig.dfpDest.target));
+
   // Default WLED slots — all empty (no WLED configured). The user maps id→dest in
   // the config tool's WLED panel. All-zero ⇒ configured=false, wledID=0 (mirrors the
   // WCB's cleared wledConfigs state).
@@ -841,6 +907,16 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["track"] = a.track;
       if (a.delayMs) obj["delay"] = a.delayMs;
       break;
+    case RA_DFPLAYER:
+      // Destination is GLOBAL — see RcConfig::dfpDest. The action carries the
+      // DFPlayer function code (fn) plus its args: chan = folder/EQ/device/flag,
+      // track = track number, /MP3 index, or volume.
+      obj["type"]  = "dfplayer";
+      obj["fn"]    = a.fn;
+      obj["chan"]  = a.chan;
+      obj["track"] = a.track;
+      if (a.delayMs) obj["delay"] = a.delayMs;
+      break;
     case RA_WLED:
       // Routing (per-id → local port | remote WCB) is GLOBAL — RcConfig::wledSlots.
       // The action only carries the ";L<id>,<verb>" command string.
@@ -922,6 +998,15 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     // the MP3 function code (fn) and numeric arg (track).
     a.type    = RA_MP3;
     a.fn      = (uint8_t)(obj["fn"]    | 0);
+    a.track   = (int16_t)(obj["track"] | 0);
+    a.delayMs = obj["delay"] | 0;
+    ok = true;
+  } else if (strcmp(type, "dfplayer") == 0) {
+    // DFPlayer destination is a global config (RcDfpDest). The action carries the
+    // function code (fn) plus chan (folder/EQ/device/flag) and track (number/volume).
+    a.type    = RA_DFPLAYER;
+    a.fn      = (uint8_t)(obj["fn"]    | 0);
+    a.chan    = (int8_t) (obj["chan"]  | 0);
     a.track   = (int16_t)(obj["track"] | 0);
     a.delayMs = obj["delay"] | 0;
     ok = true;
@@ -1155,6 +1240,16 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
     mp3Obj["target"] = rcConfig.mp3Dest.target;        // WCB ID string
   } else {
     mp3Obj["port"]   = rcConfig.mp3Dest.target;        // "S3"/"S4"
+  }
+
+  // Global DFPlayer destination — every RA_DFPLAYER action reads from here.
+  // Same {transport, target|port} shape as mp3Dest so the tool can share code.
+  JsonObject dfpObj = doc.createNestedObject("dfpDest");
+  dfpObj["transport"] = (rcConfig.dfpDest.transport == 1) ? "wcb" : "serial";
+  if (rcConfig.dfpDest.transport == 1) {
+    dfpObj["target"] = rcConfig.dfpDest.target;        // WCB ID string
+  } else {
+    dfpObj["port"]   = rcConfig.dfpDest.target;        // "S3"/"S4"/"S5"
   }
 
   // Per-id WLED routing table — dense array (index 0..RC_NUM_WLED-1) so slot
@@ -1484,6 +1579,19 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     }
   }
 
+  if (doc.containsKey("dfpDest")) {
+    JsonObject dfpObj = doc["dfpDest"];
+    const char* tp = dfpObj["transport"] | "serial";   // local is the DFPlayer default
+    rcConfig.dfpDest.transport = (strcmp(tp, "wcb") == 0) ? 1 : 0;
+    if (rcConfig.dfpDest.transport == 1) {
+      strlcpy(rcConfig.dfpDest.target, dfpObj["target"] | "2",
+              sizeof(rcConfig.dfpDest.target));
+    } else {
+      strlcpy(rcConfig.dfpDest.target, dfpObj["port"] | "S3",
+              sizeof(rcConfig.dfpDest.target));
+    }
+  }
+
   // Per-id WLED routing table. Guarded by containsKey so a diff-save that omits
   // "wledSlots" can't wipe it. Numeric fields use presence checks, not '|': id/
   // port/wcb 0 is a legal value that '|' (0 is falsy) would silently drop.
@@ -1586,6 +1694,7 @@ inline const char* rcSerialLabelAuto(int slot) {
     int fwPort = slot + 3;                                  // slot 0/1/2 → firmware S3/S4/S5
     if (rcConfig.hcrDest.transport == 0 && rcConfig.hcrDest.target[0] == 'S' && atoi(rcConfig.hcrDest.target + 1) == fwPort) return "HCR";
     if (rcConfig.mp3Dest.transport == 0 && rcConfig.mp3Dest.target[0] == 'S' && atoi(rcConfig.mp3Dest.target + 1) == fwPort) return "MP3";
+    if (rcConfig.dfpDest.transport == 0 && rcConfig.dfpDest.target[0] == 'S' && atoi(rcConfig.dfpDest.target + 1) == fwPort) return "DFPlayer";
     for (int i = 0; i < RC_NUM_WLED; i++)
       if (rcConfig.wledSlots[i].configured && rcConfig.wledSlots[i].remoteWCB == 0 && rcConfig.wledSlots[i].serialPort == fwPort) return "WLED";
   }

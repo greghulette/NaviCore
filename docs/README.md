@@ -33,6 +33,7 @@ someone using NaviCore today. These pages are the other audience: us, mid-change
 |---|---|
 | [RECORD_REPLAY_DESIGN.md](RECORD_REPLAY_DESIGN.md) | Record / replay data model, storage, concurrency, timeline editor |
 | [WCB_NATIVE_MAESTRO_DESIGN.md](WCB_NATIVE_MAESTRO_DESIGN.md) | Making Pololu servo control a native WCB verb |
+| [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md) | DFPlayer Mini as a second audio device — `;D` verb set, wire frames, routing |
 | [MAESTRO_ACTIONS.md](MAESTRO_ACTIONS.md) | Maestro speed/accel limits, unit maths, delay semantics |
 
 ---
@@ -104,4 +105,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-05 | _(uncommitted)_ | Indexed [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md) under Feature design notes. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |
