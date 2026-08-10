@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">05.22:33.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">10.16:29.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3047,6 +3047,39 @@
             </label>
             <div class="noconn" style="margin-top:4px">Off by default. Enable only if you daisy-chain a downstream SBUS device — leaving it off saves the per-frame CPU of re-transmitting. Applies on Save (no reboot).</div>
           </div>
+          <div class="sb-section">
+            <h3>Mode Report <span style="font-size:11px;font-weight:normal;color:var(--muted)">— mode-select position → a WCB</span></h3>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
+              <input type="checkbox" id="modereport-enabled" onchange="setModeReportEnabled(this.checked)">
+              <span>Report the mode-select position to a WCB</span>
+            </label>
+            <div id="modereport-fields" style="display:none">
+              <div class="wcb-send-row" style="margin-bottom:6px">
+                <label>Target WCB:</label>
+                <input type="number" id="modereport-wcb" min="1" max="20" step="1" style="width:70px;font-size:12px"
+                       oninput="config.modeReport.wcb = Math.max(0, Math.min(20, parseInt(this.value,10)||0))">
+              </div>
+              <div class="wcb-send-row" style="margin-bottom:6px">
+                <label>Command:</label>
+                <input type="text" id="modereport-template" maxlength="47" placeholder="e.g. MODE,{mode}" style="width:220px;font-size:12px"
+                       oninput="config.modeReport.template = this.value.slice(0,47)">
+              </div>
+              <div class="wcb-send-row" style="margin-bottom:4px"><label style="color:var(--muted)">Per-mode overrides (optional):</label></div>
+              <div class="wcb-send-row" style="margin-bottom:4px">
+                <label style="min-width:56px">Mode 1:</label>
+                <input type="text" id="modereport-cmd1" maxlength="47" style="width:220px;font-size:12px" oninput="setModeReportCmd(0, this.value)">
+              </div>
+              <div class="wcb-send-row" style="margin-bottom:4px">
+                <label style="min-width:56px">Mode 2:</label>
+                <input type="text" id="modereport-cmd2" maxlength="47" style="width:220px;font-size:12px" oninput="setModeReportCmd(1, this.value)">
+              </div>
+              <div class="wcb-send-row" style="margin-bottom:4px">
+                <label style="min-width:56px">Mode 3:</label>
+                <input type="text" id="modereport-cmd3" maxlength="47" style="width:220px;font-size:12px" oninput="setModeReportCmd(2, this.value)">
+              </div>
+            </div>
+            <div class="noconn" style="margin-top:4px">Off by default. Sends a command to the target WCB carrying the mode-select position on <b>every switch change</b> and <b>every 60&nbsp;s</b>. <b>Command</b> uses <code>{mode}</code> → the position (1/2/3). A non-blank <b>per-mode override</b> replaces the command for that position (blank = send nothing for that mode). Applies on Save.</div>
+          </div>
         </section>
 
         <!-- ════════════════════════════════════════════════════════════
@@ -3584,6 +3617,11 @@ let config = {
   serialBcast:   { S3: { out: false, in: false },
                    S4: { out: false, in: false },
                    S5: { out: false, in: false } },
+  // Optional mode-select report (OFF by default). When enabled, NaviCore sends a
+  // command to one WCB carrying the mode-select position on every switch change +
+  // every 60s. `template` uses {mode} → position (1/2/3); a non-empty per-mode
+  // `cmds[mode-1]` overrides it. Firmware mirror: rcConfig.modeReport.
+  modeReport:    { enabled: false, wcb: 0, template: '', cmds: ['', '', ''] },
 };
 
 // ── NaviCore port labels + mesh broadcast bridging ──────────────────────────
@@ -3650,6 +3688,39 @@ function renderSerialBcast() {
     if (o) o.checked = !!bc[k].out;
     if (i) i.checked = !!bc[k].in;
   });
+}
+
+// ── Mode Report (optional per-mode → WCB) ────────────────────────────────────
+function _modeReport() {
+  if (!config.modeReport || typeof config.modeReport !== 'object') config.modeReport = {};
+  const m = config.modeReport;
+  m.enabled = !!m.enabled;
+  m.wcb = +m.wcb || 0;
+  m.template = String(m.template || '');
+  if (!Array.isArray(m.cmds)) m.cmds = [];
+  m.cmds = [String(m.cmds[0] || ''), String(m.cmds[1] || ''), String(m.cmds[2] || '')];
+  return m;
+}
+function setModeReportEnabled(checked) {
+  _modeReport().enabled = !!checked;
+  const f = document.getElementById('modereport-fields');
+  if (f) f.style.display = checked ? '' : 'none';
+}
+function setModeReportCmd(i, value) {
+  _modeReport().cmds[i] = String(value == null ? '' : value).slice(0, 47);
+}
+function renderModeReport() {
+  const m = _modeReport();
+  const en = document.getElementById('modereport-enabled');
+  if (en) en.checked = m.enabled;
+  const f = document.getElementById('modereport-fields');
+  if (f) f.style.display = m.enabled ? '' : 'none';
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+  set('modereport-wcb', m.wcb || '');
+  set('modereport-template', m.template);
+  set('modereport-cmd1', m.cmds[0]);
+  set('modereport-cmd2', m.cmds[1]);
+  set('modereport-cmd3', m.cmds[2]);
 }
 
 const modeLabels = ['', 'SW Down (Mode 1)', 'SW Mid (Mode 2)', 'SW Up (Mode 3)'];
@@ -8101,6 +8172,18 @@ function applyConfig(data) {
   // which has no bridging at all, so every flag reads back off.
   config.serialBcast = (data.serialBcast && typeof data.serialBcast === 'object') ? { ...data.serialBcast } : {};
   renderSerialBcast();   // also normalizes the object to the full 3 x {out,in} shape
+  // Optional mode-select report. Full-replace: absent = old firmware → defaults (off).
+  {
+    const m = (data.modeReport && typeof data.modeReport === 'object') ? data.modeReport : {};
+    const cmds = Array.isArray(m.cmds) ? m.cmds : [];
+    config.modeReport = {
+      enabled: !!m.enabled,
+      wcb: (+m.wcb || 0),
+      template: String(m.template || ''),
+      cmds: [String(cmds[0] || ''), String(cmds[1] || ''), String(cmds[2] || '')],
+    };
+    renderModeReport();
+  }
   document.getElementById('tapwin-input').value = config.tapWindowMs;
   { const cr = document.getElementById('chrate-input');
     if (cr) { const hz = Math.max(1, Math.min(20, config.chRateHz ?? 5));
@@ -15751,6 +15834,7 @@ function handleConfigImportFile(event) {
           const p = (config.serialBcast || {})[k];
           return [k, { out: !!(p && p.out), in: !!(p && p.in) }];
         })),
+        modeReport: (() => { const m = _modeReport(); return { enabled: m.enabled, wcb: m.wcb, template: m.template, cmds: [...m.cmds] }; })(),
       };
       let csvHadHcrDest = false;
       let csvHadMaestros = false;
