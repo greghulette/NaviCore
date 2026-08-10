@@ -562,6 +562,21 @@ struct RcSmoothProfile {
 // JSON key per slot — index with RC_SLBL_*. Order must match the defines above.
 static const char* const RC_SLBL_KEYS[RC_NUM_SLBL] = { "S3", "S4", "S5", "maestro" };
 
+// ── Mode-select report ───────────────────────────────────────────────────────
+// Optional, OFF by default. When enabled, NaviCore sends a command to one WCB
+// carrying the active mode-select position (FunctionSwState 1/2/3) on every mode
+// change AND every 60 s. `tmpl` is the fallback command with "{mode}" substituted
+// to the position digit; a non-empty per-mode `cmds[mode-1]` overrides `tmpl` for
+// that position. Nothing is sent when the effective command is empty. Droid-
+// specific plumbing (rcModeReportCmd builds the effective string; reportMode in
+// rc_telemetry.h sends it).
+struct RcModeReport {
+  bool    enabled;      // master on/off (default false)
+  uint8_t wcb;          // target WCB id 1-20 (0 = unset → nothing sent)
+  char    tmpl[48];     // fallback command; "{mode}" → position digit
+  char    cmds[3][48];  // per-mode overrides (index 0 = mode 1); win over tmpl when non-empty
+};
+
 struct RcConfig {
   uint8_t        txModel;        // RcTxModel — drives GUI layout + defaults
   // Per-build hardware option flag — meaningful only when txModel == TX_MODEL_X20.
@@ -630,6 +645,7 @@ struct RcConfig {
   // handled in firmware (see the peer-event drain in NaviCore.ino loop()).
   RcTier   peerNewActions;   // up to 5 actions; count 0 = alert only, no action
   bool     peerAlert;        // also do a passive NeoPixel flash + terminal line
+  RcModeReport modeReport;   // optional: report the mode-select position to one WCB (off by default)
 };
 
 // rcConfig is heap-allocated in PSRAM at boot (see NaviCore.ino setup()); the
@@ -823,6 +839,7 @@ void rcConfigLoadDefaults() {
   memset(rcConfig.serialLabels, 0, sizeof(rcConfig.serialLabels));   // no overrides → all ports auto-derive
   memset(rcConfig.serialBcastOut, 0, sizeof(rcConfig.serialBcastOut));   // no port bridges the mesh broadcast
   memset(rcConfig.serialBcastIn,  0, sizeof(rcConfig.serialBcastIn));    // domain until explicitly enabled
+  rcConfig.modeReport = RcModeReport{};   // mode-select report OFF by default (all fields zero/empty)
 
   // Default Maestro slots — all 8 disabled until user enables them in the
   // GUI Maestro Locations panel.  Device numbers default to match the slot
@@ -1294,6 +1311,15 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
       p["in"]  = rcConfig.serialBcastIn[i];
     }
   }
+  // Optional mode-select report (off by default).
+  {
+    JsonObject mr = doc.createNestedObject("modeReport");
+    mr["enabled"]  = rcConfig.modeReport.enabled;
+    mr["wcb"]      = rcConfig.modeReport.wcb;
+    mr["template"] = rcConfig.modeReport.tmpl;
+    JsonArray mc = mr.createNestedArray("cmds");
+    for (int i = 0; i < 3; i++) mc.add(rcConfig.modeReport.cmds[i]);
+  }
 
   // Smoothing profiles — all 6 slots emitted (array index = profile id, so knob
   // refs stay aligned); entries are SPARSE (only channels with speed|accel).
@@ -1648,6 +1674,22 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       rcConfig.serialBcastIn[i]  = p["in"]  | rcConfig.serialBcastIn[i];
     }
   }
+  // Optional mode-select report. containsKey-guarded, and per-field defaulted to the
+  // current value, so a partial object only changes what it carries.
+  if (doc.containsKey("modeReport")) {
+    JsonObject mr = doc["modeReport"];
+    rcConfig.modeReport.enabled = mr["enabled"] | rcConfig.modeReport.enabled;
+    rcConfig.modeReport.wcb     = (uint8_t)(mr["wcb"] | rcConfig.modeReport.wcb);
+    if (mr.containsKey("template"))
+      strlcpy(rcConfig.modeReport.tmpl, mr["template"] | "", sizeof(rcConfig.modeReport.tmpl));
+    if (mr.containsKey("cmds")) {
+      JsonArray mc = mr["cmds"];
+      for (int i = 0; i < 3; i++)
+        strlcpy(rcConfig.modeReport.cmds[i],
+                (!mc.isNull() && i < (int)mc.size()) ? (mc[i] | "") : "",
+                sizeof(rcConfig.modeReport.cmds[0]));
+    }
+  }
   // A switch's channel/positions may have changed — re-seed switchPrevPos on the
   // next SBUS frame so processSwitches doesn't fire a phantom action from a stale
   // prior position. (Boot already starts with this true.)
@@ -1704,6 +1746,26 @@ inline const char* rcSerialLabel(int slot) {
   if (slot < 0 || slot >= RC_NUM_SLBL) return "";
   if (rcConfig.serialLabels[slot][0]) return rcConfig.serialLabels[slot];   // user override wins
   return rcSerialLabelAuto(slot);
+}
+// Build the mode-select report command for `mode` (1-3) into `out`. A non-empty
+// per-mode override wins; else the template with every "{mode}" replaced by the
+// position digit; else empty (→ nothing to send). Returns `out`.
+inline const char* rcModeReportCmd(int mode, char* out, size_t outSz) {
+  if (!out || outSz == 0) return out;
+  out[0] = '\0';
+  if (mode < 1 || mode > 3) return out;
+  const char* ov = rcConfig.modeReport.cmds[mode - 1];
+  if (ov[0]) { strlcpy(out, ov, outSz); return out; }
+  const char* t = rcConfig.modeReport.tmpl;
+  if (!t[0]) return out;
+  const char md = (char)('0' + mode);
+  size_t o = 0;
+  for (size_t i = 0; t[i] && o + 1 < outSz; ) {
+    if (!strncmp(t + i, "{mode}", 6)) { if (o + 1 < outSz) out[o++] = md; i += 6; }
+    else                              { out[o++] = t[i++]; }
+  }
+  out[o] = '\0';
+  return out;
 }
 // Which WDP PORTLABEL port number a label slot is advertised under. The three aux
 // headers go out as the mesh ports that address them (S1/S2/S3); the Maestro takes

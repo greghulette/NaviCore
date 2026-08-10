@@ -654,6 +654,7 @@ constexpr uint32_t CH_INTERVAL_MS = 200;   // 5 Hz — default/fallback rate (20
 
 inline uint32_t _lastHb = 0;
 inline uint32_t _lastCh = 0;
+inline uint32_t _lastModeReport = 0;   // last mode-select report send/attempt — clocks the 60 s heartbeat
 
 // Runtime rc_ch emit interval derived from the config-tool slider
 // (rcConfig.chRateHz, 1–20 Hz). Falls back to the 5 Hz default when the field
@@ -891,6 +892,21 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
 inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi = 0, bool includeRelayName = true);
 inline String buildWcbMeta();   // per-board aliases + serial-port labels, fragmented (GET_WCB_META)
 
+// ── Optional mode-select report ─────────────────────────────────────────────
+// Send the active mode position to one configured WCB (rcConfig.modeReport). No-op
+// unless enabled with a valid target and a non-empty effective command. Called on
+// every mode change (from emitMode) and every 60 s (from tick). Always stamps
+// _lastModeReport so the 60 s heartbeat re-spaces from the last change.
+inline void reportMode(int mode) {
+  _lastModeReport = millis();
+  if (!wcb || !wcbReady) return;
+  const RcModeReport& mr = rcConfig.modeReport;
+  if (!mr.enabled || mr.wcb < 1 || mr.wcb > 20) return;
+  char cmd[64];
+  rcModeReportCmd(mode, cmd, sizeof(cmd));
+  if (cmd[0]) wcb->send(mr.wcb, cmd);
+}
+
 // ── Outbound: heartbeat + channel snapshot (periodic) ───────────────────────
 // Called from loop().  Emits at most one HB and one CH packet per call,
 // throttled to the constants above.  Setting _lastHb = 0 / _lastCh = 0
@@ -1007,6 +1023,10 @@ inline void tick() {
   const uint32_t now = millis();
   const uint8_t  id  = rcConfig.wcbNetwork.deviceId;
 
+  // Mode-select report heartbeat — every 60 s (reportMode no-ops when disabled and
+  // re-stamps _lastModeReport, so this re-evaluates only once a minute).
+  if (now - _lastModeReport >= 60000UL) reportMode(FunctionSwState);
+
   if (now - _lastHb >= HB_INTERVAL_MS) {
     _lastHb = now;
     // SBUS health: surface what the LOCAL reader is seeing so the config
@@ -1094,6 +1114,7 @@ inline void emitMode(int mode) {
     "{\"sys\":1,\"type\":\"rc_mode\",\"id\":%u,\"mode\":%d}",
     rcConfig.wcbNetwork.deviceId, mode);
   wcb->broadcast(buf, false);   // best-effort: monitor display telemetry (sibling of rc_trig)
+  reportMode(mode);             // optional per-mode report to a configured WCB (off by default)
 }
 
 // ── Inbound parser ──────────────────────────────────────────────────────────
