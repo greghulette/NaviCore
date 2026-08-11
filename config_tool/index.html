@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">11.14:05.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">11.14:56.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2747,7 +2747,7 @@
             <div class="btn-row">
               <button class="btn btn-ghost" type="button" style="font-size:11px;padding:5px 12px" onclick="saveWcbProfilePrompt()">＋ Save current credentials as profile…</button>
             </div>
-            <div class="noconn" style="margin-top:4px">Save the current network credentials as a named profile (e.g. <b>Dev</b>, <b>In-droid</b>), then <b>select one to load it</b> — same functional config, different mesh identity. Stored in this browser (includes the password). <b>WCB Network changes only apply over Direct USB</b> — so flip to the target profile, connect over USB, then Save.</div>
+            <div class="noconn" style="margin-top:4px">Save the current network credentials as a named profile (e.g. <b>Dev</b>, <b>In-droid</b>), then <b>select one to load it</b> — same functional config, different mesh identity. Stored <b>in the NaviCore config</b> (travels with the droid + cloud backups/exports; includes the password) — Save the config to store profile edits. <b>WCB Network changes only apply over Direct USB</b>, so to switch the droid's mesh: flip to the target profile, connect over USB, then Save.</div>
           </div>
 
           <div class="sb-section">
@@ -3631,6 +3631,10 @@ let config = {
   // every 60s. `template` uses {mode} → position (1/2/3); a non-empty per-mode
   // `cmds[mode-1]` overrides it. Firmware mirror: rcConfig.modeReport.
   modeReport:    { enabled: false, wcb: 0, template: ';V,MODE,{mode}', cmds: ['', '', ''] },
+  // Saved WCB-credential profiles (Dev / In-droid / …) — a whole mesh identity per
+  // entry, switched from the WCB Network tab. Stored IN the config so they live on the
+  // droid and ride along in backups/exports. Firmware mirror: rcConfig.wcbProfiles.
+  wcbProfiles:   [],
 };
 
 // ── NaviCore port labels + mesh broadcast bridging ──────────────────────────
@@ -8022,6 +8026,14 @@ function handleBoardMessage(line) {
     if (_foldLocalMaestroChIntoConfig()) {
       appendTerminalLine('< [config] Imported Maestro channel names/limits found in this browser — open Config and Save to store them on the NaviCore.', 'rx');
     }
+    // Same order-critical migration for the pre-config WCB profiles: adopt any
+    // browser-stored ones AFTER the baseline (only when the board carried none) so a
+    // Save actually ships them to the droid. Then repaint the profile list.
+    if (_foldLegacyWcbProfiles()) {
+      appendTerminalLine('< [wcb] Saved WCB profiles found in this browser — imported into the config. Open Config → WCB Network and Save to store them on the NaviCore.', 'rx');
+      showToast('Imported your saved WCB profiles — Save to store them on the NaviCore', 'info');
+    }
+    renderWcbProfiles();
     _syncMaestroChFromConfig();
     renderMaestroLocations();   // badges reflect the freshly-synced mirror
     renderWledSlots();
@@ -8164,6 +8176,11 @@ function applyConfig(data) {
     if (w.quantity !== undefined) w.quantity = +w.quantity;
     if (w.deviceId !== undefined) w.deviceId = +w.deviceId;
   }
+  // Saved WCB-credential profiles. Full-replace from the board (normalized so a
+  // string field can't fabricate a phantom dirty diff); absent = old firmware → empty
+  // here, then _foldLegacyWcbProfiles() in the CONFIG handler (AFTER the baseline)
+  // adopts any pre-config browser-stored ones so a Save ships them.
+  config.wcbProfiles = Array.isArray(data.wcbProfiles) ? data.wcbProfiles.map(_normWcbProfile) : [];
   if (data.dfpDest) {
     config.dfpDest = { ...config.dfpDest, ...data.dfpDest };
   }
@@ -9022,15 +9039,34 @@ function applyWcbNetworkUI() {
 // ── WCB credential profiles (dev / in-droid) ─────────────────────────────────
 // Save the current WCB-network credentials as a named profile and swap between
 // them with one click, so a single functional config can target either mesh.
-// Stored per-browser in localStorage (includes the password — same trust model
-// as the cloud-backup "remember" creds). Only config.wcbNetwork is touched; the
-// firmware still has one active network, written on Save (Direct USB only).
-const WCB_PROFILES_LS = 'navicore-wcb-profiles-v1';
+// Stored IN the config (config.wcbProfiles) so they live on the droid and ride
+// along in cloud backup + export — NOT in browser localStorage. Firmware mirror:
+// rcConfig.wcbProfiles (rc_config.h). Only config.wcbNetwork is touched when a
+// profile is loaded; the firmware still has one active network, written on Save
+// (Direct USB only). Adding/removing a profile is a config change like any other,
+// saved to the droid on the next Save.
+const WCB_PROFILES_LEGACY_LS = 'navicore-wcb-profiles-v1';   // pre-config store; read once for migration (_foldLegacyWcbProfiles), then dormant
+const WCB_MAX_PROFILES = 6;   // capacity — MUST match RC_MAX_WCB_PROFILES in rc_config.h
 function _wcbProfiles() {
-  try { const a = JSON.parse(localStorage.getItem(WCB_PROFILES_LS) || '[]'); return Array.isArray(a) ? a : []; }
-  catch (_) { return []; }
+  if (!Array.isArray(config.wcbProfiles)) config.wcbProfiles = [];
+  return config.wcbProfiles;
 }
-function _saveWcbProfiles(arr) { try { localStorage.setItem(WCB_PROFILES_LS, JSON.stringify(arr)); } catch (_) {} }
+function _saveWcbProfiles(arr) {
+  config.wcbProfiles = Array.isArray(arr) ? arr.slice(0, WCB_MAX_PROFILES).map(_normWcbProfile) : [];
+}
+function _normWcbProfile(p) { return { name: String((p && p.name) || ''), ..._wcbProfileParams(p) }; }
+// One-time adoption of the pre-config localStorage profiles: only when the config
+// carries none (board didn't supply them / old firmware). Returns true if it imported
+// any. Called from the CONFIG handler AFTER the diff baseline so a Save ships them.
+function _foldLegacyWcbProfiles() {
+  try {
+    if (Array.isArray(config.wcbProfiles) && config.wcbProfiles.length) return false;
+    const arr = JSON.parse(localStorage.getItem(WCB_PROFILES_LEGACY_LS) || '[]');
+    if (!Array.isArray(arr) || !arr.length) return false;
+    config.wcbProfiles = arr.slice(0, WCB_MAX_PROFILES).map(_normWcbProfile);
+    return true;
+  } catch (_) { return false; }
+}
 function _wcbProfileParams(w) {
   w = w || {};
   return { macOct2: w.macOct2 | 0, macOct3: w.macOct3 | 0, password: w.password || '',
@@ -9073,7 +9109,7 @@ function loadWcbProfile(i) {
   // live config — which is ambiguous when two profiles hold identical credentials
   // (match picks the first, so the radio would snap back). Force THIS profile's radio
   // checked so the click always selects exactly what was clicked.
-  const radios = document.querySelectorAll('#wcb-profile-list input[type=”radio”]');
+  const radios = document.querySelectorAll('#wcb-profile-list input[type=radio]');
   if (radios[i]) radios[i].checked = true;
   appendTerminalLine('< [wcb] loaded profile “' + p.name + '” — Save over Direct USB to apply it to the board', 'rx');
   showToast('Loaded WCB profile “' + p.name + '” — Save over USB to apply', 'info');
@@ -9081,21 +9117,25 @@ function loadWcbProfile(i) {
 function saveWcbProfilePrompt() {
   const name = (prompt('Save the current WCB credentials as a profile named:', _activeWcbProfileName() || 'Dev') || '').trim();
   if (!name) return;
-  const profs = _wcbProfiles();
-  const entry = { name, ..._wcbProfileParams(config.wcbNetwork) };
+  const profs = _wcbProfiles().slice();   // copy → assign a fresh array back via _saveWcbProfiles
+  const entry = _normWcbProfile({ name, ..._wcbProfileParams(config.wcbNetwork) });
   const idx = profs.findIndex(p => (p.name || '').toLowerCase() === name.toLowerCase());
-  if (idx >= 0) profs[idx] = entry; else profs.push(entry);
+  if (idx >= 0) { profs[idx] = entry; }
+  else if (profs.length >= WCB_MAX_PROFILES) {
+    showToast('Profile limit reached (' + WCB_MAX_PROFILES + ') — delete one first', 'warn'); return;
+  } else { profs.push(entry); }
   _saveWcbProfiles(profs);
   renderWcbProfiles();
-  showToast('Saved WCB profile “' + name + '”', 'success');
+  showToast('Saved WCB profile “' + name + '” — Save the config to store it on the NaviCore', 'success');
 }
 function deleteWcbProfile(i) {
-  const profs = _wcbProfiles();
+  const profs = _wcbProfiles().slice();
   if (i < 0 || i >= profs.length) return;
-  if (!confirm('Delete WCB profile "' + profs[i].name + '"? (This only removes the saved profile — your current config is unchanged.)')) return;
+  if (!confirm('Delete WCB profile "' + profs[i].name + '"? (Removes the saved profile; your current WCB Network fields are unchanged. Save the config to store the removal on the NaviCore.)')) return;
   profs.splice(i, 1);
   _saveWcbProfiles(profs);
   renderWcbProfiles();
+  showToast('Deleted WCB profile — Save the config to store the change on the NaviCore', 'info');
 }
 
 // Tracks whether the user actually edited the peer ACTION rows this render.

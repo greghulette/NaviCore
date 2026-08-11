@@ -443,6 +443,22 @@ struct RcWcbNetwork {
                           // begin(); a reboot is required to change it. Default 1.
 };
 
+// Named snapshots of WCB-network credentials (a whole mesh identity) the config tool
+// switches between — e.g. a bench "Dev" mesh vs the "In-droid" mesh — instead of
+// re-typing the fields. INERT storage: the firmware never acts on the list; only the
+// config tool reads it and applies one into wcbNetwork on request (over Direct USB).
+// Lives in the config so it travels with the droid + rides along in backups/exports.
+#define RC_MAX_WCB_PROFILES 6   // capacity — MUST match WCB_MAX_PROFILES in the config tool
+struct RcWcbProfile {
+  char    name[24];       // display name ("Dev", "In-droid"); "" = empty (23 chars + null)
+  uint8_t macOct2;
+  uint8_t macOct3;
+  char    password[40];   // ESP-NOW network password (≤39 chars)
+  uint8_t quantity;
+  uint8_t deviceId;
+  uint8_t channel;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Maestro locations (8 slots, ID 1-8)
 //
@@ -605,6 +621,8 @@ struct RcConfig {
   RcHcrDest      hcrDest;
   RcMaestroSlot  maestros[RC_NUM_MAESTROS];  // ID 1-8 → maestros[0..7]
   RcWcbNetwork   wcbNetwork;
+  RcWcbProfile   wcbProfiles[RC_MAX_WCB_PROFILES];  // saved mesh identities (Dev/In-droid/…)
+  uint8_t        wcbProfileCount;                   // 0..RC_MAX_WCB_PROFILES entries in use
   RcMp3Dest      mp3Dest;
   RcDfpDest      dfpDest;                 // global DFPlayer Mini destination (the other audio device)
   RcWledSlot     wledSlots[RC_NUM_WLED];  // per-id WLED routing table (id 1-9 → local port | remote WCB)
@@ -864,6 +882,10 @@ void rcConfigLoadDefaults() {
   rcConfig.wcbNetwork.quantity = WCB_QUANTITY;
   rcConfig.wcbNetwork.deviceId = WCB_DEVICE_ID;
   rcConfig.wcbNetwork.channel  = 1;    // default ESP-NOW mesh channel (matches WCB_MESH_CHANNEL)
+
+  // Saved WCB-credential profiles — none until the user creates them in the GUI.
+  memset(rcConfig.wcbProfiles, 0, sizeof(rcConfig.wcbProfiles));
+  rcConfig.wcbProfileCount = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1250,6 +1272,20 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   wcbObj["deviceId"] = rcConfig.wcbNetwork.deviceId;
   wcbObj["channel"]  = rcConfig.wcbNetwork.channel;
 
+  // Saved WCB-credential profiles (Dev / In-droid / …). Count-based dense array —
+  // only the in-use entries are emitted. Inert storage; see RcWcbProfile.
+  JsonArray wpArr = doc.createNestedArray("wcbProfiles");
+  for (uint8_t i = 0; i < rcConfig.wcbProfileCount && i < RC_MAX_WCB_PROFILES; i++) {
+    JsonObject o = wpArr.createNestedObject();
+    o["name"]     = rcConfig.wcbProfiles[i].name;
+    o["macOct2"]  = rcConfig.wcbProfiles[i].macOct2;
+    o["macOct3"]  = rcConfig.wcbProfiles[i].macOct3;
+    o["password"] = rcConfig.wcbProfiles[i].password;
+    o["quantity"] = rcConfig.wcbProfiles[i].quantity;
+    o["deviceId"] = rcConfig.wcbProfiles[i].deviceId;
+    o["channel"]  = rcConfig.wcbProfiles[i].channel;
+  }
+
   // Global MP3 Trigger destination — every RA_MP3 action reads from here.
   JsonObject mp3Obj = doc.createNestedObject("mp3Dest");
   mp3Obj["transport"] = (rcConfig.mp3Dest.transport == 1) ? "wcb" : "serial";
@@ -1590,6 +1626,27 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     rcConfig.wcbNetwork.deviceId = (uint8_t)(wcbObj["deviceId"] | rcConfig.wcbNetwork.deviceId);
     { int ch = wcbObj["channel"] | (int)rcConfig.wcbNetwork.channel;   // ESP-NOW mesh channel (1-13)
       rcConfig.wcbNetwork.channel = (uint8_t)(ch < 1 ? 1 : ch > 13 ? 13 : ch); }
+  }
+
+  // Saved WCB-credential profiles. Guarded by containsKey so a diff-save that omits
+  // "wcbProfiles" can't wipe the stored list; when present, the tool always sends the
+  // FULL set, so the list is rebuilt wholesale (an empty array legitimately clears it).
+  if (doc.containsKey("wcbProfiles")) {
+    JsonArray wpArr = doc["wcbProfiles"];
+    uint8_t n = 0;
+    for (JsonObject o : wpArr) {
+      if (n >= RC_MAX_WCB_PROFILES) break;
+      RcWcbProfile& wp = rcConfig.wcbProfiles[n];
+      strlcpy(wp.name, o["name"] | "", sizeof(wp.name));
+      wp.macOct2  = (uint8_t)(o["macOct2"].as<int>() & 0xFF);
+      wp.macOct3  = (uint8_t)(o["macOct3"].as<int>() & 0xFF);
+      strlcpy(wp.password, o["password"] | "", sizeof(wp.password));
+      wp.quantity = (uint8_t)(o["quantity"] | 4);
+      wp.deviceId = (uint8_t)(o["deviceId"] | 20);
+      { int ch = o["channel"] | 1; wp.channel = (uint8_t)(ch < 1 ? 1 : ch > 13 ? 13 : ch); }
+      n++;
+    }
+    rcConfig.wcbProfileCount = n;
   }
 
   if (doc.containsKey("mp3Dest")) {

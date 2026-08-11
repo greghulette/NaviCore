@@ -44,6 +44,7 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 | `RC_MAESTRO_CHANNELS` | 32 | Pololu max channels |
 | `RC_NUM_WLED` | 4 | WLED routing slots (ids 1–9 addressable) |
 | `RC_NUM_SMOOTH_PROFILES` | 6 | Smoothing profiles |
+| `RC_MAX_WCB_PROFILES` | 6 | Saved WCB-credential profiles (Dev/In-droid/…) |
 
 ---
 
@@ -66,7 +67,8 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 | `funcBindings` | `RcFuncBindings` | `{modeSwitch}` — which switch selects the global mode |
 | `hcrDest` | `RcHcrDest` | **Global** HCR destination |
 | `maestros[8]` | `RcMaestroSlot` | `{type, device, channels[32]}` |
-| `wcbNetwork` | `RcWcbNetwork` | Mesh credentials (runtime; `wcb_config.h` only seeds defaults) |
+| `wcbNetwork` | `RcWcbNetwork` | ACTIVE mesh credentials (runtime; `wcb_config.h` only seeds defaults) |
+| `wcbProfiles[≤6]` + `wcbProfileCount` | `RcWcbProfile` | Saved mesh identities (`{name[24], macOct2, macOct3, password[40], quantity, deviceId, channel}`) the config tool switches between. **Inert storage** — firmware never acts on them; loading one just writes `wcbNetwork` (tool-side, Direct USB) |
 | `mp3Dest` | `RcMp3Dest` | **Global** MP3 Trigger destination |
 | `dfpDest` | `RcDfpDest` | **Global** DFPlayer Mini destination — `{transport, target}`, defaults local `S3` |
 | `wledSlots[4]` | `RcWledSlot` | Per-id WLED routing |
@@ -203,6 +205,7 @@ highest-risk category of edit in the repo.
 | `RC_KNOB_MAX_OUTPUTS` | `KNOB_MAX_OUTPUTS` | 10 |
 | `RC_NUM_MAESTROS` | `NUM_MAESTRO_SLOTS` | 8 |
 | `RC_NUM_WLED` | `NUM_WLED_SLOTS` | 4 |
+| `RC_MAX_WCB_PROFILES` | `WCB_MAX_PROFILES` | 6 |
 | `RC_KNOB_LABELS[]` | knob source table | `S1,S2,LS,RS,S3,J1..J4,J5,J6` |
 | `RC_SWITCH_LABELS[]` | switch table | `SA..SJ` |
 | `RcTxModel` enum | per-model metadata tables | model ids |
@@ -257,5 +260,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-11 | _(uncommitted)_ | Added `wcbProfiles[≤6]` + `wcbProfileCount` (`RcWcbProfile`) — saved WCB mesh identities the config tool switches between, now stored in the config (was browser localStorage) so they travel with the droid + backups. New capacity constant `RC_MAX_WCB_PROFILES` (6) and its cross-file pair `WCB_MAX_PROFILES`. |
 | 2026-08-05 | _(uncommitted)_ | Added `dfpDest` (`RcDfpDest`), recorded the inverse MP3-Trigger/DFPlayer volume scales, and added four new rows to the cross-file invariants table (`RcActionType` now 0–13, `RcDfpFn`, the duplicated arg ranges, `DBG_DFP`). |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |
