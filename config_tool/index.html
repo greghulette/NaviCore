@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">11.09:43.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">11.11:34.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3078,7 +3078,7 @@
                 <input type="text" id="modereport-cmd3" maxlength="47" style="width:220px;font-size:12px" oninput="setModeReportCmd(2, this.value)">
               </div>
             </div>
-            <div class="noconn" style="margin-top:4px">Off by default. Sends a command to the target WCB carrying the mode-select position on <b>every switch change</b> and <b>every 60&nbsp;s</b>. <b>Command</b> uses <code>{mode}</code> → the position (1/2/3); a non-blank <b>per-mode override</b> replaces it for that position (blank = send nothing for that mode). Heads-up: a plain command with no <code>;</code> prefix (like the <code>MODE,{mode}</code> default) is re-broadcast out <b>every</b> WCB's serial ports across the mesh — use a <code>;</code>-prefixed command to keep it targeted. Applies on Save.</div>
+            <div class="noconn" style="margin-top:4px">Off by default. Sends a command to the target WCB carrying the mode-select position on <b>every switch change</b> and <b>every 60&nbsp;s</b>. <b>Command</b> uses <code>{mode}</code> → the position (1/2/3); a non-blank <b>per-mode override</b> replaces it for that position (blank = send nothing for that mode). The default <code>;V,MODE,{mode}</code> sets the target WCB's <code>MODE</code> variable to the position — the <code>;</code> prefix keeps it targeted (a command with <b>no</b> <code>;</code> prefix is instead re-broadcast out every WCB's serial ports mesh-wide). Applies on Save.</div>
           </div>
         </section>
 
@@ -3621,7 +3621,7 @@ let config = {
   // command to one WCB carrying the mode-select position on every switch change +
   // every 60s. `template` uses {mode} → position (1/2/3); a non-empty per-mode
   // `cmds[mode-1]` overrides it. Firmware mirror: rcConfig.modeReport.
-  modeReport:    { enabled: false, wcb: 0, template: 'MODE,{mode}', cmds: ['', '', ''] },
+  modeReport:    { enabled: false, wcb: 0, template: ';V,MODE,{mode}', cmds: ['', '', ''] },
 };
 
 // ── NaviCore port labels + mesh broadcast bridging ──────────────────────────
@@ -3706,7 +3706,7 @@ function setModeReportEnabled(checked) {
   m.enabled = !!checked;
   // Turning it on with nothing configured drops in the default command so it works
   // out of the box (editable; blank it to send nothing / use only per-mode overrides).
-  if (checked && !m.template && !m.cmds.some(c => c)) m.template = 'MODE,{mode}';
+  if (checked && !m.template && !m.cmds.some(c => c)) m.template = ';V,MODE,{mode}';
   renderModeReport();
 }
 function setModeReportCmd(i, value) {
