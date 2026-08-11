@@ -222,12 +222,15 @@ too.
 (MAC octets, password, quantity, device id, channel) as a named profile and radio-toggle
 between them — e.g. a *dev* mesh and an *in-droid* mesh — so one functional config can target
 either. Stored **in the config** (`config.wcbProfiles` → firmware `rcConfig.wcbProfiles`, up to
-`WCB_MAX_PROFILES` = 6), so they travel with the droid and ride along in cloud backup + export;
-adding/removing a profile is a config change saved on the next Save. Loading a profile only
-writes `config.wcbNetwork`, and because WCB Network changes apply over **Direct USB only**, it
-still needs a Save over USB to switch the droid's mesh. Profiles saved in the earlier
-localStorage build (`navicore-wcb-profiles-v1`) are auto-imported into the config on the next
-Load (then Save to store them on the droid).
+`WCB_MAX_PROFILES` = 6), so they travel with the droid and ride along in cloud backup, the JSON
+export, **and the CSV Export/Import** (`wcbProfile<N>_<field>` rows, incl. passwords). Selecting
+a profile makes the WCB Network fields **edit that profile** — change a value and it's captured
+back into the profile on the next profile switch or Save (`_snapshotLiveIntoSelectedProfile`);
+editing the active identity that merely *matches* a profile (nothing selected) never rewrites
+it. Loading a profile writes `config.wcbNetwork`, and because WCB Network changes apply over
+**Direct USB only**, it still needs a Save over USB to switch the droid's mesh. Profiles saved
+in the earlier localStorage build (`navicore-wcb-profiles-v1`) are auto-imported into the config
+on the next Load (then Save to store them on the droid).
 
 ---
 
@@ -254,6 +257,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-11 | _(uncommitted)_ | WCB profiles are now **edit-in-place**: selecting a profile makes the WCB Network fields edit that profile (captured back on switch/Save via `_snapshotLiveIntoSelectedProfile`), so changing a selected profile's password sticks to it instead of being lost. Profiles are also included in **CSV Export/Import** (`wcbProfile<N>_<field>` rows). |
 | 2026-08-11 | _(uncommitted)_ | WCB profiles now live **in the config** (`config.wcbProfiles` ↔ firmware `rcConfig.wcbProfiles`, cap `WCB_MAX_PROFILES`=6) instead of browser localStorage — they travel with the droid + backups; legacy localStorage profiles auto-migrate on first Load. Also fixed a curly-quote (`”`) in the profile-select `querySelectorAll` that silently no-op'd the force-check. |
 | 2026-08-11 | _(uncommitted)_ | Fixes: WCB-profile radios use `onclick` (not `onchange`) and force the clicked profile checked after the list rebuild, so selecting a profile whose creds match another's no longer snaps back. Mode Report drops in the `;V,MODE,{mode}` default whenever it is enabled with a blank command — on load too, not only when toggled on — so a config saved enabled-but-empty (firmware default template is empty) still shows the default. |
 | 2026-08-11 | _(uncommitted)_ | Cloud backup: corrected the crypto model to the **username + password** pair (was still documented as WCB-password-derived); documented per-row **⤓ Download** to a decrypted config JSON, **⤒ Upload** a config file into a cloud slot, and **📂 Load** a config file into the tool. Added **WCB credential profiles** (dev / in-droid radio-toggle, `localStorage`, Direct-USB-only apply). |

@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">11.14:56.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">11.15:44.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8180,7 +8180,8 @@ function applyConfig(data) {
   // string field can't fabricate a phantom dirty diff); absent = old firmware → empty
   // here, then _foldLegacyWcbProfiles() in the CONFIG handler (AFTER the baseline)
   // adopts any pre-config browser-stored ones so a Save ships them.
-  config.wcbProfiles = Array.isArray(data.wcbProfiles) ? data.wcbProfiles.map(_normWcbProfile) : [];
+  config.wcbProfiles = Array.isArray(data.wcbProfiles) ? data.wcbProfiles.filter(Boolean).map(_normWcbProfile) : [];
+  _wcbSelectedProfile = '';   // a fresh load isn't "editing" a profile — the radio falls back to the config-match
   if (data.dfpDest) {
     config.dfpDest = { ...config.dfpDest, ...data.dfpDest };
   }
@@ -9055,6 +9056,19 @@ function _saveWcbProfiles(arr) {
   config.wcbProfiles = Array.isArray(arr) ? arr.slice(0, WCB_MAX_PROFILES).map(_normWcbProfile) : [];
 }
 function _normWcbProfile(p) { return { name: String((p && p.name) || ''), ..._wcbProfileParams(p) }; }
+// Which saved profile the WCB Network fields are currently editing ('' = none / a
+// custom identity). Set only when the user explicitly selects a profile (or saves the
+// current fields AS a profile) — NOT on load, so editing the active identity that
+// merely happens to match a profile never silently rewrites it.
+let _wcbSelectedProfile = '';
+// Edit-in-place: copy the live WCB Network fields back into the selected profile, so
+// edits made after selecting one belong to THAT profile. No-op if none is selected or
+// it was since deleted. Called when switching profiles and when saving the config.
+function _snapshotLiveIntoSelectedProfile() {
+  if (!_wcbSelectedProfile) return;
+  const p = _wcbProfiles().find(pr => pr.name === _wcbSelectedProfile);
+  if (p) Object.assign(p, _wcbProfileParams(config.wcbNetwork));
+}
 // One-time adoption of the pre-config localStorage profiles: only when the config
 // carries none (board didn't supply them / old firmware). Returns true if it imported
 // any. Called from the CONFIG handler AFTER the diff baseline so a Save ships them.
@@ -9087,7 +9101,7 @@ function renderWcbProfiles() {
   if (!wrap) return;
   const profs = _wcbProfiles();
   if (!profs.length) { wrap.innerHTML = '<div style="color:var(--muted);font-size:11px">No profiles saved yet — set your credentials below, then “Save current credentials as profile…”.</div>'; return; }
-  const active = _activeWcbProfileName();
+  const active = _wcbSelectedProfile || _activeWcbProfileName();
   wrap.innerHTML = profs.map((p, i) =>
     '<label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">'
     // onclick (not onchange): fires on every click, incl. re-clicking the already-
@@ -9100,6 +9114,8 @@ function renderWcbProfiles() {
 function loadWcbProfile(i) {
   const p = _wcbProfiles()[i];
   if (!p) return;
+  _snapshotLiveIntoSelectedProfile();   // preserve field edits into the profile we're leaving
+  _wcbSelectedProfile = p.name;         // edits from here belong to THIS profile (edit-in-place)
   const w = config.wcbNetwork || (config.wcbNetwork = {});
   const pp = _wcbProfileParams(p);
   w.macOct2 = pp.macOct2; w.macOct3 = pp.macOct3; w.password = pp.password;
@@ -9125,6 +9141,7 @@ function saveWcbProfilePrompt() {
     showToast('Profile limit reached (' + WCB_MAX_PROFILES + ') — delete one first', 'warn'); return;
   } else { profs.push(entry); }
   _saveWcbProfiles(profs);
+  _wcbSelectedProfile = name;   // the fields now represent (and edit) this profile
   renderWcbProfiles();
   showToast('Saved WCB profile “' + name + '” — Save the config to store it on the NaviCore', 'success');
 }
@@ -9132,8 +9149,10 @@ function deleteWcbProfile(i) {
   const profs = _wcbProfiles().slice();
   if (i < 0 || i >= profs.length) return;
   if (!confirm('Delete WCB profile "' + profs[i].name + '"? (Removes the saved profile; your current WCB Network fields are unchanged. Save the config to store the removal on the NaviCore.)')) return;
+  const removedName = profs[i].name;
   profs.splice(i, 1);
   _saveWcbProfiles(profs);
+  if (_wcbSelectedProfile === removedName) _wcbSelectedProfile = '';   // no longer editing a profile
   renderWcbProfiles();
   showToast('Deleted WCB profile — Save the config to store the change on the NaviCore', 'info');
 }
@@ -14135,6 +14154,7 @@ async function saveConfigToBoard() {
     if (Number.isFinite(cr)) config.chRateHz = Math.max(1, Math.min(20, cr));
   }
   syncPeerEventFromDom();   // commit the inline new-peer action editor into config.peerEvent before diffing
+  _snapshotLiveIntoSelectedProfile();   // commit any WCB Network field edits into the selected profile so this Save ships them
 
   // ─── Diff against the on-board baseline ─────────────────────────────────
   // Only ship the top-level branches that actually changed since Load.
@@ -15714,6 +15734,20 @@ function exportConfigCsv() {
     rows.push(csvRow(pad(['config','wcbDeviceId','','' + (w.deviceId | 0)])));
   }
 
+  // WCB credential profiles — one row per field, keyed wcbProfile<N>_<field>, so the
+  // whole saved set (incl. passwords) rides along in the CSV. MAC octets are hex like
+  // the active wcbNetwork above; the import parser reverses this format.
+  (config.wcbProfiles || []).forEach((p, i) => {
+    const pfx = 'wcbProfile' + i + '_';
+    rows.push(csvRow(pad(['config', pfx + 'name',     '', String(p.name || '')])));
+    rows.push(csvRow(pad(['config', pfx + 'macOct2',  '', (p.macOct2 | 0).toString(16).toUpperCase().padStart(2, '0')])));
+    rows.push(csvRow(pad(['config', pfx + 'macOct3',  '', (p.macOct3 | 0).toString(16).toUpperCase().padStart(2, '0')])));
+    rows.push(csvRow(pad(['config', pfx + 'password', '', String(p.password || '')])));
+    rows.push(csvRow(pad(['config', pfx + 'quantity', '', String(p.quantity | 0)])));
+    rows.push(csvRow(pad(['config', pfx + 'deviceId', '', String(p.deviceId | 0)])));
+    rows.push(csvRow(pad(['config', pfx + 'channel',  '', String(p.channel | 0)])));
+  });
+
   // Global HCR destination — every HCR action shares this routing.
   if (config.hcrDest) {
     const d = config.hcrDest;
@@ -16012,6 +16046,7 @@ function handleConfigImportFile(event) {
       // file silent about smoothing keeps whatever is on the board.
       let _smoothCleared = false;
       let _wledCleared = false;   // first 'wled' row makes the CSV authoritative for wledSlots
+      let _wcbProfilesCleared = false;   // first 'wcbProfile' row makes the CSV authoritative for wcbProfiles
       const ensureSmoothProfiles = () => {
         if (!_smoothCleared) {
           imported.smoothProfiles = Array.from({ length: 6 }, () => ({ name: '', entries: [] }));
@@ -16091,6 +16126,27 @@ function handleConfigImportFile(event) {
               imported.wcbNetwork.quantity = Math.max(1, Math.min(20, Number(raw) || 1));
             } else if (control === 'wcbdeviceid') {
               imported.wcbNetwork.deviceId = Math.max(1, Math.min(20, Number(raw) || 1));
+            }
+          } else if (control.startsWith('wcbprofile')) {
+            // wcbProfile<N>_<field> rows → imported.wcbProfiles[N]. The first such row
+            // makes the CSV authoritative (clears the spread-in live set). Value is in
+            // the channel column, read as a string (hex octets / password) like above.
+            const pm = control.match(/^wcbprofile(\d+)_([a-z0-9]+)$/);
+            if (pm) {
+              if (!_wcbProfilesCleared) { imported.wcbProfiles = []; _wcbProfilesCleared = true; }
+              const pi = +pm[1], field = pm[2];
+              if (pi >= 0 && pi < WCB_MAX_PROFILES) {
+                const wp = imported.wcbProfiles[pi] || (imported.wcbProfiles[pi] =
+                  { name: '', macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20, channel: 1 });
+                const raw = value || cellStr(row, indexes.channel) || '';
+                if      (field === 'name')     wp.name     = String(raw).slice(0, 23);
+                else if (field === 'macoct2')  wp.macOct2  = (parseInt(raw, 16) | 0) & 0xFF;
+                else if (field === 'macoct3')  wp.macOct3  = (parseInt(raw, 16) | 0) & 0xFF;
+                else if (field === 'password') wp.password = String(raw);
+                else if (field === 'quantity') wp.quantity = Math.max(1, Math.min(20, Number(raw) || 4));
+                else if (field === 'deviceid') wp.deviceId = Math.max(1, Math.min(20, Number(raw) || 20));
+                else if (field === 'channel')  wp.channel  = Math.max(1, Math.min(13, Number(raw) || 1));
+              }
             }
           } else if (control === 'mp3transport' || control === 'mp3target' ||
                      control === 'mp3port') {
@@ -16336,6 +16392,10 @@ function handleConfigImportFile(event) {
         if (!_maeHadChan.has(idx)) imported.maestros[idx].channels = _maePrevChannels[idx] || [];
       });
       config = imported;
+      // Compact any holes (out-of-order / sparse profile indices), cap, normalize.
+      config.wcbProfiles = Array.isArray(config.wcbProfiles)
+        ? config.wcbProfiles.filter(Boolean).slice(0, WCB_MAX_PROFILES).map(_normWcbProfile) : [];
+      _wcbSelectedProfile = '';   // import isn't "editing" a profile; radio falls back to config-match
       if (Object.keys(newSwitches).length) config.switches = newSwitches;
       if (Object.keys(newKnobs).length) config.knobs = newKnobs;
       // Re-apply the transmitter model so activeTxModel + the model SVG, the
