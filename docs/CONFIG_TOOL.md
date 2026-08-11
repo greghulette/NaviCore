@@ -205,12 +205,25 @@ Cloudflare Worker relay (source in [`tools/cheatsheet-relay-worker.js`](../tools
 and shows a QR code for it.
 
 **Cloud config backup.** There is **no visible button** — click the "NaviCore" wordmark
-four times quickly to open it. It keeps a rolling ring of 10 backups in Cloudflare KV,
-encrypted client-side with AES-GCM using a key and slot derived from the **WCB network
-password** via PBKDF2/SHA-256 with distinct salts. Consequences, stated in the modal:
-strength equals the password's entropy, and changing the password orphans old backups. The
-key is deliberately password-only — adding a per-install discriminator would break
-restore-into-a-blank-tool.
+four times quickly to open it. A **username + password** pair (independent of the WCB
+password) both addresses and encrypts your backups: the slot base is
+`SHA-256(slotSalt | user | pw)` and the AES-GCM-256 key is `PBKDF2(user | pw)` under a
+distinct salt (`_cfgSlotBase` / `_cfgKey`, ≈16733/16738). Each pair therefore sees only its
+own rolling ring of 10 backups (`CFG_BACKUP_MAX`) in Cloudflare KV — anyone can keep their
+own configs under their own credentials, and forgetting either orphans them. Each backup
+carries an optional note; "remember on this device" stores the pair in `localStorage`
+(`CFG_CREDS_LS`). Beyond restore, each row has a **⤓ Download** to a decrypted, readable
+`{navicore, savedAt, note, config}` JSON file; the modal also has **⤒ Upload** (encrypt a
+config file from disk straight into a cloud slot) and **📂 Load** (apply a config file into
+the tool, left unsaved for review). It's a convenience copy, not a vault — keep Export files
+too.
+
+**WCB credential profiles.** On the WCB Network tab, save the current network credentials
+(MAC octets, password, quantity, device id, channel) as a named profile and radio-toggle
+between them — e.g. a *dev* mesh and an *in-droid* mesh — so one functional config can target
+either. Stored per-browser in `localStorage` (`WCB_PROFILES_LS`); only `config.wcbNetwork` is
+touched. Because WCB Network changes apply over **Direct USB only**, loading a profile still
+needs a Save over USB to reach the board.
 
 ---
 
@@ -237,5 +250,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-11 | _(uncommitted)_ | Cloud backup: corrected the crypto model to the **username + password** pair (was still documented as WCB-password-derived); documented per-row **⤓ Download** to a decrypted config JSON, **⤒ Upload** a config file into a cloud slot, and **📂 Load** a config file into the tool. Added **WCB credential profiles** (dev / in-droid radio-toggle, `localStorage`, Direct-USB-only apply). |
 | 2026-08-05 | _(uncommitted)_ | Separate `hcr` + `mp3` tabs merged into one **audio** tab (twelve tabs → eleven), with a stale-`rcConfigLastTab` remap; noted that NaviCore's own command-library boards live in `NC_CMDLIB_SEED`, never in the vendored MPL-2.0 snapshot, and that a param's `enum` is a string id. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |
