@@ -28,6 +28,8 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | `CONFIG` reply arrives truncated / mangled mid-string | USB-CDC TX overflow. The 8 KB TX buffer and 50 ms TX timeout exist for exactly this | `setup()` |
 | A new JSON field reads as its default on the board | Not added to the ArduinoJson **filter whitelist**. The header parse is a whitelist — unlisted fields are silently stripped | `handleSerialInput()` |
 | Board appears frozen with no host attached | TX timeout tuning. 0 drops bytes when the host is briefly slow; ~100 ms stalls the loop. 50 ms is the deliberate middle | `setup()` |
+| Remote Maestro passthrough choppy while the live monitor is open | The monitor's per-frame USB write can back-pressure and stall `loop()`, which paces the passthrough broadcast. Now best-effort — drops the frame if the tx buffer is full. **First** rule out servo power: servos off USB power sag under load (that was the real cause once) | `sendPWMUpdate()` |
+| SBUS panel reads "No data — link idle" but the passthrough still follows the stick | The live-**monitor** stream stopped, not SBUS. A board reboot resets `wsMonitorActive`, so the frozen tool never gets a fresh `START_MONITOR`. The tool now auto-re-subscribes when the panel goes stale; otherwise disconnect + reconnect | `sendPWMUpdate()`, `_sbusStaleTick()` |
 
 ## Mesh / Via WCB
 
@@ -58,6 +60,7 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | A servo moves at the wrong speed long after the action that set it | Maestro speed/accel are **sticky limits** on the channel. Reset to 0 to clear | [MAESTRO_ACTIONS.md](MAESTRO_ACTIONS.md) |
 | Servo buzzes or hunts at rest | Set `releaseIdleMs` to de-energize after idle. **A released servo has no holding torque** — not for a load-bearing bearing | `maestroIdleReleaseTick()` |
 | Panels sit half-open at stick rest | Use `midClosed` on the output: centre maps to `posMin`, only the upper half of travel sweeps | `sbusToRangeMidClosed()` |
+| Passthrough servo jumps when you flip the **global mode** switch | A knob bound to its OWN switch via `modeSwitchOverride` was re-armed by the global-mode change and re-dispatched to the current stick position. Now only true global-mode followers (`modeSwitchOverride < 0`) re-arm. If it still moves, it's `releaseIdleMs` going limp then snapping back on the next dispatch | `resetModeAwareKnobs()` |
 | Remote trigger behaves differently from a local press | It must be dispatching on Core 1. Remote `TRIGGER` is queued through `remoteTriggerQueue`, not run inline on Core 0 | `drainRemoteTriggers()` |
 
 ## Serial peripherals
@@ -112,4 +115,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | Added rows: choppy remote passthrough while live-monitoring (`sendPWMUpdate` loop-stall, now guarded) + servo-power caveat; "SBUS panel No data but passthrough works" (stale monitor after reboot, tool auto-re-subscribes); passthrough servo jumps on global-mode flip (`resetModeAwareKnobs` no longer re-arms override-switch knobs). |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

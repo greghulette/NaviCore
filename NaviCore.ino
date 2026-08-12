@@ -2568,7 +2568,13 @@ void sendPWMUpdate() {
     sbusOk ? "true" : "false", sbusFps, sbusFrameCount, ageMs,
     lostFrameOld ? "true" : "false", sbusFailsafe ? "true" : "false",
     sbusRx.detectedChCount, sbusRx.detectedFrameLen, channelBuf);
-  Serial.println(buf);
+  // Best-effort, NEVER blocking: the live monitor must not stall loop() — SBUS decode and
+  // the Maestro-passthrough broadcast run there, and a blocked USB write (HWCDC has a 50 ms
+  // tx timeout) starves them, which shows up as choppy remote passthrough. If the host
+  // isn't draining fast enough — or the tab/USB closed without a STOP_MONITOR, leaving this
+  // flag stuck on — DROP this frame; the next is 50 ms out. Mirrors wcbStreamLog()/vlogf().
+  const size_t _pwmLen = strlen(buf);              // +2 for println's CRLF
+  if (Serial.availableForWrite() >= (int)(_pwmLen + 2)) Serial.println(buf);
 }
 
 // =============================================================================
