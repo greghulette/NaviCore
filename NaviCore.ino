@@ -2168,8 +2168,15 @@ void processKnobs() {
 // until the stick is nudged past the deadband. Called from both mode-commit
 // sites (processSbus SBUS decode + rc_telemetry SET_MODE).
 void resetModeAwareKnobs() {
+  // A GLOBAL mode change must re-arm ONLY the knobs that actually follow the global mode.
+  // A knob with a modeSwitchOverride (>=0) follows its OWN switch, so the global-mode
+  // change did NOT change ITS mode — re-arming it forces a spurious re-dispatch that
+  // snaps the servo to the current stick position on every mode-selector flip (and, for a
+  // REMOTE Maestro, fires a needless mesh broadcast each time). Its own switch moving
+  // still re-arms it via the per-knob lastKnobMode check in processKnobs().
   for (int i = 0; i < RC_NUM_KNOBS; i++)
-    if (rcConfig.knobs[i].modeAware) lastKnobRaw[i] = 0xFFFF;
+    if (rcConfig.knobs[i].modeAware && rcConfig.knobs[i].modeSwitchOverride < 0)
+      lastKnobRaw[i] = 0xFFFF;
 }
 
 // De-energize idle passthrough servos. A Maestro-passthrough output with
