@@ -38,14 +38,30 @@ discarding it. `rcExecuteActionNow()` does exactly that on both `RA_WCB_UNICAST`
 recoverable and the next trigger supersedes it) but is the wrong default for anything
 that must land exactly once.
 
-**The one-hop cap.** A command that arrives over the mesh is executed locally and is
-**never** re-forwarded onto the mesh — every forward path in the WCB firmware gates on
-`lastReceivedViaESPNOW` (`routeStoredOrCap()`, `sendMaestroCommand()`, the `;L` WLED
-proxy, `recallStoredCommand()`). That is deliberate anti-storm behaviour. The consequence
-for a controller: a `^`-chain sent **unicast** runs only the parts its target board hosts
-and silently drops the rest. A `^`-chain **broadcast** is fine — every board hears it and
-runs its own parts. NaviCore does not split or validate chains in firmware; the config
-tool warns at authoring time instead.
+**The one-hop cap applies to implicit routing only.** A mesh-arrived command is not
+re-routed onward — but only where the receiving board has to *decide* which board hosts
+the device. Those paths, and only those, gate on `lastReceivedViaESPNOW`:
+
+| Verb | Gate |
+|---|---|
+| `;A` MP3 · `;D` DFPlayer · `;H` HCR | `routeStoredOrCap()` — `WCB.ino` ≈5382, called ≈5413/5416/5419 |
+| `;M` Maestro | `sendMaestroCommand()` — `WCB_Maestro.cpp` ≈143 |
+| `;L` WLED | remote proxy — `WCB_WLED.cpp` ≈151 |
+| `;C` / `;SEQ` | `recallStoredCommand()` — `WCB.ino` ≈5672 |
+| any re-**broadcast** | `sendESPNowMessage()` — `WCB.ino` ≈2145, gated on `target == 0` |
+
+**Explicit `;w<n>` routing is *not* capped.** `processCommandCharcter()` dispatches `;w`
+with no gate (≈5404); a `;w` aimed at the receiving board runs locally (≈5586) and one
+aimed elsewhere re-forwards by unicast (≈5604), which `sendESPNowMessage()` allows because
+its cap covers broadcast only. `;s<n>` (local serial write) and `;P` (local PWM) never
+route at all.
+
+So in a `^`-chain sent **unicast**, a part is dropped only when it is an implicitly-routed
+verb *and* its device lives on a board other than the target. `;w3;s4:PP100^;w3;s4:PL5`
+is delivered correctly whichever board you aim it at; `;M316^<CA1022>` aimed at WCB1 loses
+the Maestro trigger if that Maestro is hosted on WCB3. A `^`-chain **broadcast** is always
+fine — every board hears it and runs its own parts. NaviCore does not split or validate
+chains in firmware; the config tool warns at authoring time, keyed on that verb list.
 
 ---
 
@@ -355,6 +371,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-08-12 | _(uncommitted)_ | §1: documented the **ensured-send degradation contract** (`_findFreePending` never evicts an outstanding ensured slot; `_sendPacket` degrades to best-effort and returns `false`, which `rcExecuteActionNow` deliberately discards) and the **one-hop cap** (a mesh-arrived command is never re-forwarded, so a `^`-chain unicast drops every part hosted elsewhere). |
+| 2026-08-12 | _(uncommitted)_ | §1: documented the **ensured-send degradation contract** (`_findFreePending` never evicts an outstanding ensured slot; `_sendPacket` degrades to best-effort and returns `false`, which `rcExecuteActionNow` deliberately discards) and the **one-hop cap** — which gates *implicit* routing only (`;A`/`;D`/`;H`, `;M`, `;L`, `;C`/`;SEQ`, and any re-broadcast). Explicit `;w<n>` is not capped: self-target runs local (`WCB.ino` ≈5586), remote re-forwards by unicast (≈5604), and `sendESPNowMessage` caps `target == 0` only (≈2145). So a unicast `^`-chain loses a part only when it is an implicitly-routed verb whose device is hosted off-target. |
 | 2026-08-05 | _(uncommitted)_ | Added the `;D` DFPlayer verb to the device-command table (10-byte binary frame on the wire; `;D` text only travels between boards) and `DBG_DFP` = bit 6 to the debug bitmask. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

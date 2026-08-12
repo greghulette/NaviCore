@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">12.11:51.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">12.14:50.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -12625,22 +12625,33 @@ function _appendCommandView(container, action) {
   row1.appendChild(makeFieldGroup('Command', cmdInput));
   container.appendChild(row1);
 
-  // One-hop cap: a command that arrives over the mesh is executed locally and is
-  // NEVER re-forwarded onto the mesh (the WCB firmware's anti-storm rule — every
-  // forward path gates on lastReceivedViaESPNOW). So a "^"-chain UNICAST to one
-  // board runs only that board's own parts and silently drops every part hosted
-  // elsewhere: no error, no log, and the symptom reads as "half my action works".
-  // Broadcast is not exposed — every board hears it and runs its own parts. Say
-  // so here, at authoring time, which is the only place it's cheap to fix.
+  // One-hop cap. The WCB firmware blocks a mesh-arrived command from being
+  // re-routed onward, but ONLY where the receiving board has to DECIDE which
+  // board hosts the device — routeStoredOrCap() for ;A/;D/;H (WCB.ino ≈5382),
+  // sendMaestroCommand() for ;M (WCB_Maestro.cpp ≈143), the ;L WLED proxy
+  // (WCB_WLED.cpp ≈151), recallStoredCommand() for ;C/;SEQ (WCB.ino ≈5672).
+  // In a "^"-chain sent UNICAST, such a part is dropped silently when its device
+  // lives on some other board — "half my action works", with no error anywhere.
+  //
+  // EXPLICIT routing is NOT capped and must not be warned about: a mesh-arrived
+  // ";w<n>" still forwards (sendESPNowMessage caps only target 0 — the broadcast
+  // storm case — WCB.ino ≈2145), a ";w" aimed at the receiver runs locally
+  // (≈5586), and ";s<n>"/";P" are local writes that never route. So
+  // ";w3;s4:PP100^;w3;s4:PL5" is delivered correctly and gets no warning.
+  const IMPLICIT_ROUTED = /^;\s*(SEQ|[ADHMLC])/i;   // NB: ";s" must not match — hence SEQ spelled out
   const chainWarn = document.createElement('div');
   chainWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
   container.appendChild(chainWarn);
   const refreshChainWarn = () => {
     const dest = document.getElementById(fid + '-destsel')?.value || '';
+    const cmd  = cmdInput.value || '';
     // sync() writes a bare board number for unicast ('0'/"W<n>S<p>" = broadcast, "S<n>" = local serial).
-    if (/^[1-9]\d*$/.test(dest) && (cmdInput.value || '').includes('^')) {
-      chainWarn.textContent = `⚠ Chained command sent to one board — WCB${dest} runs only the parts it hosts itself and silently drops the rest. `
-                            + `Send to "All boards (broadcast)" instead, or split the chain into one action per part.`;
+    const parts = cmd.split('^');
+    if (/^[1-9]\d*$/.test(dest) && parts.length > 1 &&
+        parts.some(p => IMPLICIT_ROUTED.test(p.trim()))) {
+      chainWarn.textContent = `⚠ Chained command sent to one board — any part whose device (Maestro / WLED / HCR / MP3 / DFPlayer / stored sequence) `
+                            + `is hosted somewhere other than WCB${dest} is dropped silently, because a command that arrived over the mesh is never re-routed onward. `
+                            + `Fine if every device in the chain lives on WCB${dest}; otherwise broadcast, or split into one action per part.`;
       chainWarn.style.display = '';
     } else {
       chainWarn.style.display = 'none';

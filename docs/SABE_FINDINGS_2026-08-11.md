@@ -23,23 +23,35 @@ transfer.
 
 ## 1. The one that matters: the one-hop cap vs `^`-chains
 
-**Claim:** a command that arrives over the mesh is executed locally and is **never**
-re-forwarded onto the mesh. So a `^`-chain unicast to one board runs only that board's local
-parts; every part hosted elsewhere is silently dropped. No error, no log on our side.
+**The claim as first written** — "a mesh-arrived command is executed locally and is *never*
+re-forwarded, so a `^`-chain unicast runs only that board's local parts and every part
+hosted elsewhere is silently dropped" — **is too broad.** The cap is real but narrower, and
+the difference decides whether a given chain works.
 
-**Verified in our own firmware**, in four independent places, all keyed on the global
-`lastReceivedViaESPNOW`:
+**Capped — the receiving board would have to *decide* where the device lives:**
 
-| Site | Symbol | Effect when set |
-|---|---|---|
-| `WCB.ino` ≈5382 | `routeStoredOrCap()` | HCR/MP3 capability triggers run local, never forwarded |
-| `WCB_Maestro.cpp` ≈143 | `sendMaestroCommand()` | `config.remoteWCB > 0 && !lastReceivedViaESPNOW` — remote Maestro forward is skipped |
-| `WCB_WLED.cpp` ≈151 | WLED runtime dispatch | remote `;L` proxy forward is skipped |
-| `WCB.ino` ≈5672 | `recallStoredCommand()` | a mesh-arrived `;C`/`;SEQ` does not fan out |
+| Site | Symbol | Verbs | Effect when `lastReceivedViaESPNOW` is set |
+|---|---|---|---|
+| `WCB.ino` ≈5382 (called ≈5413/5416/5419) | `routeStoredOrCap()` | `;A` MP3, `;D` DFPlayer, `;H` HCR | runs local, never forwarded |
+| `WCB_Maestro.cpp` ≈143 | `sendMaestroCommand()` | `;M` | remote Maestro forward skipped |
+| `WCB_WLED.cpp` ≈151 | WLED runtime dispatch | `;L` | remote proxy forward skipped |
+| `WCB.ino` ≈5672 | `recallStoredCommand()` | `;C` / `;SEQ` | does not fan out |
+| `WCB.ino` ≈2145 | `sendESPNowMessage()` | any | re-**broadcast** suppressed (`target == 0` only) |
+
+**Not capped — explicit addressing:** `processCommandCharcter()` dispatches `;w` with no
+gate at all (≈5404). A `;w` naming the receiving board runs locally (≈5586,
+`enqueueCommand(payload, 0)`); a `;w` naming another board re-forwards by **unicast**
+(≈5604), which `sendESPNowMessage()` permits because its cap covers broadcast only. `;s<n>`
+(local serial write) and `;P` (local PWM) never route in the first place.
+
+So the real consequence for a controller: **a unicast `^`-chain loses a part only when that
+part is an implicitly-routed verb whose device is hosted on a board other than the target.**
+`;w3;s4:PP100^;w3;s4:PL5` is delivered correctly whichever board it is aimed at.
+`;M316^<CA1022>` aimed at WCB1 loses the Maestro trigger when that Maestro lives on WCB3 —
+which is exactly Sabé's case, and why the original claim looked general from one data point.
 
 The comments call it "the one-hop cap — no loops, no duplicate fires." It is deliberate and
-correct anti-storm behaviour. The consequence for a *controller* is the part worth writing
-down.
+correct anti-storm behaviour, and the loop it prevents is the *broadcast* one.
 
 **Sabé found this the hard way on their first ground day (2026-08-09):** `;M316^<CA1022>`
 unicast to WCB1 played the sound and silently dropped the WCB3 Maestro trigger. Their fix is
@@ -50,10 +62,12 @@ to split the chain at the source and route each part independently —
 
 `RA_WCB_UNICAST` sends the action's command string verbatim to one board
 (`NaviCore.ino` ≈1729, `rcExecuteActionNow()`). The command is free text authored in the
-config tool. Nothing validates it, splits it, or warns.
+config tool, and the firmware neither validates nor splits it — the config tool warns at
+authoring time instead (see the options below).
 
-So an action authored as `;M316^;L2,ON` targeted at WCB1 loses the `;L2,ON` — and the
-symptom is "half my action works", which reads as a WLED problem, not a routing one.
+So an action authored as `;M316^;L2,ON` targeted at WCB1 loses the `;L2,ON` **if WLED 2 is
+wired to a board other than WCB1** — and the symptom is "half my action works", which reads
+as a WLED problem, not a routing one. If both devices are on WCB1 the chain is correct.
 
 `RA_WCB_BROADCAST` (`NaviCore.ino` ≈1737) is **not** exposed the same way: every board
 receives the broadcast and runs its own local parts, so a mixed chain resolves correctly.
@@ -65,33 +79,60 @@ chains ever reach it.
 
 ### The open question, answered
 
-**Nothing authors `^`-chains today.** Checked across every catalog the tool can load: the
-21 DroidNet board files, `cmdlib/navicore/navicore.json`, and the private
-`Leia_Projector/navicore-command-library/leia.json`. The **only** `^` anywhere in the
-command library is `wcb-native.json` ≈880 — a `[^^]+` parameter pattern on `?SEQ,SAVE`
-that *forbids* one. No template emits a chain, and no encoder joins parts with `^`. The
-tool's own 67 `^` occurrences are all regex anchors or negated character classes.
+**Nothing authors `^`-chains today.** The strongest evidence is the field data, not the
+catalog: five real config exports spanning 2026-07-27 → 2026-08-12 contain **zero `^`
+characters** anywhere in the file.
 
-So a chained Via-WCB unicast can only come from a human typing free text into the command
+The catalog agrees. Checked across every source the tool can load — the 21 DroidNet board
+files, `cmdlib/navicore/navicore.json`, and the private
+`Leia_Projector/navicore-command-library/leia.json` — no template emits a chain and no
+encoder joins parts with `^`. The tool's own 67 `^` occurrences are all regex anchors or
+negated character classes.
+
+Two qualifiers on that sweep:
+
+- **`;T` is chain-shaped by design.** `wcb.timer` is `;T{ms},{command}` with a free-text
+  `command` param, and `;T` is not a container — `command_timer.cpp` ≈97 splits the whole
+  line on `^` *first*, then treats `;T` tokens as group boundaries. "Do A, then 500 ms later
+  do B" is `;A,PLAY,1^;T500,;M3,goHome`. So the library can produce a chain; it just has no
+  template that does so on its own.
+- **The one `^` in the catalog is inert, and backwards.** `wcb-native.json` ≈880 puts
+  `[^^]+` on the `?SEQ,SAVE` value. `pattern` is never read anywhere in the tool
+  (`_ncCommandPattern()` builds its decode regex from `width`/`enum`/`type` only), so it
+  enforces nothing — and the firmware deliberately *preserves* `^` inside a `?SEQ,SAVE`
+  value (`WCB.ino` ≈1914-1946: bare `^` and `^;` belong to the sequence, only `^?` ends it).
+  A catalog bug with no current effect.
+
+Neither changes the conclusion. A chained Via-WCB unicast can only come from a human typing
+free text into the command
 box. That is what option 1 covers, and it is what shipped.
 
 ### Options, cheapest first
 
-1. **Config-tool validation only** — warn when a Via-WCB *unicast* action command contains
-   `^`, with a note explaining the one-hop cap. No firmware change, no wire change, catches
-   it at authoring time where the user can actually fix it. **Shipped** —
-   `refreshChainWarn()` in `_appendCommandView()`, re-evaluated on both the command text
-   and the "Send to" destination. See [CONFIG_TOOL.md §9](CONFIG_TOOL.md#9-two-extras-worth-knowing).
+1. **Config-tool validation only** — warn at authoring time, where the user can actually fix
+   it. No firmware change, no wire change. **Shipped** — `refreshChainWarn()` in
+   `_appendCommandView()`, re-evaluated on both the command text and the "Send to"
+   destination. It fires only when a part starts with an implicitly-routed verb
+   (`IMPLICIT_ROUTED` = `;A` `;D` `;H` `;M` `;L` `;C`/`;SEQ`), so an explicit-routing chain
+   like `;w3;s4:PP100^;w3;s4:PL5` stays quiet.
+   See [CONFIG_TOOL.md §9](CONFIG_TOOL.md#9-two-extras-worth-knowing).
 2. **Firmware warning** — `dlog(DBG_WCB, …)` when a `RA_WCB_UNICAST` command contains `^`.
    Cheap, but only visible to someone already watching the console. *Not adopted* — the
    authoring-time warning reaches the user who can fix it; this one only reaches someone
    already debugging.
-3. **Split and route, Sabé-style** — split on `^` and route each part. We can do this
-   *better* than Sabé can, because we already consume `maestroIds[]` from WDP
-   (`wcb->setMaestroIds()` / `getNeighbor()`), so `;M` parts can be routed to their real host
-   instead of Sabé's `;M<digit> → WCB<digit>` topology assumption. Biggest change; only worth
-   it if chained Via-WCB actions turn out to be a thing people actually author — which, per
-   the catalog sweep above, they currently are not. *Deferred.*
+3. **Split and route, Sabé-style** — split on `^` and route each part. *Deferred, and the
+   case for it is weaker than it first looked.* Splitting at the source would mean
+   duplicating the fleet's routing table in the controller to decide where each part goes —
+   and the mesh already has a correct answer for that: address the part explicitly with
+   `;w<n>`, which is not capped. The cap itself is right and should not be worked around; it
+   is what stops a re-broadcast loop and duplicate fires. Only worth revisiting if chained
+   Via-WCB actions become common, which the evidence says they are not.
+
+**A note on the cap itself.** Nothing above is a criticism of the one-hop rule. It is the
+correct design — without it a mesh-arrived broadcast would be re-broadcast by every board
+that heard it, and every capability-routed verb would fire once per hop. The cost is that
+*implicit* routing is one-hop-only, and the fix for that is explicit `;w<n>` addressing, not
+a weaker cap.
 
 ---
 
@@ -314,5 +355,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | **Corrected §1.** The one-hop cap is narrower than first written: it gates *implicit* routing only (`;A`/`;D`/`;H` via `routeStoredOrCap`, `;M`, `;L`, `;C`/`;SEQ`, and any re-broadcast). Explicit `;w<n>` is **not** capped — self-target runs local (`WCB.ino` ≈5586), remote re-forwards by unicast (≈5604), and `sendESPNowMessage` caps `target == 0` only (≈2145). So `;w3;s4:PP100^;w3;s4:PL5` is delivered correctly. Narrowed the config-tool warning to the implicitly-routed verbs, and downgraded option 3 — the cap is correct and `;w` is the supported answer. Also recorded the `;T` chain-shape qualifier and that catalog `pattern` fields are inert. |
 | 2026-08-12 | _(uncommitted)_ | §1 open question answered (no catalog emits `^`-chains) and option 1 shipped; §2.1/2.2/2.5 adopted; §3.1 recorded in PROTOCOLS.md; §3.2 fixed in the WCB wiki, incl. a second instance in `Configuration-Guide.md`. |
 | 2026-08-11 | _(uncommitted)_ | Initial version. Read-only review of Sabé `Sabe-main` against NaviCore, WCBClient 1.12.0, and WCB firmware 6.2.0. |
