@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">12.10:03.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">12.11:51.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -12625,6 +12625,28 @@ function _appendCommandView(container, action) {
   row1.appendChild(makeFieldGroup('Command', cmdInput));
   container.appendChild(row1);
 
+  // One-hop cap: a command that arrives over the mesh is executed locally and is
+  // NEVER re-forwarded onto the mesh (the WCB firmware's anti-storm rule — every
+  // forward path gates on lastReceivedViaESPNOW). So a "^"-chain UNICAST to one
+  // board runs only that board's own parts and silently drops every part hosted
+  // elsewhere: no error, no log, and the symptom reads as "half my action works".
+  // Broadcast is not exposed — every board hears it and runs its own parts. Say
+  // so here, at authoring time, which is the only place it's cheap to fix.
+  const chainWarn = document.createElement('div');
+  chainWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
+  container.appendChild(chainWarn);
+  const refreshChainWarn = () => {
+    const dest = document.getElementById(fid + '-destsel')?.value || '';
+    // sync() writes a bare board number for unicast ('0'/"W<n>S<p>" = broadcast, "S<n>" = local serial).
+    if (/^[1-9]\d*$/.test(dest) && (cmdInput.value || '').includes('^')) {
+      chainWarn.textContent = `⚠ Chained command sent to one board — WCB${dest} runs only the parts it hosts itself and silently drops the rest. `
+                            + `Send to "All boards (broadcast)" instead, or split the chain into one action per part.`;
+      chainWarn.style.display = '';
+    } else {
+      chainWarn.style.display = 'none';
+    }
+  };
+
   // Destination — to the right of the command. WLED routes by id (no picker);
   // everything else picks from ONE "Send to" list: broadcast, a real/known WCB,
   // or a serial port. The chosen value drives the firmware action type
@@ -12680,6 +12702,7 @@ function _appendCommandView(container, action) {
       else                   { dest = `W${w}S${p}`; tp = 'wcb_broadcast'; }
       destHidden.value = dest;
       if (typeSel) typeSel.value = tp;
+      refreshChainWarn();   // unicast⇄broadcast changes whether a "^" chain is a problem
       const m = /^fields-(.+)-(\d+)$/.exec(fid); if (m) refreshTierState(m[1]);
     };
     wcbSel.onchange  = () => {
@@ -12735,7 +12758,7 @@ function _appendCommandView(container, action) {
     hint.textContent = `\u{1F4DA} ${d.board.name} · ${label}`;
   };
   setHint();
-  cmdInput.oninput = setHint;
+  cmdInput.oninput = () => { setHint(); refreshChainWarn(); };
   container.appendChild(hint);
 }
 

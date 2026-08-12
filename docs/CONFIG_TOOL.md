@@ -104,6 +104,7 @@ Where to look when changing a given area:
 | Live monitor | `updatePWMDisplay()`, `updateChannelsGrid()`, `updateTransmitterAnimation()`, `markActiveChannels()` |
 | Mesh status | `renderWcbStatus()`, `startWcbStatusPoll()`, `_maybeRequestWcbMeta()` |
 | Action rows | `buildActionRow()`, `renderArgs()`, `_renderMaestroActionArgs()`, `renderHcrParamFields()`, `renderMp3ArgField()` |
+| Wire-command row (command + "Send to") | `_appendCommandView()` — shared by the tier rows *and* the timeline popover; `readActionFromFid()` reads it back |
 | Command library | `ncCommandLibrary()`, `ncEncodeCommand()`, `ncDecodeCommand()`, `_cmdlibDestFieldHtml()` |
 | Maestro panel | `renderMaestroLocations()`, `_importMaestroFile()` (Control Center XML), `_maestroChInfo()` |
 | Smoothing | `renderSmoothingPane()`, `_smoothProfiles()` |
@@ -200,6 +201,16 @@ cannot duplicate an event. It can also export a clip as Maestro **script source*
 
 ## 9. Two extras worth knowing
 
+**The `^`-chain warning.** A wire-command row shows a red line when the command contains
+`^` **and** the destination is a single board. A mesh-arrived command is run locally and
+never re-forwarded, so a unicast chain silently drops every part hosted on another board.
+The check lives in `refreshChainWarn()` inside `_appendCommandView()` and re-runs on both
+triggers that can change the answer — typing in the command box, and changing "Send to".
+It keys on the hidden `-destsel` value (a bare board number means unicast), so it stays
+correct as the destination dropdowns rewrite the action type. Authoring time is the only
+cheap place to catch this: the firmware cannot tell a deliberately-local chain from a
+mistake, and the symptom in the field reads as "half my action works".
+
 **Cheat sheet QR.** The 📱 button publishes a generated cheat-sheet page through a live
 Cloudflare Worker relay (source in [`tools/cheatsheet-relay-worker.js`](../tools/cheatsheet-relay-worker.js))
 and shows a QR code for it.
@@ -266,6 +277,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | Wire-command rows now warn (`refreshChainWarn()` in `_appendCommandView()`) when a `^`-chain is aimed at a **single** board — the WCB one-hop cap silently drops every part hosted elsewhere. Re-evaluated on both the command text and the "Send to" destination. Indexed `_appendCommandView()` in the function map. |
 | 2026-08-12 | _(uncommitted)_ | **Export** now downloads a **complete JSON backup** (was the lossy CSV, which silently dropped knob/servo passthrough outputs); **Import** auto-detects JSON vs legacy CSV. `exportConfigCsv` is retained as a partial spreadsheet export only. Added an 👁 show/hide toggle to the cloud-backup password field. The live monitor now **auto-re-subscribes** (re-sends `START_MONITOR` from `_sbusStaleTick` when the SBUS panel goes stale while a link is open), so it self-heals after a board reboot drops `wsMonitorActive`. |
 | 2026-08-11 | _(uncommitted)_ | WCB profiles are now **edit-in-place**: selecting a profile makes the WCB Network fields edit that profile (captured back on switch/Save via `_snapshotLiveIntoSelectedProfile`), so changing a selected profile's password sticks to it instead of being lost. Profiles are also included in **CSV Export/Import** (`wcbProfile<N>_<field>` rows). |
 | 2026-08-11 | _(uncommitted)_ | WCB profiles now live **in the config** (`config.wcbProfiles` ↔ firmware `rcConfig.wcbProfiles`, cap `WCB_MAX_PROFILES`=6) instead of browser localStorage — they travel with the droid + backups; legacy localStorage profiles auto-migrate on first Load. Also fixed a curly-quote (`”`) in the profile-select `querySelectorAll` that silently no-op'd the force-check. |

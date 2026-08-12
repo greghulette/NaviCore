@@ -35,6 +35,17 @@ someone using NaviCore today. These pages are the other audience: us, mid-change
 | [WCB_NATIVE_MAESTRO_DESIGN.md](WCB_NATIVE_MAESTRO_DESIGN.md) | Making Pololu servo control a native WCB verb |
 | [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md) | DFPlayer Mini as a second audio device — `;D` verb set, wire frames, routing |
 | [MAESTRO_ACTIONS.md](MAESTRO_ACTIONS.md) | Maestro speed/accel limits, unit maths, delay semantics |
+| [E22_REMOTE_LINK_DESIGN.md](E22_REMOTE_LINK_DESIGN.md) | NaviHiltCore (`boardType 2`) — E22 LoRa handheld remotes as an alternate input source alongside SBUS |
+
+## Cross-repo findings
+
+Reviews of other `WCB_Client` consumers on the same mesh. Decision input, not settled design
+— each item carries a cost estimate and a recommendation. Items that have since been adopted
+are marked **shipped** inline in the page; the rest are still open questions.
+
+| Document | Subject |
+|---|---|
+| [SABE_FINDINGS_2026-08-11.md](SABE_FINDINGS_2026-08-11.md) | Sabé (Todd Word's droid, device 20). The `^`-chain one-hop cap, six adoption candidates, two corrections to how the ensured-send table and `?ETM,CHKSM` default actually behave. Shipped: the authoring-time chain warning, board ONLINE/OFFLINE logging, the boot roll call, the empty-password banner, both corrections. Open: checksum escape hatch, inbound rate limit, host-side tests |
 
 ---
 
@@ -105,5 +116,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-11 | _(uncommitted)_ | Indexed [E22_REMOTE_LINK_DESIGN.md](E22_REMOTE_LINK_DESIGN.md) under Feature design notes. |
+| 2026-08-12 | _(uncommitted)_ | Cross-repo findings blurb updated — items from the Sabé review have now been adopted, so the section no longer claims nothing has been acted on. |
+| 2026-08-11 | _(uncommitted)_ | Added the Cross-repo findings section and indexed [SABE_FINDINGS_2026-08-11.md](SABE_FINDINGS_2026-08-11.md). |
 | 2026-08-05 | _(uncommitted)_ | Indexed [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md) under Feature design notes. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

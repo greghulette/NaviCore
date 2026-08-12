@@ -97,6 +97,17 @@ uint32_t      g_peerGraceUntil = 0;   // millis(): boards first heard before thi
 uint32_t      g_peerFlashUntil = 0;   // millis(): show the new-peer LED pulse until then (0 = not flashing)
 #define PEER_GRACE_MS 8000            // suppress the initial fleet-discovery burst for 8 s after wcb->begin()
 
+// ── Boot roll call ──────────────────────────────────────────────────────────
+// One shot, ROLL_CALL_MS after wcb->begin(): name every board in the configured
+// floor (1..quantity) that has still never been heard from. This is distinct
+// from the online/offline transition log — a board that comes up and later
+// drops gets a transition line, but a board that was never there at all
+// produces NO evidence on this console at all without this.
+// It is a ROLL CALL, NOT AN ALARM: "WCB3 absent" is worth one line whether the
+// answer is "the dome is on the bench" or "check its power".
+uint32_t g_rollCallAt   = 0;      // millis() deadline; 0 = disarmed/already run
+#define  ROLL_CALL_MS 30000       // long enough for ETM heartbeats from a slow-booting board
+
 // ── Remote TRIGGER → deferred dispatch (Core 0 → Core 1) ────────────────────
 // A remote {"type":"TRIGGER"} arrives in onWCBCommand → rcTelemetry::handle() on
 // Core 0 (WiFi task). Dispatching it there would run the full action chain
@@ -3737,6 +3748,25 @@ void setup() {
   // Pin the ESP-NOW radio to the mesh channel every WCB is on BEFORE begin() — the
   // ESP32 has one radio, so a mismatched channel makes this RC silently unreachable.
   wcb->setMeshChannel(rcConfig.wcbNetwork.channel);
+  // An EMPTY mesh password is a silent, symptomless blackout. The password is a
+  // plain-text namespace field on every packet (wcb_packet_etm_t::structPassword)
+  // and the receive path strncmp's it before anything else (WCB_Client.cpp ≈2036),
+  // so a mismatch means nothing is heard and nothing is received. begin() does NOT
+  // validate it — it only range-checks device_id and brings up WiFi/ESP-NOW — so
+  // this returns true, no fault is latched, and the orange LED never lights. Name
+  // the exact field, loudly, because nothing downstream will.
+  if (rcConfig.wcbNetwork.password[0] == '\0') {
+    Serial.println("┌───────────────────────────────────────────────────────────────┐");
+    Serial.println("│  WCB MESH PASSWORD IS EMPTY — this board is deaf AND mute.     │");
+    Serial.println("│                                                               │");
+    Serial.println("│  Every ESP-NOW packet carries the network password, and a      │");
+    Serial.println("│  receiver drops any packet whose password doesn't match. Until │");
+    Serial.println("│  it is set, no WCB hears this board and this board hears none. │");
+    Serial.println("│                                                               │");
+    Serial.println("│  Fix: config tool → WCB Network → Password. It must match the  │");
+    Serial.println("│  WCBs' own password. A reboot is required to take effect.      │");
+    Serial.println("└───────────────────────────────────────────────────────────────┘");
+  }
   if (!wcb->begin()) {
     Serial.println("[WCB] ERROR: wcb->begin() failed — check WCB Network settings in GUI");
     // Latch the fault for the LED arbiter: updateStatusLed() (loop) displays a
@@ -3788,6 +3818,12 @@ void setup() {
     peerEventQueue   = xQueueCreate(8, sizeof(uint8_t));
     g_peerGraceUntil = millis() + PEER_GRACE_MS;
     wcb->onNeighbor(onWcbNeighbor);
+    // Board online/offline transitions → one console line each. Registered after
+    // begin() so the boot-time burst of first heartbeats is reported as ONLINE
+    // rather than lost. See onWcbStatus for the two-task/Core-0 constraint.
+    wcb->onStatusChange(onWcbStatus);
+    // Arm the one-shot boot roll call — names any configured board still unheard.
+    g_rollCallAt = millis() + ROLL_CALL_MS;
     Serial.printf("[WCB] Joined network as device ID %d (quantity=%d)\n",
                   rcConfig.wcbNetwork.deviceId, rcConfig.wcbNetwork.quantity);
   }
@@ -4164,6 +4200,55 @@ void drainPeerEvents() {
   }
 }
 
+// ── Board ONLINE / OFFLINE transitions ──────────────────────────────────────
+// The library tracks online/offline whether or not this is registered
+// (isOnline()); registering it is what makes the TRANSITION visible. Without
+// it a board that drops mid-show leaves no trace on this console at all.
+//
+// Runs on TWO different tasks: the ONLINE edge fires from the ESP-NOW receive
+// callback (Core 0 — WCB_Client.cpp ≈2063, on the first heartbeat after
+// silence), the OFFLINE edge from wcb->update() in loop() (Core 1 —
+// _checkOfflineBoards, WCB_Client.cpp ≈1938). So the body must stay Core-0
+// safe: one printf, no flash, no NVS, no droid hardware. Both edges are gated
+// by the ETM heartbeat miss count, so this cannot flood the WiFi task.
+//
+// The name comes from rcTelemetry::wcbAlias() rather than wcb->getNeighbor():
+// wcbAlias is written on Core 0 terminator-first and is invariantly terminated,
+// so the Core-1 offline read can't tear onto a half-written name.
+void onWcbStatus(uint8_t wcbID, bool online) {
+  if (wcbID < 1 || wcbID > WCB_MAX_BOARDS) return;
+  const char* alias = rcTelemetry::wcbAlias((int)wcbID);
+  Serial.printf("[WCB] WCB%u%s%s %s\n", wcbID,
+                alias[0] ? " · " : "", alias, online ? "ONLINE" : "OFFLINE");
+}
+
+// ── Boot roll call (one shot, ROLL_CALL_MS after begin) ─────────────────────
+// Name every board in the configured floor we have STILL never heard from.
+// Distinct from onWcbStatus: a board that comes up and later drops gets a
+// transition line, but a board that was never there at all produces nothing.
+// A roll call, not an alarm — one line is worth it whether the answer is
+// "the dome is on the bench" or "check its power".
+void checkBootRollCall() {
+  if (!g_rollCallAt || (int32_t)(millis() - g_rollCallAt) < 0) return;
+  g_rollCallAt = 0;                                  // one shot, however it ends
+  if (!wcb || !wcbReady) return;
+  const uint8_t self = rcConfig.wcbNetwork.deviceId;
+  uint8_t total = 0, missing = 0;
+  uint8_t floorMax = rcConfig.wcbNetwork.quantity;
+  if (floorMax > WCB_MAX_BOARDS) floorMax = WCB_MAX_BOARDS;
+  for (uint8_t id = 1; id <= floorMax; id++) {
+    if (id == self) continue;                        // ourselves — never a peer
+    total++;
+    if (wcb->isOnline(id)) continue;
+    const char* alias = rcTelemetry::wcbAlias((int)id);
+    Serial.printf("[WCB] roll call: WCB%u%s%s never heard from\n", id,
+                  alias[0] ? " · " : "", alias);
+    missing++;
+  }
+  Serial.printf("[WCB] roll call: %u/%u board(s) online %us after join\n",
+                (uint8_t)(total - missing), total, (unsigned)(ROLL_CALL_MS / 1000));
+}
+
 // Dispatch remote TRIGGERs deferred from the Core-0 onWCBCommand callback (loop,
 // Core 1). Running rcDispatch here — the same core as a local matrix press —
 // means the Maestro UART, HCR/MP3 aux-serial, speed/accel caches, tap-timing
@@ -4214,6 +4299,10 @@ void loop() {
   // New WCB peer detected on the mesh → fire the configured action + passive
   // alert (deferred here from the Core-0 onNeighbor callback). Cheap no-op idle.
   drainPeerEvents();
+
+  // One-shot boot roll call — name any configured board never heard from.
+  // Self-disarms on its first run, so this is a single compare afterwards.
+  checkBootRollCall();
 
   // Remote TRIGGER — dispatch any {"type":"TRIGGER"} relayed from the config tool
   // / mesh, deferred here from the Core-0 onWCBCommand callback so it shares the

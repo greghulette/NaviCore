@@ -22,6 +22,31 @@ command into a 200-byte `structCommand[]` and appends `"|CRC%08X"` (12 B). A pay
 187 B truncates the CRC and the receiver silently drops the packet as "Missing CRC". Both
 sides hard-code this: `rcTelemetry::MAX_ENV_BYTES` and the tool's `FRAG_MAX_ENV_BYTES`.
 
+**Ensured delivery degrades, it does not evict.** `wcb->send()` defaults to
+`ensured = true`, so every NaviCore send is retransmitted until the target ACKs
+(`ETM_MAX_RETRIES` = 3). Only `WCB_PENDING_MAX` = 10 of those can be in flight at once.
+When the table saturates, `_findFreePending()` reclaims **only** a best-effort slot or an
+ensured slot that has already completed — a still-outstanding ensured delivery is never
+dropped. If every slot is outstanding, `_sendPacket()` transmits the new command
+best-effort once and **returns `false`**.
+
+So the contract is: *an ensured send never silently loses a guaranteed command; it
+degrades to best-effort and tells you.* That `false` is the only signal that a command
+went out unguaranteed — a caller that discards `send()`'s return value on a burst is
+discarding it. `rcExecuteActionNow()` does exactly that on both `RA_WCB_UNICAST` and
+`RA_WCB_BROADCAST`, which is acceptable for animation traffic (a lost pose or sound is
+recoverable and the next trigger supersedes it) but is the wrong default for anything
+that must land exactly once.
+
+**The one-hop cap.** A command that arrives over the mesh is executed locally and is
+**never** re-forwarded onto the mesh — every forward path in the WCB firmware gates on
+`lastReceivedViaESPNOW` (`routeStoredOrCap()`, `sendMaestroCommand()`, the `;L` WLED
+proxy, `recallStoredCommand()`). That is deliberate anti-storm behaviour. The consequence
+for a controller: a `^`-chain sent **unicast** runs only the parts its target board hosts
+and silently drops the rest. A `^`-chain **broadcast** is fine — every board hears it and
+runs its own parts. NaviCore does not split or validate chains in firmware; the config
+tool warns at authoring time instead.
+
 ---
 
 ## 2. USB serial JSON protocol
@@ -330,5 +355,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | §1: documented the **ensured-send degradation contract** (`_findFreePending` never evicts an outstanding ensured slot; `_sendPacket` degrades to best-effort and returns `false`, which `rcExecuteActionNow` deliberately discards) and the **one-hop cap** (a mesh-arrived command is never re-forwarded, so a `^`-chain unicast drops every part hosted elsewhere). |
 | 2026-08-05 | _(uncommitted)_ | Added the `;D` DFPlayer verb to the device-command table (10-byte binary frame on the wire; `;D` text only travels between boards) and `DBG_DFP` = bit 6 to the debug bitmask. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

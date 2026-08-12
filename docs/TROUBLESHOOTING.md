@@ -41,6 +41,9 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | Reassembled config is garbage / shows `U+FFFD` | A multi-byte character split across fragments. Slices must break on codepoint boundaries | `_utf8Chunks()`, `_startFragSend()` |
 | Two tools fight, fragments interleave | Sessions key on `(sid, senderID)` — both tools start at `sid = 1` | `_findOrAllocSession()` |
 | Board silently unreachable on the mesh | Mesh channel mismatch. One radio, so `wcbNetwork.channel` must match the fleet. Set before `begin()`; **needs a reboot** | `setup()` |
+| Nothing is sent and nothing arrives, but there is **no** fault LED | Mesh password empty or not matching the fleet. It is a plain-text namespace field on every packet, strncmp'd on receive — but `begin()` does not validate it, so it returns true and latches no fault. An empty one prints a boxed banner at boot; a *wrong* one is indistinguishable from a dead mesh | `setup()` |
+| Half a Via-WCB action works and the rest silently does nothing | A `^`-chain sent **unicast**. A mesh-arrived command runs locally and is never re-forwarded (the WCB's deliberate one-hop anti-storm cap), so every part hosted on another board is dropped with no error. Broadcast instead — every board runs its own parts — or split into one action per part. The config tool warns while authoring | `rcExecuteActionNow()`, `RA_WCB_UNICAST` |
+| A board was absent the whole session and nothing said so | The boot roll call names every configured board never heard from, once, 30 s after join. A board that comes up and *later* drops produces an `ONLINE`/`OFFLINE` transition line instead | `checkBootRollCall()`, `onWcbStatus()` |
 | WCB Status shows fewer boards than expected | The reply is shrunk to fit one ESP-NOW packet — aliases dropped, then relay name, then the roster trimmed. `quantity` is still reported, so the tail renders as placeholders | `buildWcbStatus()` |
 | Remote Maestro read shows `(no response)` | The WCB-side read verb has not shipped yet | [ROADMAP.md §2](ROADMAP.md#2-wcb-native-maestro--partially-shipped) |
 | `skipRunning` action fires when it should have been gated | The gate **fails open** by design — no busy reply within `maeGateMs` (default 250) means fire anyway | `maestroVerbBusy()` |
@@ -115,5 +118,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | Added Mesh rows for the three Sabé-review adoptions: empty/mismatched mesh password (no fault LED — `begin()` does not validate it), `^`-chain unicast silently dropping the parts hosted elsewhere (the one-hop cap), and the boot roll call naming boards never heard from. |
 | 2026-08-12 | _(uncommitted)_ | Added rows: choppy remote passthrough while live-monitoring (`sendPWMUpdate` loop-stall, now guarded) + servo-power caveat; "SBUS panel No data but passthrough works" (stale monitor after reboot, tool auto-re-subscribes); passthrough servo jumps on global-mode flip (`resetModeAwareKnobs` no longer re-arms override-switch knobs). |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

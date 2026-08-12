@@ -152,10 +152,11 @@ reformat — the config filesystem.
    callback can fire.
 10. `navirec::recBegin()` — allocates the capture queue **before** the mesh callback that
     can feed it.
-11. Construct `WCB_Client`, `setMeshChannel()`, `begin()`. On success: create every
-    cross-core queue, *then* register `onCommand` / `onRawPacket` / bulk hooks /
-    `onNeighbor`; publish WDP identity and port labels; enable auto-join; arm the
-    8 s new-peer grace window.
+11. Construct `WCB_Client`, `setMeshChannel()`, banner if the mesh password is empty,
+    `begin()`. On success: create every cross-core queue, *then* register `onCommand` /
+    `onRawPacket` / bulk hooks / `onNeighbor` / `onStatusChange`; publish WDP identity and
+    port labels; enable auto-join; arm the 8 s new-peer grace window and the 30 s boot
+    roll call.
 12. Construct the `WCBStream` broadcast channel — after `wcb` exists, so it self-registers
     and gets flushed by `wcb->update()`.
 
@@ -175,6 +176,7 @@ naviota::drainOtaPackets()     + checkOtaTimeout()
 drainRemoteCli()               relayed CLI lines → execCliLine with output tee'd to RTERM
 maePumpRemoteEmits()           mesh-relayed Maestro read replies → [MAE:] markers
 drainPeerEvents()              new-peer action + LED alert
+checkBootRollCall()            one shot at 30 s — name any configured board never heard
 drainRemoteTriggers()          remote TRIGGER → rcDispatch on the right core
 drainForgetPeer()              esp_now_del_peer + NVS write
 drainTestAction()              bridged per-action Test button
@@ -224,6 +226,14 @@ store with one logical writer.
 
 The USB-CDC tee (`RcSerial`) gates its capture sink on `xPortGetCoreID() == _capCore`, so a
 Core-0 print landing mid-command cannot corrupt the single-threaded RTERM line buffer.
+
+**`onWcbStatus` is the one callback that fires on *both* cores.** The ONLINE edge comes
+from the ESP-NOW receive callback (Core 0, first heartbeat after silence); the OFFLINE edge
+comes from `wcb->update()` inside `loop()` (Core 1, heartbeat-miss sweep). It therefore has
+to satisfy the Core-0 rules regardless of which edge you are reasoning about — it does one
+`printf` and nothing else. Its board name comes from `rcTelemetry::wcbAlias()`, which
+writes the terminator first and so is safe to read from Core 1 while Core 0 rewrites it;
+`wcb->getNeighbor()->name` carries no such guarantee.
 
 **When adding any mesh-triggered feature: assume your handler runs on Core 0 and defer.**
 
@@ -348,5 +358,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | `onStatusChange`/`onWcbStatus` + the 30 s boot roll call added to the setup order and the loop sequence. Recorded the concurrency rule that `onWcbStatus` is the **one callback firing on both cores** (ONLINE from the RX task, OFFLINE from `update()`), and why its name must come from `rcTelemetry::wcbAlias()` rather than `getNeighbor()->name`. |
 | 2026-08-05 | _(uncommitted)_ | `RA_DFPLAYER` (13) added to the executor table + `dfpDest`; noted why it is a separate type from `RA_MP3` (inverse volume scales, different verb sets). |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |
