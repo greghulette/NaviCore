@@ -80,23 +80,30 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 | `peerNewActions` | `RcTier` | Up to 5 actions fired when a new mesh peer appears |
 | `peerAlert` | `bool` | Also flash the LED and print a terminal line |
 | `modeReport` | `RcModeReport` | `{enabled, wcb, tmpl[48], cmds[3][48]}` — optional: send the mode-select position to one WCB on every change and every 60 s. `{mode}` in `tmpl` → the position; a non-empty `cmds[mode-1]` overrides it |
-| `statsReport` | `RcStatsReport` | `{enabled, wcb}` — optional: push **this board's** ESP-NOW delivery counters to one WCB every 30 s as one chained `;V` command. See below |
+| `statsReport` | `RcStatsReport` | `{enabled, wcb}` — optional: push **this board's** ESP-NOW delivery counters to one WCB every 30 s as one `?STATS,RPT` command. See below |
 
-**`statsReport` — the `;V` shape is load-bearing.** The report is sent as
-`;V,STATS_SENT,<n>^;V,STATS_ACK,<n>^…` — **one variable per counter, never one variable
-holding a tuple.** A WCB variable is a single `int32_t` and the `;V` parser reads exactly one
-value field (`WCB_Variables.cpp` ≈23, ≈226-251), so `;V,STATS,<sent>,<ackd>,…` would set
-`STATS` to `<sent>` and silently discard every later field.
+**`statsReport` — `?` and not `;` is load-bearing.** The report is one command:
 
-Plain `;V` and **never `;VP`**: a plain `;V` leaves a *new* variable **volatile** on the
-receiving WCB (`WCB_Variables.cpp` ≈256-261) — RAM-only, gone on that board's reboot, no
-flash write per report. `;VP` would persist to NVS on every 30 s report, which is flash wear,
-not a preference. The seven names (`STATS_SENT`, `STATS_ACK`, `STATS_RETRY`, `STATS_FAIL`,
-`STATS_NOSLOT`, `STATS_BCAST`, `STATS_RECV`) are each ≤ `WCB_VAR_NAME_MAX` (15) and the whole
-chain is ≤ 177 B worst case, inside the one-packet budget.
+```
+?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>
+```
 
-This carries **only this board's own numbers** — every other board reports its own the same
-way. It is never a fleet roll-up.
+`executeCommand()` routes a `?` command to `processLocalCommand()` and returns
+(`WCB.ino` ≈3964), so a report is handled **locally on the receiving board and can never
+fall through to `processBroadcastCommand()`** — it is never written to that board's serial
+ports and never re-broadcast to the mesh. A `;` verb would have to be excluded from those
+paths by hand; `?` is that exclusion by construction.
+
+`<from>` travels in the payload because `processLocalCommand()` takes no `sourceID`
+(`WCB.ino` ≈3965) — a `?` handler cannot tell who sent it.
+
+The receiver stores it in `reportedStats[]`, **RAM-only**, surfaced under `?STATS` in a
+*Reported by Other Nodes* section and cleared by `?STATS,RESET` or a reboot. A report with
+fewer than 8 fields is dropped whole rather than stored partially, so a truncated packet
+cannot leave a row that looks like data with zeros in the missing columns.
+
+This carries **only this board's own numbers** — every other node reports its own the same
+way. It is never a fleet roll-up. **Requires WCB firmware with `?STATS,RPT`.**
 
 ### `RcAction` — the atom
 

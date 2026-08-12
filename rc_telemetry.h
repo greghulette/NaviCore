@@ -929,26 +929,26 @@ inline void reportMode(int mode) {
 // on the mesh reports its own the same way — this never carries a fleet
 // roll-up, only NaviCore's own numbers.
 //
-// Sent as ONE chained payload rather than seven sends: ";V" is a purely local
-// verb on the receiving board (it sets a variable there — nothing to re-route),
-// so the WCB one-hop cap does not apply and the whole chain resolves on the
-// target. One packet instead of seven is also seven times less airtime and one
-// ensured-delivery slot instead of seven.
+// ONE command, not a chain of variable sets. The report goes as a LOCAL "?"
+// command — "?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,
+// <bcast>,<recv>" — which the receiving WCB stores in its reported-stats table
+// and shows under ?STATS.
 //
-// ";V" and never ";VP": a plain ;V leaves a NEW variable VOLATILE on the WCB
-// (WCB_Variables.cpp ≈256-261), so these are RAM-only, reset when that board
-// reboots, and never wear its flash under a periodic push. ";VP" would write
-// NVS every report — a flash-wear bug, not a preference.
+// "?" and NOT ";" is the whole point. executeCommand() sends a "?" command to
+// processLocalCommand and returns (WCB.ino ≈3964), so a report can never fall
+// through to processBroadcastCommand and get sprayed out that board's serial
+// ports or re-broadcast to the mesh. A ";" verb would have to be excluded from
+// those paths by hand; "?" is that exclusion by construction. It is also why
+// this is not a chain of ";V" sets — those would be seven commands on the
+// receiving board, and a WCB variable is a single int32 that cannot hold the
+// tuple anyway.
 //
-// ONE VARIABLE PER COUNTER, not one variable holding a tuple. A WCB variable is
-// a single int32 (WCB_Variables.cpp ≈23) and the ;V parser reads exactly one
-// value field — vField(body,1) — using field 2 only as an INC/DEC amount
-// (≈226-251). So ";V,STATS,<sent>,<ackd>,..." would set STATS to <sent> and
-// silently discard every later field. Six named variables is the only shape
-// that survives the parser with all values intact.
+// `<from>` travels in the payload because processLocalCommand() takes no
+// sourceID (WCB.ino ≈3965) — a "?" handler cannot tell who sent it.
 //
-// Names are <= WCB_VAR_NAME_MAX (15) and STATS_-prefixed so they group together
-// in ?VAR,LIST and cannot collide with a builder's own. The table holds 100.
+// The receiving board holds this RAM-only and clears it on reboot, matching the
+// counters' own lifetime: they describe this session, and a row that outlived a
+// reboot would read as live data.
 #define STATS_REPORT_MS 30000UL   // one report every 30 s — diagnostics, not telemetry
 inline void reportMeshStats() {
   _lastStatsReport = millis();
@@ -959,25 +959,24 @@ inline void reportMeshStats() {
   WCBPeerStats agg = wcb->getAggregateStats();
   // Must fit ONE packet. Over the cap the library would fragment it, and only
   // one fragmented send may be in flight at a time — a periodic diagnostic must
-  // never contend with a config save for that slot. Worst case here is 177 B
-  // (all seven counters saturated at 10 digits), so the guard below is a
-  // backstop against a future field, not an expected path.
+  // never contend with a config save for that slot. Worst case is ~90 B (eight
+  // fields saturated at 10 digits), so the guard is a backstop against a future
+  // field rather than an expected path.
   constexpr int kMaxOnePacket = 187;   // same bound as rcTelemetry's bridge envelope
-  char cmd[224];
-  int n = snprintf(cmd, sizeof(cmd),
-                   ";V,STATS_SENT,%lu^;V,STATS_ACK,%lu^;V,STATS_RETRY,%lu^"
-                   ";V,STATS_FAIL,%lu^;V,STATS_NOSLOT,%lu^;V,STATS_BCAST,%lu^"
-                   ";V,STATS_RECV,%lu",
+  char cmd[160];
+  int n = snprintf(cmd, sizeof(cmd), "?STATS,RPT,%u,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                   (unsigned)rcConfig.wcbNetwork.deviceId,
                    (unsigned long)agg.sent, (unsigned long)agg.ackd,
                    (unsigned long)agg.retries, (unsigned long)agg.failed,
                    (unsigned long)agg.noSlot,
                    (unsigned long)wcb->getBroadcastSent(),
                    (unsigned long)g_meshRxCount);
-  // snprintf truncates rather than overruns; drop a truncated chain outright
-  // instead of sending a half-command that would set one variable to garbage.
+  // snprintf truncates rather than overruns. The receiver drops a report with
+  // fewer than 8 fields outright, so a truncated line is discarded rather than
+  // stored with zeros — but don't send one in the first place.
   if (n <= 0 || n >= (int)sizeof(cmd) || n > kMaxOnePacket) {
-    // Ungated print (this file has no dlog): it can only fire if a counter set
-    // is added without re-checking the budget, and then it must be loud.
+    // Ungated print (this file has no dlog): it can only fire if a counter is
+    // added without re-checking the budget, and then it must be loud.
     Serial.printf("[RC] stats report is %d B, over the %d B one-packet cap — not sent\n",
                   n, kMaxOnePacket);
     return;

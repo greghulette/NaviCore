@@ -131,6 +131,34 @@ the Via-WCB reply must fit one ESP-NOW frame. `buildMeshStats()` re-builds witho
 per-peer rows when the full payload exceeds the budget, and the tool detects the missing key
 and says per-board detail needs Direct USB. Same shed-to-fit discipline as `WCB_STATUS`.
 
+### Outbound stats report (`?STATS,RPT`) — board → one WCB
+
+When `statsReport.enabled`, every 30 s NaviCore unicasts **one** command to `statsReport.wcb`:
+
+```
+?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>
+```
+
+It carries **only this board's own counters**; every other node reports its own the same
+way, so the receiving board accumulates a fleet view without anyone computing a roll-up.
+
+**`?` is load-bearing.** `executeCommand()` routes a `?` command to `processLocalCommand()`
+and returns (`WCB.ino` ≈3964), so the report is handled locally on the receiving board and
+can never fall through to `processBroadcastCommand()` — it is never written to that board's
+serial ports and never re-broadcast to the mesh. A `;` verb would need those exclusions
+added by hand.
+
+`<from>` is in the payload because `processLocalCommand()` receives no `sourceID`
+(`WCB.ino` ≈3965). The receiver stores it in `reportedStats[]` (RAM-only, cleared by
+`?STATS,RESET` or a reboot) and lists it under `?STATS` → *Reported by Other Nodes*. A
+report with fewer than 8 fields is dropped whole rather than stored partially.
+
+| Counterpart | Where |
+|---|---|
+| Receiver + storage | `WCB.ino` `storeReportedStats()`, `reportedStats[]` |
+| Display | `WCB.ino` `buildStatsString()` |
+| Sender | `rcTelemetry::reportMeshStats()` |
+
 ### Streams (board → tool)
 
 | Message | Rate | Contents |

@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">12.15:13.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">12.15:33.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3102,7 +3102,7 @@
                        oninput="config.statsReport.wcb = Math.max(0, Math.min(20, parseInt(this.value,10)||0))">
               </div>
             </div>
-            <div class="noconn" style="margin-top:4px">Off by default. Every <b>30&nbsp;s</b> this board sets seven <b>volatile</b> variables on the target WCB — <code>STATS_SENT</code>, <code>STATS_ACK</code>, <code>STATS_RETRY</code>, <code>STATS_FAIL</code>, <code>STATS_NOSLOT</code>, <code>STATS_BCAST</code>, <code>STATS_RECV</code> — as one chained <code>;V</code> command. These are <b>this board's own</b> numbers only; every other board reports its own the same way. Plain <code>;V</code> means they are RAM-only on the WCB: they reset when it reboots and never touch its flash. Read them there with <code>?VAR,LIST</code>. Applies on Save.</div>
+            <div class="noconn" style="margin-top:4px">Off by default. Every <b>30&nbsp;s</b> this board sends one command to the target WCB — <code>?STATS,RPT,&lt;from&gt;,&lt;sent&gt;,&lt;ackd&gt;,&lt;retries&gt;,&lt;failed&gt;,&lt;noSlot&gt;,&lt;bcast&gt;,&lt;recv&gt;</code> — which that board stores and shows under <code>?STATS</code>, in a <b>Reported by Other Nodes</b> section. These are <b>this board's own</b> numbers only; every other node reports its own the same way. Because it is a <code>?</code> command it is handled locally on that board and is <b>never</b> re-broadcast or written to its serial ports. The stored rows are RAM-only and clear on that board's reboot. Requires WCB firmware with <code>?STATS,RPT</code>. Applies on Save.</div>
             <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
               <button type="button" class="btn btn-ghost" id="stats-refresh" style="padding:4px 10px;font-size:12px"
                       onclick="requestMeshStats()">↻ Refresh</button>
@@ -3656,10 +3656,10 @@ let config = {
   // `cmds[mode-1]` overrides it. Firmware mirror: rcConfig.modeReport.
   modeReport:    { enabled: false, wcb: 0, template: ';V,MODE,{mode}', cmds: ['', '', ''] },
   // Optional mesh-stats report (OFF by default). When enabled, NaviCore pushes ITS
-  // OWN ESP-NOW delivery counters to one WCB every 30 s as one chained ;V command
-  // setting STATS_SENT/ACK/RETRY/FAIL/NOSLOT/BCAST/RECV. Plain ;V leaves them
-  // VOLATILE on that board (RAM-only, reset on its reboot, no flash wear).
-  // Firmware mirror: rcConfig.statsReport.
+  // OWN ESP-NOW delivery counters to one WCB every 30 s as ONE local command:
+  // ?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>.
+  // "?" (not ";") is what keeps it local on that board — never re-broadcast, never
+  // written to its serial ports. Firmware mirror: rcConfig.statsReport.
   statsReport:   { enabled: false, wcb: 0 },
   // Saved WCB-credential profiles (Dev / In-droid / …) — a whole mesh identity per
   // entry, switched from the WCB Network tab. Stored IN the config so they live on the
