@@ -103,6 +103,7 @@ Where to look when changing a given area:
 | Config save | `saveConfigToBoard()` + `_diffConfigBranches()` / `_diffMappings()` |
 | Live monitor | `updatePWMDisplay()`, `updateChannelsGrid()`, `updateTransmitterAnimation()`, `markActiveChannels()` |
 | Mesh status | `renderWcbStatus()`, `startWcbStatusPoll()`, `_maybeRequestWcbMeta()` |
+| Mesh stats | `renderMeshStats()`, `requestMeshStats()`, `setMeshStatsAutoPoll()` (live view) · `_statsReport()`, `renderStatsReport()` (the saved `;V` push setting) |
 | Action rows | `buildActionRow()`, `renderArgs()`, `_renderMaestroActionArgs()`, `renderHcrParamFields()`, `renderMp3ArgField()` |
 | Wire-command row (command + "Send to") | `_appendCommandView()` — shared by the tier rows *and* the timeline popover; `readActionFromFid()` reads it back |
 | Command library | `ncCommandLibrary()`, `ncEncodeCommand()`, `ncDecodeCommand()`, `_cmdlibDestFieldHtml()` |
@@ -216,6 +217,17 @@ correct as the destination dropdowns rewrite the action type. It is deliberately
 the tool cannot always know where a device is hosted. Authoring time is still the only
 cheap place to catch this — the symptom in the field reads as "half my action works".
 
+**Mesh Stats (General tab).** Two independent things share one section, and mixing them up
+is the easy mistake: the **checkbox + Target WCB** are *saved config*
+(`config.statsReport` → `rcConfig.statsReport`) that turns on the 30 s `;V` push, while
+**Refresh / auto-poll** is a *live diagnostic view* (`GET_MESH_STATS` → `MESH_STATS`) that
+saves nothing and must never dirty the config. Toggling auto-poll deliberately does not
+touch `config`.
+
+The renderer is shared by both transports. A bridged reply omits `peers` (it has to fit one
+ESP-NOW frame), and `renderMeshStats()` keys on that absence to say per-board rows need
+Direct USB — without it a totals-only table reads as "no peer has any traffic".
+
 **Cheat sheet QR.** The 📱 button publishes a generated cheat-sheet page through a live
 Cloudflare Worker relay (source in [`tools/cheatsheet-relay-worker.js`](../tools/cheatsheet-relay-worker.js))
 and shows a QR code for it.
@@ -282,6 +294,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | Added the **Mesh Stats** section to the General tab: a saved `statsReport` toggle + Target WCB (the 30 s `;V` push) and a live `GET_MESH_STATS` readout with optional 5 s auto-poll. The live view saves nothing; the shared renderer notes when a bridged reply has shed its per-board rows. |
 | 2026-08-12 | _(uncommitted)_ | Wire-command rows now warn (`refreshChainWarn()` in `_appendCommandView()`) when a `^`-chain is aimed at a **single** board **and** a part starts with an implicitly-routed verb (`IMPLICIT_ROUTED` = `;A` `;D` `;H` `;M` `;L` `;C`/`;SEQ`) — only those can be dropped by the WCB one-hop cap. Explicit `;w<n>` chains stay quiet. Re-evaluated on both the command text and the "Send to" destination. Indexed `_appendCommandView()` in the function map. |
 | 2026-08-12 | _(uncommitted)_ | **Export** now downloads a **complete JSON backup** (was the lossy CSV, which silently dropped knob/servo passthrough outputs); **Import** auto-detects JSON vs legacy CSV. `exportConfigCsv` is retained as a partial spreadsheet export only. Added an 👁 show/hide toggle to the cloud-backup password field. The live monitor now **auto-re-subscribes** (re-sends `START_MONITOR` from `_sbusStaleTick` when the SBUS panel goes stale while a link is open), so it self-heals after a board reboot drops `wsMonitorActive`. |
 | 2026-08-11 | _(uncommitted)_ | WCB profiles are now **edit-in-place**: selecting a profile makes the WCB Network fields edit that profile (captured back on switch/Save via `_snapshotLiveIntoSelectedProfile`), so changing a selected profile's password sticks to it instead of being lost. Profiles are also included in **CSV Export/Import** (`wcbProfile<N>_<field>` rows). |

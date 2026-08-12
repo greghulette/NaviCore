@@ -593,6 +593,21 @@ struct RcModeReport {
   char    cmds[3][48];  // per-mode overrides (index 0 = mode 1); win over tmpl when non-empty
 };
 
+// Optional mesh-statistics report. When enabled with a valid target, this board
+// pushes its own ESP-NOW delivery counters to ONE WCB as a chain of runtime
+// variable sets (";V,<name>,<value>"), so an aggregator on that board can read
+// them or fan them onward. Every OTHER board reports its own stats the same way
+// — this carries NaviCore's numbers only, never a fleet roll-up.
+//
+// ";V" (never ";VP") is deliberate: a plain ;V leaves a NEW variable VOLATILE on
+// the WCB (WCB_Variables.cpp ≈256-261), so the values are RAM-only, vanish on
+// that board's reboot, and never wear its flash under a periodic push. Using
+// ";VP" here would persist them to NVS on every report — do not.
+struct RcStatsReport {
+  bool    enabled;      // master on/off (default false)
+  uint8_t wcb;          // target WCB id 1-20 (0 = unset → nothing sent)
+};
+
 struct RcConfig {
   uint8_t        txModel;        // RcTxModel — drives GUI layout + defaults
   // Per-build hardware option flag — meaningful only when txModel == TX_MODEL_X20.
@@ -664,6 +679,7 @@ struct RcConfig {
   RcTier   peerNewActions;   // up to 5 actions; count 0 = alert only, no action
   bool     peerAlert;        // also do a passive NeoPixel flash + terminal line
   RcModeReport modeReport;   // optional: report the mode-select position to one WCB (off by default)
+  RcStatsReport statsReport; // optional: push this board's mesh delivery counters to one WCB (off by default)
 };
 
 // rcConfig is heap-allocated in PSRAM at boot (see NaviCore.ino setup()); the
@@ -858,6 +874,7 @@ void rcConfigLoadDefaults() {
   memset(rcConfig.serialBcastOut, 0, sizeof(rcConfig.serialBcastOut));   // no port bridges the mesh broadcast
   memset(rcConfig.serialBcastIn,  0, sizeof(rcConfig.serialBcastIn));    // domain until explicitly enabled
   rcConfig.modeReport = RcModeReport{};   // mode-select report OFF by default (all fields zero/empty)
+  rcConfig.statsReport = RcStatsReport{}; // mesh-stats report OFF by default (enabled=false, wcb=0)
 
   // Default Maestro slots — all 8 disabled until user enables them in the
   // GUI Maestro Locations panel.  Device numbers default to match the slot
@@ -1356,6 +1373,12 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
     JsonArray mc = mr.createNestedArray("cmds");
     for (int i = 0; i < 3; i++) mc.add(rcConfig.modeReport.cmds[i]);
   }
+  // Optional mesh-stats report (off by default).
+  {
+    JsonObject sr = doc.createNestedObject("statsReport");
+    sr["enabled"] = rcConfig.statsReport.enabled;
+    sr["wcb"]     = rcConfig.statsReport.wcb;
+  }
 
   // Smoothing profiles — all 6 slots emitted (array index = profile id, so knob
   // refs stay aligned); entries are SPARSE (only channels with speed|accel).
@@ -1746,6 +1769,13 @@ bool rcConfigFromJSON(const JsonObject& doc) {
                 (!mc.isNull() && i < (int)mc.size()) ? (mc[i] | "") : "",
                 sizeof(rcConfig.modeReport.cmds[0]));
     }
+  }
+  // Optional mesh-stats report. Same containsKey/per-field-default discipline as
+  // modeReport above, so a partial object only changes what it carries.
+  if (doc.containsKey("statsReport")) {
+    JsonObject sr = doc["statsReport"];
+    rcConfig.statsReport.enabled = sr["enabled"] | rcConfig.statsReport.enabled;
+    rcConfig.statsReport.wcb     = (uint8_t)(sr["wcb"] | rcConfig.statsReport.wcb);
   }
   // A switch's channel/positions may have changed — re-seed switchPrevPos on the
   // next SBUS frame so processSwitches doesn't fire a phantom action from a stale

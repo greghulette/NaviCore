@@ -358,6 +358,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | `rcTelemetry::tick()` gained the 30 s mesh-stats `;V` push and the deferred bridged `MESH_STATS` reply (`_pendingMeshStatsSender`, same Core-0-defer discipline as `WCB_STATUS`). Inbound COMMANDs are now counted in `onWCBCommand` (`g_meshRxCount`/`g_meshRxFrom`) because `WCB_Client`'s own statistics are outbound-only. |
 | 2026-08-12 | _(uncommitted)_ | `onStatusChange`/`onWcbStatus` + the 30 s boot roll call added to the setup order and the loop sequence. Recorded the concurrency rule that `onWcbStatus` is the **one callback firing on both cores** (ONLINE from the RX task, OFFLINE from `update()`), and why its name must come from `rcTelemetry::wcbAlias()` rather than `getNeighbor()->name`. |
 | 2026-08-05 | _(uncommitted)_ | `RA_DFPLAYER` (13) added to the executor table + `dfpDest`; noted why it is a separate type from `RA_MP3` (inverse volume scales, different verb sets). |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

@@ -79,6 +79,11 @@ extern unsigned long sbusLastFrameMs;    // millis() at last received frame (0 =
 extern bool          lostFrameOld;       // SBUS lost-frame flag (no signal)
 extern bool          sbusFailsafe;       // SBUS failsafe flag (TX lost / disarmed)
 extern bool          wcbReady;           // true only after wcb->begin() succeeded (ESP-NOW usable)
+// Inbound mesh COMMAND counters (defined in the .ino, written on Core 0 in
+// onWCBCommand). The receive-side half of the delivery statistics — WCB_Client's
+// own counters are outbound-only. RAM-only; a reboot zeroes them.
+extern uint32_t      g_meshRxCount;
+extern uint32_t      g_meshRxFrom[];
 void                rcDispatch(int buttonId, uint8_t tapCount);
 void                queueRemoteTrigger(int mode, int btn, uint8_t tap);   // Core-0 → loop hop for remote TRIGGER (defined in .ino)
 void                queueForgetPeer(uint8_t id);   // Core-0 → loop hop for FORGET_PEER; id 0 = all (defined in .ino)
@@ -266,6 +271,12 @@ inline uint8_t _pendingGetWcbMetaSender = 0;
 // use. Latest requester wins: a status poll is idempotent, so overwriting a
 // still-pending one simply answers the newest.
 inline uint8_t _pendingWcbStatusSender = 0;
+
+// Deferred bridged MESH_STATS reply — same Core-0-defer discipline and the same
+// idempotent latest-wins rule as WCB_STATUS above. The reply is a TX, and this
+// one is polled too (the tool's Mesh Stats panel can auto-poll at 5 s), so it
+// must not be built in the receive callback either.
+inline uint8_t _pendingMeshStatsSender = 0;
 
 // Inter-fragment pacing.  40 ms saturated the ESP-NOW MAC layer in testing
 // (queue-overflow drops on the receiving WCB); 150 ms gives the MAC + ETM
@@ -655,6 +666,7 @@ constexpr uint32_t CH_INTERVAL_MS = 200;   // 5 Hz — default/fallback rate (20
 inline uint32_t _lastHb = 0;
 inline uint32_t _lastCh = 0;
 inline uint32_t _lastModeReport = 0;   // last mode-select report send/attempt — clocks the 60 s heartbeat
+inline uint32_t _lastStatsReport = 0;  // last mesh-stats report send/attempt — clocks STATS_REPORT_MS
 
 // Runtime rc_ch emit interval derived from the config-tool slider
 // (rcConfig.chRateHz, 1–20 Hz). Falls back to the 5 Hz default when the field
@@ -891,6 +903,10 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
 // HERE (where those call sites can see them) and are omitted on the definition.
 inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi = 0, bool includeRelayName = true);
 inline String buildWcbMeta();   // per-board aliases + serial-port labels, fragmented (GET_WCB_META)
+// Roster helpers — defined further down (≈1349/1360) but used by buildMeshStats
+// above them, so forward-declare here for the same reason buildWcbStatus does.
+inline bool wcbBoardKnown(int i, int floor);
+inline int  wcbHighestKnown(int floor);
 
 // ── Optional mode-select report ─────────────────────────────────────────────
 // Send the active mode position to one configured WCB (rcConfig.modeReport). No-op
@@ -905,6 +921,114 @@ inline void reportMode(int mode) {
   char cmd[64];
   rcModeReportCmd(mode, cmd, sizeof(cmd));
   if (cmd[0]) wcb->send(mr.wcb, cmd);
+}
+
+// ── Optional mesh-statistics report ─────────────────────────────────────────
+// Push THIS board's ESP-NOW delivery counters to one configured WCB
+// (rcConfig.statsReport) as a chain of runtime variable sets. Every other board
+// on the mesh reports its own the same way — this never carries a fleet
+// roll-up, only NaviCore's own numbers.
+//
+// Sent as ONE chained payload rather than seven sends: ";V" is a purely local
+// verb on the receiving board (it sets a variable there — nothing to re-route),
+// so the WCB one-hop cap does not apply and the whole chain resolves on the
+// target. One packet instead of seven is also seven times less airtime and one
+// ensured-delivery slot instead of seven.
+//
+// ";V" and never ";VP": a plain ;V leaves a NEW variable VOLATILE on the WCB
+// (WCB_Variables.cpp ≈256-261), so these are RAM-only, reset when that board
+// reboots, and never wear its flash under a periodic push. ";VP" would write
+// NVS every report — a flash-wear bug, not a preference.
+//
+// ONE VARIABLE PER COUNTER, not one variable holding a tuple. A WCB variable is
+// a single int32 (WCB_Variables.cpp ≈23) and the ;V parser reads exactly one
+// value field — vField(body,1) — using field 2 only as an INC/DEC amount
+// (≈226-251). So ";V,STATS,<sent>,<ackd>,..." would set STATS to <sent> and
+// silently discard every later field. Six named variables is the only shape
+// that survives the parser with all values intact.
+//
+// Names are <= WCB_VAR_NAME_MAX (15) and STATS_-prefixed so they group together
+// in ?VAR,LIST and cannot collide with a builder's own. The table holds 100.
+#define STATS_REPORT_MS 30000UL   // one report every 30 s — diagnostics, not telemetry
+inline void reportMeshStats() {
+  _lastStatsReport = millis();
+  if (!wcb || !wcbReady) return;
+  const RcStatsReport& sr = rcConfig.statsReport;
+  if (!sr.enabled || sr.wcb < 1 || sr.wcb > 20) return;
+
+  WCBPeerStats agg = wcb->getAggregateStats();
+  // Must fit ONE packet. Over the cap the library would fragment it, and only
+  // one fragmented send may be in flight at a time — a periodic diagnostic must
+  // never contend with a config save for that slot. Worst case here is 177 B
+  // (all seven counters saturated at 10 digits), so the guard below is a
+  // backstop against a future field, not an expected path.
+  constexpr int kMaxOnePacket = 187;   // same bound as rcTelemetry's bridge envelope
+  char cmd[224];
+  int n = snprintf(cmd, sizeof(cmd),
+                   ";V,STATS_SENT,%lu^;V,STATS_ACK,%lu^;V,STATS_RETRY,%lu^"
+                   ";V,STATS_FAIL,%lu^;V,STATS_NOSLOT,%lu^;V,STATS_BCAST,%lu^"
+                   ";V,STATS_RECV,%lu",
+                   (unsigned long)agg.sent, (unsigned long)agg.ackd,
+                   (unsigned long)agg.retries, (unsigned long)agg.failed,
+                   (unsigned long)agg.noSlot,
+                   (unsigned long)wcb->getBroadcastSent(),
+                   (unsigned long)g_meshRxCount);
+  // snprintf truncates rather than overruns; drop a truncated chain outright
+  // instead of sending a half-command that would set one variable to garbage.
+  if (n <= 0 || n >= (int)sizeof(cmd) || n > kMaxOnePacket) {
+    // Ungated print (this file has no dlog): it can only fire if a counter set
+    // is added without re-checking the budget, and then it must be loud.
+    Serial.printf("[RC] stats report is %d B, over the %d B one-packet cap — not sent\n",
+                  n, kMaxOnePacket);
+    return;
+  }
+  wcb->send(sr.wcb, cmd);
+}
+
+// Build the MESH_STATS reply into buf. Mirrors the payload NaviCore.ino emits on
+// direct USB — same field names, same flat [id,sent,ackd,retries,failed,noSlot,
+// recv] peer rows — so the config tool has ONE renderer for both transports.
+//
+// includePeers=false drops the per-peer rows: the bridged reply must fit ONE
+// ESP-NOW frame (the relay's WCB_Client cannot reassemble fragments), and a
+// six-board roster overflows it. Same shed-to-fit discipline as buildWcbStatus,
+// just with one thing to shed — the aggregate is the part worth keeping, and the
+// tool says so when the rows are missing. Returns the length written.
+inline size_t buildMeshStats(char* buf, size_t n, bool includePeers) {
+  int q = rcConfig.wcbNetwork.quantity;
+  if (q < 0) q = 0;
+  if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
+  const int selfId = rcConfig.wcbNetwork.deviceId;
+  WCBPeerStats agg = wcb ? wcb->getAggregateStats() : WCBPeerStats{};
+  size_t o = snprintf(buf, n,
+                      "{\"sys\":1,\"type\":\"MESH_STATS\",\"self\":%d,\"upMs\":%lu,"
+                      "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"retries\":%lu,\"failed\":%lu,"
+                      "\"noSlot\":%lu,\"bcast\":%lu,\"recv\":%lu}",
+                      selfId, (unsigned long)millis(),
+                      (unsigned long)agg.sent, (unsigned long)agg.ackd,
+                      (unsigned long)agg.retries, (unsigned long)agg.failed,
+                      (unsigned long)agg.noSlot,
+                      (unsigned long)(wcb ? wcb->getBroadcastSent() : 0),
+                      (unsigned long)g_meshRxCount);
+  if (o >= n) return o;   // truncated — caller re-builds smaller
+  if (includePeers) {
+    const int hi = wcbHighestKnown(q);
+    o += snprintf(buf + o, (o < n) ? n - o : 0, ",\"peers\":[");
+    bool first = true;
+    for (int i = 1; i <= hi && o < n; i++) {
+      if (i == selfId) continue;
+      if (!wcbBoardKnown(i, q)) continue;
+      WCBPeerStats p = wcb ? wcb->getPeerStats((uint8_t)i) : WCBPeerStats{};
+      o += snprintf(buf + o, n - o, "%s[%d,%lu,%lu,%lu,%lu,%lu,%lu]", first ? "" : ",", i,
+                    (unsigned long)p.sent, (unsigned long)p.ackd,
+                    (unsigned long)p.retries, (unsigned long)p.failed,
+                    (unsigned long)p.noSlot, (unsigned long)g_meshRxFrom[i - 1]);
+      first = false;
+    }
+    if (o < n) o += snprintf(buf + o, n - o, "]");
+  }
+  if (o < n) o += snprintf(buf + o, n - o, "}");
+  return o;
 }
 
 // ── Outbound: heartbeat + channel snapshot (periodic) ───────────────────────
@@ -1019,6 +1143,22 @@ inline void tick() {
     return;   // one status reply this tick — skip the periodic telemetry below
   }
 
+  // Deferred bridged MESH_STATS reply — built and sent HERE on Core 1, same as
+  // WCB_STATUS above and for the same reason. One packet, so shed the per-peer
+  // rows if the full reply won't fit; the aggregate always does. The tool tells
+  // the two apart by the absence of `peers` and says so in the panel.
+  if (_pendingMeshStatsSender != 0) {
+    const uint8_t to = _pendingMeshStatsSender;
+    _pendingMeshStatsSender = 0;
+    char sbuf[220];
+    const size_t kFit = 185;                    // one ESP-NOW frame, same margin as WCB_STATUS
+    size_t l = buildMeshStats(sbuf, sizeof(sbuf), true);
+    if (l > kFit) l = buildMeshStats(sbuf, sizeof(sbuf), false);
+    // A truncated reply is unparseable JSON — drop it and let the tool re-poll.
+    if (wcb && l <= kFit) wcb->send(to, sbuf);
+    return;   // one reply this tick
+  }
+
   if (!wcb) return;
   const uint32_t now = millis();
   const uint8_t  id  = rcConfig.wcbNetwork.deviceId;
@@ -1026,6 +1166,11 @@ inline void tick() {
   // Mode-select report heartbeat — every 60 s (reportMode no-ops when disabled and
   // re-stamps _lastModeReport, so this re-evaluates only once a minute).
   if (now - _lastModeReport >= 60000UL) reportMode(FunctionSwState);
+
+  // Mesh-stats report — every STATS_REPORT_MS (reportMeshStats no-ops when
+  // disabled and always re-stamps _lastStatsReport, so this re-evaluates once
+  // per interval whether or not anything goes out).
+  if (now - _lastStatsReport >= STATS_REPORT_MS) reportMeshStats();
 
   if (now - _lastHb >= HB_INTERVAL_MS) {
     _lastHb = now;
@@ -1632,6 +1777,14 @@ inline bool handle(uint8_t senderID, const char* command) {
   // (Core 1) builds and unicasts the reply, tagging `to` as the relay node.
   if (!strcmp(type, "GET_WCB_STATUS")) {
     _pendingWcbStatusSender = senderID;   // latest wins; idempotent poll (see the decl)
+    return true;
+  }
+
+  // ── GET_MESH_STATS — answer it over the WCB bridge too ─────────────────
+  // Same reasoning as GET_WCB_STATUS directly above: record the requester only,
+  // never build or send from this Core-0 callback. tick() does the work.
+  if (!strcmp(type, "GET_MESH_STATS")) {
+    _pendingMeshStatsSender = senderID;
     return true;
   }
 

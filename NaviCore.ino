@@ -97,6 +97,18 @@ uint32_t      g_peerGraceUntil = 0;   // millis(): boards first heard before thi
 uint32_t      g_peerFlashUntil = 0;   // millis(): show the new-peer LED pulse until then (0 = not flashing)
 #define PEER_GRACE_MS 8000            // suppress the initial fleet-discovery burst for 8 s after wcb->begin()
 
+// ── Inbound mesh COMMAND counters ───────────────────────────────────────────
+// The receive-side half of the delivery statistics. WCB_Client 1.13.0 counts
+// only what this board SENDS (getPeerStats / getAggregateStats / getBroadcastSent
+// are all outbound), so the inbound side is counted here in onWCBCommand — the
+// single funnel every mesh COMMAND reaches. Written on Core 0, read on Core 1;
+// see the comment at the increment for why that needs no lock.
+//
+// RAM-only and never persisted: a reboot zeroes them, which is the intent — the
+// counters describe this session's link health, not the board's history.
+uint32_t g_meshRxCount = 0;                   // total COMMANDs delivered to onWCBCommand
+uint32_t g_meshRxFrom[WCB_MAX_BOARDS] = {0};  // per-sender breakdown, index = id-1
+
 // ── Boot roll call ──────────────────────────────────────────────────────────
 // One shot, ROLL_CALL_MS after wcb->begin(): name every board in the configured
 // floor (1..quantity) that has still never been heard from. This is distinct
@@ -2463,6 +2475,22 @@ void __attribute__((noinline)) queueForgetPeer(uint8_t id) {
 //  WCB receive callback
 // =============================================================================
 void onWCBCommand(uint8_t senderID, const char* command) {
+  // Inbound COMMAND counter. WCB_Client's statistics are outbound-only
+  // (sent/ackd/retries/failed/noSlot are all about deliveries WE originate), so
+  // "how much is this board actually hearing" has no library counter — count it
+  // here, at the single funnel every mesh COMMAND passes through.
+  //
+  // Deliberately BEFORE the rcTelemetry::handle() delegation, so a management
+  // message counts as received traffic like any other. Raw-packet paths (OTA,
+  // bulk chunks) are NOT counted — they never reach this callback.
+  //
+  // Core 0, unlocked: one aligned 32-bit increment with a single writer, read on
+  // Core 1 for reporting. Same rationale as the library's own counters — a lock
+  // here would put the loop task in contention with the WiFi task for nothing.
+  // Volatile-free on purpose: this is a statistic, and a reader that is one
+  // packet stale is not wrong in any way that matters.
+  g_meshRxCount++;
+  if (senderID >= 1 && senderID <= WCB_MAX_BOARDS) g_meshRxFrom[senderID - 1]++;
   // Delegate to the telemetry/management bridge first — if it recognised
   // the command as a JSON management message addressed to us (PING /
   // TRIGGER / SET_MODE / GET_CONFIG / SET_CONFIG), it dispatches and
@@ -3368,6 +3396,46 @@ void handleSerialInput() {
               Serial.printf("%s\"%s\"", p ? "," : "", safe);
             }
             Serial.print("]");
+          }
+          Serial.println("]}");
+
+        } else if (strcmp(type,"GET_MESH_STATS")==0) {
+          // ESP-NOW delivery counters for the tool's Mesh Stats panel.
+          // OUT: WCB_Client's own per-peer/aggregate counters (what this board
+          //      SENT and what came back). IN: g_meshRxFrom/g_meshRxCount, which
+          //      the library does not track — see onWCBCommand.
+          // All RAM-only: a reboot zeroes them, deliberately (session health, not
+          // lifetime history), so there is nothing to load or persist here.
+          int q = rcConfig.wcbNetwork.quantity;
+          if (q < 0) q = 0;
+          if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
+          int selfId = rcConfig.wcbNetwork.deviceId;
+          int hi = rcTelemetry::wcbHighestKnown(q);
+          WCBPeerStats agg = wcb ? wcb->getAggregateStats() : WCBPeerStats{};
+          Serial.printf("{\"type\":\"MESH_STATS\",\"self\":%d,\"upMs\":%lu,"
+                        "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"retries\":%lu,"
+                        "\"failed\":%lu,\"noSlot\":%lu,\"bcast\":%lu,\"recv\":%lu}",
+                        selfId, (unsigned long)millis(),
+                        (unsigned long)agg.sent, (unsigned long)agg.ackd,
+                        (unsigned long)agg.retries, (unsigned long)agg.failed,
+                        (unsigned long)agg.noSlot,
+                        (unsigned long)(wcb ? wcb->getBroadcastSent() : 0),
+                        (unsigned long)g_meshRxCount);
+          // Per-peer rows, one per board the status panel would render. Built as
+          // a flat array of arrays (not objects) to keep the line short — the
+          // tool names the columns.  [id, sent, ackd, retries, failed, noSlot, recv]
+          Serial.print(",\"peers\":[");
+          bool firstPeer = true;
+          for (int i = 1; i <= hi; i++) {
+            if (i == selfId) continue;                       // never a peer of ourselves
+            if (!rcTelemetry::wcbBoardKnown(i, q)) continue; // don't render slots the panel hides
+            WCBPeerStats p = wcb ? wcb->getPeerStats((uint8_t)i) : WCBPeerStats{};
+            Serial.printf("%s[%d,%lu,%lu,%lu,%lu,%lu,%lu]", firstPeer ? "" : ",", i,
+                          (unsigned long)p.sent, (unsigned long)p.ackd,
+                          (unsigned long)p.retries, (unsigned long)p.failed,
+                          (unsigned long)p.noSlot,
+                          (unsigned long)g_meshRxFrom[i - 1]);
+            firstPeer = false;
           }
           Serial.println("]}");
 
