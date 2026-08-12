@@ -204,6 +204,15 @@ cannot duplicate an event. It can also export a clip as Maestro **script source*
 Cloudflare Worker relay (source in [`tools/cheatsheet-relay-worker.js`](../tools/cheatsheet-relay-worker.js))
 and shows a QR code for it.
 
+**Export / Import.** The **Export** button (`exportConfigJson`) downloads the **complete**
+config as JSON (`{navicore, savedAt, note, config}`) — every branch, including knob/servo
+passthrough outputs. This is the real backup; the file interchanges with the cloud modal's
+⤓ Download / 📂 Load. **Import** (`handleConfigImportFile`) sniffs the file: a leading `{`
+takes the lossless JSON path (`_cfgExtractConfig` → `applyConfig`, left unsaved for review);
+otherwise it falls back to the legacy **CSV** parser. `exportConfigCsv` still exists but is a
+**partial, human-editable spreadsheet** export — it cannot represent the variable-length knob
+output lists (per-mode passthrough), `peerEvent` actions, etc., so it is **not** a full backup.
+
 **Cloud config backup.** There is **no visible button** — click the "NaviCore" wordmark
 four times quickly to open it. A **username + password** pair (independent of the WCB
 password) both addresses and encrypts your backups: the slot base is
@@ -257,6 +266,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-12 | _(uncommitted)_ | **Export** now downloads a **complete JSON backup** (was the lossy CSV, which silently dropped knob/servo passthrough outputs); **Import** auto-detects JSON vs legacy CSV. `exportConfigCsv` is retained as a partial spreadsheet export only. Added an 👁 show/hide toggle to the cloud-backup password field. |
 | 2026-08-11 | _(uncommitted)_ | WCB profiles are now **edit-in-place**: selecting a profile makes the WCB Network fields edit that profile (captured back on switch/Save via `_snapshotLiveIntoSelectedProfile`), so changing a selected profile's password sticks to it instead of being lost. Profiles are also included in **CSV Export/Import** (`wcbProfile<N>_<field>` rows). |
 | 2026-08-11 | _(uncommitted)_ | WCB profiles now live **in the config** (`config.wcbProfiles` ↔ firmware `rcConfig.wcbProfiles`, cap `WCB_MAX_PROFILES`=6) instead of browser localStorage — they travel with the droid + backups; legacy localStorage profiles auto-migrate on first Load. Also fixed a curly-quote (`”`) in the profile-select `querySelectorAll` that silently no-op'd the force-check. |
 | 2026-08-11 | _(uncommitted)_ | Fixes: WCB-profile radios use `onclick` (not `onchange`) and force the clicked profile checked after the list rebuild, so selecting a profile whose creds match another's no longer snaps back. Mode Report drops in the `;V,MODE,{mode}` default whenever it is enabled with a blank command — on load too, not only when toggled on — so a config saved enabled-but-empty (firmware default template is empty) still shows the default. |

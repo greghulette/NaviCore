@@ -992,8 +992,8 @@
 
     <button class="btn btn-blue"    id="btn-refresh" disabled>Refresh</button>
     <button class="btn btn-ghost" id="btn-hwsetup" type="button">Config</button>
-    <button class="btn btn-ghost" id="btn-export-cfg" type="button">Export</button>
-    <button class="btn btn-ghost" id="btn-import-cfg" type="button">Import</button>
+    <button class="btn btn-ghost" id="btn-export-cfg" type="button" title="Download a COMPLETE backup of the config as JSON (everything — knobs, servo passthrough, mappings, profiles). This is the real backup.">Export</button>
+    <button class="btn btn-ghost" id="btn-import-cfg" type="button" title="Restore a config from a .json backup (also still reads legacy .csv exports)">Import</button>
     <!-- Cloud backup has NO visible button — it's a hidden feature. Trigger: click
          the "NaviCore" wordmark 4× quickly (wired near the other toolbar handlers). -->
     <button class="btn btn-ghost" id="btn-cheatsheet" type="button" title="Printable control cheat sheet — what every button / switch / knob does (HTML or PDF)">📋 Cheat Sheet</button>
@@ -1002,7 +1002,7 @@
     <button class="btn btn-ghost" id="btn-theme" type="button" title="Toggle light / dark theme" aria-label="Toggle theme" style="min-width:36px;justify-content:center;font-size:15px">☾</button>
   </div>
 </div>
-<input id="cfg-import-file" type="file" accept=".csv,text/csv" style="display:none">
+<input id="cfg-import-file" type="file" accept=".json,.csv,application/json,text/csv" style="display:none">
 
 <div class="main">
   <!-- ── Sidebar ── -->
@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">11.15:44.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">12.09:46.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14311,7 +14311,7 @@ document.getElementById('btn-defaults').addEventListener('click', async () => {
   await sendJSON({ type: 'GET_CONFIG' });
 });
 
-document.getElementById('btn-export-cfg').addEventListener('click', exportConfigCsv);
+document.getElementById('btn-export-cfg').addEventListener('click', exportConfigJson);
 document.getElementById('btn-import-cfg').addEventListener('click', () => document.getElementById('cfg-import-file').click());
 // Cloud backup is a HIDDEN feature — no visible button. Secret trigger: click the
 // "NaviCore" wordmark 4× quickly. Invisible (no hint, not Tab-focusable), and 4
@@ -15686,6 +15686,16 @@ document.getElementById('btn-qs-send').addEventListener('click', async () => {
 // ════════════════════════════════════════════════════════════════════════════
 //  CSV export / import
 // ════════════════════════════════════════════════════════════════════════════
+// Full, LOSSLESS config backup — the ENTIRE config as JSON (knobs + servo passthrough
+// outputs, mappings, profiles — everything the flat CSV can't hold). This is the real
+// backup; the file interchanges with the cloud modal's ⤓ Download / 📂 Load and the
+// Import button. exportConfigCsv() below is a partial, human-editable spreadsheet export.
+function exportConfigJson() {
+  const out = { navicore: 'config-backup/v1', savedAt: Date.now(), note: '', config };
+  const name = 'navicore-config-' + new Date().toISOString().slice(0, 10) + '.json';
+  _cfgDownloadTextFile(name, JSON.stringify(out, null, 2));
+  showToast('Exported full config backup (JSON)', 'success');
+}
 function exportConfigCsv() {
   // NOTE: the new-peer event (config.peerEvent = { alert, actions[] }) is
   // intentionally NOT in the CSV — its actions[] is a variable-length action
@@ -15952,6 +15962,21 @@ function handleConfigImportFile(event) {
   reader.onload = () => {
     try {
       const text = reader.result;
+      // A full-config JSON backup (from Export, or the cloud ⤓ Download) — apply the
+      // WHOLE config losslessly, no CSV parsing. Detected by a leading '{'.
+      if (String(text).trimStart().startsWith('{')) {
+        let parsed;
+        try { parsed = JSON.parse(text); } catch (e) { throw new Error('That .json file is not valid JSON.'); }
+        const cfg = _cfgExtractConfig(parsed);   // accepts the {navicore,…,config} wrapper OR a bare config
+        applyConfig(cfg);
+        _configLoaded = true;
+        if (typeof _syncMaestroChFromConfig === 'function') _syncMaestroChFromConfig();
+        if (typeof renderMaestroLocations === 'function')   renderMaestroLocations();
+        if (typeof renderWledSlots === 'function')          renderWledSlots();
+        alert('Full config imported (JSON). Review it, then Save to write it to the NaviCore.');
+        input.value = '';
+        return;
+      }
       const rows = parseCsv(text);
       if (!rows.length) throw new Error('Empty CSV file.');
       const header = rows[0].map(h => String(h || '').trim().toLowerCase());
@@ -17050,6 +17075,7 @@ function cfgOpenCloudModal() {
     + '<div style="display:flex;gap:8px;margin-bottom:8px">'
     + '<input id="cfg-cloud-user" type="text" placeholder="username" autocomplete="off" value="' + esc(saved.u) + '" style="flex:1;min-width:0;' + inputCss + '">'
     + '<input id="cfg-cloud-pw" type="password" placeholder="password" autocomplete="off" value="' + esc(saved.p) + '" style="flex:1;min-width:0;' + inputCss + '">'
+    + '<button id="cfg-cloud-pw-eye" type="button" title="Show / hide password" aria-label="Show password" style="padding:7px 10px;cursor:pointer;' + inputCss + '">👁</button>'
     + '<button id="cfg-cloud-list" class="btn btn-ghost" style="padding:7px 12px">List</button></div>'
     + '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted,#9a9aa2);margin-bottom:14px;cursor:pointer">'
     + '<input id="cfg-cloud-remember" type="checkbox"' + (saved.p ? ' checked' : '') + '> Remember username + password on this device</label>'
@@ -17068,6 +17094,14 @@ function cfgOpenCloudModal() {
   const close = () => ov.remove();
   ov.addEventListener('click', e => { if (e.target === ov) close(); });
   $('cfg-cloud-close').addEventListener('click', close);
+  // 👁 show/hide the password field.
+  $('cfg-cloud-pw-eye').addEventListener('click', () => {
+    const p = $('cfg-cloud-pw'), eye = $('cfg-cloud-pw-eye');
+    const show = p.type === 'password';
+    p.type = show ? 'text' : 'password';
+    eye.textContent = show ? '🙈' : '👁';
+    eye.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+  });
   const creds = () => ({ user: $('cfg-cloud-user').value.trim(), pw: $('cfg-cloud-pw').value });
   // Persist or clear the remembered creds per the checkbox. Called on every list/backup.
   function _persistCreds() {
