@@ -105,13 +105,15 @@ line; `rxLen` lets the host detect USB RX truncation.
 ### `MESH_STATS` — ESP-NOW delivery counters
 
 ```json
-{"type":"MESH_STATS","self":20,"upMs":812340,
+{"type":"MESH_STATS","pg":0,"self":20,"upMs":812340,
  "agg":{"sent":412,"ackd":408,"rty":11,"fail":3,"ung":0,"bcast":96,"recv":530},
- "peers":[[1,140,140,0,0,0,88],[3,131,127,9,3,0,102]]}
+ "peers":[[1,140,140,0,0,0,88],[3,131,127,9,3,0,102]],"last":1}
 ```
 
-Built by `rcTelemetry::buildMeshStats()` for **both** transports, so the two payload shapes
-cannot drift. `"sys":1` is present on the bridged reply only (see §4).
+Built by `rcTelemetry::buildMeshStatsPage()` for **both** transports, so the two payload
+shapes cannot drift. `"sys":1` is present on the bridged reply only (see §4). `"pg"` and
+`"last"` drive the paging described below — a Direct USB reply is always a single
+`"pg":0` page with `"last":1`.
 
 Peer rows are **flat arrays** and the `agg` keys are **abbreviated** — both to fit the
 budget below, not for style: `[id, sent, ackd, rty, fail, ung, recv]`. The tool supplies
@@ -129,28 +131,39 @@ ratio only means something against the uptime that produced it.
 `sent - (ackd + fail + ung)` is **in flight**. The library guarantees it is never negative;
 a negative value is a library bug (a pending slot settled twice), not a lost packet.
 
-#### Shedding to fit one frame
+#### Paging — how the full roster crosses the bridge
 
 The relay's `WCB_Client` cannot reassemble fragments, so a bridged reply must fit **185 B**.
-`buildMeshStats()` re-builds one tier down until it does (`MeshStatsPeers`):
+The aggregate alone is ~140 B, so **no per-board data for a real fleet fits alongside it** —
+measured at six boards: ~229 B with full rows, and still ~202 B stripped to `[id, ack%, fail]`.
 
-| Tier | Rows included | Marker | Typical size |
+So the reply is **paged**. `buildMeshStatsPage()` fills rows until the next would exceed the
+budget, then reports where to resume; `tick()` sends one page per pass, `FRAG_PACING_MS`
+apart. Six boards is three packets, ~300 ms, once per poll:
+
+| Page | Carries | Typical | Large counters |
 |---|---|---|---|
-| `MSP_ALL` | every known board | — | 229 B at 4 boards — **never fits bridged** |
-| `MSP_PROBLEMS` | only boards with non-zero `rty`/`fail`/`ung` | `"pfilt":1` | 152 B with none, 173 B with one |
-| `MSP_NONE` | none — `peers` key absent | — | 131 B |
+| 0 | header + `agg` + `upMs`, `"pg":0` | 164 B | 164 B |
+| 1… | lean header + rows only | 166 B | 149 B |
+| last | + `"last":1` | 87 B | 158 B |
 
-The middle tier is the one that earns its keep: clean links carry nothing worth diagnosing,
-and dropping them keeps a row for every board that *does*. **Two or more problem boards
-(195 B) still falls through to aggregate-only** — at that point the totals already tell you
-something is badly wrong and Direct USB is the answer.
+**Page 0 usually carries no rows at all**, and that is deliberate: the aggregate plus one
+row of five-digit counters overruns the frame. Emitting page 0 empty costs one extra packet;
+force-writing the row would push the page over budget, `tick()` would refuse to send it, and
+the whole cycle would abort — no stats at all.
+
+Direct USB is the degenerate case: one page with a budget larger than any roster, so paging
+never triggers and the whole fleet arrives in one line marked `"last":1`.
+
+**The consumer merges by board id and only promotes a set it saw `"last":1` for**, and the
+pages must be **contiguous**. Both matter: a lost middle page followed by a later page
+carrying `last` would otherwise promote a set missing the dropped boards, and those boards
+would render "no traffic" — a wrong answer that looks like a real one. A gap abandons the
+cycle, leaving the previous complete snapshot on screen until the next poll rebuilds from
+page 0. A duplicate page (an ETM retry landing twice) is ignored rather than double-listed.
 
 This is also why the `agg` keys are short. Spelled out (`retries`/`failed`/`unguaranteed`)
-the aggregate alone is ~146 B and `pfilt` + one row lands at ~188 B — the middle tier could
-never fit and would always collapse. USB has no packet budget and always sends `MSP_ALL`.
-
-The tool distinguishes all three: `peers` absent → "per-board rows need Direct USB";
-`pfilt` set → "only boards with retries or failures are listed".
+the aggregate is ~146 B, which eats the budget the rows need.
 
 ### Outbound stats report (`?STATS,RPT`) — board → one WCB
 
@@ -450,7 +463,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-08-13 | _(uncommitted)_ | `MESH_STATS` gained a three-tier shed (`MSP_ALL` → `MSP_PROBLEMS` → `MSP_NONE`, flagged `"pfilt":1`) so a bridged reply keeps a row for every board with retries/failures instead of dropping all per-board detail. `agg` keys abbreviated to `rty`/`fail`/`ung` — measured: spelled out, the middle tier could never fit 185 B. `buildMeshStats()` is now the single builder for USB **and** bridged, so the shapes cannot drift. |
+| 2026-08-13 | _(uncommitted)_ | `MESH_STATS` is now **paged** (`"pg"`/`"last"`) so the full per-board roster crosses the bridge — measured: no per-board data for a 6-board fleet fits one 185 B frame alongside the aggregate at all, so the earlier shed-tier approach could only ever drop boards. Page 0 deliberately carries no rows. Consumer merges by id and promotes only a contiguous set ending in `last`. `agg` keys abbreviated to `rty`/`fail`/`ung` to buy row space. `buildMeshStatsPage()` is the single builder for USB **and** bridged. |
 | 2026-08-12 | _(uncommitted)_ | Added `GET_MESH_STATS` → `MESH_STATS` (ESP-NOW delivery counters, flat per-peer rows, bridged replies shed `peers` to fit one frame). Noted that `recv` is NaviCore's own counter — `WCB_Client` 1.13.0's statistics are outbound-only. |
 | 2026-08-12 | _(uncommitted)_ | §1: documented the **ensured-send degradation contract** (`_findFreePending` never evicts an outstanding ensured slot; `_sendPacket` degrades to best-effort and returns `false`, which `rcExecuteActionNow` deliberately discards) and the **one-hop cap** — which gates *implicit* routing only (`;A`/`;D`/`;H`, `;M`, `;L`, `;C`/`;SEQ`, and any re-broadcast). Explicit `;w<n>` is not capped: self-target runs local (`WCB.ino` ≈5586), remote re-forwards by unicast (≈5604), and `sendESPNowMessage` caps `target == 0` only (≈2145). So a unicast `^`-chain loses a part only when it is an implicitly-routed verb whose device is hosted off-target. |
 | 2026-08-05 | _(uncommitted)_ | Added the `;D` DFPlayer verb to the device-command table (10-byte binary frame on the wire; `;D` text only travels between boards) and `DBG_DFP` = bit 6 to the debug bitmask. |

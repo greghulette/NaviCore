@@ -276,7 +276,14 @@ inline uint8_t _pendingWcbStatusSender = 0;
 // idempotent latest-wins rule as WCB_STATUS above. The reply is a TX, and this
 // one is polled too (the tool's Mesh Stats panel can auto-poll at 5 s), so it
 // must not be built in the receive callback either.
-inline uint8_t _pendingMeshStatsSender = 0;
+inline uint8_t  _pendingMeshStatsSender = 0;
+// Paging cursor for that reply. A fresh request restarts at page 0 / board 1;
+// tick() walks the roster one packet at a time. Latest-wins on the sender means
+// a re-poll mid-cycle simply restarts the walk, which is correct — the tool
+// discards a partial set anyway.
+inline int      _meshStatsPage     = 0;
+inline int      _meshStatsNextPeer = 1;
+inline uint32_t _meshStatsNextMs   = 0;   // pacing gate between pages
 
 // Inter-fragment pacing.  40 ms saturated the ESP-NOW MAC layer in testing
 // (queue-overflow drops on the receiving WCB); 150 ms gives the MAC + ETM
@@ -984,84 +991,109 @@ inline void reportMeshStats() {
   wcb->send(sr.wcb, cmd);
 }
 
-// Peer-row detail levels for buildMeshStats, most complete first. The bridged
-// reply must fit ONE ESP-NOW frame (the relay's WCB_Client cannot reassemble
-// fragments) and a full roster overflows it, so the caller re-builds one tier
-// down until it fits — the same shed-to-fit discipline as buildWcbStatus.
+// Build ONE PAGE of the MESH_STATS reply into buf, filling peer rows until the
+// next one would exceed `fit`, then stopping and reporting where to resume.
 //
-// The middle tier is the one that earns its keep: it drops boards whose links
-// are CLEAN (no retries, no failures, nothing unguaranteed), which is most of
-// them most of the time, so a bridged reply almost always still carries a row
-// for every board that has something to say. Shedding all-or-nothing meant the
-// per-board detail vanished exactly when you were bridged — i.e. in the droid,
-// which is where you actually diagnose a bad link.
-enum MeshStatsPeers : int {
-  MSP_NONE     = 0,   // aggregate only
-  MSP_PROBLEMS = 1,   // only boards with retries/failed/unguaranteed non-zero
-  MSP_ALL      = 2,   // every known board
-};
-
-// Build the MESH_STATS reply into buf. The SINGLE builder for both transports —
-// direct USB and the Via-WCB bridge — so the two payload shapes cannot drift
-// apart. Peer rows are flat [id,sent,ackd,retries,failed,unguaranteed,recv].
+// The SINGLE builder for both transports, so the two payload shapes cannot
+// drift. Direct USB is simply the degenerate case: give it a `fit` larger than
+// any possible roster and it produces one page holding everything.
 //
-// `sys` is emitted only for the bridged reply, matching what the rest of this
-// file does: the "sys":1 marker exists so the WCB Wizard can mute tool chatter
-// when it shares the bridge WCB's USB port, and a direct-USB reply has no
-// Wizard to mute it for.
+// WHY PAGE AT ALL. A bridged reply must fit one ESP-NOW frame (185 B) because
+// the relay's WCB_Client cannot reassemble fragments. The aggregate alone is
+// ~131 B, so NO per-board data for a real fleet fits alongside it — measured:
+// six boards need ~229 B with full rows and still ~202 B stripped to
+// [id, ack%, fail]. Shedding rows instead (the previous approach) meant the
+// per-board detail vanished exactly when bridged, i.e. in the droid, which is
+// where a bad link actually gets diagnosed. Paging keeps every board.
 //
-// When rows are filtered to MSP_PROBLEMS the reply carries "pfilt":1, so the
-// tool can say "only boards with problems are listed" instead of leaving the
-// user to read a short list as "every other board is idle". Returns the length
-// written (>= n means truncated — caller re-builds smaller).
-inline size_t buildMeshStats(char* buf, size_t n, int peerMode, bool includeSys) {
+// Page 0 carries the aggregate; later pages carry a lean header and rows only,
+// which is what makes the split pay — a continuation page is ~50 B of header
+// against ~135 B of rows. The last page is marked "last":1 so the consumer knows
+// the set is complete; it merges by board id and only promotes a fully-received
+// set, so a dropped page leaves the previous complete snapshot on screen rather
+// than a half-updated one.
+//
+// Aggregate keys are ABBREVIATED (rty/fail/ung) and peer rows are positional
+// arrays — both to buy room, not for style. The tool supplies every
+// human-readable name, so nothing user-facing is abbreviated.
+//
+// `sys` is emitted only for the bridged reply, matching the rest of this file:
+// the marker exists so the WCB Wizard can mute tool chatter when it shares the
+// bridge WCB's USB port, and a direct-USB reply has no Wizard to mute it for.
+//
+//   startPeer : 1-based board id to begin at (1 on the first page)
+//   nextPeer  : set to the id to resume from, or 0 when the roster is exhausted
+// Returns the length written (>= n means the buffer was too small).
+inline size_t buildMeshStatsPage(char* buf, size_t n, size_t fit, int page,
+                                 int startPeer, int* nextPeer, bool includeSys) {
   int q = rcConfig.wcbNetwork.quantity;
   if (q < 0) q = 0;
   if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
   const int selfId = rcConfig.wcbNetwork.deviceId;
-  WCBPeerStats agg = wcb ? wcb->getAggregateStats() : WCBPeerStats{};
-  // Aggregate keys are ABBREVIATED (rty/fail/ung) on purpose, and it is
-  // load-bearing rather than cosmetic. The bridged reply must fit 185 B; with
-  // "retries"/"failed"/"unguaranteed" spelled out the aggregate alone is ~146 B
-  // and adding "pfilt" plus a single problem row lands at ~188 B — so the
-  // MSP_PROBLEMS tier could never actually fit and would always collapse to
-  // aggregate-only. Short keys bring it to ~131 B, which fits one problem row
-  // (~173 B). The tool supplies the human-readable column names, so nothing
-  // user-facing is abbreviated. Peer rows are positional arrays for the same reason.
-  size_t o = snprintf(buf, n,
-                      "{%s\"type\":\"MESH_STATS\",\"self\":%d,\"upMs\":%lu,"
-                      "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"rty\":%lu,\"fail\":%lu,"
-                      "\"ung\":%lu,\"bcast\":%lu,\"recv\":%lu}",
-                      includeSys ? "\"sys\":1," : "",
-                      selfId, (unsigned long)millis(),
-                      (unsigned long)agg.sent, (unsigned long)agg.ackd,
-                      (unsigned long)agg.retries, (unsigned long)agg.failed,
-                      (unsigned long)agg.unguaranteed,
-                      (unsigned long)(wcb ? wcb->getBroadcastSent() : 0),
-                      (unsigned long)g_meshRxCount);
-  if (o >= n) return o;   // truncated — caller re-builds smaller
-  if (peerMode != MSP_NONE) {
-    const int hi = wcbHighestKnown(q);
-    if (peerMode == MSP_PROBLEMS && o < n) o += snprintf(buf + o, n - o, ",\"pfilt\":1");
-    if (o < n) o += snprintf(buf + o, n - o, ",\"peers\":[");
-    bool first = true;
-    for (int i = 1; i <= hi && o < n; i++) {
-      if (i == selfId) continue;
-      if (!wcbBoardKnown(i, q)) continue;
-      WCBPeerStats p = wcb ? wcb->getPeerStats((uint8_t)i) : WCBPeerStats{};
-      // A clean link has nothing to diagnose — drop it when space is tight.
-      // `sent`/`ackd`/`recv` alone never qualify a board as interesting; the
-      // aggregate already carries those totals.
-      if (peerMode == MSP_PROBLEMS && p.retries == 0 && p.failed == 0 && p.unguaranteed == 0)
-        continue;
-      o += snprintf(buf + o, n - o, "%s[%d,%lu,%lu,%lu,%lu,%lu,%lu]", first ? "" : ",", i,
-                    (unsigned long)p.sent, (unsigned long)p.ackd,
-                    (unsigned long)p.retries, (unsigned long)p.failed,
-                    (unsigned long)p.unguaranteed, (unsigned long)g_meshRxFrom[i - 1]);
-      first = false;
-    }
-    if (o < n) o += snprintf(buf + o, n - o, "]");
+  if (fit > n - 1) fit = n - 1;
+  *nextPeer = 0;
+
+  size_t o;
+  if (page == 0) {
+    WCBPeerStats agg = wcb ? wcb->getAggregateStats() : WCBPeerStats{};
+    o = snprintf(buf, n,
+                 "{%s\"type\":\"MESH_STATS\",\"pg\":0,\"self\":%d,\"upMs\":%lu,"
+                 "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"rty\":%lu,\"fail\":%lu,"
+                 "\"ung\":%lu,\"bcast\":%lu,\"recv\":%lu}",
+                 includeSys ? "\"sys\":1," : "",
+                 selfId, (unsigned long)millis(),
+                 (unsigned long)agg.sent, (unsigned long)agg.ackd,
+                 (unsigned long)agg.retries, (unsigned long)agg.failed,
+                 (unsigned long)agg.unguaranteed,
+                 (unsigned long)(wcb ? wcb->getBroadcastSent() : 0),
+                 (unsigned long)g_meshRxCount);
+  } else {
+    // Continuation: no aggregate, no uptime — the consumer already has both
+    // from page 0 and merges these rows into that same snapshot.
+    o = snprintf(buf, n, "{%s\"type\":\"MESH_STATS\",\"pg\":%d,\"self\":%d",
+                 includeSys ? "\"sys\":1," : "", page, selfId);
   }
+  if (o >= n) return o;
+
+  o += snprintf(buf + o, n - o, ",\"peers\":[");
+  const int hi = wcbHighestKnown(q);
+  bool first = true;
+  for (int i = (startPeer < 1 ? 1 : startPeer); i <= hi; i++) {
+    if (i == selfId) continue;                 // never a peer of ourselves
+    if (!wcbBoardKnown(i, q)) continue;        // don't report slots the panel hides
+    WCBPeerStats p = wcb ? wcb->getPeerStats((uint8_t)i) : WCBPeerStats{};
+    // Measure the row before committing it: once written we cannot take it back,
+    // and an over-budget packet is silently dropped by the bridge rather than
+    // truncated visibly. Reserve 10 for the "]," + "last":1 + "}" tail.
+    char row[72];
+    int rl = snprintf(row, sizeof(row), "%s[%d,%lu,%lu,%lu,%lu,%lu,%lu]",
+                      first ? "" : ",", i,
+                      (unsigned long)p.sent, (unsigned long)p.ackd,
+                      (unsigned long)p.retries, (unsigned long)p.failed,
+                      (unsigned long)p.unguaranteed, (unsigned long)g_meshRxFrom[i - 1]);
+    if (rl <= 0) continue;
+    if (o + (size_t)rl + 10 > fit) {
+      // Doesn't fit. Defer it to the next page — including when it is the FIRST
+      // row of page 0, which is a case that really happens: page 0 carries the
+      // aggregate (~140 B) and one row of five-digit counters is ~30 B, which
+      // together overrun the 185 B frame. Emitting page 0 empty and letting
+      // page 1 carry the rows costs one extra packet; force-writing the row
+      // instead would push the page over budget, tick() would refuse to send
+      // it, and the whole cycle would abort — no stats at all.
+      //
+      // The exception is a page >0 that cannot fit even one row: there is no
+      // later page to defer to, so write it over budget rather than loop
+      // forever asking for the same board. Unreachable in practice (a
+      // continuation header is ~50 B against a ~30 B row).
+      if (!first || page == 0) { *nextPeer = i; break; }
+    }
+    if (o + (size_t)rl + 2 >= n) { *nextPeer = i; break; }   // buffer, not budget
+    memcpy(buf + o, row, (size_t)rl);
+    o += (size_t)rl;
+    first = false;
+  }
+  if (o < n) o += snprintf(buf + o, n - o, "]");
+  if (*nextPeer == 0 && o < n) o += snprintf(buf + o, n - o, ",\"last\":1");
   if (o < n) o += snprintf(buf + o, n - o, "}");
   return o;
 }
@@ -1179,22 +1211,34 @@ inline void tick() {
   }
 
   // Deferred bridged MESH_STATS reply — built and sent HERE on Core 1, same as
-  // WCB_STATUS above and for the same reason. One packet, so shed the per-peer
-  // rows if the full reply won't fit; the aggregate always does. The tool tells
-  // the two apart by the absence of `peers` and says so in the panel.
-  if (_pendingMeshStatsSender != 0) {
+  // WCB_STATUS above and for the same reason. Sent as PAGES: a full roster
+  // cannot share one ESP-NOW frame with the aggregate (see buildMeshStatsPage),
+  // so one page goes out per pass and the tool merges them by board id.
+  //
+  // Paced at FRAG_PACING_MS like every other multi-packet send here — 40 ms
+  // saturated the MAC layer in testing, and a stats poll must never be the
+  // thing that costs a config fragment its ACK.
+  if (_pendingMeshStatsSender != 0 && (int32_t)(millis() - _meshStatsNextMs) >= 0) {
     const uint8_t to = _pendingMeshStatsSender;
-    _pendingMeshStatsSender = 0;
     char sbuf[220];
     const size_t kFit = 185;                    // one ESP-NOW frame, same margin as WCB_STATUS
-    // Shed the cheapest detail first: every board → only boards with something
-    // wrong → aggregate only. See MeshStatsPeers for why the middle tier exists.
-    size_t l = buildMeshStats(sbuf, sizeof(sbuf), MSP_ALL, true);
-    if (l > kFit) l = buildMeshStats(sbuf, sizeof(sbuf), MSP_PROBLEMS, true);
-    if (l > kFit) l = buildMeshStats(sbuf, sizeof(sbuf), MSP_NONE, true);
-    // A truncated reply is unparseable JSON — drop it and let the tool re-poll.
+    int next = 0;
+    size_t l = buildMeshStatsPage(sbuf, sizeof(sbuf), kFit, _meshStatsPage,
+                                  _meshStatsNextPeer, &next, /*includeSys=*/true);
+    // A truncated page is unparseable JSON — drop the whole cycle rather than
+    // send a fragment of one, and let the tool re-poll. The tool only promotes
+    // a set it received "last" for, so an abandoned cycle shows nothing stale.
     if (wcb && l <= kFit) wcb->send(to, sbuf);
-    return;   // one reply this tick
+    if (next == 0 || l > kFit) {
+      _pendingMeshStatsSender = 0;              // cycle complete (or abandoned)
+      _meshStatsPage = 0;
+      _meshStatsNextPeer = 1;
+    } else {
+      _meshStatsPage++;
+      _meshStatsNextPeer = next;
+      _meshStatsNextMs = millis() + FRAG_PACING_MS;
+    }
+    return;   // one page this tick
   }
 
   if (!wcb) return;
@@ -1823,6 +1867,9 @@ inline bool handle(uint8_t senderID, const char* command) {
   // never build or send from this Core-0 callback. tick() does the work.
   if (!strcmp(type, "GET_MESH_STATS")) {
     _pendingMeshStatsSender = senderID;
+    _meshStatsPage     = 0;    // restart the page walk for this request
+    _meshStatsNextPeer = 1;
+    _meshStatsNextMs   = 0;    // first page goes out on the next tick, unpaced
     return true;
   }
 

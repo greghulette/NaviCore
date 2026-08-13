@@ -103,7 +103,7 @@ Where to look when changing a given area:
 | Config save | `saveConfigToBoard()` + `_diffConfigBranches()` / `_diffMappings()` |
 | Live monitor | `updatePWMDisplay()`, `updateChannelsGrid()`, `updateTransmitterAnimation()`, `markActiveChannels()` |
 | Mesh status | `renderWcbStatus()`, `startWcbStatusPoll()`, `_maybeRequestWcbMeta()` |
-| Mesh stats | `renderMeshStats()`, `requestMeshStats()`, `setMeshStatsAutoPoll()` (live view) · `_statsReport()`, `renderStatsReport()` (the saved `;V` push setting) |
+| Mesh stats | `_meshStatsChipLine()` (sidebar per-board), `_meshStatsGlanceHtml()` (footer), `renderMeshStats()` (modal table), `_meshStatsMergePage()` (paged reply), `requestMeshStats()` · `_statsReport()`, `renderStatsReport()` (the saved `?STATS,RPT` push setting) |
 | Action rows | `buildActionRow()`, `renderArgs()`, `_renderMaestroActionArgs()`, `renderHcrParamFields()`, `renderMp3ArgField()` |
 | Wire-command row (command + "Send to") | `_appendCommandView()` — shared by the tier rows *and* the timeline popover; `readActionFromFid()` reads it back |
 | Command library | `ncCommandLibrary()`, `ncEncodeCommand()`, `ncDecodeCommand()`, `_cmdlibDestFieldHtml()` |
@@ -224,12 +224,17 @@ config. They are shown in two places at two depths:
 
 | Where | What | Function |
 |---|---|---|
-| **Sidebar**, under the WCB Status chips | One aggregate line + a badge on any board with retries/failures | `_meshStatsGlanceHtml()`, `_meshStatsChipBadge()` |
-| **📊 modal** (from the glance, or General) | Full per-board table, uptime, refresh, 5 s auto-poll | `renderMeshStats()` |
+| **Sidebar**, under each WCB Status chip | A per-board line — `140 sent · 100% ack`, with `↻`/`✗` counts when non-zero — plus an all-links footer | `_meshStatsChipLine()`, `_meshStatsGlanceHtml()` |
+| **📊 modal** (from the footer, or General) | Full per-board table, uptime, refresh, 5 s auto-poll | `renderMeshStats()` |
 
-The sidebar answers *"is anything wrong?"*; the modal answers *"what exactly"*. Putting the
-table in the narrow sidebar would be cramped, and burying it in a config tab made it
-invisible — hence both.
+Every board gets numbers, not just unhealthy ones: an aggregate alone was too vague to act
+on, and *which board* is the first thing you want to know. The modal adds the columns the
+sidebar has no room for (retries, unguaranteed, recv, in-flight).
+
+`_meshStatsMergePage()` reassembles the bridged **paged** reply (see
+[PROTOCOLS.md §2](PROTOCOLS.md#2-usb-serial-json-protocol)). It stages pages and promotes
+only a contiguous set ending in `"last":1`, so a dropped page leaves the previous complete
+snapshot up rather than rendering boards as "no traffic" that simply went missing.
 
 **The badge wording is load-bearing.** These are *our* counters for *our* links: `⚠3` beside
 WCB3 means "this board's link to WCB3", which could equally be our own radio. The section
@@ -310,7 +315,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-08-13 | _(uncommitted)_ | Mesh Stats split by depth: the **sidebar** gains an aggregate line + per-board badges under the WCB Status chips, and the full table moves to a **📊 modal**. General keeps only the saved toggle + Target WCB. Polling folded into the 3 s status tick at 1-in-5 (~15 s). Badge wording made directional so a link failure is not read as the remote board being broken. |
+| 2026-08-13 | _(uncommitted)_ | Mesh Stats split by depth: **per-board numbers under every chip** in the sidebar (not just a badge on unhealthy ones) plus an all-links footer, with the full table in a **📊 modal**. General keeps only the saved toggle + Target WCB. `_meshStatsMergePage()` reassembles the paged bridged reply. Polling folded into the 3 s status tick at 1-in-5 (~15 s). Per-board wording is directional so a link failure is not read as the remote board being broken. |
 | 2026-08-12 | _(uncommitted)_ | Added the **Mesh Stats** section to the General tab: a saved `statsReport` toggle + Target WCB (the 30 s `;V` push) and a live `GET_MESH_STATS` readout with optional 5 s auto-poll. The live view saves nothing; the shared renderer notes when a bridged reply has shed its per-board rows. |
 | 2026-08-12 | _(uncommitted)_ | Wire-command rows now warn (`refreshChainWarn()` in `_appendCommandView()`) when a `^`-chain is aimed at a **single** board **and** a part starts with an implicitly-routed verb (`IMPLICIT_ROUTED` = `;A` `;D` `;H` `;M` `;L` `;C`/`;SEQ`) — only those can be dropped by the WCB one-hop cap. Explicit `;w<n>` chains stay quiet. Re-evaluated on both the command text and the "Send to" destination. Indexed `_appendCommandView()` in the function map. |
 | 2026-08-12 | _(uncommitted)_ | **Export** now downloads a **complete JSON backup** (was the lossy CSV, which silently dropped knob/servo passthrough outputs); **Import** auto-detects JSON vs legacy CSV. `exportConfigCsv` is retained as a partial spreadsheet export only. Added an 👁 show/hide toggle to the cloud-backup password field. The live monitor now **auto-re-subscribes** (re-sends `START_MONITOR` from `_sbusStaleTick` when the SBUS panel goes stale while a link is open), so it self-heals after a board reboot drops `wsMonitorActive`. |

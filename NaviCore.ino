@@ -3407,18 +3407,24 @@ void handleSerialInput() {
           // All RAM-only: a reboot zeroes them, deliberately (session health, not
           // lifetime history), so there is nothing to load or persist here.
           //
-          // Built by rcTelemetry::buildMeshStats — the SAME builder the bridged
-          // reply uses, so the two payload shapes cannot drift. USB has no packet
-          // budget, so it always sends every board (MSP_ALL); only the bridged
-          // path sheds rows to fit one ESP-NOW frame. No "sys":1 here: that marker
-          // exists so the WCB Wizard can mute tool chatter when it shares the
-          // BRIDGE board's port, and a direct-USB reply has no Wizard to mute it
-          // for — matching the WCB_STATUS reply just above.
+          // Built by rcTelemetry::buildMeshStatsPage — the SAME builder the
+          // bridged reply uses, so the two payload shapes cannot drift. USB has
+          // no packet budget, so it asks for one page with a `fit` larger than
+          // any possible roster: the paging never triggers and the whole fleet
+          // arrives in a single line marked "last":1, which is exactly what the
+          // tool's merge treats as a complete set.
           //
-          // 20 boards x ~30 chars + the aggregate fits well inside this; loop()
-          // has ample stack for it on Core 1.
+          // No "sys":1 here: that marker exists so the WCB Wizard can mute tool
+          // chatter when it shares the BRIDGE board's port, and a direct-USB
+          // reply has no Wizard to mute it for — matching WCB_STATUS above.
+          //
+          // 20 boards x ~30 B + the aggregate sits well inside 900; static so a
+          // buffer this size never lands on the loop task's stack.
           static char msbuf[900];
-          rcTelemetry::buildMeshStats(msbuf, sizeof(msbuf), rcTelemetry::MSP_ALL, /*includeSys=*/false);
+          int msNext = 0;
+          rcTelemetry::buildMeshStatsPage(msbuf, sizeof(msbuf), sizeof(msbuf) - 1,
+                                          /*page=*/0, /*startPeer=*/1, &msNext,
+                                          /*includeSys=*/false);
           Serial.println(msbuf);
 
         } else {
