@@ -2476,7 +2476,7 @@ void __attribute__((noinline)) queueForgetPeer(uint8_t id) {
 // =============================================================================
 void onWCBCommand(uint8_t senderID, const char* command) {
   // Inbound COMMAND counter. WCB_Client's statistics are outbound-only
-  // (sent/ackd/retries/failed/noSlot are all about deliveries WE originate), so
+  // (sent/ackd/retries/failed/unguaranteed are all about deliveries WE originate), so
   // "how much is this board actually hearing" has no library counter — count it
   // here, at the single funnel every mesh COMMAND passes through.
   //
@@ -3414,16 +3414,16 @@ void handleSerialInput() {
           WCBPeerStats agg = wcb ? wcb->getAggregateStats() : WCBPeerStats{};
           Serial.printf("{\"type\":\"MESH_STATS\",\"self\":%d,\"upMs\":%lu,"
                         "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"retries\":%lu,"
-                        "\"failed\":%lu,\"noSlot\":%lu,\"bcast\":%lu,\"recv\":%lu}",
+                        "\"failed\":%lu,\"unguaranteed\":%lu,\"bcast\":%lu,\"recv\":%lu}",
                         selfId, (unsigned long)millis(),
                         (unsigned long)agg.sent, (unsigned long)agg.ackd,
                         (unsigned long)agg.retries, (unsigned long)agg.failed,
-                        (unsigned long)agg.noSlot,
+                        (unsigned long)agg.unguaranteed,
                         (unsigned long)(wcb ? wcb->getBroadcastSent() : 0),
                         (unsigned long)g_meshRxCount);
           // Per-peer rows, one per board the status panel would render. Built as
           // a flat array of arrays (not objects) to keep the line short — the
-          // tool names the columns.  [id, sent, ackd, retries, failed, noSlot, recv]
+          // tool names the columns.  [id, sent, ackd, retries, failed, unguaranteed, recv]
           Serial.print(",\"peers\":[");
           bool firstPeer = true;
           for (int i = 1; i <= hi; i++) {
@@ -3433,7 +3433,7 @@ void handleSerialInput() {
             Serial.printf("%s[%d,%lu,%lu,%lu,%lu,%lu,%lu]", firstPeer ? "" : ",", i,
                           (unsigned long)p.sent, (unsigned long)p.ackd,
                           (unsigned long)p.retries, (unsigned long)p.failed,
-                          (unsigned long)p.noSlot,
+                          (unsigned long)p.unguaranteed,
                           (unsigned long)g_meshRxFrom[i - 1]);
             firstPeer = false;
           }

@@ -106,14 +106,14 @@ line; `rxLen` lets the host detect USB RX truncation.
 
 ```json
 {"type":"MESH_STATS","self":20,"upMs":812340,
- "agg":{"sent":412,"ackd":408,"retries":11,"failed":3,"noSlot":0,"bcast":96,"recv":530},
+ "agg":{"sent":412,"ackd":408,"retries":11,"failed":3,"unguaranteed":0,"bcast":96,"recv":530},
  "peers":[[1,140,140,0,0,0,88],[3,131,127,9,3,0,102]]}
 ```
 
 Peer rows are **flat arrays**, not objects, to keep the line short:
-`[id, sent, ackd, retries, failed, noSlot, recv]`. The column names live in the tool.
+`[id, sent, ackd, retries, failed, unguaranteed, recv]`. The column names live in the tool.
 
-`sent`/`ackd`/`retries`/`failed`/`noSlot` and `bcast` come from `WCB_Client`
+`sent`/`ackd`/`retries`/`failed`/`unguaranteed` and `bcast` come from `WCB_Client`
 (`getAggregateStats()` / `getPeerStats()` / `getBroadcastSent()`) and are **outbound only**.
 `recv` has no library counter — it is `g_meshRxCount` / `g_meshRxFrom[]`, incremented in
 `onWCBCommand()`, so it counts COMMANDs delivered to the application and **not** raw-packet
@@ -122,7 +122,7 @@ traffic (OTA, bulk chunks) which never reaches that callback.
 `upMs` is reported alongside because these counters are RAM-only and reset on reboot — a
 ratio only means something against the uptime that produced it.
 
-`sent - (ackd + failed + noSlot)` is **in flight**. The library guarantees it is never
+`sent - (ackd + failed + unguaranteed)` is **in flight**. The library guarantees it is never
 negative; a negative value is a library bug (a pending slot settled twice), not a lost
 packet.
 
@@ -136,7 +136,7 @@ and says per-board detail needs Direct USB. Same shed-to-fit discipline as `WCB_
 When `statsReport.enabled`, every 30 s NaviCore unicasts **one** command to `statsReport.wcb`:
 
 ```
-?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>
+?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<unguaranteed>,<bcast>,<recv>
 ```
 
 It carries **only this board's own counters**; every other node reports its own the same

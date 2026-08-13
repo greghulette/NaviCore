@@ -85,7 +85,7 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 **`statsReport` — `?` and not `;` is load-bearing.** The report is one command:
 
 ```
-?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,<bcast>,<recv>
+?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<unguaranteed>,<bcast>,<recv>
 ```
 
 `executeCommand()` routes a `?` command to `processLocalCommand()` and returns

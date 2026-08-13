@@ -930,7 +930,7 @@ inline void reportMode(int mode) {
 // roll-up, only NaviCore's own numbers.
 //
 // ONE command, not a chain of variable sets. The report goes as a LOCAL "?"
-// command — "?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<noSlot>,
+// command — "?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<unguaranteed>,
 // <bcast>,<recv>" — which the receiving WCB stores in its reported-stats table
 // and shows under ?STATS.
 //
@@ -968,7 +968,7 @@ inline void reportMeshStats() {
                    (unsigned)rcConfig.wcbNetwork.deviceId,
                    (unsigned long)agg.sent, (unsigned long)agg.ackd,
                    (unsigned long)agg.retries, (unsigned long)agg.failed,
-                   (unsigned long)agg.noSlot,
+                   (unsigned long)agg.unguaranteed,
                    (unsigned long)wcb->getBroadcastSent(),
                    (unsigned long)g_meshRxCount);
   // snprintf truncates rather than overruns. The receiver drops a report with
@@ -985,7 +985,7 @@ inline void reportMeshStats() {
 }
 
 // Build the MESH_STATS reply into buf. Mirrors the payload NaviCore.ino emits on
-// direct USB — same field names, same flat [id,sent,ackd,retries,failed,noSlot,
+// direct USB — same field names, same flat [id,sent,ackd,retries,failed,unguaranteed,
 // recv] peer rows — so the config tool has ONE renderer for both transports.
 //
 // includePeers=false drops the per-peer rows: the bridged reply must fit ONE
@@ -1002,11 +1002,11 @@ inline size_t buildMeshStats(char* buf, size_t n, bool includePeers) {
   size_t o = snprintf(buf, n,
                       "{\"sys\":1,\"type\":\"MESH_STATS\",\"self\":%d,\"upMs\":%lu,"
                       "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"retries\":%lu,\"failed\":%lu,"
-                      "\"noSlot\":%lu,\"bcast\":%lu,\"recv\":%lu}",
+                      "\"unguaranteed\":%lu,\"bcast\":%lu,\"recv\":%lu}",
                       selfId, (unsigned long)millis(),
                       (unsigned long)agg.sent, (unsigned long)agg.ackd,
                       (unsigned long)agg.retries, (unsigned long)agg.failed,
-                      (unsigned long)agg.noSlot,
+                      (unsigned long)agg.unguaranteed,
                       (unsigned long)(wcb ? wcb->getBroadcastSent() : 0),
                       (unsigned long)g_meshRxCount);
   if (o >= n) return o;   // truncated — caller re-builds smaller
@@ -1021,7 +1021,7 @@ inline size_t buildMeshStats(char* buf, size_t n, bool includePeers) {
       o += snprintf(buf + o, n - o, "%s[%d,%lu,%lu,%lu,%lu,%lu,%lu]", first ? "" : ",", i,
                     (unsigned long)p.sent, (unsigned long)p.ackd,
                     (unsigned long)p.retries, (unsigned long)p.failed,
-                    (unsigned long)p.noSlot, (unsigned long)g_meshRxFrom[i - 1]);
+                    (unsigned long)p.unguaranteed, (unsigned long)g_meshRxFrom[i - 1]);
       first = false;
     }
     if (o < n) o += snprintf(buf + o, n - o, "]");
