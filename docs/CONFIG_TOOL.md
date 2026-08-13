@@ -231,6 +231,8 @@ Every board gets numbers, not just unhealthy ones: an aggregate alone was too va
 on, and *which board* is the first thing you want to know. The modal adds the columns the
 sidebar has no room for (retries, unguaranteed, recv, in-flight).
 
+The sidebar stats are **off by default**, behind a `stats` checkbox in the WCB Status header — the compact chip list is the normal working view. The toggle gates the **poll** as well as the render, so the default costs no mesh traffic at all; the modal fetches on open and works either way. It is view-only state (`rcShowMeshStats` in localStorage, beside `rcTerminalTimestamps`), because toggling what a panel draws must never dirty the config or need a Save.
+
 Every peer gets a line, **including temporary ones** (a mgmt relay): they are real link targets whose sent/failed land in the aggregate, and hiding them once made the totals unexplainable. Only self is skipped. The modal adds a **"not currently listed"** row when the per-board rows do not sum to the aggregate — the library keeps counters for all 20 slots, so a board that drops off the roster would otherwise take its share of the totals with no row to hang it on.
 
 `_meshStatsMergePage()` reassembles the bridged **paged** reply (see
@@ -317,6 +319,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-13 | _(uncommitted)_ | Sidebar stats put behind a `stats` checkbox in the WCB Status header, **off by default**, gating the background poll as well as the render so the default costs no mesh traffic. View-only state in `rcShowMeshStats`. Temporary peers now get a per-board line (their counters were in the aggregate with no row to explain them), and the modal shows a "not currently listed" remainder row so the columns always reconcile. |
 | 2026-08-13 | _(uncommitted)_ | Mesh Stats split by depth: **per-board numbers under every chip** in the sidebar (not just a badge on unhealthy ones) plus an all-links footer, with the full table in a **📊 modal**. General keeps only the saved toggle + Target WCB. `_meshStatsMergePage()` reassembles the paged bridged reply. Polling folded into the 3 s status tick at 1-in-5 (~15 s). Per-board wording is directional so a link failure is not read as the remote board being broken. |
 | 2026-08-12 | _(uncommitted)_ | Added the **Mesh Stats** section to the General tab: a saved `statsReport` toggle + Target WCB (the 30 s `;V` push) and a live `GET_MESH_STATS` readout with optional 5 s auto-poll. The live view saves nothing; the shared renderer notes when a bridged reply has shed its per-board rows. |
 | 2026-08-12 | _(uncommitted)_ | Wire-command rows now warn (`refreshChainWarn()` in `_appendCommandView()`) when a `^`-chain is aimed at a **single** board **and** a part starts with an implicitly-routed verb (`IMPLICIT_ROUTED` = `;A` `;D` `;H` `;M` `;L` `;C`/`;SEQ`) — only those can be dropped by the WCB one-hop cap. Explicit `;w<n>` chains stay quiet. Re-evaluated on both the command text and the "Send to" destination. Indexed `_appendCommandView()` in the function map. |

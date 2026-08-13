@@ -1055,7 +1055,15 @@
     <!-- WCB Status — populated from the firmware's GET_WCB_STATUS reply
          while connected. One chip per board (1..wcbNetwork.quantity). -->
     <div class="sb-section">
-      <h3>WCB Status</h3>
+      <h3 style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <span>WCB Status</span>
+        <label style="font-size:10px;font-weight:400;color:var(--muted);display:flex;align-items:center;gap:4px;cursor:pointer"
+               title="Show each board's ESP-NOW delivery stats under its chip. Off keeps the compact list — and skips the background stats poll entirely.">
+          <input type="checkbox" id="wcb-show-stats" style="margin:0"
+                 onchange="setShowMeshStats(this.checked)">
+          <span>stats</span>
+        </label>
+      </h3>
       <div id="wcb-status-list" class="wcb-status-list">
         <div class="noconn">Connect board to see WCB status</div>
       </div>
@@ -2286,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.12:41.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.13:49.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3822,6 +3830,24 @@ function renderStatsReport() {
 // "upMs" is reported alongside them — a ratio is only meaningful against the
 // uptime that produced it, and a board that rebooted an hour into a show would
 // otherwise look suspiciously healthy.
+// Sidebar stats visibility. OFF by default: the compact chip list is the normal
+// working view, and the stats are a thing you go looking for. View-only state,
+// so it lives in localStorage beside rcTerminalTimestamps / rcDisplayUnit rather
+// than in the droid config — toggling what a panel draws must never dirty the
+// config or need a Save.
+//
+// It also gates the background POLL, not just the render: with stats off the
+// tool asks the board for nothing, so the default costs no mesh traffic at all.
+let showMeshStats = localStorage.getItem('rcShowMeshStats') === '1';
+function setShowMeshStats(on) {
+  showMeshStats = !!on;
+  try { localStorage.setItem('rcShowMeshStats', showMeshStats ? '1' : '0'); } catch (_) {}
+  // Fetch immediately on enable rather than making the user wait out the 15 s
+  // tick staring at "no traffic" under every board.
+  if (showMeshStats) requestMeshStats();
+  if (_wcbLastOnline.length) renderWcbStatus(_wcbLastOnline);
+}
+
 // Last COMPLETE MESH_STATS snapshot. Cached because TWO views read it — the
 // per-board lines in the sidebar and the modal table — and neither should
 // trigger its own fetch just to render.
@@ -3993,7 +4019,7 @@ function _meshStatsPeerRow(id) {
 // belonging to no visible board. Only SELF is skipped, and only because the
 // library never credits stats against our own id.
 function _meshStatsChipLine(id) {
-  if (!_meshStats) return '';
+  if (!showMeshStats || !_meshStats) return '';
   const p = _meshStatsPeerRow(id);
   const ind = 'margin:1px 0 3px 16px;font-size:10px;font-family:var(--mono);color:var(--muted)';
   if (!p) return `<div style="${ind}">no traffic</div>`;
@@ -4016,7 +4042,7 @@ function _meshStatsChipLine(id) {
 // The per-board lines above carry the detail; this is the one-number summary
 // and the affordance that tells you a deeper view exists.
 function _meshStatsGlanceHtml() {
-  if (!_meshStats) return '';
+  if (!showMeshStats || !_meshStats) return '';
   const a = _meshStats.agg || {};
   const sent = +a.sent || 0;
   const fail = (+a.fail || 0) + (+a.ung || 0);
@@ -4718,7 +4744,8 @@ function startWcbStatusPoll() {
   _wcbStatusSeen = false;           // re-arm the one-time reply log for this session
   _wcbStatusTicks = 0;
   _meshStats = null;                // drop the previous board's counters
-  requestMeshStats();               // seed the glance instead of waiting 15 s for it
+  _meshStatsStaging = null;         // and any half-merged page set from that session
+  if (showMeshStats) requestMeshStats();   // seed the lines instead of waiting out the first 15 s tick
   wcbEverSeen = new Set();          // fresh per-session memory
   wcbSelfId   = 0;
   _wcbMetaTries = 0; _wcbMetaReqAt = 0; _wcbLastOnline = [];   // re-fetch aliases + port labels over the bridge this session
@@ -4750,7 +4777,11 @@ function startWcbStatusPoll() {
       // Delivery counters move slowly, and bridged every poll is a round trip
       // competing with SBUS — 3 s would be pure noise for numbers that change
       // this rarely. The modal's own 5 s auto-poll is the "watching it now" case.
-      if ((++_wcbStatusTicks % 5) === 0) requestMeshStats();
+      //
+      // Skipped entirely when the sidebar stats are hidden: nothing is reading
+      // them, and the paged bridged reply is several packets per cycle. The
+      // modal fetches on open, so it still works with the sidebar toggle off.
+      if (showMeshStats && (++_wcbStatusTicks % 5) === 0) requestMeshStats();
     } else {
       renderWcbStatus(null);        // keep the placeholder live
     }
@@ -15470,6 +15501,14 @@ function _updateFirmwareBtnState() {
 // (which may have viaWcbActive=true from localStorage restore) is reflected.
 // Done with a microtask so it runs after DOMContentLoaded handlers settle.
 queueMicrotask(_updateFirmwareBtnState);
+
+// Reflect the saved sidebar-stats preference into its checkbox. Same microtask
+// discipline: the element exists at parse time, but doing it here keeps all the
+// restore-from-localStorage work in one place after the DOM has settled.
+queueMicrotask(() => {
+  const el = document.getElementById('wcb-show-stats');
+  if (el) el.checked = showMeshStats;
+});
 
 document.getElementById('btn-fw-flash').addEventListener('click', e => {
   // Defence-in-depth: even though the button is disabled when viaWcbActive
