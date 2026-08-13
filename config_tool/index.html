@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.12:02.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.12:34.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3822,10 +3822,54 @@ function renderStatsReport() {
 // "upMs" is reported alongside them — a ratio is only meaningful against the
 // uptime that produced it, and a board that rebooted an hour into a show would
 // otherwise look suspiciously healthy.
-// Last MESH_STATS reply. Cached because TWO views read it — the always-on
-// sidebar glance and the modal table — and neither should trigger its own
-// fetch just to render.
+// Last COMPLETE MESH_STATS snapshot. Cached because TWO views read it — the
+// per-board lines in the sidebar and the modal table — and neither should
+// trigger its own fetch just to render.
 let _meshStats = null;
+// Staging for an in-progress paged reply. A bridged reply cannot fit the whole
+// roster in one ESP-NOW frame, so the firmware walks it a page at a time and we
+// reassemble here (see rc_telemetry.h buildMeshStatsPage).
+//
+// Only a set we saw "last":1 for is promoted to _meshStats. A dropped page
+// therefore leaves the PREVIOUS complete snapshot on screen rather than a
+// half-updated one — stale-but-consistent beats a board silently showing
+// another board's freshness. The next poll restarts at page 0 and recovers.
+let _meshStatsStaging = null;
+function _meshStatsMergePage(msg) {
+  if (msg.pg === 0 || typeof msg.pg !== 'number') {
+    // Page 0 (or an unpaged USB reply) carries the aggregate and starts the set.
+    _meshStatsStaging = { ...msg, peers: Array.isArray(msg.peers) ? msg.peers.slice() : [], _pg: 0 };
+  } else if (_meshStatsStaging && _meshStatsStaging.self === msg.self &&
+             msg.pg === _meshStatsStaging._pg + 1) {
+    // Continuation, and CONTIGUOUS. The contiguity check is what stops a lost
+    // middle page from being papered over: without it a later page carrying
+    // "last" would promote a set missing the dropped page's boards, and those
+    // boards would render "no traffic" — a wrong answer that looks like a real
+    // one. A gap abandons the cycle instead, so the previous complete snapshot
+    // stays up until the next poll rebuilds from page 0.
+    (msg.peers || []).forEach(row => {
+      const at = _meshStatsStaging.peers.findIndex(p => p && p[0] === row[0]);
+      if (at >= 0) _meshStatsStaging.peers[at] = row; else _meshStatsStaging.peers.push(row);
+    });
+    _meshStatsStaging._pg = msg.pg;
+  } else if (_meshStatsStaging && _meshStatsStaging.self === msg.self &&
+             msg.pg === _meshStatsStaging._pg) {
+    return;   // duplicate of the page we already merged (an ETM retry) — ignore
+  } else {
+    _meshStatsStaging = null;   // gap, or a continuation with no page 0 — wait for a fresh cycle
+    return;
+  }
+  if (!msg.last) return;                       // set incomplete — don't show it yet
+  _meshStatsStaging.peers.sort((a, b) => a[0] - b[0]);
+  _meshStats = _meshStatsStaging;
+  _meshStatsStaging = null;
+  renderMeshStats();                  // modal table — cheap, and pre-populates it for the next open
+  // Redraw the chips so the per-board lines update. GUARDED on having a status
+  // reply already: this can arrive first (both are requested together on
+  // connect), and renderWcbStatus([]) would draw every board "Unknown" for the
+  // moment before the real status lands.
+  if (_wcbLastOnline.length) renderWcbStatus(_wcbLastOnline);
+}
 let _meshStatsTimer = null;
 function requestMeshStats() {
   // Same hold as the WCB Status poll: a request slotting between SET_CONFIG
@@ -3899,17 +3943,9 @@ function renderMeshStats() {
         + ` · in flight: <span style="font-family:var(--mono)">${inFlight}</span>. `
         + `<b>Recv</b> is COMMANDs this board received (counted here, not by the library). `
         + `Counters are RAM-only and reset when this board reboots.`
-        // A bridged reply sheds rows to fit one ESP-NOW frame (rc_telemetry.h
-        // buildMeshStats). Both shed levels have to be called out, or a short
-        // list reads as "every other board is idle" when it means "every other
-        // board is fine" — or, worse, as "no peers have any traffic".
-        + (msg.peers
-             ? (msg.pfilt ? ` <b>Only boards with retries or failures are listed</b> — the bridged reply `
-                          + `has to fit one ESP-NOW packet, so clean links were dropped. `
-                          + `Connect over Direct USB to see every board.`
-                          : '')
-             : ` <b>Per-board rows need a Direct USB connection</b> — the bridged reply `
-             + `has to fit one ESP-NOW packet, so only the totals come across.`)
+        // Bridged, the roster arrives as several packets that are merged before
+        // this renders (see _meshStatsMergePage), so the table is complete on
+        // both transports and there is no shed to explain any more.
         + `</div>`;
   body.innerHTML = html;
 }
@@ -3927,19 +3963,32 @@ function _meshStatsPeerRow(id) {
   if (!_meshStats || !Array.isArray(_meshStats.peers)) return null;
   return _meshStats.peers.find(p => p && p[0] === id) || null;
 }
-function _meshStatsChipBadge(id) {
+// The per-board line drawn under each chip. Numbers for every board, not just
+// the unhealthy ones — an aggregate alone was too vague to act on, and "which
+// board" is the first thing you want to know.
+function _meshStatsChipLine(id) {
+  if (!_meshStats) return '';
   const p = _meshStatsPeerRow(id);
-  if (!p) return '';
+  const ind = 'margin:1px 0 3px 16px;font-size:10px;font-family:var(--mono);color:var(--muted)';
+  if (!p) return `<div style="${ind}">no traffic</div>`;
   const [, sent, ackd, rty, fail, ung] = p;
-  if (!rty && !fail && !ung) return '';
-  const self = _meshStats.self;
-  const tip = `This board (WCB ${self}) → WCB ${id}: ${sent} sent, ${ackd} ackd `
-            + `(${_statsPct(ackd, sent)}), ${rty} retries, ${fail} failed, ${ung} unguaranteed. `
-            + `Measured HERE — a failure can be this board's radio as easily as WCB ${id}'s.`;
+  if (!sent) return `<div style="${ind}">no traffic</div>`;
   const bad = fail > 0 || ung > 0;
-  return ` <small title="${escH(tip)}" style="color:${bad ? 'var(--red)' : 'var(--accent3)'};font-weight:600;cursor:default">`
-       + `${bad ? '⚠' : '↻'}${fail || ung || rty}</small>`;
+  const self = _meshStats.self;
+  // Directional on purpose: these are OUR counters for OUR link. "3 failed"
+  // beside WCB3 can be this board's radio as easily as WCB3's, and someone
+  // reading it the other way power-cycles a board that is fine.
+  const tip = `WCB ${self} → WCB ${id}: ${sent} sent, ${ackd} ackd (${_statsPct(ackd, sent)}), `
+            + `${rty} retries, ${fail} failed, ${ung} unguaranteed. Measured on THIS board — `
+            + `a failure here can be this board's radio as easily as WCB ${id}'s.`;
+  let s = `<div style="${ind}" title="${escH(tip)}">${sent} sent · ${_statsPct(ackd, sent)} ack`;
+  if (rty)  s += ` · <span style="color:var(--accent3)">${rty}↻</span>`;
+  if (bad)  s += ` · <span style="color:var(--red)">${fail + ung}✗</span>`;
+  return s + `</div>`;
 }
+// Footer under the chips: the fleet total, plus the way into the full table.
+// The per-board lines above carry the detail; this is the one-number summary
+// and the affordance that tells you a deeper view exists.
 function _meshStatsGlanceHtml() {
   if (!_meshStats) return '';
   const a = _meshStats.agg || {};
@@ -3948,8 +3997,8 @@ function _meshStatsGlanceHtml() {
   const pct  = _statsPct(+a.ackd || 0, sent);
   return `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);`
        + `display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)">`
-       + `<span style="flex:1">This board's links: `
-       + `<span style="font-family:var(--mono)">${sent}</span> sent · `
+       + `<span style="flex:1" title="Totals across every peer, measured on THIS board">`
+       + `All links: <span style="font-family:var(--mono)">${sent}</span> sent · `
        + `<span style="font-family:var(--mono)">${pct}</span> ack`
        + (fail ? ` · <span style="font-family:var(--mono);color:var(--red)">${fail}</span> failed` : '')
        + `</span>`
@@ -4835,9 +4884,9 @@ function renderWcbStatus(online) {
       : '';
     html += `<div class="wcb-chip">
       <span class="wcb-chip-dot${stateCls}"></span>
-      <span class="wcb-chip-name">WCB ${i}${aliasRaw ? ' · ' + escH(aliasRaw) : ''}${clientTag}${tempTag}${autoTag}${relayTag}${selfTag}${_meshStatsChipBadge(i)}</span>
+      <span class="wcb-chip-name">WCB ${i}${aliasRaw ? ' · ' + escH(aliasRaw) : ''}${clientTag}${tempTag}${autoTag}${relayTag}${selfTag}</span>
       <span class="wcb-chip-state${stateCls}">${stateLabel}</span>${forgetBtn}
-    </div>`;
+    </div>${(i === wcbSelfId || isTemp) ? '' : _meshStatsChipLine(i)}`;
   }
   // The relaying node itself is kept OUT of the roster arrays above (excluded on
   // the RC so the reply fits one ESP-NOW packet), so draw it its own chip here —
@@ -8137,13 +8186,7 @@ function handleBoardMessage(line) {
   // is a diagnostic readout, not traffic worth logging. Handled (and returned)
   // before the terminal echo.
   if (msg.type === 'MESH_STATS') {
-    _meshStats = msg;
-    renderMeshStats();                  // modal table — cheap, and pre-populates it for the next open
-    // Redraw the chips so badges + the glance line update. GUARDED on having a
-    // status reply already: this can arrive first (both are requested together
-    // on connect), and renderWcbStatus([]) would draw every board "Unknown" for
-    // the moment before the real status lands.
-    if (_wcbLastOnline.length) renderWcbStatus(_wcbLastOnline);
+    _meshStatsMergePage(msg);
     return;
   }
 
