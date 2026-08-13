@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.19:08.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.19:25.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4340,6 +4340,45 @@ const maestroCommands = {
 // succeed, so a failed attempt leaves no partial state for the caller to
 // clean up.  Throws if the port can't be opened (caller decides retry).
 //
+// ── Release the serial port on page teardown ─────────────────────────────────
+// A refresh kills the tab with the port still open, so the browser reclaims it
+// abruptly and the CDC control lines end up wherever the driver leaves them.
+// On a NaviCore v2 (ESP32-S3, native USB CDC — no bridge chip) those lines are
+// exactly what the USB Serial/JTAG peripheral watches to reset the chip; it is
+// how esptool resets an S3 with no CP2102 in the path. So an uncontrolled
+// teardown can reboot the board on every refresh.
+//
+// Deassert DTR/RTS explicitly and close, making the teardown deterministic
+// instead of whatever an abandoned handle does. serial-hub.js already takes
+// this seriously for the shared/WCB path (assertDTR:false, and visibility
+// handoff disabled precisely because re-opening toggles DTR and resets a WCB) —
+// the Direct USB path never got the same care.
+//
+// Best-effort by necessity: the page is going away and the browser will not
+// await any of this. setSignals() is one quick call and usually lands; close()
+// frequently will not, which is fine — releasing the signals is the part that
+// matters. Streams are deliberately not unlocked first: that is more async work
+// than an unload handler can rely on, and close() failing costs nothing here.
+//
+// 'pagehide' rather than 'beforeunload' — it fires for bfcache navigations too,
+// and browsers increasingly ignore beforeunload without user interaction.
+//
+// NOTE: this can only help if the reset happens on the CLOSE edge. If the board
+// resets when the NEW page opens the port, this will not change anything — the
+// boot line "Reset reason: …" is what tells the two apart.
+function _releaseSerialOnUnload() {
+  // Shared/Via-WCB: the hub owns the port when this tab is leader. leave() posts
+  // its cross-tab "bye" FIRST (synchronously), so a follower can take the port
+  // over promptly instead of waiting out the Web Lock — worth calling even
+  // though the close() inside it will not finish before the page dies.
+  try { if (sharedHub) sharedHub.leave(); } catch (_) {}
+  const p = port;
+  if (!p) return;
+  try { p.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
+  try { p.close(); } catch (_) {}
+}
+window.addEventListener('pagehide', _releaseSerialOnUnload);
+
 // Returns true if the board actually ANSWERED (a PONG was seen) — i.e. the
 // session is live, not merely "port opened".  reopenAfterFlash uses this to
 // detect a dead/half-up CDC right after a reboot and retry cleanly.

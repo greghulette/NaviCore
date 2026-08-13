@@ -60,6 +60,8 @@ Leader failover rides the lock queue. Two constraints are deliberate:
 Flashing needs the raw port, so only the leader tab can flash. Firmware-flash buttons are
 disabled while Via WCB is active.
 
+**Page teardown releases the port.** A `pagehide` handler (`_releaseSerialOnUnload()`) deasserts DTR/RTS and closes, because a refresh otherwise abandons an open port and the CDC control lines settle wherever the driver leaves them — and on a NaviCore v2 (native USB, no bridge chip) those lines are what the USB Serial/JTAG peripheral watches to reset the chip. It also calls `sharedHub.leave()`, whose cross-tab `bye` posts synchronously so a follower can take a shared port over without waiting out the Web Lock.
+
 Link loss (sleep, unplug) is caught by `handleLinkLost()` → `tryAutoReconnect()`, gated on
 `_wantAutoReconnect` so a deliberate disconnect never re-opens the port.
 
@@ -319,6 +321,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-13 | _(uncommitted)_ | Added `_releaseSerialOnUnload()` on `pagehide`: deasserts DTR/RTS, closes the port, and calls `sharedHub.leave()`. The Direct USB path had no teardown at all, so a refresh abandoned an open port. |
 | 2026-08-13 | _(uncommitted)_ | Hovering a WCB Status chip now shows that board's serial-port map, from the WDP labels already cached in `wcbPortLabels` (`_wcbPortTooltip()`). Real WCBs only — a client device has no WCB ports. Distinguishes "nothing advertised yet" from "ports are empty". |
 | 2026-08-13 | _(uncommitted)_ | Sidebar stats are now seeded from the droid config (`statsReport.enabled`) on every config load, so they appear **from connect** rather than needing a box ticked; the header checkbox is a session override and is no longer persisted in localStorage. |
 | 2026-08-13 | _(uncommitted)_ | Sidebar stats put behind a `stats` checkbox in the WCB Status header, **off by default**, gating the background poll as well as the render so the default costs no mesh traffic. View-only state in `rcShowMeshStats`. Temporary peers now get a per-board line (their counters were in the aggregate with no row to explain them), and the modal shows a "not currently listed" remainder row so the columns always reconcile. |
