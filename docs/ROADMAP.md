@@ -111,6 +111,7 @@ Do not "fix" these — each was decided:
 | `FRAG_MAX_PARTS` capped at 192 | 384 crash-loops the board. A larger bridged payload needs a heap-allocated buffer, not a bigger static array |
 | Cloud backup has no visible button | Intentionally hidden: click the "NaviCore" wordmark 4× |
 | The `sbusSharedUart = false` code path | Kept as a fallback if shared SBUS ever proves unreliable on a board |
+| No NaviCore port of the WCB's `?ETM,CHAR` network test | Decided 2026-08-13. **There is no knob to act on the result**: the test's whole output is a recommended ACK timeout, and `ETM_RETRY_INTERVAL_MS` is a compile-time `#define` in `WCB_Client` with no setter — NaviCore would run a 30–60 s test to produce a number it cannot apply, while the WCBs *can* apply it fleet-wide with `?ETM,TIMEOUT`. Also: phase 3 deliberately floods the mesh, and NaviCore's `loop()` carries `processSbus()` every 9–14 ms; phase 3 needs peer orchestration NaviCore has no way to drive; and the library has no RTT instrumentation to measure with. If fleet characterization is ever wanted from this tool, **relay `?MGMT,ETM,CHAR,<n>` to the bridge WCB** — the existing, proven, orchestrated test, no firmware work. A NaviCore-native version would be a small per-peer link probe (RTT min/avg/max, no flooding), not this |
 
 ---
 
@@ -121,4 +122,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-13 | _(uncommitted)_ | Recorded the decision NOT to port the WCB `?ETM,CHAR` network test to NaviCore, with the reasoning — chiefly that `ETM_RETRY_INTERVAL_MS` has no setter, so the recommended timeout it produces cannot be applied. Relaying `?MGMT,ETM,CHAR` is the cheap path if it is ever wanted. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |
