@@ -231,6 +231,8 @@ Every board gets numbers, not just unhealthy ones: an aggregate alone was too va
 on, and *which board* is the first thing you want to know. The modal adds the columns the
 sidebar has no room for (retries, unguaranteed, recv, in-flight).
 
+Every peer gets a line, **including temporary ones** (a mgmt relay): they are real link targets whose sent/failed land in the aggregate, and hiding them once made the totals unexplainable. Only self is skipped. The modal adds a **"not currently listed"** row when the per-board rows do not sum to the aggregate — the library keeps counters for all 20 slots, so a board that drops off the roster would otherwise take its share of the totals with no row to hang it on.
+
 `_meshStatsMergePage()` reassembles the bridged **paged** reply (see
 [PROTOCOLS.md §2](PROTOCOLS.md#2-usb-serial-json-protocol)). It stages pages and promotes
 only a contiguous set ending in `"last":1`, so a dropped page leaves the previous complete
