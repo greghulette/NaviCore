@@ -3531,13 +3531,33 @@ static void printBootTelemetry() {
     case ESP_RST_TASK_WDT: name = "Task watchdog"; break;
     case ESP_RST_WDT:      name = "RTC watchdog (short-WDT bootloader fired)"; break;
     case ESP_RST_BROWNOUT: name = "BROWNOUT — supply rail sagged"; break;
+    // The S3 has no bridge chip: the USB Serial/JTAG peripheral itself resets
+    // the chip when the host drives the CDC control lines, which is how esptool
+    // reboots one with nothing but a USB cable. A host merely OPENING the port
+    // can do it — Chrome asserts DTR/RTS as part of open() and the order they
+    // land in produces the reset edge — so this is the expected reason after
+    // connecting the config tool, and is NOT a fault. See TROUBLESHOOTING.
+    case ESP_RST_USB:      name = "USB peripheral (host toggled DTR/RTS — e.g. a tool opening the port)"; break;
+    case ESP_RST_JTAG:     name = "JTAG"; break;
     default: break;
   }
-  // Low-level per-core causes (rom/rtc.h). Key S3 codes:
-  //   1 = power-on   15 = RTC-WDT brown-out   16 = RTC-WDT system reset
-  //   (16 = the short-WDT bootloader's 3 s watchdog fired — auto-retry)
-  Serial.printf("Reset reason: %d - %s  (RTC codes core0=%d core1=%d)\n",
-                (int)r, name, (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1));
+  // Low-level per-core causes (rom/rtc.h). Named for the ones that actually turn
+  // up, because a bare number sends you looking through the TRM mid-diagnosis.
+  auto rtcName = [](int c) -> const char* {
+    switch (c) {
+      case 1:  return "power-on";
+      case 3:  return "SW system";
+      case 7:  return "RTC-WDT system";
+      case 15: return "brown-out";
+      case 16: return "RTC-WDT (short-WDT bootloader fired — auto-retry)";
+      case 21: return "USB UART chip reset";   // host opened/closed the CDC port
+      case 22: return "USB JTAG chip reset";
+      default: return "see rom/rtc.h";
+    }
+  };
+  const int rc0 = (int)rtc_get_reset_reason(0), rc1 = (int)rtc_get_reset_reason(1);
+  Serial.printf("Reset reason: %d - %s  (RTC codes core0=%d [%s] core1=%d [%s])\n",
+                (int)r, name, rc0, rtcName(rc0), rc1, rtcName(rc1));
   if (g_bootMagic != BOOT_MAGIC) {          // true power loss → fresh count
     g_bootMagic = BOOT_MAGIC;
     g_bootAttempts = 0;
