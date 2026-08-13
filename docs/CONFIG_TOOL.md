@@ -102,7 +102,7 @@ Where to look when changing a given area:
 | Config load | `applyConfig()` — also the migration point for older config shapes |
 | Config save | `saveConfigToBoard()` + `_diffConfigBranches()` / `_diffMappings()` |
 | Live monitor | `updatePWMDisplay()`, `updateChannelsGrid()`, `updateTransmitterAnimation()`, `markActiveChannels()` |
-| Mesh status | `renderWcbStatus()`, `startWcbStatusPoll()`, `_maybeRequestWcbMeta()` |
+| Mesh status | `renderWcbStatus()`, `startWcbStatusPoll()`, `_maybeRequestWcbMeta()`, `_wcbPortTooltip()` (hover = that board's serial-port map) |
 | Mesh stats | `_meshStatsChipLine()` (sidebar per-board), `_meshStatsGlanceHtml()` (footer), `renderMeshStats()` (modal table), `_meshStatsMergePage()` (paged reply), `requestMeshStats()` · `_statsReport()`, `renderStatsReport()` (the saved `?STATS,RPT` push setting) |
 | Action rows | `buildActionRow()`, `renderArgs()`, `_renderMaestroActionArgs()`, `renderHcrParamFields()`, `renderMp3ArgField()` |
 | Wire-command row (command + "Send to") | `_appendCommandView()` — shared by the tier rows *and* the timeline popover; `readActionFromFid()` reads it back |
@@ -319,6 +319,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-13 | _(uncommitted)_ | Hovering a WCB Status chip now shows that board's serial-port map, from the WDP labels already cached in `wcbPortLabels` (`_wcbPortTooltip()`). Real WCBs only — a client device has no WCB ports. Distinguishes "nothing advertised yet" from "ports are empty". |
 | 2026-08-13 | _(uncommitted)_ | Sidebar stats are now seeded from the droid config (`statsReport.enabled`) on every config load, so they appear **from connect** rather than needing a box ticked; the header checkbox is a session override and is no longer persisted in localStorage. |
 | 2026-08-13 | _(uncommitted)_ | Sidebar stats put behind a `stats` checkbox in the WCB Status header, **off by default**, gating the background poll as well as the render so the default costs no mesh traffic. View-only state in `rcShowMeshStats`. Temporary peers now get a per-board line (their counters were in the aggregate with no row to explain them), and the modal shows a "not currently listed" remainder row so the columns always reconcile. |
 | 2026-08-13 | _(uncommitted)_ | Mesh Stats split by depth: **per-board numbers under every chip** in the sidebar (not just a badge on unhealthy ones) plus an all-links footer, with the full table in a **📊 modal**. General keeps only the saved toggle + Target WCB. `_meshStatsMergePage()` reassembles the paged bridged reply. Polling folded into the 3 s status tick at 1-in-5 (~15 s). Per-board wording is directional so a link failure is not read as the remote board being broken. |
