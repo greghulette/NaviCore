@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.13:56.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.19:05.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4012,6 +4012,30 @@ function renderMeshStats() {
 // beside WCB3 means "this board's link to WCB3", which could equally be our own
 // antenna. Labelled "This board's links" and the tooltip reads directionally,
 // so nobody power-cycles WCB3 over what is our radio.
+// Serial-port map for a status chip's hover tooltip.
+//
+// REAL WCB BOARDS ONLY. A client device (a mesh monitor, another controller) has
+// no WCB serial ports to report, and the firmware already sends empty labels for
+// one — but check here too so an empty row set can't be mistaken for "a WCB with
+// nothing attached".
+//
+// Labels come from WDP: each board advertises what is on each of its ports, so
+// this is the fleet's own view of its wiring, not something configured here.
+// They ride WCB_STATUS on Direct USB and the separate fragmented WCB_META reply
+// when bridged (the one-packet bridged status can't carry them), so both
+// transports end up populating wcbPortLabels.
+function _wcbPortTooltip(i, isClient) {
+  if (isClient) return '';
+  const labels = (typeof wcbPortLabels !== 'undefined' && wcbPortLabels && wcbPortLabels[i - 1]) || null;
+  if (!Array.isArray(labels)) return '';        // not fetched yet — no tooltip beats a wrong one
+  const clean = [];
+  for (let p = 1; p <= 5; p++) clean.push((labels[p - 1] != null) ? String(labels[p - 1]).trim() : '');
+  // Nothing advertised is worth saying out loud: it means WDP hasn't reported
+  // this board's ports, NOT that its ports are empty.
+  if (!clean.some(l => l)) return `WCB ${i} — no serial-port labels advertised yet`;
+  return `WCB ${i} serial ports\n`
+       + clean.map((l, idx) => `  S${idx + 1}  ${l || '—'}`).join('\n');
+}
 function _meshStatsPeerRow(id) {
   if (!_meshStats || !Array.isArray(_meshStats.peers)) return null;
   return _meshStats.peers.find(p => p && p[0] === id) || null;
@@ -4947,7 +4971,11 @@ function renderWcbStatus(online) {
     const forgetBtn = (i > quantity && !isTemp)
       ? ` <button type="button" title="Forget this learned peer" onclick="forgetLearnedPeer(${i}, this)" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:2px 5px;border-radius:3px" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--muted)'">✕</button>`
       : '';
-    html += `<div class="wcb-chip">
+    // Hovering a real WCB shows what it has on each serial port. The inner tags
+    // (client / temp / auto / relay) keep their own titles, which correctly win
+    // over this one when you hover the tag itself.
+    const portTip = _wcbPortTooltip(i, isClient);
+    html += `<div class="wcb-chip"${portTip ? ` title="${escH(portTip)}"` : ''}>
       <span class="wcb-chip-dot${stateCls}"></span>
       <span class="wcb-chip-name">WCB ${i}${aliasRaw ? ' · ' + escH(aliasRaw) : ''}${clientTag}${tempTag}${autoTag}${relayTag}${selfTag}</span>
       <span class="wcb-chip-state${stateCls}">${stateLabel}</span>${forgetBtn}
