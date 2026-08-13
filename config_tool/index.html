@@ -2286,7 +2286,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.10:49.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.12:02.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2564,6 +2564,30 @@
   </div>
 </div>
 <input type="file" id="cmdlib-import-file" accept=".json,application/json" style="display:none">
+
+<!-- ── Mesh Stats — the detail view behind the sidebar glance ──────────────────
+     Live diagnostics only; nothing here is saved. The SETTING that pushes these
+     counters to a collecting WCB lives in Config → General → Mesh Stats. -->
+<div class="modal-overlay" id="meshstats-modal" style="z-index:220">
+  <div class="modal" style="max-width:640px;width:94%">
+    <div class="modal-header">
+      <span class="modal-title">📊 Mesh Stats — this board's links</span>
+      <button class="btn btn-ghost" id="meshstats-close" type="button" style="padding:4px 10px"
+              onclick="closeMeshStats()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px"
+                onclick="requestMeshStats()">↻ Refresh</button>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--muted)">
+          <input type="checkbox" id="stats-autopoll" onchange="setMeshStatsAutoPoll(this.checked)">
+          <span>auto every 5&nbsp;s</span>
+        </label>
+      </div>
+      <div id="mesh-stats-body"></div>
+    </div>
+  </div>
+</div>
 
 <!-- ── Hardware Setup Modal — configure-once wiring/credentials ── -->
 <div class="modal-overlay" id="hwsetup-modal">
@@ -3103,15 +3127,11 @@
               </div>
             </div>
             <div class="noconn" style="margin-top:4px">Off by default. Every <b>30&nbsp;s</b> this board sends one command to the target WCB — <code>?STATS,RPT,&lt;from&gt;,&lt;sent&gt;,&lt;ackd&gt;,&lt;retries&gt;,&lt;failed&gt;,&lt;unguaranteed&gt;,&lt;bcast&gt;,&lt;recv&gt;</code> — which that board stores and shows under <code>?STATS</code>, in a <b>Reported by Other Nodes</b> section. These are <b>this board's own</b> numbers only; every other node reports its own the same way. Because it is a <code>?</code> command it is handled locally on that board and is <b>never</b> re-broadcast or written to its serial ports. The stored rows are RAM-only and clear on that board's reboot. Requires WCB firmware with <code>?STATS,RPT</code>. Applies on Save.</div>
-            <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
-              <button type="button" class="btn btn-ghost" id="stats-refresh" style="padding:4px 10px;font-size:12px"
-                      onclick="requestMeshStats()">↻ Refresh</button>
-              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--muted)">
-                <input type="checkbox" id="stats-autopoll" onchange="setMeshStatsAutoPoll(this.checked)">
-                <span>auto every 5&nbsp;s</span>
-              </label>
+            <div style="margin-top:10px">
+              <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px"
+                      onclick="openMeshStats()">📊 View mesh stats</button>
+              <span style="font-size:11px;color:var(--muted);margin-left:6px">live diagnostics — also shown under WCB Status</span>
             </div>
-            <div id="mesh-stats-body" style="margin-top:8px"></div>
           </div>
         </section>
 
@@ -3802,6 +3822,10 @@ function renderStatsReport() {
 // "upMs" is reported alongside them — a ratio is only meaningful against the
 // uptime that produced it, and a board that rebooted an hour into a show would
 // otherwise look suspiciously healthy.
+// Last MESH_STATS reply. Cached because TWO views read it — the always-on
+// sidebar glance and the modal table — and neither should trigger its own
+// fetch just to render.
+let _meshStats = null;
 let _meshStatsTimer = null;
 function requestMeshStats() {
   // Same hold as the WCB Status poll: a request slotting between SET_CONFIG
@@ -3811,17 +3835,30 @@ function requestMeshStats() {
 }
 function setMeshStatsAutoPoll(on) {
   if (_meshStatsTimer) { clearInterval(_meshStatsTimer); _meshStatsTimer = null; }
-  // 5 s, not the 1 s a live monitor would use: these counters move slowly and
-  // each poll is a round trip that competes with the SBUS stream when bridged.
+  // 5 s while the modal is open and you're actively watching. The background
+  // cadence that feeds the sidebar is much slower — see the status poll.
   if (on) { requestMeshStats(); _meshStatsTimer = setInterval(requestMeshStats, 5000); }
+}
+function openMeshStats() {
+  document.getElementById('meshstats-modal').classList.add('open');
+  renderMeshStats();
+  requestMeshStats();          // freshen on open; the glance data may be ~15 s old
+}
+function closeMeshStats() {
+  document.getElementById('meshstats-modal').classList.remove('open');
+  // Stop the fast poll with the modal — nothing is reading it at 5 s any more.
+  const ap = document.getElementById('stats-autopoll');
+  if (ap) ap.checked = false;
+  setMeshStatsAutoPoll(false);
 }
 function _statsPct(ackd, sent) {
   if (!sent) return '—';
   return (100 * ackd / sent).toFixed(1) + '%';
 }
-function renderMeshStats(msg) {
+function renderMeshStats() {
   const body = document.getElementById('mesh-stats-body');
   if (!body) return;
+  const msg = _meshStats;
   if (!msg) {
     body.innerHTML = '<div class="noconn">Connect the board, then press Refresh.</div>';
     return;
@@ -3832,7 +3869,7 @@ function renderMeshStats(msg) {
   // never negative (one predicate grants `sent` and gates the settles), so a
   // negative here is a library bug, not a lost packet — show it rather than
   // clamping it away.
-  const inFlight = (+a.sent || 0) - ((+a.ackd || 0) + (+a.failed || 0) + (+a.unguaranteed || 0));
+  const inFlight = (+a.sent || 0) - ((+a.ackd || 0) + (+a.fail || 0) + (+a.ung || 0));
   const cell = (v, warn) => `<td style="text-align:right;padding:2px 6px;font-family:var(--mono)${warn ? ';color:var(--red)' : ''}">${v}</td>`;
   let html = `<div style="font-size:11px;color:var(--muted);margin-bottom:4px">`
            + `This board (WCB ${escH(String(msg.self))}) · up ${mins} min`
@@ -3855,20 +3892,71 @@ function renderMeshStats(msg) {
   html += `<tr style="border-top:1px solid var(--border);font-weight:600">`
         + `<td style="padding:2px 6px">All peers</td>`
         + cell(a.sent) + cell(a.ackd) + cell(_statsPct(a.ackd, a.sent))
-        + cell(a.retries, a.retries > 0) + cell(a.failed, a.failed > 0)
-        + cell(a.unguaranteed, a.unguaranteed > 0) + cell(a.recv) + `</tr></table>`
+        + cell(a.rty, a.rty > 0) + cell(a.fail, a.fail > 0)
+        + cell(a.ung, a.ung > 0) + cell(a.recv) + `</tr></table>`
         + `<div style="font-size:11px;color:var(--muted);margin-top:4px">`
         + `Broadcast frames sent: <span style="font-family:var(--mono)">${+a.bcast || 0}</span>`
         + ` · in flight: <span style="font-family:var(--mono)">${inFlight}</span>. `
         + `<b>Recv</b> is COMMANDs this board received (counted here, not by the library). `
         + `Counters are RAM-only and reset when this board reboots.`
-        // Bridged replies shed the per-peer rows to fit one ESP-NOW frame
-        // (rc_telemetry.h buildMeshStats). Say so rather than showing a
-        // totals-only table that looks like "no peers have any traffic".
-        + (msg.peers ? '' : ` <b>Per-board rows need a Direct USB connection</b> — the bridged reply `
-                          + `has to fit one ESP-NOW packet, so only the totals come across.`)
+        // A bridged reply sheds rows to fit one ESP-NOW frame (rc_telemetry.h
+        // buildMeshStats). Both shed levels have to be called out, or a short
+        // list reads as "every other board is idle" when it means "every other
+        // board is fine" — or, worse, as "no peers have any traffic".
+        + (msg.peers
+             ? (msg.pfilt ? ` <b>Only boards with retries or failures are listed</b> — the bridged reply `
+                          + `has to fit one ESP-NOW packet, so clean links were dropped. `
+                          + `Connect over Direct USB to see every board.`
+                          : '')
+             : ` <b>Per-board rows need a Direct USB connection</b> — the bridged reply `
+             + `has to fit one ESP-NOW packet, so only the totals come across.`)
         + `</div>`;
   body.innerHTML = html;
+}
+
+// ── Sidebar glance ───────────────────────────────────────────────────────────
+// One line under the WCB Status chips plus a badge on any board with something
+// wrong. Deliberately NOT a table: the sidebar answers "is anything wrong?",
+// the modal answers "what exactly".
+//
+// Wording matters here. These are OUR counters for OUR links — a failure count
+// beside WCB3 means "this board's link to WCB3", which could equally be our own
+// antenna. Labelled "This board's links" and the tooltip reads directionally,
+// so nobody power-cycles WCB3 over what is our radio.
+function _meshStatsPeerRow(id) {
+  if (!_meshStats || !Array.isArray(_meshStats.peers)) return null;
+  return _meshStats.peers.find(p => p && p[0] === id) || null;
+}
+function _meshStatsChipBadge(id) {
+  const p = _meshStatsPeerRow(id);
+  if (!p) return '';
+  const [, sent, ackd, rty, fail, ung] = p;
+  if (!rty && !fail && !ung) return '';
+  const self = _meshStats.self;
+  const tip = `This board (WCB ${self}) → WCB ${id}: ${sent} sent, ${ackd} ackd `
+            + `(${_statsPct(ackd, sent)}), ${rty} retries, ${fail} failed, ${ung} unguaranteed. `
+            + `Measured HERE — a failure can be this board's radio as easily as WCB ${id}'s.`;
+  const bad = fail > 0 || ung > 0;
+  return ` <small title="${escH(tip)}" style="color:${bad ? 'var(--red)' : 'var(--accent3)'};font-weight:600;cursor:default">`
+       + `${bad ? '⚠' : '↻'}${fail || ung || rty}</small>`;
+}
+function _meshStatsGlanceHtml() {
+  if (!_meshStats) return '';
+  const a = _meshStats.agg || {};
+  const sent = +a.sent || 0;
+  const fail = (+a.fail || 0) + (+a.ung || 0);
+  const pct  = _statsPct(+a.ackd || 0, sent);
+  return `<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);`
+       + `display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)">`
+       + `<span style="flex:1">This board's links: `
+       + `<span style="font-family:var(--mono)">${sent}</span> sent · `
+       + `<span style="font-family:var(--mono)">${pct}</span> ack`
+       + (fail ? ` · <span style="font-family:var(--mono);color:var(--red)">${fail}</span> failed` : '')
+       + `</span>`
+       + `<button type="button" title="Open the full per-board table" onclick="openMeshStats()" `
+       + `style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;`
+       + `padding:2px 5px;border-radius:3px" onmouseover="this.style.color='var(--accent)'" `
+       + `onmouseout="this.style.color='var(--muted)'">📊</button></div>`;
 }
 
 const modeLabels = ['', 'SW Down (Mode 1)', 'SW Mid (Mode 2)', 'SW Up (Mode 3)'];
@@ -4549,9 +4637,13 @@ function isWcbConfigured() {
       || (w.macOct3 | 0) !== 0
       || (w.password && w.password.length > 0);
 }
+let _wcbStatusTicks = 0;            // drives the 1-in-5 mesh-stats sub-poll below
 function startWcbStatusPoll() {
   stopWcbStatusPoll();
   _wcbStatusSeen = false;           // re-arm the one-time reply log for this session
+  _wcbStatusTicks = 0;
+  _meshStats = null;                // drop the previous board's counters
+  requestMeshStats();               // seed the glance instead of waiting 15 s for it
   wcbEverSeen = new Set();          // fresh per-session memory
   wcbSelfId   = 0;
   _wcbMetaTries = 0; _wcbMetaReqAt = 0; _wcbLastOnline = [];   // re-fetch aliases + port labels over the bridge this session
@@ -4579,6 +4671,11 @@ function startWcbStatusPoll() {
     if (_bridgeUploadInFlight || _bulkActive) return;
     if (isWcbConfigured() || viaWcbActive || sharedActive) {
       sendJSON({ type: 'GET_WCB_STATUS' }, /*silent=*/true).catch(() => {});
+      // Mesh stats ride this timer at 1-in-5 (~15 s) rather than owning one.
+      // Delivery counters move slowly, and bridged every poll is a round trip
+      // competing with SBUS — 3 s would be pure noise for numbers that change
+      // this rarely. The modal's own 5 s auto-poll is the "watching it now" case.
+      if ((++_wcbStatusTicks % 5) === 0) requestMeshStats();
     } else {
       renderWcbStatus(null);        // keep the placeholder live
     }
@@ -4738,7 +4835,7 @@ function renderWcbStatus(online) {
       : '';
     html += `<div class="wcb-chip">
       <span class="wcb-chip-dot${stateCls}"></span>
-      <span class="wcb-chip-name">WCB ${i}${aliasRaw ? ' · ' + escH(aliasRaw) : ''}${clientTag}${tempTag}${autoTag}${relayTag}${selfTag}</span>
+      <span class="wcb-chip-name">WCB ${i}${aliasRaw ? ' · ' + escH(aliasRaw) : ''}${clientTag}${tempTag}${autoTag}${relayTag}${selfTag}${_meshStatsChipBadge(i)}</span>
       <span class="wcb-chip-state${stateCls}">${stateLabel}</span>${forgetBtn}
     </div>`;
   }
@@ -4761,6 +4858,7 @@ function renderWcbStatus(online) {
     shown++;
   }
   if (!shown) html = '<div class="noconn">No WCBs configured (set quantity in Config → WCB Network)</div>';
+  else html += _meshStatsGlanceHtml();   // aggregate line + 📊 into the detail modal
   list.innerHTML = html;
 }
 
@@ -8038,7 +8136,16 @@ function handleBoardMessage(line) {
   // Silenced like WCB_STATUS: with auto-poll on this arrives every 5 s, and it
   // is a diagnostic readout, not traffic worth logging. Handled (and returned)
   // before the terminal echo.
-  if (msg.type === 'MESH_STATS') { renderMeshStats(msg); return; }
+  if (msg.type === 'MESH_STATS') {
+    _meshStats = msg;
+    renderMeshStats();                  // modal table — cheap, and pre-populates it for the next open
+    // Redraw the chips so badges + the glance line update. GUARDED on having a
+    // status reply already: this can arrive first (both are requested together
+    // on connect), and renderWcbStatus([]) would draw every board "Unknown" for
+    // the moment before the real status lands.
+    if (_wcbLastOnline.length) renderWcbStatus(_wcbLastOnline);
+    return;
+  }
 
   // Silenced: WCB_STATUS replies arrive every 3s from the background poll.
   // Handle (and return) BEFORE the terminal echo so they don't spam the log.

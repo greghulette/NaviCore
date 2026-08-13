@@ -106,14 +106,18 @@ line; `rxLen` lets the host detect USB RX truncation.
 
 ```json
 {"type":"MESH_STATS","self":20,"upMs":812340,
- "agg":{"sent":412,"ackd":408,"retries":11,"failed":3,"unguaranteed":0,"bcast":96,"recv":530},
+ "agg":{"sent":412,"ackd":408,"rty":11,"fail":3,"ung":0,"bcast":96,"recv":530},
  "peers":[[1,140,140,0,0,0,88],[3,131,127,9,3,0,102]]}
 ```
 
-Peer rows are **flat arrays**, not objects, to keep the line short:
-`[id, sent, ackd, retries, failed, unguaranteed, recv]`. The column names live in the tool.
+Built by `rcTelemetry::buildMeshStats()` for **both** transports, so the two payload shapes
+cannot drift. `"sys":1` is present on the bridged reply only (see §4).
 
-`sent`/`ackd`/`retries`/`failed`/`unguaranteed` and `bcast` come from `WCB_Client`
+Peer rows are **flat arrays** and the `agg` keys are **abbreviated** — both to fit the
+budget below, not for style: `[id, sent, ackd, rty, fail, ung, recv]`. The tool supplies
+every human-readable name, so nothing user-facing is abbreviated.
+
+`sent`/`ackd`/`rty`/`fail`/`ung` and `bcast` come from `WCB_Client`
 (`getAggregateStats()` / `getPeerStats()` / `getBroadcastSent()`) and are **outbound only**.
 `recv` has no library counter — it is `g_meshRxCount` / `g_meshRxFrom[]`, incremented in
 `onWCBCommand()`, so it counts COMMANDs delivered to the application and **not** raw-packet
@@ -122,14 +126,31 @@ traffic (OTA, bulk chunks) which never reaches that callback.
 `upMs` is reported alongside because these counters are RAM-only and reset on reboot — a
 ratio only means something against the uptime that produced it.
 
-`sent - (ackd + failed + unguaranteed)` is **in flight**. The library guarantees it is never
-negative; a negative value is a library bug (a pending slot settled twice), not a lost
-packet.
+`sent - (ackd + fail + ung)` is **in flight**. The library guarantees it is never negative;
+a negative value is a library bug (a pending slot settled twice), not a lost packet.
 
-**Bridged replies shed `peers`.** The relay's `WCB_Client` cannot reassemble fragments, so
-the Via-WCB reply must fit one ESP-NOW frame. `buildMeshStats()` re-builds without the
-per-peer rows when the full payload exceeds the budget, and the tool detects the missing key
-and says per-board detail needs Direct USB. Same shed-to-fit discipline as `WCB_STATUS`.
+#### Shedding to fit one frame
+
+The relay's `WCB_Client` cannot reassemble fragments, so a bridged reply must fit **185 B**.
+`buildMeshStats()` re-builds one tier down until it does (`MeshStatsPeers`):
+
+| Tier | Rows included | Marker | Typical size |
+|---|---|---|---|
+| `MSP_ALL` | every known board | — | 229 B at 4 boards — **never fits bridged** |
+| `MSP_PROBLEMS` | only boards with non-zero `rty`/`fail`/`ung` | `"pfilt":1` | 152 B with none, 173 B with one |
+| `MSP_NONE` | none — `peers` key absent | — | 131 B |
+
+The middle tier is the one that earns its keep: clean links carry nothing worth diagnosing,
+and dropping them keeps a row for every board that *does*. **Two or more problem boards
+(195 B) still falls through to aggregate-only** — at that point the totals already tell you
+something is badly wrong and Direct USB is the answer.
+
+This is also why the `agg` keys are short. Spelled out (`retries`/`failed`/`unguaranteed`)
+the aggregate alone is ~146 B and `pfilt` + one row lands at ~188 B — the middle tier could
+never fit and would always collapse. USB has no packet budget and always sends `MSP_ALL`.
+
+The tool distinguishes all three: `peers` absent → "per-board rows need Direct USB";
+`pfilt` set → "only boards with retries or failures are listed".
 
 ### Outbound stats report (`?STATS,RPT`) — board → one WCB
 
@@ -429,6 +450,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-13 | _(uncommitted)_ | `MESH_STATS` gained a three-tier shed (`MSP_ALL` → `MSP_PROBLEMS` → `MSP_NONE`, flagged `"pfilt":1`) so a bridged reply keeps a row for every board with retries/failures instead of dropping all per-board detail. `agg` keys abbreviated to `rty`/`fail`/`ung` — measured: spelled out, the middle tier could never fit 185 B. `buildMeshStats()` is now the single builder for USB **and** bridged, so the shapes cannot drift. |
 | 2026-08-12 | _(uncommitted)_ | Added `GET_MESH_STATS` → `MESH_STATS` (ESP-NOW delivery counters, flat per-peer rows, bridged replies shed `peers` to fit one frame). Noted that `recv` is NaviCore's own counter — `WCB_Client` 1.13.0's statistics are outbound-only. |
 | 2026-08-12 | _(uncommitted)_ | §1: documented the **ensured-send degradation contract** (`_findFreePending` never evicts an outstanding ensured slot; `_sendPacket` degrades to best-effort and returns `false`, which `rcExecuteActionNow` deliberately discards) and the **one-hop cap** — which gates *implicit* routing only (`;A`/`;D`/`;H`, `;M`, `;L`, `;C`/`;SEQ`, and any re-broadcast). Explicit `;w<n>` is not capped: self-target runs local (`WCB.ino` ≈5586), remote re-forwards by unicast (≈5604), and `sendESPNowMessage` caps `target == 0` only (≈2145). So a unicast `^`-chain loses a part only when it is an implicitly-routed verb whose device is hosted off-target. |
 | 2026-08-05 | _(uncommitted)_ | Added the `;D` DFPlayer verb to the device-command table (10-byte binary frame on the wire; `;D` text only travels between boards) and `DBG_DFP` = bit 6 to the debug bitmask. |

@@ -984,25 +984,55 @@ inline void reportMeshStats() {
   wcb->send(sr.wcb, cmd);
 }
 
-// Build the MESH_STATS reply into buf. Mirrors the payload NaviCore.ino emits on
-// direct USB — same field names, same flat [id,sent,ackd,retries,failed,unguaranteed,
-// recv] peer rows — so the config tool has ONE renderer for both transports.
+// Peer-row detail levels for buildMeshStats, most complete first. The bridged
+// reply must fit ONE ESP-NOW frame (the relay's WCB_Client cannot reassemble
+// fragments) and a full roster overflows it, so the caller re-builds one tier
+// down until it fits — the same shed-to-fit discipline as buildWcbStatus.
 //
-// includePeers=false drops the per-peer rows: the bridged reply must fit ONE
-// ESP-NOW frame (the relay's WCB_Client cannot reassemble fragments), and a
-// six-board roster overflows it. Same shed-to-fit discipline as buildWcbStatus,
-// just with one thing to shed — the aggregate is the part worth keeping, and the
-// tool says so when the rows are missing. Returns the length written.
-inline size_t buildMeshStats(char* buf, size_t n, bool includePeers) {
+// The middle tier is the one that earns its keep: it drops boards whose links
+// are CLEAN (no retries, no failures, nothing unguaranteed), which is most of
+// them most of the time, so a bridged reply almost always still carries a row
+// for every board that has something to say. Shedding all-or-nothing meant the
+// per-board detail vanished exactly when you were bridged — i.e. in the droid,
+// which is where you actually diagnose a bad link.
+enum MeshStatsPeers : int {
+  MSP_NONE     = 0,   // aggregate only
+  MSP_PROBLEMS = 1,   // only boards with retries/failed/unguaranteed non-zero
+  MSP_ALL      = 2,   // every known board
+};
+
+// Build the MESH_STATS reply into buf. The SINGLE builder for both transports —
+// direct USB and the Via-WCB bridge — so the two payload shapes cannot drift
+// apart. Peer rows are flat [id,sent,ackd,retries,failed,unguaranteed,recv].
+//
+// `sys` is emitted only for the bridged reply, matching what the rest of this
+// file does: the "sys":1 marker exists so the WCB Wizard can mute tool chatter
+// when it shares the bridge WCB's USB port, and a direct-USB reply has no
+// Wizard to mute it for.
+//
+// When rows are filtered to MSP_PROBLEMS the reply carries "pfilt":1, so the
+// tool can say "only boards with problems are listed" instead of leaving the
+// user to read a short list as "every other board is idle". Returns the length
+// written (>= n means truncated — caller re-builds smaller).
+inline size_t buildMeshStats(char* buf, size_t n, int peerMode, bool includeSys) {
   int q = rcConfig.wcbNetwork.quantity;
   if (q < 0) q = 0;
   if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
   const int selfId = rcConfig.wcbNetwork.deviceId;
   WCBPeerStats agg = wcb ? wcb->getAggregateStats() : WCBPeerStats{};
+  // Aggregate keys are ABBREVIATED (rty/fail/ung) on purpose, and it is
+  // load-bearing rather than cosmetic. The bridged reply must fit 185 B; with
+  // "retries"/"failed"/"unguaranteed" spelled out the aggregate alone is ~146 B
+  // and adding "pfilt" plus a single problem row lands at ~188 B — so the
+  // MSP_PROBLEMS tier could never actually fit and would always collapse to
+  // aggregate-only. Short keys bring it to ~131 B, which fits one problem row
+  // (~173 B). The tool supplies the human-readable column names, so nothing
+  // user-facing is abbreviated. Peer rows are positional arrays for the same reason.
   size_t o = snprintf(buf, n,
-                      "{\"sys\":1,\"type\":\"MESH_STATS\",\"self\":%d,\"upMs\":%lu,"
-                      "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"retries\":%lu,\"failed\":%lu,"
-                      "\"unguaranteed\":%lu,\"bcast\":%lu,\"recv\":%lu}",
+                      "{%s\"type\":\"MESH_STATS\",\"self\":%d,\"upMs\":%lu,"
+                      "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"rty\":%lu,\"fail\":%lu,"
+                      "\"ung\":%lu,\"bcast\":%lu,\"recv\":%lu}",
+                      includeSys ? "\"sys\":1," : "",
                       selfId, (unsigned long)millis(),
                       (unsigned long)agg.sent, (unsigned long)agg.ackd,
                       (unsigned long)agg.retries, (unsigned long)agg.failed,
@@ -1010,14 +1040,20 @@ inline size_t buildMeshStats(char* buf, size_t n, bool includePeers) {
                       (unsigned long)(wcb ? wcb->getBroadcastSent() : 0),
                       (unsigned long)g_meshRxCount);
   if (o >= n) return o;   // truncated — caller re-builds smaller
-  if (includePeers) {
+  if (peerMode != MSP_NONE) {
     const int hi = wcbHighestKnown(q);
-    o += snprintf(buf + o, (o < n) ? n - o : 0, ",\"peers\":[");
+    if (peerMode == MSP_PROBLEMS && o < n) o += snprintf(buf + o, n - o, ",\"pfilt\":1");
+    if (o < n) o += snprintf(buf + o, n - o, ",\"peers\":[");
     bool first = true;
     for (int i = 1; i <= hi && o < n; i++) {
       if (i == selfId) continue;
       if (!wcbBoardKnown(i, q)) continue;
       WCBPeerStats p = wcb ? wcb->getPeerStats((uint8_t)i) : WCBPeerStats{};
+      // A clean link has nothing to diagnose — drop it when space is tight.
+      // `sent`/`ackd`/`recv` alone never qualify a board as interesting; the
+      // aggregate already carries those totals.
+      if (peerMode == MSP_PROBLEMS && p.retries == 0 && p.failed == 0 && p.unguaranteed == 0)
+        continue;
       o += snprintf(buf + o, n - o, "%s[%d,%lu,%lu,%lu,%lu,%lu,%lu]", first ? "" : ",", i,
                     (unsigned long)p.sent, (unsigned long)p.ackd,
                     (unsigned long)p.retries, (unsigned long)p.failed,
@@ -1151,8 +1187,11 @@ inline void tick() {
     _pendingMeshStatsSender = 0;
     char sbuf[220];
     const size_t kFit = 185;                    // one ESP-NOW frame, same margin as WCB_STATUS
-    size_t l = buildMeshStats(sbuf, sizeof(sbuf), true);
-    if (l > kFit) l = buildMeshStats(sbuf, sizeof(sbuf), false);
+    // Shed the cheapest detail first: every board → only boards with something
+    // wrong → aggregate only. See MeshStatsPeers for why the middle tier exists.
+    size_t l = buildMeshStats(sbuf, sizeof(sbuf), MSP_ALL, true);
+    if (l > kFit) l = buildMeshStats(sbuf, sizeof(sbuf), MSP_PROBLEMS, true);
+    if (l > kFit) l = buildMeshStats(sbuf, sizeof(sbuf), MSP_NONE, true);
     // A truncated reply is unparseable JSON — drop it and let the tool re-poll.
     if (wcb && l <= kFit) wcb->send(to, sbuf);
     return;   // one reply this tick

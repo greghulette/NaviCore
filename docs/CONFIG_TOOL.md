@@ -217,16 +217,32 @@ correct as the destination dropdowns rewrite the action type. It is deliberately
 the tool cannot always know where a device is hosted. Authoring time is still the only
 cheap place to catch this — the symptom in the field reads as "half my action works".
 
-**Mesh Stats (General tab).** Two independent things share one section, and mixing them up
-is the easy mistake: the **checkbox + Target WCB** are *saved config*
-(`config.statsReport` → `rcConfig.statsReport`) that turns on the 30 s `;V` push, while
-**Refresh / auto-poll** is a *live diagnostic view* (`GET_MESH_STATS` → `MESH_STATS`) that
-saves nothing and must never dirty the config. Toggling auto-poll deliberately does not
-touch `config`.
+**Mesh Stats — config and view live apart, deliberately.** The **checkbox + Target WCB** are
+*saved config* (`config.statsReport` → `rcConfig.statsReport`) and stay in **General**; the
+numbers themselves are a *live diagnostic* that saves nothing and must never dirty the
+config. They are shown in two places at two depths:
 
-The renderer is shared by both transports. A bridged reply omits `peers` (it has to fit one
-ESP-NOW frame), and `renderMeshStats()` keys on that absence to say per-board rows need
-Direct USB — without it a totals-only table reads as "no peer has any traffic".
+| Where | What | Function |
+|---|---|---|
+| **Sidebar**, under the WCB Status chips | One aggregate line + a badge on any board with retries/failures | `_meshStatsGlanceHtml()`, `_meshStatsChipBadge()` |
+| **📊 modal** (from the glance, or General) | Full per-board table, uptime, refresh, 5 s auto-poll | `renderMeshStats()` |
+
+The sidebar answers *"is anything wrong?"*; the modal answers *"what exactly"*. Putting the
+table in the narrow sidebar would be cramped, and burying it in a config tab made it
+invisible — hence both.
+
+**The badge wording is load-bearing.** These are *our* counters for *our* links: `⚠3` beside
+WCB3 means "this board's link to WCB3", which could equally be our own radio. The section
+reads **"This board's links"** and the tooltip is directional (`WCB 20 → WCB 3`), so nobody
+power-cycles WCB3 over our antenna.
+
+Polling rides the existing 3 s status timer at **1-in-5** (~15 s) rather than owning a
+timer — these counters move slowly and a bridged poll competes with SBUS. The modal's 5 s
+auto-poll is the "watching it right now" case and stops when the modal closes.
+
+`renderMeshStats()` handles all three reply shapes: full rows, `pfilt` (only problem boards
+survived the bridged shed), and no `peers` at all. Each says so — without that, a short list
+reads as "every other board is idle" and a totals-only table as "no peer has any traffic".
 
 **Cheat sheet QR.** The 📱 button publishes a generated cheat-sheet page through a live
 Cloudflare Worker relay (source in [`tools/cheatsheet-relay-worker.js`](../tools/cheatsheet-relay-worker.js))
@@ -294,6 +310,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-13 | _(uncommitted)_ | Mesh Stats split by depth: the **sidebar** gains an aggregate line + per-board badges under the WCB Status chips, and the full table moves to a **📊 modal**. General keeps only the saved toggle + Target WCB. Polling folded into the 3 s status tick at 1-in-5 (~15 s). Badge wording made directional so a link failure is not read as the remote board being broken. |
 | 2026-08-12 | _(uncommitted)_ | Added the **Mesh Stats** section to the General tab: a saved `statsReport` toggle + Target WCB (the 30 s `;V` push) and a live `GET_MESH_STATS` readout with optional 5 s auto-poll. The live view saves nothing; the shared renderer notes when a bridged reply has shed its per-board rows. |
 | 2026-08-12 | _(uncommitted)_ | Wire-command rows now warn (`refreshChainWarn()` in `_appendCommandView()`) when a `^`-chain is aimed at a **single** board **and** a part starts with an implicitly-routed verb (`IMPLICIT_ROUTED` = `;A` `;D` `;H` `;M` `;L` `;C`/`;SEQ`) — only those can be dropped by the WCB one-hop cap. Explicit `;w<n>` chains stay quiet. Re-evaluated on both the command text and the "Send to" destination. Indexed `_appendCommandView()` in the function map. |
 | 2026-08-12 | _(uncommitted)_ | **Export** now downloads a **complete JSON backup** (was the lossy CSV, which silently dropped knob/servo passthrough outputs); **Import** auto-detects JSON vs legacy CSV. `exportConfigCsv` is retained as a partial spreadsheet export only. Added an 👁 show/hide toggle to the cloud-backup password field. The live monitor now **auto-re-subscribes** (re-sends `START_MONITOR` from `_sbusStaleTick` when the SBUS panel goes stale while a link is open), so it self-heals after a board reboot drops `wsMonitorActive`. |

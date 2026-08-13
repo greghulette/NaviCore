@@ -3406,38 +3406,20 @@ void handleSerialInput() {
           //      the library does not track — see onWCBCommand.
           // All RAM-only: a reboot zeroes them, deliberately (session health, not
           // lifetime history), so there is nothing to load or persist here.
-          int q = rcConfig.wcbNetwork.quantity;
-          if (q < 0) q = 0;
-          if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
-          int selfId = rcConfig.wcbNetwork.deviceId;
-          int hi = rcTelemetry::wcbHighestKnown(q);
-          WCBPeerStats agg = wcb ? wcb->getAggregateStats() : WCBPeerStats{};
-          Serial.printf("{\"type\":\"MESH_STATS\",\"self\":%d,\"upMs\":%lu,"
-                        "\"agg\":{\"sent\":%lu,\"ackd\":%lu,\"retries\":%lu,"
-                        "\"failed\":%lu,\"unguaranteed\":%lu,\"bcast\":%lu,\"recv\":%lu}",
-                        selfId, (unsigned long)millis(),
-                        (unsigned long)agg.sent, (unsigned long)agg.ackd,
-                        (unsigned long)agg.retries, (unsigned long)agg.failed,
-                        (unsigned long)agg.unguaranteed,
-                        (unsigned long)(wcb ? wcb->getBroadcastSent() : 0),
-                        (unsigned long)g_meshRxCount);
-          // Per-peer rows, one per board the status panel would render. Built as
-          // a flat array of arrays (not objects) to keep the line short — the
-          // tool names the columns.  [id, sent, ackd, retries, failed, unguaranteed, recv]
-          Serial.print(",\"peers\":[");
-          bool firstPeer = true;
-          for (int i = 1; i <= hi; i++) {
-            if (i == selfId) continue;                       // never a peer of ourselves
-            if (!rcTelemetry::wcbBoardKnown(i, q)) continue; // don't render slots the panel hides
-            WCBPeerStats p = wcb ? wcb->getPeerStats((uint8_t)i) : WCBPeerStats{};
-            Serial.printf("%s[%d,%lu,%lu,%lu,%lu,%lu,%lu]", firstPeer ? "" : ",", i,
-                          (unsigned long)p.sent, (unsigned long)p.ackd,
-                          (unsigned long)p.retries, (unsigned long)p.failed,
-                          (unsigned long)p.unguaranteed,
-                          (unsigned long)g_meshRxFrom[i - 1]);
-            firstPeer = false;
-          }
-          Serial.println("]}");
+          //
+          // Built by rcTelemetry::buildMeshStats — the SAME builder the bridged
+          // reply uses, so the two payload shapes cannot drift. USB has no packet
+          // budget, so it always sends every board (MSP_ALL); only the bridged
+          // path sheds rows to fit one ESP-NOW frame. No "sys":1 here: that marker
+          // exists so the WCB Wizard can mute tool chatter when it shares the
+          // BRIDGE board's port, and a direct-USB reply has no Wizard to mute it
+          // for — matching the WCB_STATUS reply just above.
+          //
+          // 20 boards x ~30 chars + the aggregate fits well inside this; loop()
+          // has ample stack for it on Core 1.
+          static char msbuf[900];
+          rcTelemetry::buildMeshStats(msbuf, sizeof(msbuf), rcTelemetry::MSP_ALL, /*includeSys=*/false);
+          Serial.println(msbuf);
 
         } else {
           Serial.println("{\"type\":\"ERROR\",\"msg\":\"unknown type\"}");
