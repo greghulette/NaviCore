@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.13:49.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.13:56.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3125,16 +3125,17 @@
             <h3>Mesh Stats <span style="font-size:11px;font-weight:normal;color:var(--muted)">— ESP-NOW delivery counters</span></h3>
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:8px">
               <input type="checkbox" id="stats-enabled" onchange="setStatsReportEnabled(this.checked)">
-              <span>Report this board's mesh stats to a WCB</span>
+              <span>Use mesh delivery stats on this droid</span>
             </label>
             <div id="stats-fields" style="display:none">
               <div class="wcb-send-row" style="margin-bottom:6px">
-                <label>Target WCB:</label>
-                <input type="number" id="stats-wcb" min="1" max="20" step="1" style="width:70px;font-size:12px"
+                <label>Report to WCB:</label>
+                <input type="number" id="stats-wcb" min="1" max="20" step="1" placeholder="none" style="width:70px;font-size:12px"
                        oninput="config.statsReport.wcb = Math.max(0, Math.min(20, parseInt(this.value,10)||0))">
+                <span style="font-size:11px;color:var(--muted);margin-left:6px">optional — leave blank to collect without shipping</span>
               </div>
             </div>
-            <div class="noconn" style="margin-top:4px">Off by default. Every <b>30&nbsp;s</b> this board sends one command to the target WCB — <code>?STATS,RPT,&lt;from&gt;,&lt;sent&gt;,&lt;ackd&gt;,&lt;retries&gt;,&lt;failed&gt;,&lt;unguaranteed&gt;,&lt;bcast&gt;,&lt;recv&gt;</code> — which that board stores and shows under <code>?STATS</code>, in a <b>Reported by Other Nodes</b> section. These are <b>this board's own</b> numbers only; every other node reports its own the same way. Because it is a <code>?</code> command it is handled locally on that board and is <b>never</b> re-broadcast or written to its serial ports. The stored rows are RAM-only and clear on that board's reboot. Requires WCB firmware with <code>?STATS,RPT</code>. Applies on Save.</div>
+            <div class="noconn" style="margin-top:4px">Off by default. <b>The counters always run</b> — they start at boot and accumulate until the board reboots, whatever this is set to. Turning this on tells the tool this droid uses them, so <b>WCB Status shows the per-board numbers from the moment you connect</b> (already covering everything since boot, not just since you looked).<br><br><b>Report to WCB</b> is optional. Blank = collect and display here only. Set it and every <b>30&nbsp;s</b> this board also sends one command to that WCB — <code>?STATS,RPT,&lt;from&gt;,&lt;sent&gt;,&lt;ackd&gt;,&lt;retries&gt;,&lt;failed&gt;,&lt;unguaranteed&gt;,&lt;bcast&gt;,&lt;recv&gt;</code> — which it stores and lists under <code>?STATS</code> in a <b>Reported by Other Nodes</b> section, so one board can collect the whole fleet. These are <b>this board's own</b> numbers only; every other node reports its own the same way. Because it is a <code>?</code> command it is handled locally there and is <b>never</b> re-broadcast or written to its serial ports. Those stored rows are RAM-only and clear on that board's reboot. Shipping requires WCB firmware with <code>?STATS,RPT</code>. Applies on Save.</div>
             <div style="margin-top:10px">
               <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px"
                       onclick="openMeshStats()">📊 View mesh stats</button>
@@ -3830,18 +3831,25 @@ function renderStatsReport() {
 // "upMs" is reported alongside them — a ratio is only meaningful against the
 // uptime that produced it, and a board that rebooted an hour into a show would
 // otherwise look suspiciously healthy.
-// Sidebar stats visibility. OFF by default: the compact chip list is the normal
-// working view, and the stats are a thing you go looking for. View-only state,
-// so it lives in localStorage beside rcTerminalTimestamps / rcDisplayUnit rather
-// than in the droid config — toggling what a panel draws must never dirty the
-// config or need a Save.
+// Sidebar stats visibility — a SESSION toggle, seeded from the droid's own
+// config (statsReport.enabled) every time a config lands. The droid says
+// whether it uses mesh stats; the checkbox is a temporary override for the
+// current session, so unticking it to get the compact list back never edits
+// the config or needs a Save.
 //
-// It also gates the background POLL, not just the render: with stats off the
-// tool asks the board for nothing, so the default costs no mesh traffic at all.
-let showMeshStats = localStorage.getItem('rcShowMeshStats') === '1';
+// Deliberately NOT persisted in localStorage: the config is the one place this
+// belongs, so it travels with the droid and rides backups. A browser-local copy
+// would silently disagree with the droid it is connected to.
+//
+// It gates the background POLL as well as the render, so a droid that does not
+// use stats costs no mesh traffic at all.
+//
+// NOTE: this controls DISPLAY only. The firmware's counters run from boot
+// regardless and are never reset in-session, so enabling this mid-session shows
+// everything since the board powered up — not just from the moment you ticked.
+let showMeshStats = false;
 function setShowMeshStats(on) {
   showMeshStats = !!on;
-  try { localStorage.setItem('rcShowMeshStats', showMeshStats ? '1' : '0'); } catch (_) {}
   // Fetch immediately on enable rather than making the user wait out the 15 s
   // tick staring at "no traffic" under every board.
   if (showMeshStats) requestMeshStats();
@@ -8564,6 +8572,15 @@ function applyConfig(data) {
     const s = (data.statsReport && typeof data.statsReport === 'object') ? data.statsReport : {};
     config.statsReport = { enabled: !!s.enabled, wcb: (+s.wcb || 0) };
     renderStatsReport();
+    // The droid decides whether the sidebar shows stats. Seeding from the config
+    // on every load is what makes them appear from CONNECT rather than only
+    // after someone remembers to tick a box — and the counters they show have
+    // been running since the board booted, so there is real history there
+    // immediately. The checkbox stays a session override on top of this.
+    showMeshStats = config.statsReport.enabled;
+    const sc = document.getElementById('wcb-show-stats');
+    if (sc) sc.checked = showMeshStats;
+    if (showMeshStats) requestMeshStats();
   }
   document.getElementById('tapwin-input').value = config.tapWindowMs;
   { const cr = document.getElementById('chrate-input');
@@ -15501,14 +15518,6 @@ function _updateFirmwareBtnState() {
 // (which may have viaWcbActive=true from localStorage restore) is reflected.
 // Done with a microtask so it runs after DOMContentLoaded handlers settle.
 queueMicrotask(_updateFirmwareBtnState);
-
-// Reflect the saved sidebar-stats preference into its checkbox. Same microtask
-// discipline: the element exists at parse time, but doing it here keeps all the
-// restore-from-localStorage work in one place after the DOM has settled.
-queueMicrotask(() => {
-  const el = document.getElementById('wcb-show-stats');
-  if (el) el.checked = showMeshStats;
-});
 
 document.getElementById('btn-fw-flash').addEventListener('click', e => {
   // Defence-in-depth: even though the button is disabled when viaWcbActive
