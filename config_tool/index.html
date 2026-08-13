@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.19:25.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.19:33.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4363,9 +4363,16 @@ const maestroCommands = {
 // 'pagehide' rather than 'beforeunload' — it fires for bfcache navigations too,
 // and browsers increasingly ignore beforeunload without user interaction.
 //
-// NOTE: this can only help if the reset happens on the CLOSE edge. If the board
-// resets when the NEW page opens the port, this will not change anything — the
-// boot line "Reset reason: …" is what tells the two apart.
+// MEASURED, 2026-08-13: this does NOT stop the reboot-on-refresh. A NaviCore v2
+// reports `Reset reason: 11 - USB peripheral` / RTC code 21 (USB UART chip
+// reset) and the boot log lands at the moment the port is OPENED — the first
+// PING follows exactly `settleMs` later. So the reset fires on the OPEN edge, in
+// the new page, and nothing the dying page does can prevent it. Chrome asserts
+// DTR/RTS as part of open() and Web Serial exposes no way to open without them.
+//
+// Kept anyway: a deterministic close is still better than an abandoned handle,
+// and the sharedHub.leave() below genuinely helps cross-tab failover. Do not
+// mistake it for a fix to the reboot — see TROUBLESHOOTING.
 function _releaseSerialOnUnload() {
   // Shared/Via-WCB: the hub owns the port when this tab is leader. leave() posts
   // its cross-tab "bye" FIRST (synchronously), so a follower can take the port
