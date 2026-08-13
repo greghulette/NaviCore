@@ -593,19 +593,27 @@ struct RcModeReport {
   char    cmds[3][48];  // per-mode overrides (index 0 = mode 1); win over tmpl when non-empty
 };
 
-// Optional mesh-statistics report. When enabled with a valid target, this board
-// pushes its own ESP-NOW delivery counters to ONE WCB as a chain of runtime
-// variable sets (";V,<name>,<value>"), so an aggregator on that board can read
-// them or fan them onward. Every OTHER board reports its own stats the same way
-// — this carries NaviCore's numbers only, never a fleet roll-up.
+// Optional mesh-statistics reporting.
 //
-// ";V" (never ";VP") is deliberate: a plain ;V leaves a NEW variable VOLATILE on
-// the WCB (WCB_Variables.cpp ≈256-261), so the values are RAM-only, vanish on
-// that board's reboot, and never wear its flash under a periodic push. Using
-// ";VP" here would persist them to NVS on every report — do not.
+// THE COUNTERS THEMSELVES ARE NOT OPTIONAL and this struct does not gate them:
+// WCB_Client accumulates delivery stats from begin(), g_meshRxCount counts
+// inbound COMMANDs from boot, and nothing here (or anywhere) resets them
+// in-session. So the numbers always cover the whole uptime, and a tool that
+// starts reading them mid-session still sees the full history.
+//
+// `enabled` is therefore a STATEMENT OF INTENT, not a switch on collection:
+//   • the config tool uses it to decide whether to show the per-board stats in
+//     WCB Status from connect, instead of waiting for someone to tick a box;
+//   • the firmware acts on it only in combination with `wcb`, below.
+//
+// `wcb` is OPTIONAL. 0 = collect and display only, ship nothing. 1-20 = also
+// push this board's own counters to that WCB every STATS_REPORT_MS as one local
+// "?STATS,RPT,<from>,..." command, which it stores and lists under ?STATS. Every
+// other node reports its own the same way, so a collector assembles the fleet
+// view without anyone computing a roll-up — this never carries one.
 struct RcStatsReport {
-  bool    enabled;      // master on/off (default false)
-  uint8_t wcb;          // target WCB id 1-20 (0 = unset → nothing sent)
+  bool    enabled;      // "this droid uses mesh stats" — drives the tool's default view
+  uint8_t wcb;          // OPTIONAL collector, 1-20; 0 = collect/display only, push nothing
 };
 
 struct RcConfig {

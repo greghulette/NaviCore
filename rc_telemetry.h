@@ -961,6 +961,9 @@ inline void reportMeshStats() {
   _lastStatsReport = millis();
   if (!wcb || !wcbReady) return;
   const RcStatsReport& sr = rcConfig.statsReport;
+  // wcb == 0 is a VALID configured state, not an unfinished one: "collect and
+  // display, ship nothing". The counters ran regardless of anything here — see
+  // RcStatsReport — so there is simply no collector to push them to.
   if (!sr.enabled || sr.wcb < 1 || sr.wcb > 20) return;
 
   WCBPeerStats agg = wcb->getAggregateStats();

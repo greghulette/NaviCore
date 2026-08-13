@@ -80,7 +80,9 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 | `peerNewActions` | `RcTier` | Up to 5 actions fired when a new mesh peer appears |
 | `peerAlert` | `bool` | Also flash the LED and print a terminal line |
 | `modeReport` | `RcModeReport` | `{enabled, wcb, tmpl[48], cmds[3][48]}` — optional: send the mode-select position to one WCB on every change and every 60 s. `{mode}` in `tmpl` → the position; a non-empty `cmds[mode-1]` overrides it |
-| `statsReport` | `RcStatsReport` | `{enabled, wcb}` — optional: push **this board's** ESP-NOW delivery counters to one WCB every 30 s as one `?STATS,RPT` command. See below |
+| `statsReport` | `RcStatsReport` | `{enabled, wcb}` — `enabled` states that this droid uses mesh stats (drives the tool's default view); `wcb` is an **optional** collector, 0 = collect/display only. See below |
+
+**The counters are never gated by this.** `WCB_Client` accumulates from `begin()`, `g_meshRxCount` counts from boot, and nothing resets them in-session — so they always cover the whole uptime and a tool that starts reading mid-session still sees the full history. `enabled` is a statement of intent (show me these), not a switch on collection; `wcb` = 0 means collect and display without shipping anywhere.
 
 **`statsReport` — `?` and not `;` is load-bearing.** The report is one command:
 
@@ -285,6 +287,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-13 | _(uncommitted)_ | `statsReport.wcb` documented as **optional** (0 = collect/display, ship nothing) and `enabled` clarified as a statement of intent — the counters run from boot regardless and are never reset in-session, so nothing here gates collection. |
 | 2026-08-12 | _(uncommitted)_ | Added `statsReport` (`{enabled, wcb}`) — the optional 30 s `;V` push of this board's ESP-NOW delivery counters to one WCB, with the one-variable-per-counter and `;V`-not-`;VP` constraints. Also documented `modeReport`, which was in the firmware but missing from this table. |
 | 2026-08-11 | _(uncommitted)_ | Added `wcbProfiles[≤6]` + `wcbProfileCount` (`RcWcbProfile`) — saved WCB mesh identities the config tool switches between, now stored in the config (was browser localStorage) so they travel with the droid + backups. New capacity constant `RC_MAX_WCB_PROFILES` (6) and its cross-file pair `WCB_MAX_PROFILES`. |
 | 2026-08-05 | _(uncommitted)_ | Added `dfpDest` (`RcDfpDest`), recorded the inverse MP3-Trigger/DFPlayer volume scales, and added four new rows to the cross-file invariants table (`RcActionType` now 0–13, `RcDfpFn`, the duplicated arg ranges, `DBG_DFP`). |
