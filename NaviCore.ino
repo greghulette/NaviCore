@@ -3547,7 +3547,8 @@ static void printBootTelemetry() {
     switch (c) {
       case 1:  return "power-on";
       case 3:  return "SW system";
-      case 7:  return "RTC-WDT system";
+      case 7:  return "MWDT0 (task/int watchdog)";  // TG0 main WDT — NOT the RTC-WDT
+      case 9:  return "RTC-WDT system";
       case 15: return "brown-out";
       case 16: return "RTC-WDT (short-WDT bootloader fired — auto-retry)";
       case 21: return "USB UART chip reset";   // host opened/closed the CDC port
