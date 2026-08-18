@@ -176,12 +176,25 @@ the tool can skip re-pulling an unchanged library.
 
 ### Picker layout
 
-Boards render collapsed. Related boards fold one level further into a **group**
-(`NC_CMDLIB_GROUPS`), so a cluster is one row instead of seven:
+The library builds **actions** — what a pilot fires from a transmitter switch. Boards of
+setup/config verbs are therefore **hidden** (`NC_CMDLIB_HIDDEN`): nobody binds a button to
+"set the hardware version" or "erase NVS", and those belong in the WCB Wizard, which is
+built for them. `wcb-native` (71 verbs) is hidden today.
+
+Hiding rather than deleting keeps the vendored snapshot byte-for-byte upstream apart from
+the sequence split, and means a re-fetch can't bring the board back. Un-hide by removing
+the id: its `NC_CMDLIB_ORDER_TOP` entry is still there, so it returns to its old slot.
+**Known consequence** — `ncDecodeCommand()` only searches boards that are present, so an
+action row already holding one of those commands keeps working (the wire string is stored
+in the config and sent unchanged) but loses its `📚 Board · Command` hint and re-opens at
+the list instead of the composer.
+
+What survives renders collapsed. Related boards fold one level further into a **group**
+(`NC_CMDLIB_GROUPS`), so a cluster is one row instead of six:
 
 | Group | Members |
 |---|---|
-| **WCB** | Stored Sequences, HCR Vocalizer, MP3 Trigger, DFPlayer Mini, Maestro, WLED Lighting, Native config |
+| **WCB** | Stored Sequences, HCR Vocalizer, MP3 Trigger, DFPlayer Mini, Maestro, WLED Lighting |
 | **AstroPixels** | General, Sound, PSI, Logics, Holo, Servo |
 
 A board joins by **id prefix** (`wcb-`, `astropixels-`) *or* by an explicit **`ids`**
@@ -192,9 +205,9 @@ with `wcb-`. Its sibling `nc-maestro` is deliberately **out** — raw Pololu byt
 configured Maestro slot is a controller concern, not a WCB one.
 
 Each group's `sub()` shortens a member's label inside it, since the shared part is now the
-group header — `"WCB · HCR Vocalizer"` → `HCR Vocalizer`, `"WCB (native config)"` →
-`Native config`, `"Maestro (via WCB)"` → `Maestro` (the qualifier only exists to tell it
-from the Pololu board outside, and the group header already says WCB). Naming a new board
+group header — `"WCB · HCR Vocalizer"` → `HCR Vocalizer`, `"Maestro (via WCB)"` →
+`Maestro` (the qualifier only exists to tell it from the Pololu board outside, and the
+group header already says WCB). Naming a new board
 `WCB · <thing>` is what makes it fold in cleanly without touching `ids`.
 
 Two ordering facts are easy to trip over:
@@ -205,8 +218,8 @@ Two ordering facts are easy to trip over:
   `nc-maestro-wcb` sits in the middle of it and does not look like it belongs — splits
   the cluster into two separate group rows. `_cmdlibNormalize()` does the sort, and the
   sort is stable, so unlisted boards keep their manifest order in the middle.
-- **Order inside a group is that same array.** Stored Sequences leads the WCB group and
-  the 71-command Native config trails it, because that is the order you reach for them.
+- **Order inside a group is that same array.** Stored Sequences leads the WCB group,
+  because that is the one you reach for.
 
 A search auto-expands every section with a match, so the extra level costs nothing when
 you know what you are looking for.
@@ -420,6 +433,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-17 | _(uncommitted)_ | Added `NC_CMDLIB_HIDDEN` and hid `wcb-native` (71 setup/config/routing/system/power verbs). The library builds ACTIONS — things a pilot fires from a transmitter switch — and none of those are: nobody binds a button to "set the hardware version" or "erase NVS", and the WCB Wizard is built for them. Hidden rather than deleted so the vendored snapshot stays byte-for-byte upstream apart from the sequence split, and so a re-fetch cannot bring it back; the board keeps its `NC_CMDLIB_ORDER_TOP` entry so removing the id restores its old slot. Known consequence: `ncDecodeCommand()` only searches present boards, so an action row already holding one of those commands still works but loses its 📚 hint and re-opens at the list. The WCB group is six members now, ending at WLED. |
+| 2026-08-17 | _(uncommitted)_ | Added `NC_CMDLIB_HIDDEN` and hid `wcb-native` (71 setup/config/routing/system/power verbs). The library builds ACTIONS — things a pilot fires from a transmitter switch — and none of those are: nobody binds a button to "set the hardware version" or "erase NVS", and the WCB Wizard is built for them. Hidden rather than deleted so the vendored snapshot stays byte-for-byte upstream apart from the sequence split, and so a re-fetch cannot bring it back; the board keeps its `NC_CMDLIB_ORDER_TOP` entry so removing the id restores its old slot. Known consequence: `ncDecodeCommand()` only searches present boards, so an action row already holding one of those commands still works but loses its `📚` hint and re-opens at the list. The WCB group is six members now, ending at WLED. |
 | 2026-08-17 | _(uncommitted)_ | The command library now shows **what a chosen sequence does**: its body is pulled with `GET_WCB_SEQVAL` and rendered under the field, one command per line with its `***` comment after it. `_seqValueToLines()` is a behaviour-identical port of the WCB Wizard's function of the same name (tested line-for-line against it) so a sequence reads the same in both tools. Each `<option>` now carries `data-wcb`, because the same key can exist on several boards with different contents and the board is not recoverable from the key alone. Bodies are cached per `<wcb>/<key>` and dropped when that board's `seqHash` moves — the fingerprint covers values, so an in-place edit that leaves the name list identical still invalidates. Also fixed: both in-flight markers now self-clear on timeout, where previously a port closed mid-pull left one set and blocked every later pull for the session. |
 | 2026-08-17 | _(uncommitted)_ | Picker groups take an explicit **`ids`** list as well as an id prefix, so `nc-maestro-wcb` (the `;M` sequence + servo verbs) joins the **WCB** group despite being one of NaviCore's own seed boards. `nc-maestro` stays out — raw Pololu bytes to a configured Maestro slot is a controller concern, not a WCB one. `sub()` renders the member as plain `Maestro`, since the qualifier only exists to tell it from the Pololu board outside the group. Note the ordering trap this creates: `nc-maestro-wcb` now sits in the MIDDLE of the WCB run in `NC_CMDLIB_ORDER_TOP` and does not look like it belongs there, but moving it out of the run splits the cluster into two group rows. |
 | 2026-08-17 | _(uncommitted)_ | Picker layout, so the sequence verbs are findable: the six stored-sequence commands split out of the 77-command `wcb-native` into their own vendored board (`wcb-sequences`, a pure move — that is the second local delta to the snapshot, see NOTICE.md), and all six `wcb-*` boards now fold into one **WCB** group. Two ordering facts are load-bearing and easy to trip over — a group renders at the position of its **first** member (so pinning WCB to the top means putting its members first *and contiguous* in `NC_CMDLIB_ORDER_TOP`), and order inside a group is that same array (Sequences leads, the 71-command native config trails). `NC_CMDLIB_ORDER_BOTTOM` is now empty. Added `_cmdlibDropMovedCmds()`: upstream still ships the six inside `wcb-native`, so a "check online" fetch re-adds them and every sequence command would list twice with only one copy carrying the live picker — it is a deliberate no-op when `wcb-sequences` is absent, so it can never strand them. |

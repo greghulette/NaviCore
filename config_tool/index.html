@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.22:03.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.22:19.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -12913,24 +12913,46 @@ function _cmdlibMergeLibraryData(data) {
 // Runs after every load/merge (vendored startup, online "check for updates",
 // file import). Idempotent, so it survives a fetch that re-adds upstream boards.
 // Four jobs:
-//  (1) De-duplicate: drop a vendored board when the NaviCore seed board that
-//      supersedes it is also present (see NC_CMDLIB_SUPERSEDE). Two cases today:
-//      the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9) loses to our
-//      firmware-accurate `nc-maestro-wcb` (id 0-9 / seq 0-99); and the generic
-//      `maestro-native` (raw Pololu bytes to a `;W<wcb>;S<port>` WCB port) loses
-//      to `nc-maestro`, whose IDENTICAL commands instead target a NaviCore
-//      configured-Maestro slot (firmware picks Local Serial2 vs remote ESP-NOW
-//      broadcast by Pololu device#), so the author never types WCB/port numbers.
-//  (2) Order: apply NaviCore's preferred board order — NaviCore's own commands +
-//      sound/servo up top, lighting (WLED) and low-level WCB config pinned to the
-//      bottom. Unlisted boards (e.g. a new upstream one) sort into the middle in
-//      their natural manifest order (stable sort).
+//  (1) Drop boards that shouldn't show. Two reasons:
+//      (a) HIDDEN outright (see NC_CMDLIB_HIDDEN) — a board whose commands aren't
+//          ACTIONS. This library exists to build things a pilot triggers from the
+//          transmitter, and nobody binds a button to "set the hardware version".
+//      (b) SUPERSEDED: a vendored board loses to the NaviCore seed board that
+//          replaces it (see NC_CMDLIB_SUPERSEDE). Two cases today:
+//          the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9) loses to our
+//          firmware-accurate `nc-maestro-wcb` (id 0-9 / seq 0-99); and the generic
+//          `maestro-native` (raw Pololu bytes to a `;W<wcb>;S<port>` WCB port)
+//          loses to `nc-maestro`, whose IDENTICAL commands instead target a
+//          NaviCore configured-Maestro slot (firmware picks Local Serial2 vs remote
+//          ESP-NOW broadcast by Pololu device#), so the author never types
+//          WCB/port numbers.
+//  (2) Order: apply NaviCore's preferred board order — the WCB cluster first, then
+//      NaviCore's own commands, sound and servo. Unlisted boards (e.g. a new
+//      upstream one) sort into the middle in their natural manifest order (the sort
+//      is stable).
 //  (3) Re-assert the live stored-sequence param source on the WCB board, so a
 //      fetch or import that replaced that board doesn't silently drop the picker
 //      (see _cmdlibApplySeqSource).
 //  (4) Drop commands that MOVED to a board of their own, from the board they left,
 //      so a fetch that re-added them upstream-style doesn't list them twice
 //      (see _cmdlibDropMovedCmds).
+// Boards hidden from the picker entirely. The command library builds ACTIONS — the
+// things a pilot fires from a transmitter switch — and a board of setup/config verbs
+// is not that: nobody binds a button to "set the hardware version", "set the baud
+// rate" or "erase NVS". Those live in the WCB Wizard, which is built for them.
+//
+// Hidden rather than deleted, so the vendored snapshot stays byte-for-byte upstream
+// apart from the sequence split (see cmdlib/droidnet/NOTICE.md) and a re-fetch can't
+// bring the board back. Un-hide by removing the id — everything else about that
+// board, including its position in NC_CMDLIB_ORDER_TOP, is still in place.
+//
+// KNOWN CONSEQUENCE: ncDecodeCommand only searches boards that are present, so an
+// action row that already holds one of these commands keeps working (the wire string
+// is stored in the config and sent unchanged) but loses its "📚 Board · Command"
+// hint and re-opens at the list instead of the composer.
+const NC_CMDLIB_HIDDEN = new Set([
+  'wcb-native',   // 71 setup/config/routing/system/power verbs — configuration, not actions
+]);
 // vendored id -> NaviCore seed id that replaces it when both are present.
 const NC_CMDLIB_SUPERSEDE = {
   'maestro':        'nc-maestro-wcb', // narrow upstream ;M board -> our via-WCB board (;M sequence + verbs)
@@ -12943,7 +12965,9 @@ const NC_CMDLIB_ORDER_TOP = [
   // so it belongs inside this run; breaking the run would split the group in two.
   // Order INSIDE the group is this array too: Stored Sequences first (the everyday
   // one), sound, then Maestro, then lighting, and the 71-command native config last.
-  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'nc-maestro-wcb', 'wcb-wled', 'wcb-native',
+  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'nc-maestro-wcb', 'wcb-wled',
+  'wcb-native',   // inert while NC_CMDLIB_HIDDEN hides it; kept so un-hiding restores its place
+
   'navicore',
   'hcr-native', 'chirp',
   'nc-maestro',   // raw Pololu bytes to a configured Maestro slot — a CONTROLLER concern, so it stays out of the WCB group
@@ -13006,6 +13030,7 @@ function _cmdlibNormalize() {
   _cmdlibDropMovedCmds(lib);    // ...and de-dup commands a fetch re-added to the board they left
   const ids = new Set(lib.boards.map(b => b && b.id).filter(Boolean));
   lib.boards = lib.boards
+    .filter(b => !(b && NC_CMDLIB_HIDDEN.has(b.id)))
     .filter(b => { const sup = b && NC_CMDLIB_SUPERSEDE[b.id]; return !(sup && ids.has(sup)); })
     .map((b, i) => ({ b, i }))
     .sort((a, z) => (_cmdlibBoardRank(a.b.id) - _cmdlibBoardRank(z.b.id)) || (a.i - z.i))
