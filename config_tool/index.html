@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.21:34.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.21:41.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -12177,21 +12177,37 @@ async function _cmdlibFetchClicked() {
 // header). Add more clusters here as the catalog grows.
 const NC_CMDLIB_GROUPS = [
   // Every verb set the WCB itself understands — the devices it drives over its own
-  // verbs (HCR, MP3, DFPlayer, WLED), its stored sequences, and its board config.
-  // Six flat rows otherwise, and the `WCB · X` naming already reads as a cluster.
-  // Pinned to the top of the picker via NC_CMDLIB_ORDER_TOP (a group takes the
-  // position of its first member), so folding them one level deeper costs a click
-  // but never a scroll.
-  { id:'wcb', name:'WCB', prefix:'wcb-',
+  // verbs (HCR, MP3, DFPlayer, Maestro, WLED), its stored sequences, and its board
+  // config. Seven flat rows otherwise, and the `WCB · X` naming already reads as a
+  // cluster. Pinned to the top of the picker via NC_CMDLIB_ORDER_TOP (a group takes
+  // the position of its first member), so folding them one level deeper costs a
+  // click but never a scroll.
+  //
+  // `ids` picks up members the prefix can't reach: nc-maestro-wcb is the `;M`
+  // sequence + servo verb set, which the WCB routes exactly like the rest of this
+  // group, but it is one of NaviCore's own seed boards so its id doesn't start with
+  // `wcb-`. Its sibling nc-maestro is deliberately NOT here — that one is raw Pololu
+  // bytes to a configured Maestro slot, which is a controller concern, not a WCB one.
+  { id:'wcb', name:'WCB', prefix:'wcb-', ids:['nc-maestro-wcb'],
     sub: name => {
-      // "WCB · HCR Vocalizer" -> "HCR Vocalizer"; "WCB (native config)" -> "Native config".
-      const s = String(name).replace(/^WCB\s*[·\-—:]?\s*/i, '').replace(/[()]/g, '').trim();
+      // "WCB · HCR Vocalizer" -> "HCR Vocalizer"; "WCB (native config)" -> "Native
+      // config"; "Maestro (via WCB)" -> "Maestro" (the group header already says WCB,
+      // and the qualifier only exists to tell it from the Pololu board outside).
+      const s = String(name).replace(/^WCB\s*[·\-—:]?\s*/i, '')
+                            .replace(/\(\s*via\s+WCB\s*\)/i, '')
+                            .replace(/[()]/g, '').trim();
       return s ? s.charAt(0).toUpperCase() + s.slice(1) : 'General';
     } },
   { id:'astropixels', name:'AstroPixels', prefix:'astropixels-',
     sub: name => { const s = String(name).replace(/^AstroPixelsPlus/i, '').replace(/[()]/g, '').trim(); return s || 'General'; } },
 ];
-function _cmdlibBoardGroup(id) { return NC_CMDLIB_GROUPS.find(g => String(id).startsWith(g.prefix)) || null; }
+// A board joins a group by id prefix or by an explicit `ids` listing — either is
+// enough, so a group can gather boards that don't share a naming convention.
+function _cmdlibBoardGroup(id) {
+  const s = String(id);
+  return NC_CMDLIB_GROUPS.find(g => (g.prefix && s.startsWith(g.prefix)) ||
+                                    (g.ids && g.ids.includes(s))) || null;
+}
 
 // Fold the flat board list into ordered entries: a plain {type:'board'} or a
 // {type:'group'} holding its member boards (kept in their existing order). A group
@@ -12702,12 +12718,14 @@ const NC_CMDLIB_SUPERSEDE = {
 const NC_CMDLIB_ORDER_TOP = [
   // The WCB cluster leads, and its members are contiguous — a group renders at the
   // position of its FIRST member, so this is what pins the "WCB" row to the top of
-  // the picker. Order INSIDE the group matters too: Stored Sequences first (the
-  // everyday one), the 71-command native config last (the one you rarely want).
-  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'wcb-wled', 'wcb-native',
+  // the picker. nc-maestro-wcb is a MEMBER (see NC_CMDLIB_GROUPS.ids) despite the id,
+  // so it belongs inside this run; breaking the run would split the group in two.
+  // Order INSIDE the group is this array too: Stored Sequences first (the everyday
+  // one), sound, then Maestro, then lighting, and the 71-command native config last.
+  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'nc-maestro-wcb', 'wcb-wled', 'wcb-native',
   'navicore',
   'hcr-native', 'chirp',
-  'nc-maestro-wcb', 'nc-maestro',   // via-WCB (;M sequence + verbs) up top; raw Pololu beside it. Both upstream maestro boards superseded.
+  'nc-maestro',   // raw Pololu bytes to a configured Maestro slot — a CONTROLLER concern, so it stays out of the WCB group
   'flthy-hps', 'psi-pro', 'rseries-logic', 'ia-magic-panel', 'pd-magic-panel',
   'r2uppityspinner-alt', 'roam-a-dome',
   'astropixels-plus', 'astropixels-sound', 'astropixels-psi',
