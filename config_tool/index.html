@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.21:11.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.21:34.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -12176,6 +12176,18 @@ async function _cmdlibFetchClicked() {
 // shortens each member's label inside the group (the shared name is now the group
 // header). Add more clusters here as the catalog grows.
 const NC_CMDLIB_GROUPS = [
+  // Every verb set the WCB itself understands — the devices it drives over its own
+  // verbs (HCR, MP3, DFPlayer, WLED), its stored sequences, and its board config.
+  // Six flat rows otherwise, and the `WCB · X` naming already reads as a cluster.
+  // Pinned to the top of the picker via NC_CMDLIB_ORDER_TOP (a group takes the
+  // position of its first member), so folding them one level deeper costs a click
+  // but never a scroll.
+  { id:'wcb', name:'WCB', prefix:'wcb-',
+    sub: name => {
+      // "WCB · HCR Vocalizer" -> "HCR Vocalizer"; "WCB (native config)" -> "Native config".
+      const s = String(name).replace(/^WCB\s*[·\-—:]?\s*/i, '').replace(/[()]/g, '').trim();
+      return s ? s.charAt(0).toUpperCase() + s.slice(1) : 'General';
+    } },
   { id:'astropixels', name:'AstroPixels', prefix:'astropixels-',
     sub: name => { const s = String(name).replace(/^AstroPixelsPlus/i, '').replace(/[()]/g, '').trim(); return s || 'General'; } },
 ];
@@ -12663,7 +12675,7 @@ function _cmdlibMergeLibraryData(data) {
 // ── Normalize the merged catalog for DISPLAY ───────────────────────────────
 // Runs after every load/merge (vendored startup, online "check for updates",
 // file import). Idempotent, so it survives a fetch that re-adds upstream boards.
-// Three jobs:
+// Four jobs:
 //  (1) De-duplicate: drop a vendored board when the NaviCore seed board that
 //      supersedes it is also present (see NC_CMDLIB_SUPERSEDE). Two cases today:
 //      the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9) loses to our
@@ -12679,21 +12691,31 @@ function _cmdlibMergeLibraryData(data) {
 //  (3) Re-assert the live stored-sequence param source on the WCB board, so a
 //      fetch or import that replaced that board doesn't silently drop the picker
 //      (see _cmdlibApplySeqSource).
+//  (4) Drop commands that MOVED to a board of their own, from the board they left,
+//      so a fetch that re-added them upstream-style doesn't list them twice
+//      (see _cmdlibDropMovedCmds).
 // vendored id -> NaviCore seed id that replaces it when both are present.
 const NC_CMDLIB_SUPERSEDE = {
   'maestro':        'nc-maestro-wcb', // narrow upstream ;M board -> our via-WCB board (;M sequence + verbs)
   'maestro-native': 'nc-maestro',    // raw-WCB-port Pololu board -> our configured-Maestro-slot board
 };
 const NC_CMDLIB_ORDER_TOP = [
+  // The WCB cluster leads, and its members are contiguous — a group renders at the
+  // position of its FIRST member, so this is what pins the "WCB" row to the top of
+  // the picker. Order INSIDE the group matters too: Stored Sequences first (the
+  // everyday one), the 71-command native config last (the one you rarely want).
+  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'wcb-wled', 'wcb-native',
   'navicore',
-  'wcb-hcr', 'hcr-native', 'wcb-mp3', 'wcb-dfplayer', 'chirp',
+  'hcr-native', 'chirp',
   'nc-maestro-wcb', 'nc-maestro',   // via-WCB (;M sequence + verbs) up top; raw Pololu beside it. Both upstream maestro boards superseded.
   'flthy-hps', 'psi-pro', 'rseries-logic', 'ia-magic-panel', 'pd-magic-panel',
   'r2uppityspinner-alt', 'roam-a-dome',
   'astropixels-plus', 'astropixels-sound', 'astropixels-psi',
   'astropixels-logics', 'astropixels-holo', 'astropixels-servo',
 ];
-const NC_CMDLIB_ORDER_BOTTOM = ['wcb-wled', 'wcb-native'];
+// Nothing is pinned to the bottom any more — wcb-wled and wcb-native moved into the
+// WCB group above. Kept so a future board can be demoted without re-plumbing the rank.
+const NC_CMDLIB_ORDER_BOTTOM = [];
 function _cmdlibBoardRank(id) {
   const t = NC_CMDLIB_ORDER_TOP.indexOf(id);    if (t >= 0) return t;
   const b = NC_CMDLIB_ORDER_BOTTOM.indexOf(id); if (b >= 0) return 100000 + b;
@@ -12702,13 +12724,12 @@ function _cmdlibBoardRank(id) {
 // Commands whose `key` param names an EXISTING stored sequence, so the composer
 // can offer a live picker instead of a text box (see NC_SEQ_SOURCE). Not seqSave —
 // that key names a sequence being CREATED.
-const NC_SEQ_SOURCE_CMDS = { 'wcb-native': ['wcb.runSeq', 'wcb.runSeqLong', 'wcb.seqClear'] };
+const NC_SEQ_SOURCE_CMDS = { 'wcb-sequences': ['wcb.runSeq', 'wcb.runSeqLong', 'wcb.seqClear'] };
 // Re-assert `source: 'wcb.sequences'` on those params. The vendored
-// wcb-native.json already carries it (a three-line delta, and the exact shape of
-// the upstream PR), but "check online for a newer library" and a user importing
-// their own copy of the DroidNet file both replace that board wholesale — which
-// would silently drop the picker back to a free-text key box with no error. Cheap
-// and idempotent; delete this once the field is upstream.
+// wcb-sequences.json already carries it, but "check online for a newer library"
+// and a user importing their own copy of the DroidNet file both replace a board
+// wholesale — which would silently drop the picker back to a free-text key box
+// with no error. Cheap and idempotent; delete this once the field is upstream.
 function _cmdlibApplySeqSource(lib) {
   for (const [boardId, cmdIds] of Object.entries(NC_SEQ_SOURCE_CMDS)) {
     const board = (lib.boards || []).find(b => b && b.id === boardId);
@@ -12719,10 +12740,31 @@ function _cmdlibApplySeqSource(lib) {
     });
   }
 }
+
+// Commands that MOVED to a board of their own. Upstream still ships the sequence
+// verbs inside `wcb-native`, so a "check online" fetch (or a user importing their
+// own copy of that file) re-adds all six there — and the picker would then list
+// every sequence command TWICE, once under Stored Sequences and once under Native
+// config, with only one of them carrying the live key picker. Drop them from the
+// board they came from whenever the board they moved to is present.
+// Delete this alongside _cmdlibApplySeqSource once the split is upstream.
+const NC_CMDLIB_MOVED_CMDS = [
+  { from: 'wcb-native', to: 'wcb-sequences',
+    ids: ['wcb.seqSave', 'wcb.seqList', 'wcb.seqClearAll', 'wcb.seqClear', 'wcb.runSeq', 'wcb.runSeqLong'] },
+];
+function _cmdlibDropMovedCmds(lib) {
+  for (const mv of NC_CMDLIB_MOVED_CMDS) {
+    const from = (lib.boards || []).find(b => b && b.id === mv.from);
+    const to   = (lib.boards || []).find(b => b && b.id === mv.to);
+    if (!from || !to || !Array.isArray(from.commands)) continue;   // no new board -> keep the originals
+    from.commands = from.commands.filter(c => !mv.ids.includes(c && c.id));
+  }
+}
 function _cmdlibNormalize() {
   const lib = window.NC_COMMAND_LIBRARY;
   if (!lib || !Array.isArray(lib.boards)) return;
   _cmdlibApplySeqSource(lib);   // survive a fetch/import that replaced the WCB board (see above)
+  _cmdlibDropMovedCmds(lib);    // ...and de-dup commands a fetch re-added to the board they left
   const ids = new Set(lib.boards.map(b => b && b.id).filter(Boolean));
   lib.boards = lib.boards
     .filter(b => { const sup = b && NC_CMDLIB_SUPERSEDE[b.id]; return !(sup && ids.has(sup)); })

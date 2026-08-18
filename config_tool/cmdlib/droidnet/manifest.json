@@ -125,6 +125,12 @@
       "confidence": "high"
     },
     {
+      "id": "wcb-sequences",
+      "file": "boards/wcb-sequences.json",
+      "name": "WCB · Stored Sequences",
+      "confidence": "high"
+    },
+    {
       "id": "wcb-wled",
       "file": "boards/wcb-wled.json",
       "name": "WCB · WLED Lighting",

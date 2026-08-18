@@ -152,15 +152,16 @@ strings.
 cmdlib/
   droidnet/manifest.json  + boards/*.json   third-party boards (FlthyHPs, MagicPanel,
                                             RSeriesLogic, HCR, MP3, WLED, Maestro,
-                                            RoamADome, UppitySpinner, AstroPixels, …)
+                                            RoamADome, UppitySpinner, AstroPixels, WCB config +
+                                            sequences, …)
   navicore/manifest.json  + navicore.json   NaviCore-native verbs (record / play / stop)
 ```
 
 `cmdlib/droidnet/` is a **vendored MPL-2.0 snapshot** — NaviCore's own boards never go in
 there. They live inline in `NC_CMDLIB_SEED` in `index.html`; `wcb-dfplayer` (the `;D` verb
-set) is one of them. The only local delta to the snapshot is the `source` field described
-below. A param's `enum` field is a **string id** into the library-level `enums` map, not an
-inline list.
+set) is one of them. Two local deltas to the snapshot are described below: the `source`
+field, and the `wcb-sequences` board split out of `wcb-native`. A param's `enum` field is a
+**string id** into the library-level `enums` map, not an inline list.
 
 Each command declares `id, name, safety, encoder, template, params[], examples,
 commentLabel, category`, plus routing metadata (`class`, `nativeWrapper`,
@@ -172,6 +173,32 @@ Users can add **private boards**, stored in `localStorage` and pushable to the d
 `/cmdlib.json` — small libraries over `SET_CMDLIB`, large ones over the bulk-transfer path
 (`_bulk*`). The droid stores the JSON opaquely; only size + FNV-1a hash are interpreted, so
 the tool can skip re-pulling an unchanged library.
+
+### Picker layout
+
+Boards render collapsed. Related boards fold one level further into a **group**
+(`NC_CMDLIB_GROUPS`, prefix-matched), so a cluster is one row instead of six:
+
+| Group | Prefix | Members |
+|---|---|---|
+| **WCB** | `wcb-` | Stored Sequences, HCR Vocalizer, MP3 Trigger, DFPlayer Mini, WLED Lighting, Native config |
+| **AstroPixels** | `astropixels-` | General, Sound, PSI, Logics, Holo, Servo |
+
+Each group's `sub()` shortens a member's label inside it, since the shared part is now the
+group header — `"WCB · HCR Vocalizer"` → `HCR Vocalizer`, `"WCB (native config)"` →
+`Native config`. Naming a new board `WCB · <thing>` is what makes it fold in cleanly.
+
+Two ordering facts are easy to trip over:
+
+- **A group renders at the position of its FIRST member**, so pinning a group means
+  putting its members first *and contiguous* in `NC_CMDLIB_ORDER_TOP`. That is what puts
+  WCB at the very top of the picker. `_cmdlibNormalize()` does the sort, and the sort is
+  stable, so unlisted boards keep their manifest order in the middle.
+- **Order inside a group is that same array.** Stored Sequences leads the WCB group and
+  the 71-command Native config trails it, because that is the order you reach for them.
+
+A search auto-expands every section with a match, so the extra level costs nothing when
+you know what you are looking for.
 
 ### Live param sources
 
@@ -205,12 +232,16 @@ Things worth knowing before touching it:
   (`_applyWcbSeqHash`), so an edit made in the Wizard shows up without polling.
 - **Pulls are sequential** — `WCB_Client` allows one inventory request in flight mesh-wide
   and rejects a second rather than queueing it (`_wcbSeqRefresh`).
-- **`_cmdlibApplySeqSource()` re-asserts the field after every merge.** The vendored
-  `wcb-native.json` carries it on `wcb.runSeq` / `wcb.runSeqLong` / `wcb.seqClear` (a
-  three-line delta, and the shape of the upstream PR), but a "check online" fetch or a
-  user importing their own copy of the DroidNet file replaces that board wholesale — which
-  would silently drop the picker back to a text box with no error. Delete the re-assert
-  once the field is upstream.
+- **Two `_cmdlibNormalize()` steps keep a library re-fetch from undoing this.** The
+  vendored `wcb-sequences.json` carries the `source` field, and the six sequence verbs
+  live there rather than in `wcb-native` — but "check online for a newer library" (and a
+  user importing their own copy of the DroidNet files) replaces a board *wholesale*, from
+  a snapshot that still has neither. So `_cmdlibApplySeqSource()` re-asserts the field,
+  and `_cmdlibDropMovedCmds()` strips the six from `wcb-native` whenever `wcb-sequences`
+  is present — without it every sequence command would list twice, and only one copy
+  would have the picker. `_cmdlibDropMovedCmds()` is deliberately a no-op when the new
+  board is absent, so it can never strand the commands. Delete both once the split and
+  the field are upstream.
 
 ---
 
@@ -361,6 +392,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-17 | _(uncommitted)_ | Picker layout, so the sequence verbs are findable: the six stored-sequence commands split out of the 77-command `wcb-native` into their own vendored board (`wcb-sequences`, a pure move — that is the second local delta to the snapshot, see NOTICE.md), and all six `wcb-*` boards now fold into one **WCB** group. Two ordering facts are load-bearing and easy to trip over — a group renders at the position of its **first** member (so pinning WCB to the top means putting its members first *and contiguous* in `NC_CMDLIB_ORDER_TOP`), and order inside a group is that same array (Sequences leads, the 71-command native config trails). `NC_CMDLIB_ORDER_BOTTOM` is now empty. Added `_cmdlibDropMovedCmds()`: upstream still ships the six inside `wcb-native`, so a "check online" fetch re-adds them and every sequence command would list twice with only one copy carrying the live picker — it is a deliberate no-op when `wcb-sequences` is absent, so it can never strand them. |
 | 2026-08-17 | _(uncommitted)_ | Command library: params can declare a **`source`** — values resolved from the droid at render time rather than a fixed `enum`. First one is `wcb.sequences`, a dropdown of the `?SEQ` keys the boards actually hold (grouped by board, ⟳ to re-read the mesh, manual-entry escape), fed by `GET_WCB_SEQ`. The vendored `wcb-native.json` carries it on `wcb.runSeq` / `wcb.runSeqLong` / `wcb.seqClear` — the snapshot's only local delta, and the shape of the upstream PR — so the note that it is *unmodified* no longer holds. `_cmdlibApplySeqSource()` re-asserts it after every merge because a fetch or import replaces that board wholesale and would otherwise silently drop the picker back to a text box; delete it once the field ships upstream. Lists are cached in memory only (live mesh state, not a setting) and invalidated by a board's `seqHash` moving. |
 | 2026-08-13 | _(uncommitted)_ | Added `_releaseSerialOnUnload()` on `pagehide`: deasserts DTR/RTS, closes the port, and calls `sharedHub.leave()`. The Direct USB path had no teardown at all, so a refresh abandoned an open port. |
 | 2026-08-13 | _(uncommitted)_ | Hovering a WCB Status chip now shows that board's serial-port map, from the WDP labels already cached in `wcbPortLabels` (`_wcbPortTooltip()`). Real WCBs only — a client device has no WCB ports. Distinguishes "nothing advertised yet" from "ports are empty". |
