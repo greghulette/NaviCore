@@ -1418,6 +1418,14 @@ static void vlogf(const char* fmt, ...) {
 static void executeHcrAction(const RcAction& a) {
   const RcHcrDest& dest = rcConfig.hcrDest;
 
+  // transport 2 = the user has this device switched off in the tool's Audio
+  // section. Refuse here rather than at the port: a disabled device must not
+  // emit anything, even if a stale target still names a live serial port.
+  if (dest.transport == 2) {
+    dlog(DBG_HCR, "[DISPATCH] HCR is disabled in config — action skipped\n");
+    return;
+  }
+
   if (dest.transport == 1) {
     // ── WCB transport (ETM command via ESP-NOW) ────────────────────────────
     // HCR over WCB is UNICAST ONLY and rides the normal WCB command path: we
@@ -1586,6 +1594,11 @@ static Mp3Codec g_mp3;
 static void executeMp3Action(const RcAction& a) {
   const RcMp3Dest& dest = rcConfig.mp3Dest;
 
+  if (dest.transport == 2) {   // disabled in the tool's Audio section
+    dlog(DBG_MP3, "[DISPATCH] MP3 Trigger is disabled in config — action skipped\n");
+    return;
+  }
+
   if (dest.transport == 0) {
     // ── Local serial transport ───────────────────────────────────────────
     Stream* p = nullptr;
@@ -1705,6 +1718,11 @@ static DfPlayerCodec g_dfp;
 //                 driver (configured there via ?DFP,S<port>) does the serial.
 static void executeDfpAction(const RcAction& a) {
   const RcDfpDest& dest = rcConfig.dfpDest;
+
+  if (dest.transport == 2) {   // disabled in the tool's Audio section
+    dlog(DBG_DFP, "[DISPATCH] DFPlayer is disabled in config — action skipped\n");
+    return;
+  }
 
   if (dest.transport == 0) {
     // ── Local serial transport ───────────────────────────────────────────
@@ -2172,6 +2190,7 @@ static void hcrVolEmit(uint8_t audioChan, uint8_t vol) {
 }
 
 static void dispatchHcrVolume(uint8_t audioChan, uint8_t vol) {
+  if (rcConfig.hcrDest.transport == 2) return;   // HCR disabled — knob drives nothing
   if (audioChan > 3) {
     dlog(DBG_HCR, "[DISPATCH] HCR volume: audio channel %u out of range (0-3 = V/A/B/All) — "
          "check the knob's HCR output target; skipped\n", audioChan);

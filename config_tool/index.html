@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.09:36.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.10:29.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2891,6 +2891,7 @@
             <div class="wcb-send-row">
               <label>Via:</label>
               <select id="hcr-transport" onchange="renderHcrDestFields()" style="font-size:12px">
+                <option value="off">Disabled</option>
                 <option value="serial">Serial</option>
                 <option value="wcb">WCB</option>
               </select>
@@ -2905,6 +2906,7 @@
             <div class="wcb-send-row">
               <label>Via:</label>
               <select id="mp3-transport" onchange="renderMp3DestFields()" style="font-size:12px">
+                <option value="off">Disabled</option>
                 <option value="serial">Serial (local)</option>
                 <option value="wcb">WCB</option>
               </select>
@@ -2919,6 +2921,7 @@
             <div class="wcb-send-row">
               <label>Via:</label>
               <select id="dfp-transport" onchange="renderDfpDestFields()" style="font-size:12px">
+                <option value="off">Disabled</option>
                 <option value="serial">Serial (local)</option>
                 <option value="wcb">WCB</option>
               </select>
@@ -3635,7 +3638,7 @@ let config = {
   funcBindings: { mode: 4 },
   thresholds:    defaultThresholds(),
   mappings:      {},
-  hcrDest:       { transport: 'serial', port: 'S3' },
+  hcrDest:       { transport: 'off', port: 'S3' },
   // 8 Maestro slots, all disabled by default. The GUI's Maestro Locations
   // panel edits these in place; firmware reads them on every dispatch.
   // Default device #s match the slot ID (slot 1 → device 1, etc.) so the
@@ -3651,11 +3654,11 @@ let config = {
   // Global MP3 Trigger destination — every "MP3 Trigger" action routes here.
   // transport 'serial' → local S3/S4 (port); 'wcb' → unicast WCB ID.
   // (Serial baud is NOT here — it's per-port in auxBaud below.)
-  mp3Dest:       { transport: 'wcb', target: '2', port: 'S3' },
+  mp3Dest:       { transport: 'off', target: '2', port: 'S3' },
   // Global DFPlayer Mini destination — every "DFPlayer" action routes here.
   // Defaults LOCAL (firmware rcConfig.dfpDest matches): a DFPlayer is usually
   // wired to the controller's own aux header, unlike the MP3 Trigger.
-  dfpDest:       { transport: 'serial', target: '2', port: 'S3' },
+  dfpDest:       { transport: 'off', target: '2', port: 'S3' },
   // Per-id WLED routing table (mirror of firmware wledSlots[] / the WCB's
   // wledConfigs). Each slot: id 1-9, port 3/4/5 (local aux) OR wcb 1-20 (remote),
   // configured flag. All empty by default; edited in the WLED tab.
@@ -9396,7 +9399,7 @@ function renderWledSlots() {
 function applyHcrDestUI() {
   const d = config.hcrDest || (config.hcrDest = { transport: 'serial', port: 'S3' });
   const tSel = document.getElementById('hcr-transport');
-  if (tSel) tSel.value = d.transport || 'serial';
+  if (tSel) tSel.value = d.transport || 'off';
   renderHcrDestFields();
 }
 
@@ -9484,7 +9487,7 @@ function applyMp3DestUI() {
   const d = config.mp3Dest
     || (config.mp3Dest = { transport: 'wcb', target: '2', port: 'S3' });
   const tSel = document.getElementById('mp3-transport');
-  if (tSel) tSel.value = d.transport || 'wcb';
+  if (tSel) tSel.value = d.transport || 'off';
   renderMp3DestFields();
 }
 
@@ -9493,8 +9496,16 @@ function renderMp3DestFields() {
   if (!wrap) return;
   const d = config.mp3Dest
     || (config.mp3Dest = { transport: 'wcb', target: '2', port: 'S3', baud: 38400 });
-  const t = document.getElementById('mp3-transport')?.value || d.transport || 'wcb';
+  const t = document.getElementById('mp3-transport')?.value || d.transport || 'off';
   d.transport = t;
+  if (t === 'off') {
+    // Disabled: no destination fields, and the firmware refuses the action outright
+    // (transport 2). The stored port/target is left untouched so re-enabling puts the
+    // device back where it was rather than on a default.
+    wrap.innerHTML = '<div style="font-size:11px; opacity:.7; padding:2px 0">' +
+      'Disabled — MP3 Trigger actions are ignored until you pick Serial or WCB.</div>';
+    return;
+  }
   if (t === 'wcb') {
     let tgt = (d.target !== undefined ? parseInt(d.target, 10) : 2);
     if (!Number.isFinite(tgt) || tgt < 1) tgt = 2;
@@ -9535,7 +9546,7 @@ function applyDfpDestUI() {
   const d = config.dfpDest
     || (config.dfpDest = { transport: 'serial', target: '2', port: 'S3' });
   const tSel = document.getElementById('dfp-transport');
-  if (tSel) tSel.value = d.transport || 'serial';
+  if (tSel) tSel.value = d.transport || 'off';
   renderDfpDestFields();
 }
 
@@ -9544,8 +9555,16 @@ function renderDfpDestFields() {
   if (!wrap) return;
   const d = config.dfpDest
     || (config.dfpDest = { transport: 'serial', target: '2', port: 'S3' });
-  const t = document.getElementById('dfp-transport')?.value || d.transport || 'serial';
+  const t = document.getElementById('dfp-transport')?.value || d.transport || 'off';
   d.transport = t;
+  if (t === 'off') {
+    // Disabled: no destination fields, and the firmware refuses the action outright
+    // (transport 2). The stored port/target is left untouched so re-enabling puts the
+    // device back where it was rather than on a default.
+    wrap.innerHTML = '<div style="font-size:11px; opacity:.7; padding:2px 0">' +
+      'Disabled — DFPlayer actions are ignored until you pick Serial or WCB.</div>';
+    return;
+  }
   if (t === 'wcb') {
     let tgt = (d.target !== undefined ? parseInt(d.target, 10) : 2);
     if (!Number.isFinite(tgt) || tgt < 1) tgt = 2;
@@ -9842,8 +9861,16 @@ function renderHcrDestFields() {
   const wrap = document.getElementById('hcr-dest-fields');
   if (!wrap) return;
   const d = config.hcrDest || (config.hcrDest = { transport: 'serial', port: 'S3' });
-  const t = document.getElementById('hcr-transport')?.value || d.transport || 'serial';
+  const t = document.getElementById('hcr-transport')?.value || d.transport || 'off';
   d.transport = t;
+  if (t === 'off') {
+    // Disabled: no destination fields, and the firmware refuses the action outright
+    // (transport 2). The stored port/target is left untouched so re-enabling puts the
+    // device back where it was rather than on a default.
+    wrap.innerHTML = '<div style="font-size:11px; opacity:.7; padding:2px 0">' +
+      'Disabled — HCR actions are ignored until you pick Serial or WCB.</div>';
+    return;
+  }
   if (t === 'wcb') {
     // HCR over WCB is unicast-only — the firmware sends an ETM ";H,FN,..."
     // command to the target WCB, whose own HCR driver (configured there via
@@ -17581,7 +17608,8 @@ function handleConfigImportFile(event) {
                         // these values (hex MAC octets, password, mp3 transport/port) are exported into the
                         // channel column, and the numeric `channel` var is NaN for non-numeric text -> '' -> data loss
             if (control === 'mp3transport') {
-              imported.mp3Dest.transport = (String(raw).toLowerCase() === 'serial') ? 'serial' : 'wcb';
+              { const tv = String(raw).toLowerCase();   // 'off' = disabled; must survive the round trip
+                imported.mp3Dest.transport = (tv === 'off') ? 'off' : (tv === 'serial') ? 'serial' : 'wcb'; }
             } else if (control === 'mp3target') {
               imported.mp3Dest.target = String(Math.max(1, Math.min(20, parseInt(raw, 10) || 2)));
             } else if (control === 'mp3port') {
@@ -17596,7 +17624,8 @@ function handleConfigImportFile(event) {
               || { transport: 'serial', target: '2', port: 'S3' };
             const raw = value || cellStr(row, indexes.channel) || '';   // string read — see the mp3 note above
             if (control === 'dfptransport') {
-              imported.dfpDest.transport = (String(raw).toLowerCase() === 'wcb') ? 'wcb' : 'serial';
+              { const tv = String(raw).toLowerCase();   // 'off' = disabled; must survive the round trip
+                imported.dfpDest.transport = (tv === 'off') ? 'off' : (tv === 'wcb') ? 'wcb' : 'serial'; }
             } else if (control === 'dfptarget') {
               imported.dfpDest.target = String(Math.max(1, Math.min(20, parseInt(raw, 10) || 2)));
             } else if (control === 'dfpport') {

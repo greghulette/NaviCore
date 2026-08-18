@@ -356,7 +356,7 @@ struct RcFuncBindings {
 //                      0 = broadcast; wcbPort = serial port on receiver 1-5)
 // ─────────────────────────────────────────────────────────────────────────────
 struct RcHcrDest {
-  uint8_t transport;
+  uint8_t transport;      // 0 = local serial (S3/S4/S5), 1 = WCB unicast, 2 = DISABLED
   char    target[6];
   uint8_t wcbPort;
 };
@@ -373,7 +373,7 @@ struct RcHcrDest {
 //  Broadcast is intentionally not offered (one MP3 Trigger, known location).
 // ─────────────────────────────────────────────────────────────────────────────
 struct RcMp3Dest {
-  uint8_t  transport;     // 0 = local serial (S3/S4), 1 = WCB unicast
+  uint8_t  transport;     // 0 = local serial (S3/S4), 1 = WCB unicast, 2 = DISABLED
   char     target[6];     // serial: "S3"/"S4"  ·  wcb: WCB ID "1"-"20"
   // (baud is NOT here — it belongs to the port, see RcConfig::auxBaud. A local
   //  MP3 Trigger runs at whatever its S3/S4 port is configured to.)
@@ -396,7 +396,7 @@ struct RcMp3Dest {
 //  the config tool warns.
 // ─────────────────────────────────────────────────────────────────────────────
 struct RcDfpDest {
-  uint8_t  transport;     // 0 = local serial (S3/S4/S5), 1 = WCB unicast
+  uint8_t  transport;     // 0 = local serial (S3/S4/S5), 1 = WCB unicast, 2 = DISABLED
   char     target[6];     // serial: "S3"/"S4"/"S5"  ·  wcb: WCB ID "1"-"20"
 };
 
@@ -851,20 +851,25 @@ void rcConfigLoadDefaults() {
 
   // Default global HCR destination — local Serial S3, disabled until user
   // changes it (no transport effect when no HCR actions are configured).
-  rcConfig.hcrDest.transport = 0;
+  // Audio devices default to DISABLED (transport 2). A fresh board has no way to
+  // know which of HCR / MP3 Trigger / DFPlayer is actually wired, and defaulting a
+  // device to a real port means its actions silently fire at whatever else is on
+  // that wire. The user enables each one in the config tool's Audio section.
+  // Existing stored configs are unaffected — they carry an explicit transport.
+  rcConfig.hcrDest.transport = 2;
   strlcpy(rcConfig.hcrDest.target, "S3", sizeof(rcConfig.hcrDest.target));
   rcConfig.hcrDest.wcbPort   = 1;
 
   // Default global MP3 Trigger destination — WCB unicast to WCB 2 (no effect
   // until the user adds RA_MP3 actions and points this at the right place).
-  rcConfig.mp3Dest.transport = 1;
+  rcConfig.mp3Dest.transport = 2;
   strlcpy(rcConfig.mp3Dest.target, "2", sizeof(rcConfig.mp3Dest.target));
 
   // Default global DFPlayer destination — LOCAL S3 (no effect until the user adds
   // RA_DFPLAYER actions). Local is the sensible default here where the MP3 Trigger
   // defaults to a WCB: a DFPlayer is cheap enough to be soldered straight onto the
   // controller's own aux header, which is the common build.
-  rcConfig.dfpDest.transport = 0;
+  rcConfig.dfpDest.transport = 2;
   strlcpy(rcConfig.dfpDest.target, "S3", sizeof(rcConfig.dfpDest.target));
 
   // Default WLED slots — all empty (no WLED configured). The user maps id→dest in
@@ -1264,7 +1269,10 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
 
   // Global HCR destination — every RA_HCR action reads from here.
   JsonObject hcrObj = doc.createNestedObject("hcrDest");
-  hcrObj["transport"] = (rcConfig.hcrDest.transport == 1) ? "wcb" : "serial";
+  // "off" = disabled. The port/target is still emitted below so re-enabling the
+  // device restores what it was pointed at rather than a default.
+  hcrObj["transport"] = (rcConfig.hcrDest.transport == 2) ? "off"
+                      : (rcConfig.hcrDest.transport == 1) ? "wcb" : "serial";
   if (rcConfig.hcrDest.transport == 1) {
     hcrObj["target"]  = rcConfig.hcrDest.target;       // WCB ID string
     hcrObj["wcbPort"] = rcConfig.hcrDest.wcbPort;
@@ -1318,7 +1326,8 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
 
   // Global MP3 Trigger destination — every RA_MP3 action reads from here.
   JsonObject mp3Obj = doc.createNestedObject("mp3Dest");
-  mp3Obj["transport"] = (rcConfig.mp3Dest.transport == 1) ? "wcb" : "serial";
+  mp3Obj["transport"] = (rcConfig.mp3Dest.transport == 2) ? "off"
+                      : (rcConfig.mp3Dest.transport == 1) ? "wcb" : "serial";
   if (rcConfig.mp3Dest.transport == 1) {
     mp3Obj["target"] = rcConfig.mp3Dest.target;        // WCB ID string
   } else {
@@ -1328,7 +1337,8 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   // Global DFPlayer destination — every RA_DFPLAYER action reads from here.
   // Same {transport, target|port} shape as mp3Dest so the tool can share code.
   JsonObject dfpObj = doc.createNestedObject("dfpDest");
-  dfpObj["transport"] = (rcConfig.dfpDest.transport == 1) ? "wcb" : "serial";
+  dfpObj["transport"] = (rcConfig.dfpDest.transport == 2) ? "off"
+                      : (rcConfig.dfpDest.transport == 1) ? "wcb" : "serial";
   if (rcConfig.dfpDest.transport == 1) {
     dfpObj["target"] = rcConfig.dfpDest.target;        // WCB ID string
   } else {
@@ -1648,7 +1658,9 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   if (doc.containsKey("hcrDest")) {
     JsonObject hcrObj = doc["hcrDest"];
     const char* tp = hcrObj["transport"] | "serial";
-    rcConfig.hcrDest.transport = (strcmp(tp, "wcb") == 0) ? 1 : 0;
+    // "off" = user disabled this device; see RcHcrDest::transport.
+    rcConfig.hcrDest.transport = (strcmp(tp, "off") == 0) ? 2
+                               : (strcmp(tp, "wcb") == 0) ? 1 : 0;
     if (rcConfig.hcrDest.transport == 1) {
       // HCR over WCB is unicast-only; default to WCB 2 (not 0/broadcast) when
       // the key is missing so a partial config doesn't produce an invalid target.
@@ -1700,7 +1712,8 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   if (doc.containsKey("mp3Dest")) {
     JsonObject mp3Obj = doc["mp3Dest"];
     const char* tp = mp3Obj["transport"] | "wcb";
-    rcConfig.mp3Dest.transport = (strcmp(tp, "wcb") == 0) ? 1 : 0;
+    rcConfig.mp3Dest.transport = (strcmp(tp, "off") == 0) ? 2
+                               : (strcmp(tp, "wcb") == 0) ? 1 : 0;
     if (rcConfig.mp3Dest.transport == 1) {
       strlcpy(rcConfig.mp3Dest.target, mp3Obj["target"] | "2",
               sizeof(rcConfig.mp3Dest.target));
@@ -1713,7 +1726,8 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   if (doc.containsKey("dfpDest")) {
     JsonObject dfpObj = doc["dfpDest"];
     const char* tp = dfpObj["transport"] | "serial";   // local is the DFPlayer default
-    rcConfig.dfpDest.transport = (strcmp(tp, "wcb") == 0) ? 1 : 0;
+    rcConfig.dfpDest.transport = (strcmp(tp, "off") == 0) ? 2
+                               : (strcmp(tp, "wcb") == 0) ? 1 : 0;
     if (rcConfig.dfpDest.transport == 1) {
       strlcpy(rcConfig.dfpDest.target, dfpObj["target"] | "2",
               sizeof(rcConfig.dfpDest.target));
@@ -2432,7 +2446,8 @@ void rcConfigLoadNVS() {
     if (deserializeJson(doc, s) == DeserializationError::Ok) {
       JsonObject root = doc.as<JsonObject>();
       const char* tp = root["transport"] | "serial";
-      rcConfig.hcrDest.transport = (strcmp(tp, "wcb") == 0) ? 1 : 0;
+      rcConfig.hcrDest.transport = (strcmp(tp, "off") == 0) ? 2
+                                 : (strcmp(tp, "wcb") == 0) ? 1 : 0;
       if (rcConfig.hcrDest.transport == 1) {
         // HCR over WCB is unicast-only; default to WCB 2 (not 0/broadcast).
         strlcpy(rcConfig.hcrDest.target, root["target"] | "2", sizeof(rcConfig.hcrDest.target));

@@ -157,9 +157,20 @@ A knob/slider/joystick axis is a *source* with up to 10 *outputs*:
 actions carry only `fn`/`chan`/`track`. WLED is different — routing is **per id** in
 `wledSlots[]`.
 
-All three live in the config tool's single **Audio** tab. `dfpDest` defaults to *local `S3`*
-where `mp3Dest` defaults to *WCB 2* — a DFPlayer is usually soldered to the controller's own
-aux header, an MP3 Trigger usually is not.
+**`transport` 2 = DISABLED**, serialised as `"off"`. All three devices default to it, and
+**every one of them starts disabled on a fresh config**. A board cannot know which of HCR /
+MP3 Trigger / DFPlayer is actually wired, and defaulting a device onto a real port means its
+actions fire blind at whatever else shares that wire. The executor refuses the action outright
+(`executeHcrAction` / `executeMp3Action` / `executeDfpAction` return early, as does
+`dispatchHcrVolume`) — the check is at the executor, not the port, so a stale `target` left
+over from an earlier setup cannot leak output.
+
+The stored `port`/`target` is preserved while disabled, so re-enabling a device puts it back
+where it was rather than on a default. An existing stored config is unaffected: it carries an
+explicit `transport`, so upgrading does not silently switch a working device off.
+
+All three live in the config tool's single **Audio** tab, as the first entry in each device's
+**Via:** dropdown.
 
 **The two audio players' volume scales are inverse.** MP3 Trigger: `0` = loudest …
 `64` = inaudible. DFPlayer: `0` = silent … `30` = loudest. Nothing converts between them —
@@ -297,6 +308,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | `hcrDest`/`mp3Dest`/`dfpDest` gained `transport` **2 = disabled** (JSON `"off"`), and all three now default to it — a fresh config has every audio device switched off until the user sets it up. Executors refuse a disabled device's actions; the stored port/target survives so re-enabling restores it. Round-trips through JSON and CSV. |
 | 2026-08-18 | _(uncommitted)_ | §3 gained `serialBcastOut[3]` / `serialBcastIn[3]` (JSON `serialBcast`) — the per-aux-port mesh bridging flags were shipped but undocumented here. Corrected `serialLabels`: **4** slots indexed by firmware port (`RC_SLBL_S3/S4/S5/MAESTRO`, JSON keys `"S3"/"S4"/"S5"/"maestro"`), not 5 indexed by WDP port with an SBUS slot — the page still described the pre-migration layout. Recorded that `rcConfigFromJSON()` memsets the slots before matching, so an old-style (`"1"`–`"5"`) object clears every override rather than misapplying it. |
 | 2026-08-13 | _(uncommitted)_ | `statsReport.wcb` documented as **optional** (0 = collect/display, ship nothing) and `enabled` clarified as a statement of intent — the counters run from boot regardless and are never reset in-session, so nothing here gates collection. |
 | 2026-08-12 | _(uncommitted)_ | Added `statsReport` (`{enabled, wcb}`) — the optional 30 s `;V` push of this board's ESP-NOW delivery counters to one WCB, with the one-variable-per-counter and `;V`-not-`;VP` constraints. Also documented `modeReport`, which was in the firmware but missing from this table. |
