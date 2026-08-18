@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">14.09:19.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.21:11.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4787,6 +4787,21 @@ let _wcbMetaTries  = 0;    // GET_WCB_META attempts this session (bounded so we 
 let _wcbMetaReqAt  = 0;    // last GET_WCB_META request time (throttle)
 let _wcbLastOnline = [];   // last online[] so a WCB_META reply can re-render immediately
 let _wcbMetaResyncAt = 0;  // last PERIODIC WCB_META re-pull — bridged auto-refresh so a label/alias EDITED after connect shows up (see _maybeResyncWcbMeta)
+// ── Stored-sequence inventory, per WCB (GET_WCB_SEQ → WCB_SEQ) ───────────────
+// The ?SEQ keys each board actually holds, so the command library's "Run
+// Sequence" action offers real sequences instead of a free-text key box.
+//
+// SESSION-SCOPED, in memory only — this is live mesh state, not a setting, and a
+// cached list that outlived the droid it came from would offer sequences that no
+// longer exist. It is keyed by board number and validated against that board's
+// seqHash (WCB_META), which the WCB re-advertises within ~500 ms of any save,
+// rename, edit or erase — so an edit made in the Wizard while this tool is open
+// invalidates the list on the next 30 s WCB_META resync, with no polling of our own.
+//   _wcbSeq[n] = { names: [...], hash: <seqHash when pulled>, at: <ms> }
+let _wcbSeq        = {};   // board number -> pulled inventory
+let wcbSeqHash     = [];   // per-board seqHash from WCB_META (positional, index 0 = board 1)
+let _wcbSeqPending = 0;    // board number a GET_WCB_SEQ is in flight for (0 = idle); one at a time, mesh-wide
+let _wcbSeqWaiters = [];   // callbacks to fire when the in-flight pull settles
 // After a forget, a WCB_STATUS reply the RC BUILT before it processed the forget
 // still carries known[id]=1. sendJSON is fire-and-forget (no response
 // correlation), so that stale reply can land just after we optimistically remove
@@ -4827,6 +4842,7 @@ function startWcbStatusPoll() {
   wcbEverSeen = new Set();          // fresh per-session memory
   wcbSelfId   = 0;
   _wcbMetaTries = 0; _wcbMetaReqAt = 0; _wcbLastOnline = [];   // re-fetch aliases + port labels over the bridge this session
+  _wcbSeq = {}; wcbSeqHash = []; _wcbSeqPending = 0; _wcbSeqWaiters = [];   // stored-sequence lists are per-droid live state — never carry them across a connect
   _wcbMetaResyncAt = Date.now();   // start the periodic re-sync clock now → first auto-refresh ~30s in, after the connect burst
   wcbAliases  = [];
   wcbPortLabels = [];
@@ -8376,10 +8392,28 @@ function handleBoardMessage(line) {
         if (Array.isArray(wcbKnown)) wcbKnown[fid - 1] = false;
       }
     }
+    _applyWcbSeqHash(msg.seqHash);   // USB carries seqHash here; the bridge sends it in WCB_META
     _wcbLastOnline = Array.isArray(msg.online) ? msg.online : [];
     renderWcbStatus(_wcbLastOnline);
     _maybeRequestWcbMeta();   // pull aliases + port labels over the bridge (cached, bounded)
     _maybeResyncWcbMeta();    // …and re-pull them every ~30s so an edited label/alias refreshes without a reconnect
+    return;
+  }
+  // WCB_SEQ — one board's stored-sequence key list, answering our GET_WCB_SEQ.
+  // Asynchronous: the RC pulls it off the mesh, so this lands whenever the board
+  // replies (or as ok:false on timeout / a busy pull slot). Settles whatever the
+  // sequence picker is waiting on, either way — a failed pull must release the
+  // waiters too, or the picker spins forever on an offline board.
+  if (msg.type === 'WCB_SEQ') {
+    const n = +msg.wcb || 0;
+    if (msg.ok !== false && Array.isArray(msg.names)) {
+      _wcbSeq[n] = { names: msg.names.map(String), hash: +msg.hash || 0, at: Date.now() };
+    } else if (n) {
+      appendTerminalLine(`< [seq] WCB ${n}: ${msg.msg || 'no sequence list'}`, 'rx');
+    }
+    if (_wcbSeqPending === n || !n) _wcbSeqPending = 0;
+    const waiters = _wcbSeqWaiters; _wcbSeqWaiters = [];
+    waiters.forEach(fn => { try { fn(); } catch (e) { console.warn('seq waiter', e); } });
     return;
   }
   // WCB_META — the per-board aliases + serial-port labels that don't fit the
@@ -8388,6 +8422,7 @@ function handleBoardMessage(line) {
   if (msg.type === 'WCB_META') {
     if (Array.isArray(msg.aliases))    wcbAliases    = msg.aliases;
     if (Array.isArray(msg.portLabels)) wcbPortLabels = msg.portLabels;
+    _applyWcbSeqHash(msg.seqHash);   // stale stored-sequence lists (see the helper)
     renderWcbStatus(_wcbLastOnline);
     return;
   }
@@ -11545,6 +11580,140 @@ const NC_CMDLIB_SEED = {
 function ncCommandLibrary() { return window.NC_COMMAND_LIBRARY || NC_CMDLIB_SEED; }
 function _cmdlibEnum(id)    { return (ncCommandLibrary().enums || {})[id] || null; }
 
+// ── Live param source: a WCB's stored sequences ─────────────────────────────
+// A command-library param can declare `"source": "wcb.sequences"` instead of an
+// `enum`, and the composer renders it as a dropdown of the ?SEQ keys the boards
+// on the mesh ACTUALLY hold — pulled live via GET_WCB_SEQ — rather than a
+// free-text box you have to remember the spelling for.
+//
+// It is a SOURCE and not an enum because the values are not knowable to the
+// library: they are whatever the droid's boards happen to store today. That also
+// keeps the board file portable — a consumer that doesn't implement the source
+// sees an unknown extra field and falls back to the plain text input, which is
+// what makes this shippable in the shared WCB library instead of a NaviCore fork.
+//
+// Sequences are PER BOARD, so the list is grouped by board and a key is offered
+// under every board that holds it. The destination is chosen on the action row,
+// not here, so this deliberately does NOT filter to one board — `;C<key>` is
+// routinely broadcast, and a key that only exists on WCB 3 is a valid broadcast.
+const NC_SEQ_SOURCE  = 'wcb.sequences';
+const NC_SEQ_MANUAL  = '-- type manually --';  // sentinel: spaces make it unusable as a real ?SEQ key
+const NC_SEQ_TIMEOUT = 8000;                   // backstop; the RC gives up at 6 s and answers ok:false
+
+// Same "is the droid reachable" test the command-library modal itself uses (a
+// live Web Serial writer here, or the cross-tab hub holding the port elsewhere).
+function _wcbSeqConnected() { return !!writer || sharedActive; }
+// Take the per-board stored-sequence fingerprints the RC just reported (WCB_STATUS
+// on USB, the fragmented WCB_META over the bridge) and drop any cached key list
+// whose board's hash has moved — a sequence was saved, renamed, edited or erased
+// there, so the picker must re-pull rather than offer one that no longer exists.
+// Hash 0 means the RC hasn't heard a SEQHASH advert from that board yet; that is
+// NOT "no sequences" (an empty inventory hashes non-zero), so it invalidates nothing.
+function _applyWcbSeqHash(arr) {
+  if (!Array.isArray(arr)) return;
+  arr.forEach((h, i) => {
+    const n = i + 1;
+    if (h && _wcbSeq[n] && _wcbSeq[n].hash && _wcbSeq[n].hash !== h) delete _wcbSeq[n];
+  });
+  wcbSeqHash = arr;
+}
+
+// Boards worth asking: known, not ourselves, not a mesh CLIENT device (a client
+// has no ?SEQ store), and currently online — a dead board just burns the RC's
+// 6 s pull timeout for nothing.
+function _wcbSeqBoards() {
+  const quantity = wcbQuantity || (config.wcbNetwork && config.wcbNetwork.quantity) || 4;
+  const selfId   = wcbSelfId   || (config.wcbNetwork && config.wcbNetwork.deviceId) || 20;
+  const mask     = (typeof wcbKnown !== 'undefined') ? wcbKnown : null;
+  const out = [];
+  const scan = Math.max(quantity, mask ? mask.length : 0);
+  for (let i = 1; i <= scan; i++) {
+    if (i === selfId) continue;
+    if (!(mask ? !!mask[i - 1] : (i <= quantity))) continue;
+    if (wcbClients && wcbClients[i - 1]) continue;
+    if (_wcbLastOnline && _wcbLastOnline.length && !_wcbLastOnline[i - 1]) continue;
+    out.push(i);
+  }
+  return out;
+}
+
+// Ask the RC for ONE board's key list. Resolves when the answer lands or on
+// timeout, and never rejects — every caller is a UI refresh that should carry on
+// to the next board regardless. One pull may be in flight mesh-wide.
+function _wcbSeqRequest(n) {
+  return new Promise(resolve => {
+    if (!_wcbSeqConnected()) { resolve(false); return; }
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(!!_wcbSeq[n]); } };
+    _wcbSeqWaiters.push(finish);
+    _wcbSeqPending = n;
+    setTimeout(finish, NC_SEQ_TIMEOUT);
+    sendJSON({ type: 'GET_WCB_SEQ', wcb: n }, /*silent=*/true).catch(() => finish());
+  });
+}
+
+// Walk the online boards and pull any whose cached list is missing or stale.
+// SEQUENTIAL by necessity: WCB_Client allows exactly one inventory request in
+// flight and rejects a second rather than queueing it. `onEach` re-renders the
+// open picker as each board lands, so the list fills in instead of blocking.
+async function _wcbSeqRefresh(onEach, force) {
+  for (const n of _wcbSeqBoards()) {
+    const have = _wcbSeq[n];
+    const hash = wcbSeqHash && wcbSeqHash[n - 1];
+    // Fresh enough: we have a list and the board's advertised fingerprint still
+    // matches what it had when we pulled. Hash 0 means the RC hasn't heard a
+    // SEQHASH advert yet — that is not evidence of change, so don't re-pull on it.
+    if (!force && have && (!hash || !have.hash || have.hash === hash)) continue;
+    await _wcbSeqRequest(n);
+    if (onEach) onEach(n);
+  }
+}
+
+// <option>s for the picker: every known key, grouped by the board holding it.
+// `cur` is always offered even when no board reports it — re-opening the composer
+// on an existing action must not silently rewrite its key just because the board
+// is offline, the key was typed by hand, or it lives on a board we can't see.
+function _wcbSeqOptionsHtml(cur) {
+  const esc = s => escH(String(s == null ? '' : s));
+  const val = String(cur == null ? '' : cur);
+  let html = `<option value=""${val === '' ? ' selected' : ''}>— pick a sequence —</option>`;
+  let seenCur = false, any = false;
+  Object.keys(_wcbSeq).map(Number).sort((a, b) => a - b).forEach(n => {
+    const names = (_wcbSeq[n] && _wcbSeq[n].names) || [];
+    if (!names.length) return;
+    any = true;
+    const alias = (wcbAliases && wcbAliases[n - 1]) ? ' · ' + wcbAliases[n - 1] : '';
+    html += `<optgroup label="WCB ${n}${esc(alias)}">`;
+    names.forEach(k => {
+      if (k === val) seenCur = true;
+      html += `<option value="${esc(k)}"${k === val ? ' selected' : ''}>${esc(k)}</option>`;
+    });
+    html += `</optgroup>`;
+  });
+  if (val && !seenCur)
+    html += `<optgroup label="Not on any board we can see"><option value="${esc(val)}" selected>${esc(val)}</option></optgroup>`;
+  if (!any)
+    html += `<optgroup label="Nothing pulled yet"><option value="" disabled>Press ⟳ to read the boards' sequences</option></optgroup>`;
+  html += `<option value="${escH(NC_SEQ_MANUAL)}">Type a key manually…</option>`;
+  return html;
+}
+
+// The composer field for a `source: "wcb.sequences"` param: the grouped dropdown,
+// a hidden manual-entry box the sentinel option reveals (so an author can still
+// name a sequence that lives on a board that is off right now), and ⟳ to re-read
+// the mesh. Wired in _cmdlibShowComposer.
+function _wcbSeqFieldHtml(pid, pname, cur) {
+  const esc = s => escH(String(s == null ? '' : s));
+  return `<span style="display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <select id="${pid}" data-pseq="${esc(pname)}" style="min-width:200px">${_wcbSeqOptionsHtml(cur)}</select>
+    <input type="text" id="${pid}-manual" data-pname="${esc(pname)}" value="${esc(cur)}" placeholder="sequence key"
+           style="width:150px;display:none">
+    <button type="button" id="${pid}-refresh" class="btn btn-ghost" style="padding:3px 9px"
+            title="Read each online WCB's stored sequence list off the mesh">⟳</button>
+    <span id="${pid}-note" style="font-size:11px;color:var(--muted)"></span>
+  </span>`;
+}
+
 // ── Destination model ───────────────────────────────────────────────────────
 // A picked library command already knows HOW it is transported; the composer's
 // "Send to" step reads this so the destination is chosen AFTER the command, not
@@ -12227,6 +12396,11 @@ function _cmdlibShowComposer() {
         + `<option value="off" ${cur === 'off' ? 'selected' : ''}>Off — full speed</option>`
         + `<option value="release" ${cur === 'release' ? 'selected' : ''}>Release — local only</option>`;
       field = `<select id="${pid}" data-pname="${esc(p.name)}" style="width:220px">${opts}</select>`;
+    } else if (p.source === NC_SEQ_SOURCE) {
+      // Stored-sequence key — a dropdown of what the boards actually hold, pulled
+      // off the mesh (see _wcbSeqFieldHtml). Checked BEFORE p.enum so a board file
+      // may carry both, letting a consumer without the source fall back to an enum.
+      field = _wcbSeqFieldHtml(pid, p.name, _cmdlibValues[p.name]);
     } else if (p.enum) {
       const en = _cmdlibEnum(p.enum);
       const opts = ((en && en.values) || []).map(v =>
@@ -12257,6 +12431,60 @@ function _cmdlibShowComposer() {
   });
   body.querySelectorAll('[data-pbool]').forEach(el => {
     el.onchange = () => { _cmdlibValues[el.dataset.pbool] = el.checked ? '1' : ''; _cmdlibUpdatePreview(); };
+  });
+  // Stored-sequence params (source: wcb.sequences). The <select> carries data-pseq
+  // rather than data-pname so the generic handler above can't write the manual-entry
+  // SENTINEL into the command; the hidden text box does carry data-pname, so once it
+  // is revealed the generic handler drives the value normally.
+  body.querySelectorAll('[data-pseq]').forEach(sel => {
+    const pname   = sel.dataset.pseq;
+    const manual  = document.getElementById(sel.id + '-manual');
+    const note    = document.getElementById(sel.id + '-note');
+    const refresh = document.getElementById(sel.id + '-refresh');
+    // Re-render the options in place, keeping whatever the field currently holds
+    // selected. Called as each board's list lands during a mesh walk.
+    const redraw = () => {
+      const keep = _cmdlibValues[pname];
+      sel.innerHTML = _wcbSeqOptionsHtml(keep);
+    };
+    sel.onchange = () => {
+      if (sel.value === NC_SEQ_MANUAL) {
+        // Keep the value the user already had — switching to manual entry is a way
+        // to EDIT a key, not a way to clear it.
+        if (manual) { manual.style.display = ''; manual.value = _cmdlibValues[pname] || ''; manual.focus(); }
+        return;
+      }
+      if (manual) manual.style.display = 'none';
+      _cmdlibValues[pname] = sel.value;
+      _cmdlibUpdatePreview();
+    };
+    if (refresh) refresh.onclick = async () => {
+      if (!_wcbSeqConnected()) { if (note) note.textContent = 'not connected'; return; }
+      refresh.disabled = true;
+      const boards = _wcbSeqBoards();
+      if (!boards.length) { if (note) note.textContent = 'no WCBs online'; refresh.disabled = false; return; }
+      let i = 0;
+      if (note) note.textContent = `reading WCB ${boards[0]}…`;
+      // force: the ⟳ is the user saying "I just changed something" — re-pull even
+      // when the cached hash still matches, since a board may not have re-advertised.
+      await _wcbSeqRefresh(n => { i++; redraw(); if (note) note.textContent = i < boards.length ? `reading WCB ${boards[i]}…` : ''; }, true);
+      redraw();
+      // Count NAMES, not answered boards: a board that replied with an empty
+      // inventory is still an entry in the cache, so keying off entry count would
+      // report success while the dropdown still says nothing was pulled.
+      const found = Object.values(_wcbSeq).reduce((a, e) => a + ((e && e.names) || []).length, 0);
+      if (note) note.textContent = found ? '' : 'no stored sequences on any board';
+      refresh.disabled = false;
+    };
+    // Auto-pull on open, so the picker is populated without the user knowing to
+    // press anything. Only fetches boards whose cached list is missing or stale
+    // (see _wcbSeqRefresh), so re-opening the composer is free. Not awaited — the
+    // composer renders immediately and the options fill in as boards answer.
+    if (_wcbSeqConnected() && !_wcbSeqPending) {
+      _wcbSeqRefresh(() => { if (document.body.contains(sel)) redraw(); }, false)
+        .then(() => { if (document.body.contains(sel)) redraw(); })
+        .catch(() => {});
+    }
   });
   // Servo-pulse params: two linked fields — PWM µs and the raw Maestro value
   // (µs × 4) — that update each other; the stored wire value is the Maestro value.
@@ -12435,7 +12663,7 @@ function _cmdlibMergeLibraryData(data) {
 // ── Normalize the merged catalog for DISPLAY ───────────────────────────────
 // Runs after every load/merge (vendored startup, online "check for updates",
 // file import). Idempotent, so it survives a fetch that re-adds upstream boards.
-// Two jobs:
+// Three jobs:
 //  (1) De-duplicate: drop a vendored board when the NaviCore seed board that
 //      supersedes it is also present (see NC_CMDLIB_SUPERSEDE). Two cases today:
 //      the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9) loses to our
@@ -12448,6 +12676,9 @@ function _cmdlibMergeLibraryData(data) {
 //      sound/servo up top, lighting (WLED) and low-level WCB config pinned to the
 //      bottom. Unlisted boards (e.g. a new upstream one) sort into the middle in
 //      their natural manifest order (stable sort).
+//  (3) Re-assert the live stored-sequence param source on the WCB board, so a
+//      fetch or import that replaced that board doesn't silently drop the picker
+//      (see _cmdlibApplySeqSource).
 // vendored id -> NaviCore seed id that replaces it when both are present.
 const NC_CMDLIB_SUPERSEDE = {
   'maestro':        'nc-maestro-wcb', // narrow upstream ;M board -> our via-WCB board (;M sequence + verbs)
@@ -12468,9 +12699,30 @@ function _cmdlibBoardRank(id) {
   const b = NC_CMDLIB_ORDER_BOTTOM.indexOf(id); if (b >= 0) return 100000 + b;
   return 1000;   // unlisted — middle, natural order preserved by the stable sort below
 }
+// Commands whose `key` param names an EXISTING stored sequence, so the composer
+// can offer a live picker instead of a text box (see NC_SEQ_SOURCE). Not seqSave —
+// that key names a sequence being CREATED.
+const NC_SEQ_SOURCE_CMDS = { 'wcb-native': ['wcb.runSeq', 'wcb.runSeqLong', 'wcb.seqClear'] };
+// Re-assert `source: 'wcb.sequences'` on those params. The vendored
+// wcb-native.json already carries it (a three-line delta, and the exact shape of
+// the upstream PR), but "check online for a newer library" and a user importing
+// their own copy of the DroidNet file both replace that board wholesale — which
+// would silently drop the picker back to a free-text key box with no error. Cheap
+// and idempotent; delete this once the field is upstream.
+function _cmdlibApplySeqSource(lib) {
+  for (const [boardId, cmdIds] of Object.entries(NC_SEQ_SOURCE_CMDS)) {
+    const board = (lib.boards || []).find(b => b && b.id === boardId);
+    if (!board) continue;
+    (board.commands || []).forEach(c => {
+      if (!cmdIds.includes(c.id)) return;
+      (c.params || []).forEach(p => { if (p.name === 'key') p.source = NC_SEQ_SOURCE; });
+    });
+  }
+}
 function _cmdlibNormalize() {
   const lib = window.NC_COMMAND_LIBRARY;
   if (!lib || !Array.isArray(lib.boards)) return;
+  _cmdlibApplySeqSource(lib);   // survive a fetch/import that replaced the WCB board (see above)
   const ids = new Set(lib.boards.map(b => b && b.id).filter(Boolean));
   lib.boards = lib.boards
     .filter(b => { const sup = b && NC_CMDLIB_SUPERSEDE[b.id]; return !(sup && ids.has(sup)); })

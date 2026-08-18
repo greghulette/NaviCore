@@ -923,6 +923,7 @@
             {
               "name": "key",
               "pattern": "[A-Za-z0-9_]+",
+              "source": "wcb.sequences",
               "required": true
             }
           ],
@@ -942,6 +943,7 @@
             {
               "name": "key",
               "pattern": "[A-Za-z0-9_]+",
+              "source": "wcb.sequences",
               "required": true
             }
           ],
@@ -961,6 +963,7 @@
             {
               "name": "key",
               "pattern": "[A-Za-z0-9_]+",
+              "source": "wcb.sequences",
               "required": true
             }
           ],
