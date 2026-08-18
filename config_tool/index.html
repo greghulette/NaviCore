@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.01:38.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.08:04.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4464,7 +4464,9 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
   // port for the duration, and a competing Web Serial session would corrupt
   // the flash (or the resumed session).  The button is also disabled while
   // flashing; this guard is defense-in-depth in case a click slips through.
-  if (_fwFlashing) return;
+  // Same reasoning for an in-flight OTA: it owns writer/port for ~2 minutes,
+  // and disconnecting mid-stream aborts the update.
+  if (_fwFlashing || _otaInProgress) return;
   if (port || sharedActive) { await disconnect(); return; }
   openConnectModal();
 });
@@ -6068,7 +6070,22 @@ async function clipRecordToggle() {
   const btn = document.getElementById('clip-record-btn');
   const nameEl = document.getElementById('clip-record-name');
   if (!_clipRecording) {
+    // The board REFUSES START unless it is idle (navicore_record.h startRecord:
+    // replaying/recording/editing all return false). Flipping the button on the
+    // bare write means the stop half then fires ?REC,SAVE for a take that never
+    // started — and saveClip persists whatever is in the RAM buffer, which after
+    // a ?REC,PLAY is the clip that was just loaded. That silently writes a copy
+    // of the played clip over the typed name (saveClip opens with "w", no
+    // clobber guard). Wait for the board's marker instead. Timeout → pre-marker
+    // firmware: fall back to the legacy assume-ok behavior (same pattern as
+    // clipRename above).
+    const startP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:REC'), 1500).catch(() => null);
     if (!(await sendRcCli('?REC,START'))) return;
+    const r = await startP;
+    if (r && r.includes('ERR')) {
+      alert('The board refused to start recording — it is busy (playing, already recording, or editing). Stop that first, then try again.');
+      return;
+    }
     _clipRecording = true;
     if (btn) { btn.textContent = '■ Stop & Save'; btn.classList.remove('btn-danger'); btn.classList.add('btn-blue'); }
   } else {
@@ -6447,6 +6464,19 @@ function _tlSvgEl(tag, attrs) {
 
 function _tlTimeToX(t) { return TL_LEFT + t * _tlClip.pxPerMs; }
 function _tlXToTime(x) { return Math.max(0, Math.round((x - TL_LEFT) / _tlClip.pxPerMs)); }
+// Time for a keyframe/action being DRAGGED. durationMs is not recomputed from the
+// keyframes after load (only _tlTrimStart/_tlSetLength/_tlUndo change it), and
+// _tlRender sizes the SVG — and therefore the scroller — from it. A point dropped
+// past the end would render outside the viewport at EVERY zoom level (zoom scales
+// width and position together) and could never be grabbed again, while still being
+// flattened and uploaded: the saved clip's length silently jumps, because the
+// firmware derives duration from the LAST event. So grow the clip to follow the
+// point instead. Ceiling matches _tlSetLength's 10-minute bound.
+function _tlDragTime(t) {
+  const nt = Math.max(0, Math.min(600000, Math.round(t)));
+  if (_tlClip && nt > _tlClip.durationMs) _tlClip.durationMs = nt;
+  return nt;
+}
 // Lane height is TL_ROW_H per-track normally, or the tall shared lane in overlay
 // mode. Read from the global flag so every value↔Y site (render AND the live
 // drag handlers) stays consistent without threading a height through each call.
@@ -7068,7 +7098,7 @@ function _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop) {
       origins.forEach(o => {
         const w = solo ? (o.k.id === kf.id ? 1 : 0) : _tlSoftWeight(Math.abs(o.t0 - self.t0));
         if (w === 0 && o.k.id !== kf.id) return;             // outside the radius — untouched
-        if (o.k.id === kf.id) o.k.t = Math.max(0, Math.round(o.t0 + dt));
+        if (o.k.id === kf.id) o.k.t = _tlDragTime(o.t0 + dt);   // grows durationMs past the end — see _tlDragTime
         setVal(o.k, o.v0 + w * dv);
       });
       arr.sort((a, b) => a.t - b.t);
@@ -7137,7 +7167,7 @@ function _tlStartDragAction(ev, a) {
     try {
       moved = true;
       const rect = document.getElementById('tl-svg').getBoundingClientRect();
-      a.t = Math.max(0, _tlXToTime(mv.clientX - rect.left));
+      a.t = _tlDragTime(_tlXToTime(mv.clientX - rect.left));   // grows durationMs past the end — see _tlDragTime
       _tlClip.dirty = true;
       _tlRender();
     } catch (e) { console.error('timeline action drag error', e); finish(); }
@@ -8878,7 +8908,18 @@ function _applyMaestroRangesToKnobs(slot) {
   const applyOuts = outs => { if (Array.isArray(outs)) outs.forEach(o => {
     if (+o.target !== +slot) return;
     const r = _maestroChInfo(slot, o.maestroCh);
-    if (r) { o.posMin = r.min; o.posMax = r.max; n++; }
+    // Snap to the imported endpoints but KEEP the configured direction. posMin >
+    // posMax is a first-class, deliberately supported state — it's how a mirrored
+    // servo is reversed (the knob modal's help text teaches it, and the firmware's
+    // sbusToRange clamps order-independently for exactly this case). The parser
+    // always yields an ascending {min,max}, so assigning it verbatim would silently
+    // un-reverse the output — the panel then travels the wrong way with nothing in
+    // the import summary hinting that direction changed.
+    if (r) {
+      if (+o.posMin > +o.posMax) { o.posMin = r.max; o.posMax = r.min; }
+      else                       { o.posMin = r.min; o.posMax = r.max; }
+      n++;
+    }
   }); };
   for (const name in config.knobs) {
     const k = config.knobs[name];
@@ -10277,11 +10318,16 @@ function renderThresholds() {
     if ((slot === 19 || slot === 20) && !threeAxisOn) return;
     const row = document.createElement('tr');
     const center = Math.round((t.minPwm + t.maxPwm) / 2);
+    // Trigger cell: parseVal returns NULL (not NaN) for a blank field, and
+    // `null-10`/`null+10` are -10/10 — so an unguarded write would turn a cleared
+    // cell into a LIVE band around zero. This table renders physical buttons only,
+    // and for those blank means "leave unchanged" (see the button modal's comment
+    // and its Number.isFinite guard); the 0/0 inert band is a LOGICAL-button idiom.
     row.innerHTML = `
       <td>${t.id}</td>
       <td><input type="text" value="${escH(t.label)}" style="width:90px" onchange="config.thresholds[${i}].label=this.value"></td>
       <td><input type="number" value="${fmtVal(center)}" style="width:65px" title="min ${fmtVal(t.minPwm)} / max ${fmtVal(t.maxPwm)}"
-                 onchange="(function(v){ config.thresholds[${i}].minPwm=v-10; config.thresholds[${i}].maxPwm=v+10; renderThresholds(); updatePWMTooltips(); })(parseVal(this.value))"></td>`;
+                 onchange="(function(v){ if(!Number.isFinite(v)) return; config.thresholds[${i}].minPwm=Math.max(0,v-10); config.thresholds[${i}].maxPwm=v+10; renderThresholds(); updatePWMTooltips(); })(parseVal(this.value))"></td>`;
     tbody.appendChild(row);
   });
 }
@@ -10302,7 +10348,11 @@ function renderSwitchesTable() {
   (model.switches || []).forEach(name => {
     const cur = config.switches[name] || {};
     const dflt = switchDefaults[name] || { channel: 0, positions: 3 };
-    const ch   = (cur.channel  | 0) || dflt.channel;
+    // Channel 0 is the firmware's DISABLED state, not "unset" — SI/SJ ship at 0
+    // (rc_config.h RC_SWITCH_DEFAULT_CH) and processSbus skips them. Falling back
+    // to the tool's default for a stored 0 would show a channel the board is not
+    // reading. Fall back only when the key is genuinely absent (older schema).
+    const ch   = (cur.channel !== undefined) ? (cur.channel | 0) : dflt.channel;
     const pos  = (cur.positions| 0) || dflt.positions;
     const row = document.createElement('tr');
     row.innerHTML = `
@@ -10313,7 +10363,8 @@ function renderSwitchesTable() {
           <option value="3"${pos===3?' selected':''}>3 (Down / Mid / Up)</option>
         </select>
       </td>
-      <td><input type="number" min="1" max="24" value="${ch}" style="width:60px"
+      <td><input type="number" min="0" max="24" value="${ch}" style="width:60px"
+                 title="0 = disabled, 1-24 = SBUS channel number"
                  data-sw="${name}" data-field="channel"></td>`;
     tbody.appendChild(row);
   });
@@ -10354,13 +10405,19 @@ function renderAxesTable() {
   }).forEach(name => {
     const cur = config.knobs[name] || {};
     const dflt = knobDefaults[name] || { channel: 0 };
-    const ch = (cur.channel | 0) || dflt.channel;
+    // Channel 0 is the firmware's DISABLED state, not "unset" — LS/RS/S3/J5/J6
+    // ship at 0 (rc_config.h RC_KNOB_DEFAULT_CH) and processKnobs skips them.
+    // Falling back to the tool's default for a stored 0 would advertise a channel
+    // the board is not reading, while the knob modal shows the true 0. Fall back
+    // only when the key is genuinely absent (older schema).
+    const ch = (cur.channel !== undefined) ? (cur.channel | 0) : dflt.channel;
     const reverse = !!cur.reverse;
     const friendly = (dflt.friendly || name).replace(/^[^—]+ — /, '');   // strip "S1 — " prefix
     const row = document.createElement('tr');
     row.innerHTML = `
       <td><b>${name}</b>${friendly && friendly !== name ? `<small style="color:var(--muted);margin-left:6px">${escH(friendly)}</small>` : ''}</td>
-      <td><input type="number" min="1" max="24" value="${ch}" style="width:60px"
+      <td><input type="number" min="0" max="24" value="${ch}" style="width:60px"
+                 title="0 = disabled, 1-24 = SBUS channel number"
                  data-knob-ch="${name}"></td>
       <td style="text-align:center"><input type="checkbox" data-knob-rev="${name}" ${reverse ? 'checked' : ''}
                  title="Invert this axis around its centre before dispatch (stick up → reads as down for downstream outputs)"></td>`;
@@ -11326,8 +11383,14 @@ function renderHcrParamFields(container, fn, curChan, curTrack) {
     } else {
       chanW = mkNum('-chan', curChan, 99); chanL = 'Chan';
     }
-    trackW = mkNum('-track', curTrack, 9999); trackL = 'Track/Val';
-    trackTitle = 'Track/file number (PlayWAV), volume (SetVolume), or level (SetEmotion 0-100).';
+    // Only PlayWAV (14) takes a 0-9999 file number. HcrCodec::normalize caps
+    // track at 99 for SetEmotion (2) and SetVolume (17) — WcbCmd/src/WcbHcr.cpp
+    // — and a rejected action produces an EMPTY command that executeHcrAction
+    // drops with no user-visible error (only a dlog behind DBG_HCR). Authoring
+    // 100 here (the obvious value for "full volume") would be a silent no-op.
+    const tMax = (fn === 14) ? 9999 : 99;
+    trackW = mkNum('-track', curTrack, tMax); trackL = 'Track/Val';
+    trackTitle = 'Track/file number (PlayWAV 0-9999), volume (SetVolume 0-99), or level (SetEmotion 0-99).';
   }
   if (trackW && trackTitle) trackW.title = trackTitle;
 
@@ -12606,7 +12669,10 @@ function _cmdlibShowComposer() {
     } else if (p.type === 'int') {
       field = `<input type="number" id="${pid}" data-pname="${esc(p.name)}" ${p.min != null ? `min="${esc(p.min)}"` : ''} ${p.max != null ? `max="${esc(p.max)}"` : ''} value="${esc(_cmdlibValues[p.name])}" style="width:110px">`;
     } else {
-      field = `<input type="text" id="${pid}" data-pname="${esc(p.name)}" value="${esc(_cmdlibValues[p.name])}" style="width:180px">`;
+      // maxlength = the whole stored-command budget: a free-text param (wled.json's
+      // raw-JSON payload) is otherwise unbounded, and _cmdlibUse's length check is
+      // the only other thing between it and the firmware's silent truncation.
+      field = `<input type="text" id="${pid}" data-pname="${esc(p.name)}" maxlength="${RC_ACTION_CMD_MAX}" value="${esc(_cmdlibValues[p.name])}" style="width:180px">`;
     }
     html += `<div class="field-group"><label>${esc(p.label || p.name)}</label>${field}</div>`;
   });
@@ -12785,6 +12851,19 @@ function _cmdlibUse() {
   const wire = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
   const board = _cmdlibSel.board, cmd = _cmdlibSel.cmd, fid = _cmdlibFid;
   const mode = _cmdlibDestMode(board, cmd);
+  // A catalog entry that declares a custom `encoder` and carries NO `template`
+  // (e.g. rseries-logic's "Logic Effect", encoder "rseries-le") encodes to an
+  // EMPTY wire string — ncEncodeCommand only does template substitution, and
+  // nothing in this tool reads `encoder`. Authoring it would write an action
+  // that is nothing but the routing prefix: it dispatches, the device never
+  // moves, and no error is reported anywhere. A legitimately wire-less command
+  // declares `local` instead (navicore.json's nc.stop) and is handled below, so
+  // gate on "not local AND empty wire" rather than on a missing template.
+  if (mode !== 'local' && !String(wire).trim()) {
+    alert('That command cannot be built here yet — the library entry uses a custom encoder this tool does not implement, so it produces an empty command.\n\n' +
+          'Pick a different command, or type the raw device string into the row by hand.');
+    return;
+  }
   let action;
   // On a re-edit (📚 Change of a row that already holds a command) the row already
   // carries the destination the user chose — preserve it; only DEFAULT the
@@ -12847,6 +12926,17 @@ function _cmdlibUse() {
   if (action && (action.type === 'wcb_unicast' || action.type === 'wcb_broadcast')
       && /;M[1-8]/i.test(action.cmd || '') && document.getElementById(fid + '-skiprun')?.checked) {
     action.skipRunning = 1;
+  }
+  // The composer writes action.cmd into the row PROGRAMMATICALLY, and the field's
+  // maxLength constrains typing only — so the 95-char store (RC_ACTION_CMD_MAX)
+  // has to be enforced here as well. Reachable via a free-text param (wled.json's
+  // raw-JSON payload, or any param in an imported library) plus the ";W<w>;S<p>"
+  // routing prefix added above. Refuse rather than let the firmware's strlcpy
+  // truncate it silently.
+  if (action && typeof action.cmd === 'string' && action.cmd.length > RC_ACTION_CMD_MAX) {
+    alert(`That command is ${action.cmd.length} characters — the board stores only ${RC_ACTION_CMD_MAX} ` +
+          `(routing prefix included) and drops the rest without an error.\n\nShorten the values and try again.`);
+    return;
   }
   _applyResolvedActionToRow(fid, action);
   closeCmdLibrary();
@@ -13534,6 +13624,32 @@ function _cmdViewMode(type, action) {
   return 'wire';
 }
 
+// ── The stored-command length cap ────────────────────────────────────────────
+// RcAction::cmd is char[96] in the firmware (rc_config.h ≈129) — 95 chars + NUL —
+// and rcConfigFromJSON copies it with strlcpy, which truncates anything longer
+// and discards the would-be length. Neither side reports it: the action still
+// dispatches, and a truncated "^"-chain can parse as a different-but-valid
+// command ("half my action works").
+//
+// The trap: what gets STORED is not what the user typed. A WCB-serial-port
+// destination prepends a ";W<wcb>;S<port>" routing prefix (6 chars ";W1;S1" to
+// 7 chars ";W20;S5") on read-back, so the visible field's cap must RESERVE room
+// for it — and the reserve changes when the destination changes. Anything that
+// caps the field at a fixed 95 (or at 90, which is still 2 short of ";W20;S5")
+// lets the stored command reach 102 and silently lose its tail.
+const RC_ACTION_CMD_MAX = 95;
+
+// The routing prefix a "Send to" value contributes to the STORED command.
+// Mirrors the read-back in readActionFromFid's wcb_broadcast branch.
+function _rcDestPrefix(destVal) {
+  const m = /^W(\d+)S(\d)$/.exec(String(destVal || ''));
+  return m ? `;W${m[1]};S${m[2]}` : '';
+}
+// How many characters the VISIBLE field may hold for a given destination.
+function _rcCmdFieldCap(destVal) {
+  return Math.max(1, RC_ACTION_CMD_MAX - _rcDestPrefix(destVal).length);
+}
+
 // Device-native command view: the visible field is the raw DEVICE string; the
 // "Send to" picks a WCB serial port (broadcast ";W<wcb>;S<port>" + string) or a
 // local aux serial. A hidden -cmd holds the full wire string and -port the local
@@ -13551,7 +13667,7 @@ function _appendDeviceView(container, action) {
 
   const devInput = document.createElement('input');
   devInput.type = 'text'; devInput.id = fid + '-devcmd';
-  devInput.maxLength = 90; devInput.value = devStr;
+  devInput.maxLength = _rcCmdFieldCap(curDest); devInput.value = devStr;
   devInput.placeholder = 'pick or type a device command';
   devInput.style.cssText = 'width:200px;font-family:monospace';
   row1.appendChild(makeFieldGroup('Command', devInput));
@@ -13566,12 +13682,25 @@ function _appendDeviceView(container, action) {
   destSel.value = curDest;
   const hint = document.createElement('div');
   hint.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--muted)';
+  const lenWarn = document.createElement('div');
+  lenWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
   const sync = () => {
     const dv = destSel.value, dev = devInput.value;
     const typeSel = document.getElementById(_cmdlibRowTypeSelId(fid));
     const m = /^W(\d+)S(\d+)$/.exec(dv);
     if (m) { if (typeSel) typeSel.value = 'wcb_broadcast'; cmdHidden.value = `;W${m[1]};S${m[2]}` + dev; }
     else   { if (typeSel) typeSel.value = 'serial'; portHidden.value = dv; cmdHidden.value = dev; }
+    // Re-reserve room for the routing prefix — its length changes with the
+    // destination (";W1;S1" = 6, ";W20;S5" = 7). Changing dest can leave an
+    // ALREADY-typed value over the new cap (maxLength never truncates), so warn
+    // rather than silently shipping something the firmware will cut.
+    devInput.maxLength = _rcCmdFieldCap(dv);
+    const over = cmdHidden.value.length - RC_ACTION_CMD_MAX;
+    lenWarn.textContent = over > 0
+      ? `⚠ Too long by ${over} character${over === 1 ? '' : 's'} — the board stores ${RC_ACTION_CMD_MAX} characters `
+        + `(including the "${_rcDestPrefix(dv)}" routing prefix) and silently drops the rest. Shorten it or split the action.`
+      : '';
+    lenWarn.style.display = over > 0 ? '' : 'none';
     let d = null; try { d = ncDecodeCommand(dev); } catch (e) {}
     hint.textContent = d ? `\u{1F4DA} ${d.board.name} · ${d.cmd.name}` : '';
     const mm = /^fields-(.+)-(\d+)$/.exec(fid); if (mm) refreshTierState(mm[1]);
@@ -13579,6 +13708,8 @@ function _appendDeviceView(container, action) {
   devInput.oninput = sync; destSel.onchange = sync;
   row1.appendChild(makeFieldGroup('Send to', destSel));
   container.appendChild(row1);
+  container.appendChild(lenWarn);
+  sync();   // paint the initial cap/warning for an already-stored over-length command
 
   const build = document.createElement('button');
   build.type = 'button'; build.className = 'btn btn-ghost';
@@ -13616,7 +13747,10 @@ function _appendCommandView(container, action) {
   // Command string — editable; the builder fills it, or type it by hand.
   const cmdInput = document.createElement('input');
   cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-  cmdInput.maxLength = 95; cmdInput.value = cmd;
+  // Cap the VISIBLE field at 95 minus the routing prefix read-back will prepend
+  // (see RC_ACTION_CMD_MAX) — the field shows the bare command, the board stores
+  // prefix + command.
+  cmdInput.maxLength = _rcCmdFieldCap(wsDest); cmdInput.value = cmd;
   cmdInput.placeholder = 'pick or type a command';
   cmdInput.style.cssText = 'width:200px;font-family:monospace';
   // Line 1: the command and its two destination dropdowns, side by side on ONE
@@ -13658,6 +13792,28 @@ function _appendCommandView(container, action) {
     } else {
       chainWarn.style.display = 'none';
     }
+  };
+
+  // Length guard. The stored command is prefix + field, and the destination can
+  // change AFTER the text was typed (maxLength never truncates an existing
+  // value), so re-apply the cap and surface an overflow instead of letting the
+  // firmware's strlcpy eat the tail silently.
+  const lenWarn = document.createElement('div');
+  lenWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
+  container.appendChild(lenWarn);
+  const refreshLenWarn = () => {
+    const dest   = document.getElementById(fid + '-destsel')?.value || '';
+    const prefix = _rcDestPrefix(dest);
+    cmdInput.maxLength = _rcCmdFieldCap(dest);
+    // Read-back skips the prefix when the user hand-typed their own ";W…" routing.
+    const stored = (prefix && !/^;W/i.test(cmdInput.value) ? prefix : '') + (cmdInput.value || '');
+    const over   = stored.length - RC_ACTION_CMD_MAX;
+    lenWarn.textContent = over > 0
+      ? `⚠ Too long by ${over} character${over === 1 ? '' : 's'} — the board stores ${RC_ACTION_CMD_MAX} characters`
+        + (prefix ? ` (including the "${prefix}" routing prefix)` : '')
+        + ` and silently drops the rest. Shorten it or split the action.`
+      : '';
+    lenWarn.style.display = over > 0 ? '' : 'none';
   };
 
   // Destination — to the right of the command. WLED routes by id (no picker);
@@ -13716,6 +13872,7 @@ function _appendCommandView(container, action) {
       destHidden.value = dest;
       if (typeSel) typeSel.value = tp;
       refreshChainWarn();   // unicast⇄broadcast changes whether a "^" chain is a problem
+      refreshLenWarn();     // the ";W;S" prefix — and so the field's cap — changes with the destination
       const m = /^fields-(.+)-(\d+)$/.exec(fid); if (m) refreshTierState(m[1]);
     };
     wcbSel.onchange  = () => {
@@ -13771,7 +13928,8 @@ function _appendCommandView(container, action) {
     hint.textContent = `\u{1F4DA} ${d.board.name} · ${label}`;
   };
   setHint();
-  cmdInput.oninput = () => { setHint(); refreshChainWarn(); };
+  refreshLenWarn();   // flag an ALREADY-stored over-length command on render, not just on edit
+  cmdInput.oninput = () => { setHint(); refreshChainWarn(); refreshLenWarn(); };
   container.appendChild(hint);
 }
 
@@ -14581,7 +14739,13 @@ function _onKnobOutMaestroChange(idx) {
   const o = editingKnobDraft.outputs[idx];
   if (o) {
     const info = _maestroChInfo(o.target, o.maestroCh);
-    if (info) { o.posMin = info.min; o.posMax = info.max; }
+    // Keep a reversed output reversed — posMin > posMax is how a mirrored servo
+    // is configured (see _applyMaestroRangesToKnobs); the imported range is
+    // always ascending, so assigning it verbatim would flip travel direction.
+    if (info) {
+      if (+o.posMin > +o.posMax) { o.posMin = info.max; o.posMax = info.min; }
+      else                       { o.posMin = info.min; o.posMax = info.max; }
+    }
   }
   renderKnobOutputs();
 }
@@ -14732,12 +14896,20 @@ function openSwitchModal(swName) {
   if (!config.switches) config.switches = {};
   const d = config.switches[swName] || {};
   const defaults = switchDefaults[swName] || { channel: 0, positions: 3 };
+  // The pXnote captions MUST be copied in here. The tier cards render from this
+  // working object and rebuildSwitchTiers/saveSwitchModal write the rendered
+  // boxes straight back into config.switches — so a note that is not seeded
+  // renders blank and is then saved as blank, wiping it from the board (the
+  // firmware memsets the tiers before re-reading, so an absent key erases too).
   const sw = {
     channel:   d.channel   || defaults.channel,
     positions: d.positions || defaults.positions,
     p0: d.p0 || [],
     p1: d.p1 || [],
     p2: d.p2 || [],
+    p0note: d.p0note || '',
+    p1note: d.p1note || '',
+    p2note: d.p2note || '',
   };
 
   document.getElementById('modal-title').textContent = `Switch ${swName}`;
@@ -15336,6 +15508,19 @@ let _saveSeq       = 0;
 document.getElementById('btn-hwsetup-save').addEventListener('click', saveConfigToBoard);
 
 document.getElementById('btn-defaults').addEventListener('click', async () => {
+  // USB only. rcTelemetry::handle() has no RESET_DEFAULTS branch — over the mesh
+  // the board logs "Unknown inbound type" and does nothing, yet the follow-up
+  // GET_CONFIG's CONFIG reply still resolves _pendingDefaultsReset below and
+  // shows a green success toast for an operation that never happened. Gate on
+  // viaWcbActive ONLY: sendJSON routes over the mesh purely on that flag, so a
+  // shared-hub session against a directly-attached NaviCore still takes the USB
+  // path where the firmware DOES handle it.
+  if (viaWcbActive) {
+    alert('Restore Defaults needs a direct USB connection.\n\n' +
+          'The board does not accept a reset over the WCB mesh. Disconnect, uncheck "Via WCB", ' +
+          'reconnect over direct USB, and try again.');
+    return;
+  }
   if (!confirm('Reset all button mappings to factory defaults?')) return;
   // RESET_DEFAULTS has no dedicated ACK — the board resets, then we re-pull.
   // The returning CONFIG is the real confirmation the reset landed, so resolve
@@ -15649,6 +15834,21 @@ let _otaMarkerResolver = null;   // set while awaiting the next [OTA:*] marker
 // (re-arm is a microtask behind `await`). Buffer those instead of dropping them.
 let _otaPendingMarkers = [];
 
+// Lock/unlock the OTHER owners of the serial port for the duration of an OTA.
+// An OTA is a ~2 minute ACK-paced stream over the live session; runFirmwareFlash
+// does `await disconnect()` and hands the port to esptool-js, and Connect/
+// Disconnect tears it down outright — either one kills the transfer mid-stream
+// and leaves the board holding a dangling OTA session until its 30 s reaper.
+// runFirmwareFlash disables the same three buttons for its own duration; this
+// is the mirror image of that block. Call it AFTER _otaInProgress is set (and
+// after it is cleared), because _updateFirmwareBtnState reads that flag to
+// decide the flash buttons' state without fighting the Via-WCB rule.
+function _otaLockPortOwnerButtons(locked) {
+  const btnConnect = document.getElementById('btn-connect');
+  if (btnConnect) btnConnect.disabled = locked;
+  _updateFirmwareBtnState();
+}
+
 // Called from handleBoardMessage for any "[OTA:" line — resolves a pending wait,
 // or buffers the marker if no waiter is armed yet (see _otaPendingMarkers).
 function _otaHandleMarker(line) {
@@ -15690,6 +15890,7 @@ async function otaUpdateOverUsb() {
   _otaPendingMarkers = []; _otaMarkerResolver = null;   // discard any stale marker from a prior/aborted run
   const btn = document.getElementById('btn-fw-ota');
   if (btn) { btn.disabled = true; btn.textContent = '⚡ Updating over USB…'; }
+  _otaLockPortOwnerButtons(true);
   if (logEl) logEl.textContent = '';
   try {
     setStatus('OTA: fetching firmware…');
@@ -15774,6 +15975,7 @@ async function otaUpdateOverUsb() {
     _otaMarkerResolver = null;
     _otaPendingMarkers = [];
     if (btn) { btn.disabled = false; btn.textContent = '⚡ Update over USB (OTA)'; }
+    _otaLockPortOwnerButtons(false);
   }
 }
 
@@ -15816,6 +16018,7 @@ async function otaUpdateOverWcb() {
   _otaPendingMarkers = []; _otaMarkerResolver = null;   // discard any stale marker from a prior/aborted run
   const btn = document.getElementById('btn-fw-ota-wcb');
   if (btn) { btn.disabled = true; btn.textContent = '📡 Updating over WCB…'; }
+  _otaLockPortOwnerButtons(true);
   if (logEl) logEl.textContent = '';
   let session = 0;
   try {
@@ -15951,11 +16154,16 @@ async function otaUpdateOverWcb() {
     _otaMarkerResolver = null;
     _otaPendingMarkers = [];
     if (btn) { btn.disabled = false; btn.textContent = '📡 Update over WCB (OTA)'; }
+    _otaLockPortOwnerButtons(false);
   }
 }
 
 async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
-  if (_fwFlashing) return;
+  // Guard BOTH flags, symmetrically with the two OTA entry points. An OTA is a
+  // ~2 minute ACK-paced loop that owns writer/port; starting a flash under it
+  // calls disconnect() out from under the loop, killing the update with a
+  // misleading "timed out" and leaving the board holding a dead OTA handle.
+  if (_fwFlashing || _otaInProgress) return;
   _fwFlashing = true;
 
   const btnFlash   = document.getElementById('btn-fw-flash');
@@ -16127,10 +16335,11 @@ function _updateFirmwareBtnState() {
     if (btnOtaWcb) btnOtaWcb.disabled = !viaWcbActive;    // relay OTA  = via WCB only
   }
 
-  // While a flash is running, the flash flow owns these buttons' disabled
+  // While a flash OR an OTA is running, that flow owns these buttons' disabled
   // state (it disables them up front, re-enables them in its finally).  Don't
-  // let a Via-WCB toggle mid-flash re-enable them out from under it.
-  if (_fwFlashing) { btnFlash.disabled = true; btnWipe.disabled = true; return; }
+  // let a Via-WCB toggle mid-run re-enable them out from under it — starting a
+  // flash under a live OTA seizes the port the OTA is streaming through.
+  if (_fwFlashing || _otaInProgress) { btnFlash.disabled = true; btnWipe.disabled = true; return; }
   const disable = !!viaWcbActive;
   btnFlash.disabled = disable;
   btnWipe.disabled  = disable;
@@ -16166,6 +16375,10 @@ document.getElementById('btn-fw-flash').addEventListener('click', e => {
           'Disconnect, uncheck "Via WCB", reconnect over direct USB, and try again.');
     return;
   }
+  if (_otaInProgress) {
+    alert('An OTA update is already running. Wait for it to finish (or fail) before flashing.');
+    return;
+  }
   runFirmwareFlash({
     eraseNvs:     false,
     sourceBtn:    e.currentTarget,
@@ -16198,6 +16411,10 @@ document.getElementById('btn-fw-wipe').addEventListener('click', e => {
   if (viaWcbActive) {
     alert('Full Wipe & Flash unavailable while connected via WCB.\n\n' +
           'Disconnect, uncheck "Via WCB", reconnect over direct USB, and try again.');
+    return;
+  }
+  if (_otaInProgress) {
+    alert('An OTA update is already running. Wait for it to finish (or fail) before flashing.');
     return;
   }
   // Destructive — confirm before proceeding. confirm() is intentional: it
@@ -18048,9 +18265,20 @@ function _cfgDownloadTextFile(name, text) {
 // Given a parsed JSON value, return the config object inside it. Accepts either the
 // Download wrapper ({navicore, savedAt, note, config}) or a bare config object, so a
 // downloaded file round-trips and a hand-exported config still loads.
+// A NaviCore config must contain at least ONE key applyConfig recognises. Type-
+// checking alone let ANY JSON object through (a WCB Wizard export, a package.json,
+// even "{}"), and the callers then report success and set _configLoaded = true —
+// the one guard that stops a Save from clobbering the board with the tool's static
+// defaults. Worse, applyConfig full-replaces a few branches (wcbProfiles,
+// serialLabels, serialBcast, modeReport, statsReport), so a stray file WIPES them
+// even from a properly loaded config. Reject the file instead.
+const CFG_KNOWN_KEYS = ['thresholds', 'mappings', 'switches', 'knobs', 'maestros', 'wcbNetwork',
+                        'hcrDest', 'mp3Dest', 'dfpDest', 'wledSlots', 'txModel', 'matrixChannel',
+                        'funcBindings', 'smoothProfiles'];
 function _cfgExtractConfig(parsed) {
   const cfg = (parsed && parsed.config && typeof parsed.config === 'object') ? parsed.config : parsed;
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('that file has no config in it');
+  if (!CFG_KNOWN_KEYS.some(k => k in cfg)) throw new Error('that file is not a NaviCore config');
   return cfg;
 }
 // Fetch + decrypt backup slot `i` under (user, pw) and save it to disk as a readable

@@ -105,6 +105,27 @@ public:
 
       // Frame must start with the SBUS header byte.
       if (!inFrame_) {
+        // Prefix check for the eager 25-byte flush above. The byte immediately
+        // after a REAL SBUS-16 frame is always the next frame's header; anything
+        // else means we truncated a longer 24-ch frame at its 25-byte prefix.
+        // That truncated parse RE-CONFIRMS the 16 lock, so without this the
+        // reader wedges into 16 for as long as data byte 24 keeps landing on
+        // 0x00 (i.e. ch17 < 256 and ch18 a multiple of 32, e.g. a switch parked
+        // at the 172 endpoint): channels 17-24 are silently pinned to 992, and
+        // frame[23] — ch17's low bits, not the flags byte — is decoded as flags,
+        // which can assert a phantom failsafe and freeze ALL dispatch while the
+        // status LED still reads "receiving". Drop the lock so the 24-variant
+        // re-detects. Do NOT fold this into the gap-based flushes: a real gap
+        // after 25 bytes IS a genuine 16-frame.
+        if (pendingLen16Check_) {
+          pendingLen16Check_ = false;
+          if (b != SBUS_HEADER) {
+            lockStreak_      = 0;
+            lockVariant_     = 0;
+            detectedFrameLen = 0;
+            detectedChCount  = 0;
+          }
+        }
         if (b == SBUS_HEADER) {
           buf_[0] = b;
           bufIdx_ = 1;
@@ -123,12 +144,17 @@ public:
       // them. Once the stream is LOCKED we know the exact frame length, so flush
       // the instant a full frame's worth of bytes ends on a footer, splitting the
       // backlog on frame boundaries instead of overflowing (which would discard
-      // both). Gated on a confirmed lock + the DETECTED length so it can never
-      // misfire on a 24-ch data byte that happens to be 0x00 at offset 24 (the
-      // 16-frame length is a prefix of the 24-frame). Pre-lock/noisy streams fall
-      // through to the unchanged gap-based path.
+      // both). Gated on a confirmed lock + the DETECTED length — but that gate is
+      // NOT sufficient on its own: a 25-byte SBUS-16 frame is a byte-for-byte
+      // PREFIX of a 36-byte SBUS-24 frame, so a 16-lock DOES misfire here on a
+      // 24-ch stream whose data byte 24 happens to be 0x00. The prefix check
+      // armed below is what catches that. Pre-lock/noisy streams fall through to
+      // the unchanged gap-based path.
       if (lockStreak_ >= LOCK_FRAMES && detectedFrameLen &&
           bufIdx_ == detectedFrameLen && buf_[detectedFrameLen - 1] == SBUS_FOOTER) {
+        // Arm the prefix check only for the ambiguous 25-byte flush: 25 is a
+        // prefix of 36, 36 is a prefix of nothing.
+        pendingLen16Check_ = (detectedFrameLen == FRAME_LEN_16);
         gotFrame = tryParseAndReset() || gotFrame;
         continue;
       }
@@ -181,6 +207,11 @@ private:
   static constexpr uint8_t LOCK_FRAMES = 3;
   uint8_t  lockStreak_  = 0;   // consecutive same-variant valid frames seen
   int      lockVariant_ = 0;   // 16 or 24 — the variant currently being confirmed
+
+  // Armed by the eager 25-byte flush in read(), consumed by the next byte read
+  // outside a frame — the only thing that distinguishes a real SBUS-16 frame
+  // from the 25-byte prefix of an SBUS-24 frame once the bytes are in the FIFO.
+  bool     pendingLen16Check_ = false;
 
   // Returns true on a CONFIRMED frame (passes structure AND the lock streak),
   // resets framing state regardless.

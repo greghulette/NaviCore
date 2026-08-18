@@ -9,47 +9,48 @@ Design notes with their own documents: [RECORD_REPLAY_DESIGN.md](RECORD_REPLAY_D
 
 ---
 
-## 1. Serial ports as full mesh citizens — **queued, design settled**
+## 1. Serial ports as full mesh citizens — **shipped**
 
-**Goal.** NaviCore's serial ports behave like a WCB's on the mesh: reachable from the mesh,
-and able to forward mesh traffic outward.
+NaviCore's serial ports are mesh citizens in both directions, the same way a WCB's are. The
+design comment above `struct SerialFwdMsg` in [`NaviCore.ino`](../NaviCore.ino) is the
+authority; this is the summary.
 
-**Decisions locked:**
+**Mesh numbering is S1 / S2 / S3 → firmware S3 / S4 / S5**, matching the NaviCore v2
+silkscreen. `rcFwPortForMesh()` / `rcMeshPortForFw()` in [`rc_config.h`](../rc_config.h) are
+the whole translation layer — every mesh-facing path converts once at the edge and works in
+firmware numbering after that. WDP PORTLABEL advertises the same numbers
+(`rcWdpPortForLabel()`), with the **Maestro on WDP port 4**: visible in `?WDP,LIST` and the
+Wizard, but deliberately not a port `;s<n>` can reach, because it is a binary bus and not
+text-addressable.
 
-1. **Mesh port numbering is S1 / S2 / S3**, mapping to firmware **S3 / S4 / S5** — matching
-   the NaviCore v2 silkscreen ("Serial 1/2/3"). This needs a translation layer.
-2. Build **both directions**.
-3. Primary ask — **Broadcast Out**: a mesh broadcast NaviCore receives is forwarded out each
-   serial port that has broadcast-out enabled.
-4. Also wanted — **targeted writes**: a WCB sends `;W20;S<n>,<cmd>` and NaviCore writes
-   `<cmd>` to that port, exactly like WCB↔WCB.
+**Targeted writes are always accepted — no config needed.** A WCB sending `;w20,;s2<cmd>`
+delivers exactly `";s2<cmd>"` to `onWCBCommand`: the sending board strips the `;w20,` and the
+rest arrives verbatim. The payload is written raw + CR with no comma stripping, byte-identical
+to what the same command would put on a WCB's own port.
 
-**Already shipped, needs renumbering.** WDP port labels: `WCB_Client` 1.11.0 `setPortLabel()`
-+ the PORTLABEL TLV; `rcConfig.serialLabels` + `rcSerialLabel()` / `rcSerialLabelAuto()` +
-`rcAdvertiseSerialLabels()`; the tool's "Serial Ports" tab (per-port Baud + Label table).
-These currently advertise WDP port 2 = Maestro and 3/4/5 = S3/S4/S5 — **renumber to
-S1/S2/S3 = firmware S3/S4/S5**.
+**Broadcast is per-port opt-in**, `rcConfig.serialBcastOut[]` / `serialBcastIn[]` — both
+default off, so a port joins the broadcast domain only when enabled in the tool's **Serial
+Ports** tab:
 
-**Open questions to resolve during the build:**
+- **Out** — an unprefixed mesh command goes out every `serialBcastOut` port
+  (`queueSerialBroadcastOut()`). It is never re-broadcast to the mesh; the out-path is
+  mesh→serial only, so there is no loop to break.
+- **In** — a **terminated** line from a `serialBcastIn` port is broadcast to the mesh and out
+  the other opted-in ports (`auxRxLine()`). A fragment from a buffer-full or idle flush is
+  shown on the terminal but never broadcast — a command is a line, the same rule a WCB's
+  `processIncomingSerial` uses. Device-owned ports are skipped: an HCR's status frames are
+  that driver's protocol, not commands.
 
-- What a slot-20 client's `WCBCommandCallback(senderID, command)` actually receives after the
-  bridge relays `;W20;S<n>,cmd` — does the relay strip `;W20`? Is the `;S<port>` routing
-  still in the text? Decide between parsing routing from the command text on NaviCore, or
-  adding a `WCB_Client` hook exposing was-broadcast + target-port (the callback exposes
-  **neither** today).
-- The exact WCB `;W<id>;S<port>` wire format — trace `processWCBMessage` and
-  `getSerialStream(port).write()` in the WCB firmware. The raw binary Maestro/Kyber path is
-  separate (`structCommand[0]` = target port).
-- Where the local Maestro sits in S1–S3 numbering. It is a binary bus and not text-`S`
-  addressable — likely labelled but non-addressable.
-- Real-time safety: serial read/forward in `loop()` must not disturb the ~111 fps SBUS path.
+**Every write is deferred to Core 1 through `serialFwdQueue`.** `onWCBCommand` runs on the
+Core-0 WiFi task and S4/S5 are bit-banged SoftwareSerial, where a write blocks with interrupts
+off for the whole frame time (~1 ms per 10 chars at 9600) — on the WiFi task that stalls
+ESP-NOW, and on either core it jitters the ~111 fps SBUS path. `drainSerialFwd()` in `loop()`
+does the writing. **Never write an aux port directly from a mesh callback.**
 
-**Build order.** Protocol trace → S1–S3 renumber (WDP labels + tool table) → per-port
-`broadcastOut` / `broadcastIn` config → firmware forwarding (mesh→serial broadcast, then
-targeted `;S<n>`→serial) → optional serial→mesh → tool toggle columns.
+`auxRxLine()` in [`NaviCore.ino`](../NaviCore.ino) is where an "act on incoming serial" parser
+belongs — it already has the assembled line and the terminated/fragment distinction.
 
-`pollAuxSerialRx()` in [`NaviCore.ino`](../NaviCore.ino) is the existing hook where an
-"act on incoming serial" parser belongs.
+**Remaining.** Nothing queued. WCB-method reads for the local Maestro are tracked in §2.
 
 ---
 
@@ -105,7 +106,7 @@ Do not "fix" these — each was decided:
 
 | Thing | Why it stays |
 |---|---|
-| Cloud backup keyed on the WCB password **alone** | A per-install discriminator would break restore-into-a-blank-tool. The caveat is surfaced in the modal instead |
+| Cloud backup keyed on user-supplied credentials **only**, with no per-install discriminator | A per-install discriminator would break restore-into-a-blank-tool. A **username + password** pair you choose (independent of the WCB password) is the entire input to both the slot address and the AES-GCM key — `_cfgSecret(user, pw)` feeds `_cfgSlotBase()` and `_cfgKey()` and nothing device- or browser-specific joins it, which is exactly what lets a blank tool on a new machine find and decrypt the ring. See [CONFIG_TOOL.md §9](CONFIG_TOOL.md#9-two-extras-worth-knowing). The caveat is surfaced in the modal instead |
 | HCR `chan` encoding differs between fn 18/19 and fn 14/16/17 | Legacy actions carry `chan=0` meaning ALL; harmonising would silently repoint existing configs |
 | Dedup window not reset on sender reboot | Essentially unreachable (needs ~5000 post-reboot commands) and fixing it costs a `WCB_Client` reflash |
 | `FRAG_MAX_PARTS` capped at 192 | 384 crash-loops the board. A larger bridged payload needs a heap-allocated buffer, not a bigger static array |
@@ -122,5 +123,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | §1 rewritten as **shipped** — the mesh↔serial bridge (S1-S3 → firmware S3/S4/S5 numbering, always-on targeted `;s<n>` writes, per-port broadcast in/out, the `serialFwdQueue` Core-1 hop) is built in firmware and tool; the answered open questions are carried forward as constraints. §5: corrected the cloud-backup row — backups are keyed on an independent **username + password** pair, not the WCB password; the no-per-install-discriminator rationale still stands. |
 | 2026-08-13 | _(uncommitted)_ | Recorded the decision NOT to port the WCB `?ETM,CHAR` network test to NaviCore, with the reasoning — chiefly that `ETM_RETRY_INTERVAL_MS` has no setter, so the recommended timeout it produces cannot be applied. Relaying `?MGMT,ETM,CHAR` is the cheap path if it is ever wanted. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

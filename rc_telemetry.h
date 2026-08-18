@@ -278,6 +278,20 @@ inline uint8_t _pendingGetCmdlibMetaSender = 0;
 // with GET_CONFIG/GET_CMDLIB), answered from tick() on Core 1.
 inline uint8_t _pendingGetWcbMetaSender = 0;
 
+// ── WCB_SEND / RESET_DEFAULTS parked for Core 1 ──────────────────────────────
+// Both exist on the Direct-USB path (handleSerialInput) and both are Core-1 work,
+// so handle() only PARKS them here: WCB_SEND is an ESP-NOW transmit, which must not
+// run inside the Core-0 receive callback (same rule as GET_WCB_STATUS), and
+// RESET_DEFAULTS rewrites the whole live rcConfig that Core 1's dispatch reads on
+// every SBUS frame.  tick() performs each one and ACKs the requester.
+// The *sender* byte is set LAST on park and cleared LAST on perform — it is what
+// publishes the payload to tick().  Latest wins, exactly like the seq-pull slot
+// below: these are hand-paced, one-shot user actions.
+inline uint8_t _pendingWcbSendTo       = 0;    // relay target: 0 = broadcast, 0xFF = out of range (tick NACKs)
+inline char    _pendingWcbSendCmd[160] = "";   // bridged WCB_SEND is single-packet, so the cmd is well under this
+inline uint8_t _pendingWcbSendFrom     = 0;    // requester to ACK (0 = nothing parked)
+inline uint8_t _pendingResetDefaults   = 0;    // requester to ACK (0 = nothing parked)
+
 // ── Stored sequences: inventory + one value ──────────────────────────────────
 //   GET_WCB_SEQ    {wcb}       → WCB_SEQ     — the ?SEQ key NAMES on that board
 //   GET_WCB_SEQVAL {wcb,key}   → WCB_SEQVAL  — ONE sequence's contents
@@ -710,6 +724,22 @@ inline bool bulkBegin(uint8_t senderID, uint16_t sid, uint32_t totalLen,
   (void)senderID; (void)hash;
   if (strcmp(tag, "cmdlib") != 0) return false;   // only the command library, for now
   if (!g_lfsReady) return false;
+  // Cap the SINK at what the DOWNLOAD path can serve.  The bulk layer alone accepts
+  // WCB_BULK_MAX_CHUNKS × WCB_BULK_CHUNK_RAW (48 KB), but _startGetCmdlibSend wraps
+  // the library in ~55 bytes of {"type":"CMDLIB",…,"data":…} and ships it through
+  // _startFragSendFile, whose ceiling is FRAG_SEND_MAX_PARTS × FRAG_CHUNK_BYTES.
+  // Accepting anything past that stores a library the mesh can never hand back —
+  // GET_CMDLIB_META keeps advertising it and "Load from NaviCore" is a permanent
+  // no-op.  Reject it HERE so the failure surfaces up front as the FINAL ok=0 the
+  // tool already reports.  The 64-byte margin covers the wrapper plus the chunker's
+  // codepoint-boundary slack (a multi-byte char can end a chunk early).
+  constexpr uint32_t kCmdlibMeshMax = (uint32_t)FRAG_SEND_MAX_PARTS * FRAG_CHUNK_BYTES - 64;
+  if (totalLen > kCmdlibMeshMax) {
+    Serial.printf("[RC] bulk cmdlib: %u bytes exceeds the %u B mesh download ceiling "
+                  "— rejecting (load it over Direct USB)\n",
+                  (unsigned)totalLen, (unsigned)kCmdlibMeshMax);
+    return false;
+  }
   if (_bulkFileOpen) { _bulkFile.close(); _bulkFileOpen = false; }
   LittleFS.remove(RC_CMDLIB_BULK_TMP);            // clear any stale staging file
   _bulkFile = LittleFS.open(RC_CMDLIB_BULK_TMP, "w+");
@@ -792,28 +822,67 @@ inline bool _startGetCmdlibSend(uint8_t target) {
   File out = LittleFS.open(RC_CMDLIB_SEND_TMP, "w");
   if (!out) { Serial.println("[RC] CMDLIB: cannot open send-staging file"); return false; }
   char meta[80];
+  size_t intended = 0;   // exact byte count the staging file must hold when we're done
   if (haveFile) {
     // size + signature so the tool can cache "this is what the droid has" and skip
     // re-pulling an unchanged library (see the CMDLIB_META check).
     snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
              (unsigned)sz, (unsigned)h);
-    out.print(meta);
     File in = LittleFS.open(RC_CMDLIB_PATH, "r");
-    if (in) {
-      uint8_t buf[256];
-      while (in.available()) { size_t n = in.read(buf, sizeof(buf)); if (n == 0) break; out.write(buf, n); }
-      in.close();
+    // Open it BEFORE writing the header, and treat a failure as fatal.  Skipping the
+    // copy but still emitting the header + '}' produces `…,"data":}` — invalid JSON
+    // that nonetheless fragments and arrives looking like a complete CMDLIB reply.
+    if (!in) {
+      Serial.println("[RC] CMDLIB: stored library exists but won't open — send aborted");
+      out.close(); LittleFS.remove(RC_CMDLIB_SEND_TMP); return false;
     }
+    out.print(meta);
+    uint8_t buf[256];
+    while (in.available()) { size_t n = in.read(buf, sizeof(buf)); if (n == 0) break; out.write(buf, n); }
+    in.close();
     out.print("}");
+    intended = strlen(meta) + sz + 1;
   } else {
     const char* empty = "{\"boards\":[],\"enums\":{}}";
     snprintf(meta, sizeof(meta), "{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
              (unsigned)strlen(empty), (unsigned)rcCmdlibHash(String(empty)));
     out.print(meta); out.print(empty); out.print("}");
+    intended = strlen(meta) + strlen(empty) + 1;
   }
   out.flush();
   out.close();
+  // Verify what actually reached FLASH, not what we asked for.  print()/write() only
+  // count bytes into the core's 4 KB stdio buffer and the real error surfaces at
+  // flush/close, whose return the core discards — so the on-flash size is the only
+  // reliable check (same discipline as rcCmdlibSaveLFS).  Without it, a short write
+  // (the data partition holding a ~40 KB library plus this second copy of it) leaves
+  // the file ending mid-JSON, _startFragSendFile takes its length from f.size(), and
+  // the tool gets ~40 KB of unparseable garbage in the terminal with no error.
+  {
+    File chk = LittleFS.open(RC_CMDLIB_SEND_TMP, "r");
+    const size_t onDisk = chk ? chk.size() : 0;
+    if (chk) chk.close();
+    if (onDisk != intended) {
+      Serial.printf("[RC] CMDLIB: send-staging short write (%u of %u bytes) — send aborted\n",
+                    (unsigned)onDisk, (unsigned)intended);
+      LittleFS.remove(RC_CMDLIB_SEND_TMP);
+      return false;
+    }
+  }
   return _startFragSendFile(target, RC_CMDLIB_SEND_TMP, "CMDLIB", OS_CMDLIB);   // frees the tmp on complete/abort
+}
+
+// A pull we cannot answer still has to ANSWER.  Every failure path of the deferred
+// pulls below (LittleFS down, staging open/short write, a payload past the fragment
+// budget) returns false from tick(), which has already cleared the requester slot —
+// leaving the tool waiting on a reply that never comes, with no client-side timeout
+// on GET_CMDLIB/GET_WCB_META.  Same reason _startGetCmdlibSend ships an EMPTY library
+// rather than nothing: the tool always gets a definitive answer.
+inline void _sendPullNack(uint8_t to, const char* of) {
+  if (!wcb || to == 0) return;
+  char e[80];
+  snprintf(e, sizeof(e), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"%s\",\"ok\":false}", of);
+  wcb->send(to, e);
 }
 
 // Advance the in-progress send by at most one fragment, paced at
@@ -1097,6 +1166,17 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     if (wcb) wcb->send(senderID, ack);
     return;
   }
+  if (!strcmp(type, "TEST_ACTION")) {
+    // A TEST_ACTION that crossed the 187-byte envelope cap arrives FRAGMENTED and
+    // lands here instead of handle()'s single-packet branch — a wcb_unicast action
+    // with skipRunning set and a long ;M chain does it (envelope = 101 + cmd bytes).
+    // Dropping it left the tool flashing the row's ▶ button as "fired" with nothing
+    // dispatched, while the identical Test over Direct USB worked. Converge both
+    // paths on the SAME queue: we're on Core 1 here (tick(), mutex already released),
+    // but dispatch still belongs in drainTestAction alongside the rest of loop().
+    queueTestAction(senderID, json.c_str());
+    return;
+  }
   Serial.printf("[RC] reassembled payload had unexpected type '%s' — dropping\n", type);
 }
 
@@ -1339,6 +1419,7 @@ inline void tick() {
   // fragment ACKs.  See the OutboundSend block above for the full rationale.
   if (_pendingGetConfigSender != 0 && !_outSend.active) {
     if (!_startGetConfigSend(_pendingGetConfigSender)) {
+      _sendPullNack(_pendingGetConfigSender, "GET_CONFIG");   // answer before clearing (see _sendPullNack)
       _pendingGetConfigSender = 0;    // couldn't start (too big / empty) — clear so we don't wedge
     }
   }
@@ -1349,7 +1430,9 @@ inline void tick() {
   if (_pendingGetCmdlibSender != 0 && !_outSend.active) {
     const uint8_t to = _pendingGetCmdlibSender;
     _pendingGetCmdlibSender = 0;
-    _startGetCmdlibSend(to);   // false = nothing to send (bailed) — already cleared
+    // false = bailed (slot already cleared, so nothing wedges) — but the requester is
+    // still waiting, and "Load from NaviCore" has no timeout. NACK it explicitly.
+    if (!_startGetCmdlibSend(to)) _sendPullNack(to, "GET_CMDLIB");
   }
   // GET_WCB_META — the aliases + serial-port labels that don't fit the one-packet
   // bridged WCB_STATUS. Fragmented (the tool reassembles + caches), single-flight on
@@ -1358,7 +1441,7 @@ inline void tick() {
   if (_pendingGetWcbMetaSender != 0 && !_outSend.active) {
     const uint8_t to = _pendingGetWcbMetaSender;
     _pendingGetWcbMetaSender = 0;
-    _startFragSend(to, buildWcbMeta(), "WCB_META", OS_WCB_META);
+    if (!_startFragSend(to, buildWcbMeta(), "WCB_META", OS_WCB_META)) _sendPullNack(to, "GET_WCB_META");
   }
   // ── Stored sequences (GET_WCB_SEQ / GET_WCB_SEQVAL) ──────────────────────
   // Issue a bridge-requested pull here on Core 1: the request is an ESP-NOW TX,
@@ -1369,6 +1452,41 @@ inline void tick() {
     const bool wantValue = (_pendingSeqKind == SEQ_PULL_VALUE);
     _pendingSeqBoard = 0; _pendingSeqSender = 0;
     startSeqPull(b, to, wantValue ? SEQ_PULL_VALUE : SEQ_PULL_NAMES, _pendingSeqKey);   // answers the requester itself on failure
+  }
+  // ── WCB_SEND parked by handle() ──────────────────────────────────────────────
+  // Perform the relay HERE (Core 1) — an ESP-NOW transmit must never run in the
+  // Core-0 receive callback — and ACK either way, so the tool's Send button can't
+  // look like it worked when the target was out of range or the command empty.
+  if (_pendingWcbSendFrom != 0) {
+    const uint8_t from = _pendingWcbSendFrom;
+    const uint8_t to   = _pendingWcbSendTo;   // 0 = broadcast, 0xFF = handle() saw a bad target
+    bool ok = false;
+    if (to != 0xFF && _pendingWcbSendCmd[0]) {
+      if (to == 0) wcb->broadcast(_pendingWcbSendCmd);
+      else         wcb->send(to, _pendingWcbSendCmd);
+      ok = true;
+    }
+    _pendingWcbSendCmd[0] = '\0';
+    _pendingWcbSendFrom   = 0;   // cleared LAST — a fresh park from Core 0 is then visible
+    char ack[72];
+    snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"WCB_SEND\",\"ok\":%s}",
+             ok ? "true" : "false");
+    wcb->send(from, ack);
+  }
+  // ── RESET_DEFAULTS parked by handle() ────────────────────────────────────────
+  // RAM-only, exactly like the USB path — the tool's follow-up Save persists it, so
+  // there is no flash write to keep off this path.  applyConfigSideEffects() is the
+  // shared live re-apply and ends in resetMaestroReleaseState(), which is what the
+  // USB handler calls directly (that one is static to the .ino); a false return only
+  // means boardType changed and the pin profile needs the reboot the GUI prompts for.
+  if (_pendingResetDefaults != 0) {
+    const uint8_t to = _pendingResetDefaults;
+    _pendingResetDefaults = 0;
+    rcConfigLoadDefaults();
+    applyConfigSideEffects();
+    Serial.printf("[RC] RESET_DEFAULTS from W%u → live config reset to factory defaults (not persisted)\n",
+                  (unsigned)to);
+    wcb->send(to, "{\"sys\":1,\"type\":\"ACK\",\"of\":\"RESET_DEFAULTS\",\"ok\":true}");
   }
   // The board answered and the reply is for the bridge — send it once the
   // fragment machine is free, exactly like the WCB_META pull above.
@@ -2161,6 +2279,38 @@ inline bool handle(uint8_t senderID, const char* command) {
     int  id  = doc["id"]  | 0;
     if (all)                                 queueForgetPeer(0);
     else if (id >= 1 && id <= WCB_MAX_BOARDS) queueForgetPeer((uint8_t)id);
+    return true;
+  }
+
+  // ── WCB_SEND — relay one command onto the mesh on the tool's behalf ────────
+  // Mirror of the Direct-USB handler (NaviCore.ino).  The config tool's WCB Send
+  // panel fires this on whichever transport is live, so without this branch a
+  // bridged Send fell through to "unknown type", returned false, and onWCBCommand
+  // then treated the raw JSON as a mesh broadcast — spraying the blob out any aux
+  // port with serialBcastOut enabled while wcb->send() never ran, with no feedback.
+  // PARK ONLY: the relay (and any NACK) is an ESP-NOW transmit and we are in the
+  // Core-0 receive callback.  tick() validates, sends, and ACKs on Core 1 — which is
+  // also why an out-of-range target is parked as 0xFF rather than answered here.
+  if (!strcmp(type, "WCB_SEND")) {
+    const int   target = doc["target"] | -1;
+    const char* cmd    = doc["cmd"]    | "";
+    _pendingWcbSendTo = (target >= 0 && target <= WCB_MAX_BOARDS) ? (uint8_t)target : 0xFF;
+    strncpy(_pendingWcbSendCmd, cmd, sizeof(_pendingWcbSendCmd) - 1);
+    _pendingWcbSendCmd[sizeof(_pendingWcbSendCmd) - 1] = '\0';
+    _pendingWcbSendFrom = senderID;   // set LAST — publishes the parked request to tick()
+    return true;
+  }
+
+  // ── RESET_DEFAULTS — factory-reset the LIVE config (RAM only, same as USB;
+  //    the tool's follow-up Save is what persists it) ─────────────────────────
+  // PARK ONLY, for the same reason: rcConfigLoadDefaults() rewrites the rcConfig
+  // that Core 1 reads every SBUS frame, and the live re-apply reopens serial ports.
+  // Neither belongs on this callback stack.  Until this branch existed the message
+  // fell through to "unknown type" while the tool's follow-up GET_CONFIG (which IS
+  // handled) returned the UNCHANGED config — so the tool cleared its watchdog and
+  // reported "Reset to factory defaults" for a reset that never happened.
+  if (!strcmp(type, "RESET_DEFAULTS")) {
+    _pendingResetDefaults = senderID;   // performed + ACKed from tick() (Core 1)
     return true;
   }
 

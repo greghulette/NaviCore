@@ -41,6 +41,18 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  # Per-branch group: two source pushes inside this ~2-min build window used to run two
+  # builds at once, and the loser rebased its own DTG-tagged bins back on top of the
+  # winner's — leaving TWO sets in firmware/, which sends the flasher's alphabetical
+  # .find() to an arbitrary (usually older) build.  Same-minute pushes were worse: both
+  # sets share a DTG, so the rebase hits a real conflict and the job dies at "Rebase
+  # failed."  Serializing per branch is what prevents both.
+  group: fw-build-${{ github.ref_name }}
+  # Safe to cancel here (unlike pages-deploy): a superseded build's binaries are already
+  # stale, and the run that wins rebuilds every bin from the newer source anyway.
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest

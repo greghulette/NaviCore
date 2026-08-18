@@ -659,6 +659,14 @@ static bool maestroBroadcastReadVerb(uint8_t id, uint8_t cmd_compact, uint8_t ch
                    : (cmd_compact == 0xA1) ? "getErrors" : nullptr;
   if (!verb) return false;
   const uint8_t dev = rcConfig.maestros[id - 1].device;
+  // The WCB's get-relay only services device 1-8 (handleMaestroGet rejects the rest,
+  // and 0/9 are its fan-out ids — a query needs a single answer). A slot outside that
+  // range can never get a :MQR back, so say so instead of putting a verb on the mesh
+  // that will be dropped and then timing out three seconds later with no explanation.
+  if (dev < 1 || dev > 8) {
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u: remote read needs device 1-8 (device is %u) — not sent\n", id, dev);
+    return false;
+  }
   char q[40];
   if (cmd_compact == 0x90) snprintf(q, sizeof(q), ";M%u,%s,%u", dev, verb, ch);
   else                     snprintf(q, sizeof(q), ";M%u,%s", dev, verb);
@@ -720,21 +728,36 @@ static void maestroReportQuery(uint8_t slot, uint8_t kind, uint8_t ch, int n, ui
 struct MaeRemoteCache { uint16_t pos; uint8_t moving; uint16_t err; uint32_t ms; bool valid;
                         uint8_t pendMask; uint8_t pendCh; };
 static MaeRemoteCache g_maeRemote[RC_NUM_MAESTROS] = {};
-// The remote skip-if-running fail-open window is configurable: rcConfig.maeGateMs (default
-// 250). A busy-state older than that — or none at all — reads as "unknown" and the gate
-// fails open. Set it in the config tool's Maestro Locations panel.
+// The skip-if-running freshness window is configurable: rcConfig.maeGateMs (default 250).
+// A busy-state older than that — or none at all — is not trusted: the REMOTE gate reads it
+// as "unknown" and fails open, the LOCAL gate re-queries (g_maeLocalGate, below). Set it in
+// the config tool's Maestro Locations panel.
 
-// Parse ":MQR,<id>,<chan>,<KIND>,<value>" (KIND = POS|MOV|ERR) into g_maeRemote.
+// Which REMOTE slot carries Pololu device `dev`? The cache is SLOT-keyed (every
+// consumer below reads it that way), but the wire speaks DEVICE numbers — we address a
+// remote read as ";M<dev>" and the WCB echoes that same <dev> back in its :MQR. The two
+// diverge freely: the config tool lets any slot carry any device 0-127, so slot 2 with
+// device 7 would otherwise file its answer under slot 7 — poisoning that slot's readout
+// and leaving slot 2's gate permanently stale. Returns 0 when no remote slot claims it.
+static uint8_t maeRemoteSlotForDevice(uint8_t dev) {
+  for (uint8_t s = 1; s <= RC_NUM_MAESTROS; s++)
+    if (rcConfig.maestros[s - 1].type == 2 && rcConfig.maestros[s - 1].device == dev) return s;
+  return 0;
+}
+
+// Parse ":MQR,<dev>,<chan>,<KIND>,<value>" (KIND = POS|MOV|ERR) into g_maeRemote.
 // Runs on Core 0 (WiFi RX task) — parse + store only, never any I/O.
 static void maeConsumeRemoteReply(const char* body) {
-  int id = atoi(body);                                      // body = "<id>,<chan>,<KIND>,<value>"
-  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  int id = atoi(body);                                      // body = "<dev>,<chan>,<KIND>,<value>" — <dev>, NOT a slot
+  if (id < 1 || id > 255) return;
+  const uint8_t slot = maeRemoteSlotForDevice((uint8_t)id); // → the slot that asked
+  if (!slot) return;                                        // a reply for a device we don't host remotely
   const char* p = strchr(body, ','); if (!p) return; p++;   // → chan
   int chan = atoi(p);
   const char* k = strchr(p, ',');    if (!k) return; k++;   // → KIND
   const char* v = strchr(k, ',');    if (!v) return;        // v points at the comma before value
   long val = atol(v + 1);
-  MaeRemoteCache& c = g_maeRemote[id - 1];
+  MaeRemoteCache& c = g_maeRemote[slot - 1];
   if      (strncmp(k, "MOV", 3) == 0) { c.moving = (uint8_t)(val != 0);                  c.pendMask |= 0x02; }
   else if (strncmp(k, "POS", 3) == 0) { c.pos = (uint16_t)val; c.pendCh = (uint8_t)chan; c.pendMask |= 0x01; }
   else if (strncmp(k, "ERR", 3) == 0) { c.err = (uint16_t)val;                           c.pendMask |= 0x04; }
@@ -757,18 +780,41 @@ static void maePumpRemoteEmits() {
   }
 }
 
+// LOCAL gate cache, same maeGateMs freshness window the REMOTE branch uses. The local
+// read is BLOCKING: maestroLocalQuery spins up to 25 ms on Serial2 when nothing answers,
+// and a tap tier fires up to RC_ACTIONS_PER_TIER gated actions back-to-back in ONE loop()
+// pass (more still on a non-exclusive multi-tap), so an uncached gate could stall loop()
+// for 125 ms+ with SBUS queued behind it. An unanswered read is not an edge case — a Micro
+// 6 has no getMovingState at all, and a Maestro whose TX isn't wired back to Serial2 RX is
+// a supported install, so on those boards EVERY gated action pays the full timeout.
+// Cache it: a whole tier then costs one query at most.
+struct MaeLocalGate { uint32_t ms; bool valid; bool moving; };
+static MaeLocalGate g_maeLocalGate[RC_NUM_MAESTROS] = {};
+// Drop the cached busy-state when WE change what the slot is doing (script start/stop,
+// goHome). Without this a second gated action ~immediately after the first would read the
+// pre-start "not busy" answer and fire anyway — the exact retrigger skipRunning exists to
+// prevent. NOT called from maestroSetTarget: that runs on every passthrough SBUS frame,
+// and invalidating there would restore the per-action blocking read this cache removes.
+static inline void maeGateInvalidateSlot(uint8_t id) {
+  if (id >= 1 && id <= RC_NUM_MAESTROS) g_maeLocalGate[id - 1].valid = false;
+}
+
 // Is Maestro `id` mid-movement (a servo still moving)? The skip-if-running gate uses this.
-// LOCAL slot → query getMovingState synchronously (bounded ~25 ms read). REMOTE slot → read
-// the WDP-relayed cache; if stale/missing, FAIL OPEN (return false = "not busy, go ahead").
-// getMovingState is a PROXY for "sequence running" — it misses a paused / instant-move
-// script, but it's the only native running-signal the Maestro offers.
+// LOCAL slot → query getMovingState (bounded ~25 ms read), cached per g_maeLocalGate above.
+// REMOTE slot → read the WDP-relayed cache; if stale/missing, FAIL OPEN (return false =
+// "not busy, go ahead"). getMovingState is a PROXY for "sequence running" — it misses a
+// paused / instant-move script, but it's the only native running-signal the Maestro offers.
 static bool maestroSequenceBusy(uint8_t id) {
   if (id < 1 || id > RC_NUM_MAESTROS) return false;
   const RcMaestroSlot& slot = rcConfig.maestros[id - 1];
   if (slot.type == 1) {                                     // LOCAL — ask now (bounded raw Serial2 read)
+    MaeLocalGate& g = g_maeLocalGate[id - 1];
+    if (g.valid && (millis() - g.ms) <= rcConfig.maeGateMs) return g.moving;   // fresh → don't re-block
     uint8_t rb[1]; uint16_t mv = 0;                         // 0x93 = getMovingState (1-byte reply)
     int n = maestroLocalQuery(id, 0x93, nullptr, 0, rb, WcbMaestro::replyLen(WcbMaestro::ReplyKind::MOV));
-    return WcbMaestro::decodeReply(WcbMaestro::ReplyKind::MOV, rb, (n > 0) ? (size_t)n : 0, mv) && mv != 0;
+    const bool busy = WcbMaestro::decodeReply(WcbMaestro::ReplyKind::MOV, rb, (n > 0) ? (size_t)n : 0, mv) && mv != 0;
+    g.moving = busy; g.ms = millis(); g.valid = true;
+    return busy;
   }
   if (slot.type == 2) {                                     // REMOTE — read the mesh-relayed cache
     const MaeRemoteCache& c = g_maeRemote[id - 1];
@@ -799,9 +845,15 @@ static uint8_t maeVerbDeviceId(const char* cmd) {
 // reply cache for the verb's Maestro; if stale, warms it by sending getMovingState to the same
 // WCB (wcbId, or broadcast when wcbId==0) and FAILS OPEN. True only on a fresh "moving" reply.
 static bool maestroVerbBusy(const char* cmd, uint8_t wcbId) {
-  const uint8_t id = maeVerbDeviceId(cmd);
+  const uint8_t id = maeVerbDeviceId(cmd);                  // DEVICE number, as written in the verb
   if (!id || !wcb) return false;                            // not a single gate-able Maestro → never skip
-  const MaeRemoteCache& c = g_maeRemote[id - 1];
+  // g_maeRemote is SLOT-keyed (see maeRemoteSlotForDevice). A hand-written ";M<dev>"
+  // verb may address a Maestro that has no remote slot on this board at all — there is
+  // then no cache to consult and nowhere for a reply to land, so fail open silently
+  // rather than warming a request whose :MQR would be discarded on arrival.
+  const uint8_t slot = maeRemoteSlotForDevice(id);
+  if (!slot) return false;
+  const MaeRemoteCache& c = g_maeRemote[slot - 1];
   if (c.valid && (millis() - c.ms) <= rcConfig.maeGateMs) return c.moving != 0;
   char q[24]; snprintf(q, sizeof(q), ";M%u,getMovingState", id);
   if (wcbId) wcb->send(wcbId, q); else wcb->broadcast(q);   // warm the cache (async :MQR) …
@@ -958,11 +1010,12 @@ static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
     dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u ch %u  SetAccel %u\n", id, ch, accel);
   }
 }
-static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); maeReleaseArmSlot(id); }
-static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); maeSmoothInvalidateSlot(id); maeReleaseArmSlot(id); }
+static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); maeGateInvalidateSlot(id); maeReleaseArmSlot(id); }
+static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); maeSmoothInvalidateSlot(id); maeGateInvalidateSlot(id); maeReleaseArmSlot(id); }
 static void maestroRestartScript(uint8_t id, uint8_t sub) {
   maestroWrite(id, 0xA7, &sub, 1);
   maeSmoothInvalidateSlot(id);   // a device-side script may change speed/accel we can't see — re-apply on next stick move
+  maeGateInvalidateSlot(id);     // the slot is (re)started — the skip-if-running gate must re-ask
 }
 // Restart Script at Subroutine WITH parameter (Pololu 0x28) — the value is pushed on
 // the Maestro's script stack. Shared by the local ";M<id>,subParam" action and the
@@ -972,6 +1025,7 @@ static void maestroSubParam(uint8_t id, uint8_t sub, uint16_t param) {
   uint8_t p[3] = { sub, (uint8_t)(param & 0x7F), (uint8_t)((param >> 7) & 0x7F) };
   maestroWrite(id, 0xA8, p, 3);  // 0xA8 & 0x7F = 0x28 → {0xAA,dev,0x28,sub,pl,ph} == WcbMaestro::buildSubParam
   maeSmoothInvalidateSlot(id);   // a device-side script may change speed/accel we can't see
+  maeGateInvalidateSlot(id);     // the slot is (re)started — the skip-if-running gate must re-ask
 }
 
 // Zero speed/accel on every passthrough channel of Maestro `id` that has
@@ -1212,6 +1266,16 @@ static HcrCodec g_hcr;
 // stays authoritative.
 static HcrFade g_hcrFade;
 
+// Pre-fade volume per HcrCodec channel (0=V, 1=A, 2=B); -1 = nothing remembered.
+// Every ramp step writes through g_hcr, so DURING a fade g_hcr.getVol(ch) is the live
+// ramp value, NOT the level the channel belongs at. A fade started while another is in
+// flight must therefore never read the shadow for its anchor: a FadeIn that did latched
+// the channel silent for good, because HcrFade completes by writing its own `to` back as
+// the commanded volume, so the next FadeIn read 0 as its target too. Latched here at the
+// start of a fade and consulted only while g_hcrFade.active(ch) — after a fade ends the
+// shadow is authoritative again and this is never read, so it cannot go stale.
+static int8_t g_hcrPreFade[3] = { -1, -1, -1 };
+
 // Resolve the LOCAL HCR aux-serial port (S3/S4/S5) from the global HCR destination,
 // or nullptr if unbound. Shared by executeHcrAction and the loop() fade tick so both
 // resolve the same port.
@@ -1389,8 +1453,16 @@ static void executeHcrAction(const RcAction& a) {
       return;
     }
     const int ch = a.chan, sec = a.track;
-    if (a.fn == 12) g_hcrFade.start(g_hcr, *hcrSerial, ch, 0, g_hcr.getVol(ch), sec, false, 0);   // FadeIn: 0 → current level
-    else { const int cur = g_hcr.getVol(ch); g_hcrFade.start(g_hcr, *hcrSerial, ch, cur, 0, sec, true, cur); }  // FadeOut: cur → 0, StopWAV, restore
+    // Where the channel belongs when the audio is "up". Read the shadow only when no
+    // fade owns it; mid-fade the shadow is the ramp's live value (see g_hcrPreFade) and
+    // using it as a target would ratchet the channel down — to silence, permanently, if
+    // the ramp is still near 0. `from` still tracks the live level so a fade that
+    // supersedes another continues from where the audio actually is, without a jump.
+    const int base = (g_hcrFade.active(ch) && g_hcrPreFade[ch] >= 0)
+                   ? (int)g_hcrPreFade[ch] : g_hcr.getVol(ch);
+    g_hcrPreFade[ch] = (int8_t)base;                        // survives this fade being superseded
+    if (a.fn == 12) g_hcrFade.start(g_hcr, *hcrSerial, ch, 0, base, sec, false, 0);   // FadeIn: 0 → pre-fade level
+    else { const int cur = g_hcr.getVol(ch); g_hcrFade.start(g_hcr, *hcrSerial, ch, cur, 0, sec, true, base); }  // FadeOut: cur → 0, StopWAV, restore pre-fade level
     dlog(DBG_HCR, "[DISPATCH] HCR→%s  Fade%s ch=%d %ds\n", dest.target, a.fn == 12 ? "In" : "Out", a.chan, sec);
     return;
   }
@@ -2557,13 +2629,19 @@ void onWCBCommand(uint8_t senderID, const char* command) {
   }
 
   // ── Mesh → serial: broadcast ────────────────────────────────────────────────
-  // Everything above claimed the prefixed traffic (JSON management, `?`/`#` CLI,
-  // `:MQR` replies, `;` routes), so an unprefixed command is a mesh BROADCAST —
-  // the same rule the WCB firmware applies before calling processBroadcastCommand.
-  // It goes out every port that opted in (none by default). Never re-broadcast to
-  // the mesh: this arrived from there, and the out-path is mesh→serial only, so
-  // there is no loop to break.
-  if (command && command[0] && command[0] != ';') {
+  // An unprefixed command is a mesh BROADCAST and goes out every port that opted in
+  // (none by default). Never re-broadcast to the mesh: this arrived from there, and the
+  // out-path is mesh→serial only, so there is no loop to break.
+  //
+  // '{' is excluded as firmly as ';'. rcTelemetry::handle() above declines several
+  // classes of JSON it cannot act on — an unknown "type", a type it deliberately no-ops,
+  // a missing "type", a self-echoed rc_* frame, a parse failure — and ALL of them start
+  // with '{'. Without this test they would be written verbatim onto the operator's serial
+  // device: a bridged Reset-to-Defaults, or a peer's rc_hb/rc_ch telemetry at several
+  // hundred B/s against a 9600-baud port. This is the same rule the WCB firmware applies
+  // (WCB.ino consumes a '{'-prefixed payload and returns before processBroadcastCommand).
+  // Declined JSON is not silently dropped — the tail log below still shows it.
+  if (command && command[0] && command[0] != ';' && command[0] != '{') {
     queueSerialBroadcastOut(command, 0);
     // fall through — the log below still shows it, which is what makes an
     // unexpected broadcast visible instead of silently swallowed.
@@ -2672,37 +2750,58 @@ static void applyBoardProfile() {
 static uint32_t appliedMaestroBaud = 0;
 static uint32_t appliedAuxBaud[3]  = { 0, 0, 0 };
 
+// NEVER hand a raw config value to begin(). A stored 0 is representable — the JSON parse
+// substitutes its default only when the key is ABSENT (ArduinoJson's `|` dispatches on
+// is<T>(), so an explicit 0 passes straight through) — and a 0 is fatal at both port
+// types: SoftwareSerial::begin divides by baud (Xtensa IntegerDivideByZero → panic), and
+// HardwareSerial::begin reads 0 as "auto-detect" and blocks up to 20 s, overrunning
+// BOOT_GUARD_TIMEOUT_MS. Either way the bad value is already on flash and is re-applied
+// at every boot, so the board boot-loops with no serial window to fix it in — recovery
+// would need an esptool erase. Clamping HERE (not only on the input path) is what
+// guarantees an already-corrupt stored config still boots. The range matches the config
+// tool's own limits (1200 … 115200 = WDP_BAUDS).
+static uint32_t sanBaud(uint32_t b, uint32_t def, const char* what) {
+  if (b >= 1200 && b <= 115200) return b;
+  Serial.printf("[AUX] %s baud %lu out of range (1200-115200) — using %lu\n",
+                what, (unsigned long)b, (unsigned long)def);
+  return def;
+}
+
 static void applySerialBauds(bool initial) {
-  if (initial || rcConfig.maestroBaud != appliedMaestroBaud) {
+  const uint32_t maestroBaud = sanBaud(rcConfig.maestroBaud, LOCAL_MAESTRO_BAUD_RATE, "Maestro");
+  const uint32_t auxBaud[3]  = { sanBaud(rcConfig.auxBaud[0], 9600, "S3"),
+                                 sanBaud(rcConfig.auxBaud[1], 9600, "S4"),
+                                 sanBaud(rcConfig.auxBaud[2], 9600, "S5") };
+  if (initial || maestroBaud != appliedMaestroBaud) {
     if (!initial) Serial2.end();
-    Serial2.begin(rcConfig.maestroBaud, SERIAL_8N1, MAESTRO_RX_PIN, MAESTRO_TX_PIN);
-    appliedMaestroBaud = rcConfig.maestroBaud;
+    Serial2.begin(maestroBaud, SERIAL_8N1, MAESTRO_RX_PIN, MAESTRO_TX_PIN);
+    appliedMaestroBaud = maestroBaud;
     Serial.printf("[Serial2] Local Maestro %s @ %lu baud  TX=GPIO%d\n",
                   initial ? "open" : "re-open",
-                  (unsigned long)rcConfig.maestroBaud, MAESTRO_TX_PIN);
+                  (unsigned long)maestroBaud, MAESTRO_TX_PIN);
   }
-  if (initial || rcConfig.auxBaud[0] != appliedAuxBaud[0]) {
+  if (initial || auxBaud[0] != appliedAuxBaud[0]) {
     if (!initial) auxEnd(s3, s3IsHw);
-    auxBegin(s3, s3IsHw, rcConfig.auxBaud[0], S3_RX_PIN, S3_TX_PIN);   // hw UART0 (v2) or SoftwareSerial (3.2)
-    appliedAuxBaud[0] = rcConfig.auxBaud[0];
+    auxBegin(s3, s3IsHw, auxBaud[0], S3_RX_PIN, S3_TX_PIN);   // hw UART0 (v2) or SoftwareSerial (3.2)
+    appliedAuxBaud[0] = auxBaud[0];
     Serial.printf("[AUX] S3 %s @ %lu baud (%s)\n",
-                  initial ? "open" : "re-open", (unsigned long)rcConfig.auxBaud[0], s3IsHw ? "hw UART0" : "sw");
+                  initial ? "open" : "re-open", (unsigned long)auxBaud[0], s3IsHw ? "hw UART0" : "sw");
   }
-  if (initial || rcConfig.auxBaud[1] != appliedAuxBaud[1]) {
+  if (initial || auxBaud[1] != appliedAuxBaud[1]) {
     if (!initial) auxEnd(s4, false);
-    auxBegin(s4, false, rcConfig.auxBaud[1], S4_RX_PIN, S4_TX_PIN);
-    appliedAuxBaud[1] = rcConfig.auxBaud[1];
+    auxBegin(s4, false, auxBaud[1], S4_RX_PIN, S4_TX_PIN);
+    appliedAuxBaud[1] = auxBaud[1];
     Serial.printf("[AUX] S4 %s @ %lu baud\n",
-                  initial ? "open" : "re-open", (unsigned long)rcConfig.auxBaud[1]);
+                  initial ? "open" : "re-open", (unsigned long)auxBaud[1]);
   }
   // S5 — both boards (v2 GPIO38/47, WCB 3.2 GPIO9/10). s5 is nullptr only in the unused
   // dedicated-SBUS fallback, so the guard still applies.
-  if (s5 && (initial || rcConfig.auxBaud[2] != appliedAuxBaud[2])) {
+  if (s5 && (initial || auxBaud[2] != appliedAuxBaud[2])) {
     if (!initial) auxEnd(s5, false);
-    auxBegin(s5, false, rcConfig.auxBaud[2], S5_RX_PIN, S5_TX_PIN);
-    appliedAuxBaud[2] = rcConfig.auxBaud[2];
+    auxBegin(s5, false, auxBaud[2], S5_RX_PIN, S5_TX_PIN);
+    appliedAuxBaud[2] = auxBaud[2];
     Serial.printf("[AUX] S5 %s @ %lu baud\n",
-                  initial ? "open" : "re-open", (unsigned long)rcConfig.auxBaud[2]);
+                  initial ? "open" : "re-open", (unsigned long)auxBaud[2]);
   }
 }
 
@@ -2763,7 +2862,18 @@ bool applyConfigSideEffects() {
   // uncovered (the steady-state hot path won't drive those down, so without this
   // a re-assigned profile could leave the OLD easing stuck on the servo).
   // Cache-gated, so a save that didn't touch easing is a no-op.
-  for (uint8_t mid = 1; mid <= RC_NUM_MAESTROS; mid++) reapplyMaestroEasing(mid);
+  //
+  // NOT while a clip is playing: _buildCurveIndex() zeroed speed/accel (= unlimited) on
+  // every channel the replay touches, on purpose — the Maestro's own latched limits can't
+  // be read back, so the player force-resets them and owns the motion shaping itself. Any
+  // save at all (a button label is enough) would re-latch the profile here and the servos
+  // would additionally be rate-limited device-side, rounding off the recorded motion. A
+  // LOOPING clip never rebuilds its curve index (_rewindCurves doesn't re-zero), so it
+  // would stay double-smoothed for every remaining lap. loop() re-applies on the
+  // takeReplayDone edge; a stopped replay self-heals on the next stick move via the
+  // g_maeSpeed/g_maeAccel mismatch check.
+  if (!navirec::isReplaying())
+    for (uint8_t mid = 1; mid <= RC_NUM_MAESTROS; mid++) reapplyMaestroEasing(mid);
   resetMaestroReleaseState();   // re-derive auto-release policy (no stale idle release)
   return true;
 }
@@ -3161,9 +3271,20 @@ void handleSerialInput() {
           Serial.println("\"}");
 
         } else if (strcmp(type,"GET_CONFIG")==0) {
-          Serial.print("{\"type\":\"CONFIG\",\"data\":");
-          Serial.print(rcConfigToJSON());
-          Serial.println("}");
+          // rcConfigToJSON() returns an ERROR envelope, NOT a config, when the document
+          // overflowed — that guard exists precisely so a truncated config never reaches
+          // the tool. Splicing it into "data" defeats it: the tool would apply an envelope
+          // with no config fields, keep its built-in defaults, latch them as the baseline,
+          // and the next Save would ship those defaults over the good on-board config.
+          // Pass the error through at the TOP level so it can never read as a config.
+          String cfg = rcConfigToJSON();
+          if (cfg.startsWith("{\"type\":\"ERROR\"")) {
+            Serial.println(cfg);
+          } else {
+            Serial.print("{\"type\":\"CONFIG\",\"data\":");
+            Serial.print(cfg);
+            Serial.println("}");
+          }
 
         } else if (strcmp(type,"GET_CMDLIB")==0) {
           // Stream back the config tool's private command library stored on this
@@ -3243,7 +3364,18 @@ void handleSerialInput() {
           Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
         } else if (strcmp(type,"CALIB")==0) {
-          calibrationActive = hdr["on"] | false;
+          const bool calibOn = hdr["on"] | false;
+          // A take must never straddle a calibration session. Dispatch and passthrough are
+          // both muted while the wizard runs, so a recording left running would capture a
+          // silent gap — and once calibrationActive is set the operator can no longer stop
+          // it (the Record trigger is muted too), so the 60 s backstop becomes the only
+          // exit and it SAVES, overwriting the take's named clip with the dead stretch.
+          // Drop the capture instead: stopRecord() flushes and goes idle without saving.
+          if (calibOn && !calibrationActive && navirec::_state == navirec::ST_RECORDING) {
+            navirec::stopRecord();
+            Serial.println("[REC] recording dropped — calibration started (not saved)");
+          }
+          calibrationActive = calibOn;
           Serial.printf("[CALIB] action dispatch %s\n",
                         calibrationActive ? "SUPPRESSED (calibrating)" : "resumed");
           Serial.println("{\"type\":\"ACK\",\"ok\":true}");
@@ -4462,7 +4594,14 @@ void loop() {
   navirec::drain();
   navirec::checkRecordBackstop();   // auto-stop+SAVE a capture that ran past REC_MAX_MS (never lose a long take)
   navirec::replayTick();
-  if (navirec::takeReplayDone()) Serial.println("[REC] ▶ playback complete");
+  if (navirec::takeReplayDone()) {
+    Serial.println("[REC] ▶ playback complete");
+    // The servos are ours again — pick up any easing a save deferred while the player
+    // owned them (applyConfigSideEffects skips the re-apply during replay), and restore
+    // the profile the player force-zeroed on every channel it touched. Cache-gated, so
+    // this is a no-op when nothing changed.
+    for (uint8_t mid = 1; mid <= RC_NUM_MAESTROS; mid++) reapplyMaestroEasing(mid);
+  }
 
   // WCB-network telemetry bridge — periodic rc_hb (0.5 Hz) + rc_ch (5 Hz)
   // broadcasts so the config tool's "Via WCB" mode can discover and live-

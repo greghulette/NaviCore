@@ -2,7 +2,7 @@
 
 Reference for using the Maestro action commands (buttons, switches, knobs, timeline
 actions) — specifically the **speed** and **acceleration** limits — and a note on
-what it would take to detect when a Maestro **script/move finishes** (2-way serial).
+what it would take to detect when a Maestro **script/move finishes**.
 
 The Maestro action commands available in the config tool's action editor are:
 
@@ -85,18 +85,34 @@ script, then a *delayed* reset. Because NaviCore can't detect when a script ends
 
 ---
 
-## Detecting when a script / move finishes (2-way serial) — NOT implemented
+## Detecting when a script / move finishes — NOT implemented
 
-**Status: considered and deferred (2026-07-02).** The set-before pattern covers the
-practical need, so it wasn't worth the hardware/firmware effort. Captured here for
-future reference.
+**Status: the 2-way read path ships; completion *inference* is deferred (2026-07-02).**
+The set-before pattern covers the practical need, so nothing polls for "the script is
+done". Captured here for future reference.
 
-### Current state
-NaviCore's local Maestro bus is effectively **write-only**. `Serial2` is actually
-begun with the RX pin live — `Serial2.begin(baud, 8N1, MAESTRO_RX_PIN=GPIO7,
-MAESTRO_TX_PIN=GPIO6)` (RX commented *"optional Maestro feedback"*) — but nothing
-reads it, and the Maestro's serial-out isn't wired to GPIO7. So the UART plumbing
-is half-done; the physical wire + read code are missing.
+### Current state — the reads work, the inference doesn't
+`maestroLocalQuery()` in `NaviCore.ino` is the **one** Maestro read path, and it covers
+both slot types:
+
+- **Local slot (`Serial2`).** Drains stale RX, sends exactly one Pololu query, then reads
+  exactly the expected reply bytes under a **25 ms deadline** — a *blocking* read, run on
+  Core 1 from `execCliLine` where Serial2 I/O is race-free. The deadline is deliberate: it
+  bounds the stall so a missing Maestro or an unwired RX line can't starve SBUS.
+- **Remote (broadcast) slot.** Sends the shared `;M<dev>,<verb>` **text** verb over the mesh
+  (not raw Pololu bytes); the hosting WCB reads its Maestro and unicasts
+  `:MQR,<id>,<chan>,<KIND>,<value>` home. `maeConsumeRemoteReply()` parses it on Core 0
+  (parse + store only, never I/O) and `maePumpRemoteEmits()` surfaces it from `loop()`.
+
+Either path lands as a `[MAE:<slot>]{…}` marker (`maestroReportQuery()`) that the config
+tool's Maestro panel reads back, and is reachable from the CLI as
+`?MAE,GET / MOVING / ERR`. `maestroSequenceBusy()` uses the same 0x93 read as the
+skip-if-running gate.
+
+**The hardware half is still on you (local slots only):** the Maestro's serial-**out** (TX)
+must be jumpered to NaviCore **GPIO7** (`MAESTRO_RX_PIN`, begun live as `Serial2` RX). No
+jumper, no reply — the query just times out. Remote slots need no NaviCore jumper; the
+hosting WCB does the reading.
 
 ### The catch: no "is the script done?" command
 The Maestro's **serial** protocol does not expose script run-state (that's only
@@ -118,20 +134,41 @@ So completion would be inferred one of two ways:
    the marker = script finished. Unambiguous.
 
 ### What it would take
-- **Hardware:** jumper the Maestro's serial-**out** (TX) to NaviCore **GPIO7**
-  (the RX UART is already configured).
-- **Firmware:** a small non-blocking read state machine — send a Get command, read
-  the 1–2 response bytes with a timeout, act on the result — driven from `loop()`.
+The transport is done; what's missing is the layer above it — a poller that repeats the
+read on a timer until the sentinel channel reads its marker (or Get Moving State reads
+"stopped"), then releases the follow-up actions.
+
+- **Hardware:** the Maestro TX → NaviCore GPIO7 jumper above, on any local slot you want
+  to poll.
+- **Firmware:** drive it from `loop()` through `maestroLocalQuery()` / the `:MQR` cache.
+  **Do not add a second `Serial2` reader** — it would race `maestroLocalQuery()`'s
+  stale-RX drain and corrupt the existing `?MAE,GET` and skip-if-running replies. Keep any
+  new read on the same bounded-blocking pattern; the 25 ms deadline is what protects SBUS.
 
 ### Limits
-- **Local Maestros only.** A Maestro on a *Remote (broadcast)* slot is driven over
-  ESP-NOW to another WCB — no return path — so feedback works only for a
-  directly-wired Maestro on Serial2.
+- **Remote Maestros answer asynchronously.** A *Remote (broadcast)* slot does reply — the
+  hosting WCB relays `:MQR` — but a mesh round-trip later, so a poller can't read it
+  inline the way a local slot allows. `maestroSequenceBusy()` handles that by caching the
+  last reply and **failing open** once it's older than `maeGateMs` (default 250 ms).
+- **Get Moving State is a proxy, not a "script done" flag** — it misses a paused or
+  instant-move script, which is why the sentinel channel is the robust option.
 - **Daisy-chains** need the read-back topology wired correctly (each device
   addressed by number).
 
 ### Bonus if ever implemented
-Beyond script/move timing, 2-way would let NaviCore read **actual servo positions**
-and **error flags** — which could make **record/replay more accurate** (it currently
-records a "shadow" of last-*commanded* positions, not measured ones) and surface
-Maestro faults. Cleanest first version: **sentinel channel + Get Position poll**.
+Reading **actual servo positions** and **error flags** already works (`?MAE,GET` /
+`?MAE,ERR`), but nothing consumes it beyond the config tool's readout and the busy gate.
+Feeding it into **record/replay** would make that more accurate — it currently records a
+"shadow" of last-*commanded* positions, not measured ones. Cleanest first version of
+completion detection: **sentinel channel + Get Position poll**.
+
+---
+
+## Revision log
+
+Newest first. Add a row whenever a code change alters what this page describes — same commit
+as the code. Page body stays present-tense; history lives here.
+
+| Date | Commit | Change |
+|---|---|---|
+| 2026-08-18 | _(uncommitted)_ | Corrected the "Current state" section: it claimed the local Maestro bus is write-only and that a Remote slot has no return path. Both reads are implemented — `maestroLocalQuery()` does a bounded 25 ms blocking read off Serial2 for Get Position / Get Moving State / Get Errors, and a Remote slot gets an asynchronous `:MQR` reply relayed home over the mesh. |

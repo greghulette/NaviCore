@@ -345,6 +345,15 @@ inline void handleOtaEndPacket(const uint8_t *raw) {
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (!otaPktAuth(pkt.structPassword, pkt.targetWCB)) return;
   bool ok = otaEnd(pkt.sessionId);
+  // otaEnd() has already cleared ota.active on EVERY path it can return through (no
+  // matching session, incomplete, SHA failure, set_boot failure, success), so
+  // otaWrittenOffset() below is necessarily 0. That zero is the ONLY thing separating a
+  // genuine END answer from a DATA cursor ACK still in flight — same struct, same status,
+  // and a tail rewind routinely puts extra cursor ACKs on the air after the browser has
+  // stopped reading them. Do not "improve" this to report ota.imageSize/ota.written, and
+  // do not move the ota.active clear to after the ACK: either silently removes the
+  // discriminator and a lost/failed END gets reported as a verified update. The WCB
+  // firmware's WCB_OTA.cpp holds the same invariant, so both target types look alike.
   sendOtaAck(pkt.sourceWCB, pkt.sessionId, ok ? OTA_ST_OK : OTA_ST_ERR, otaWrittenOffset());
   if (ok) {
     Serial.println("[OTA] remote update verified — rebooting into new firmware...");

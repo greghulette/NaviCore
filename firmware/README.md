@@ -36,8 +36,18 @@ Three files per release, all ending with these stable suffixes:
 | File suffix             | Flash address | What it is                |
 |-------------------------|---------------|---------------------------|
 | `_ESP32S3.bin`          | `0x10000`     | Application image (`ota_0`)|
-| `_ESP32S3_boot.bin`     | `0x0`         | Second-stage bootloader   |
-| `_ESP32S3_part.bin`     | `0x8000`      | Partition table           |
+| `_ESP32S3_boot.bin`     | *not flashed* | Per-build bootloader artifact (see below)|
+| `_ESP32S3_part.bin`     | `0x8000`      | Partition table (from `partitions.csv`)|
+
+The bootloader written at `0x0` is **not** the per-build `_ESP32S3_boot.bin`.
+`config_tool/flasher.js` fetches `firmware/WCB_S3_custom_bootloader_16MB_wdt3s.bin`
+by that FIXED name — the custom short-WDT 16 MB bootloader (cold-boot auto-retry),
+the matched pair of the in-app boot guard in `NaviCore.ino`.  The name is fixed
+precisely so a per-build `_ESP32S3_boot.bin` can never shadow it.  What that
+per-build file actually contains differs by builder — `tools/build-firmware.ps1`
+copies the custom bootloader under that name, while `tools/build-firmware.sh`
+(the CI path) copies arduino-cli's stock `NaviCore.ino.bootloader.bin` — but
+neither is ever flashed, so changing it changes nothing on the board.
 
 The flasher matches by **suffix**, so the version prefix can change every
 build without touching the page. Example set:
@@ -51,10 +61,14 @@ NaviCore_201500RMAY26_ESP32S3_part.bin
 The Config → Firmware tab offers two buttons:
 
 - **⬆ Update Firmware** — routine update. NVS at `0x9000` is never touched,
-  so the user's saved configuration survives.  The flasher auto-detects
-  whether app-only is safe (matching partition table) or a full
-  bootloader+partition+app write is needed (layout changed) — either way,
-  NVS is preserved.
+  so the user's saved configuration survives.  The flasher ALWAYS writes
+  bootloader + partition table + app — it never reads the flash back to
+  decide whether app-only would do.  That read is slow and flaky over the
+  S3's native USB, and when it stalls it wedges the esptool stub so the
+  *following* write times out (observed in the field).  Boot + partition
+  table are ~23 KB next to the ~1 MB app, so always writing them is nearly
+  free and works on blank and programmed boards alike.  See the comment at
+  `flashFirmware()` step 3b in `config_tool/flasher.js`.
 - **⚠ Full Wipe & Flash** — initial push / recovery.  Writes the full image
   AND erases NVS (`0x9000`, 20 KB) and OTA data (`0xE000`, 8 KB), returning
   the board to factory-fresh state.  Use this for first-time programming on
@@ -64,10 +78,11 @@ The Config → Firmware tab offers two buttons:
 ## How to update the binaries
 
 **Default: GitHub Actions does it automatically.**  Every push to any
-branch triggers `.github/workflows/build-firmware.yml`, which compiles
-`NaviCore.ino` for ESP32-S3 with the `min_spiffs` partition scheme,
-reads `FW_VERSION_BASE` + `FW_VERSION_DTG` out of `fw_version.h`, and
-commits the three resulting bins back to `firmware/` (overwriting older
+branch triggers `.github/workflows/build-firmware.yml`, which runs
+`tools/build-firmware.sh` — compiling `NaviCore.ino` for ESP32-S3 with
+`PartitionScheme=custom,FlashSize=16M` (the table in `partitions.csv`),
+reading `FW_VERSION_BASE` + `FW_VERSION_DTG` out of `fw_version.h`, and
+committing the three resulting bins back to `firmware/` (overwriting older
 versioned files) under an auto-commit tagged `[skip ci]`.  Once that
 commit lands on `main`, the Config → Firmware tab can flash any
 connected board.
@@ -79,16 +94,22 @@ producing a one-off bin without going through CI.
 
 1. Open `NaviCore.ino` in Arduino IDE.
 2. Tools → Board → **ESP32S3 Dev Module** (or whatever you normally use for WCB v3.2).
-3. Tools → Partition Scheme → **Minimal SPIFFS (1.9MB APP with OTA / 190KB SPIFFS)**.
-4. Tools → PSRAM → **OPI PSRAM** — **required**; the firmware allocates its
+3. Tools → Partition Scheme → **Custom** — uses `partitions.csv` from the
+   sketch folder.  Do **not** pick "Minimal SPIFFS": rows 0–5 match, but the
+   stock table has no `clips` partition, so the record/replay LittleFS never
+   mounts and every clip save is refused ("clips FS not mounted") while the
+   rest of the firmware looks perfectly healthy.
+4. Tools → Flash Size → **16MB (128Mb)** — **required**; the `clips` partition
+   spans `0x400000`–`0x1000000` and is unaddressable at any smaller size.
+5. Tools → PSRAM → **OPI PSRAM** — **required**; the firmware allocates its
    runtime config in external PSRAM and halts at boot (solid red status LED)
    without it.
-5. Sketch → **Export Compiled Binary** (Ctrl/Cmd+Alt+S).
-6. The IDE writes three files into `build/<fqbn>/`:
+6. Sketch → **Export Compiled Binary** (Ctrl/Cmd+Alt+S).
+7. The IDE writes three files into `build/<fqbn>/`:
    - `NaviCore.ino.bin`
    - `NaviCore.ino.bootloader.bin`
    - `NaviCore.ino.partitions.bin`
-7. Copy them into `firmware/`, renaming with a version prefix + the suffixes
+8. Copy them into `firmware/`, renaming with a version prefix + the suffixes
    in the table above. Example:
    ```
    cp build/.../NaviCore.ino.bin             firmware/NaviCore_<DTG>_ESP32S3.bin
@@ -97,11 +118,15 @@ producing a one-off bin without going through CI.
    ```
    (Old versioned files can be deleted or left as history — the flasher only
    looks at suffixes, so it always picks one of each.)
-8. Commit to `main`. The Config → Firmware tab will pick them up automatically.
+
+   `NaviCore.ino.bootloader.bin` is copied for completeness only — the flasher
+   writes the fixed `WCB_S3_custom_bootloader_16MB_wdt3s.bin` at `0x0`, so an
+   IDE-built bootloader never reaches the board.
+9. Commit to `main`. The Config → Firmware tab will pick them up automatically.
 
 ### Option B — `tools/build-firmware.ps1` (Windows) or `build-firmware.sh` (Linux/macOS/WSL)
 
-Wraps `arduino-cli` so steps 2–6 above happen in one command.  Same
+Wraps `arduino-cli` so steps 2–7 above happen in one command.  Same
 logic the CI workflow uses, just running locally.
 
 ```powershell
@@ -128,8 +153,12 @@ the CI workflow installs (see `.github/workflows/build-firmware.yml`).
   now. If support for older boards is added later, mirror the WCB Wizard's
   per-variant suffix scheme (`_ESP32.bin`, `_ESP32_boot.bin`, etc.) and add
   a board-variant dropdown to the Firmware tab.
-- The flasher auto-detects whether the board is blank, has matching
-  partitions, or needs a full flash. App-only is the default for any
-  already-programmed board with a matching partition table.
+- The flasher writes bootloader + partition table + app on every flash,
+  blank board or not.  The only difference between Update and Full Wipe is
+  whether NVS (`0x9000`) and otadata (`0xE000`) are also erased.
+- App-only is a fallback, not a mode: it happens only when the bootloader
+  and partition files are both absent from GitHub.  If exactly one is
+  present the flasher aborts rather than write a partial set, because
+  app-only onto a blank board leaves it unbootable.
 - The page fetches from `main` by default. Developers can override the
   branch by setting `localStorage.rc_fw_branch = '<branch-name>'` in DevTools.
