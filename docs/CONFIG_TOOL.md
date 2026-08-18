@@ -219,7 +219,7 @@ time. One today:
 
 | `source` | Field | Fed by |
 |---|---|---|
-| `wcb.sequences` | Dropdown of stored `?SEQ` keys, grouped by the board holding them, with a ⟳ that re-reads the mesh and a manual-entry escape | `GET_WCB_SEQ` → `WCB_SEQ` ([PROTOCOLS.md](PROTOCOLS.md#stored-sequence-inventory)) |
+| `wcb.sequences` | Dropdown of stored `?SEQ` keys, grouped by the board holding them, with a ⟳ that re-reads the mesh and a manual-entry escape — plus the chosen sequence's **contents** rendered underneath | `GET_WCB_SEQ` → `WCB_SEQ`, `GET_WCB_SEQVAL` → `WCB_SEQVAL` ([PROTOCOLS.md](PROTOCOLS.md#stored-sequences)) |
 
 It is a `source` and not an `enum` because the values are not knowable to the library —
 they are whatever the boards happen to store today. That also keeps the board file
@@ -241,8 +241,25 @@ Things worth knowing before touching it:
   mesh state, not a setting; a list that outlived the droid it came from would offer
   sequences that no longer exist. A board's hash moving invalidates its list
   (`_applyWcbSeqHash`), so an edit made in the Wizard shows up without polling.
-- **Pulls are sequential** — `WCB_Client` allows one inventory request in flight mesh-wide
-  and rejects a second rather than queueing it (`_wcbSeqRefresh`).
+- **Pulls are sequential** — `WCB_Client` allows one request in flight mesh-wide, across
+  names *and* values, and rejects a second rather than queueing it. The name walk
+  (`_wcbSeqRefresh`) goes board by board, and a value fetch waits out any pull already
+  running. Both in-flight markers **self-clear on timeout**: they were cleared only by the
+  reply handler, which never runs if the port closes mid-pull, and the stale marker then
+  blocked every later pull for the rest of the session.
+- **The chosen sequence's body is shown underneath**, one command per line with its
+  `***` comment after it. `_seqValueToLines()` is a **port of the WCB Wizard's
+  `seqValueToLines()`** and is deliberately behaviour-identical — a sequence has to read
+  the same in both tools, and the Wizard is where it is authored. Keep them in step if
+  either changes; a test asserts they agree line-for-line.
+- **Which board's copy is not recoverable from the key.** The same key can exist on
+  several boards with *different* contents, so each `<option>` carries `data-wcb`. When
+  the composer re-opens on an existing action there is no option behind the value — the
+  row stores only the wire string — so it falls back to the boards whose inventory holds
+  that key, and says which one it is showing.
+- **The delimiter is assumed to be `^`.** A WCB's is configurable but is not advertised
+  over WDP, so an overridden one is not knowable here — the same assumption the tool's
+  `^`-chain warning already makes.
 - **Two `_cmdlibNormalize()` steps keep a library re-fetch from undoing this.** The
   vendored `wcb-sequences.json` carries the `source` field, and the six sequence verbs
   live there rather than in `wcb-native` — but "check online for a newer library" (and a
@@ -403,6 +420,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-17 | _(uncommitted)_ | The command library now shows **what a chosen sequence does**: its body is pulled with `GET_WCB_SEQVAL` and rendered under the field, one command per line with its `***` comment after it. `_seqValueToLines()` is a behaviour-identical port of the WCB Wizard's function of the same name (tested line-for-line against it) so a sequence reads the same in both tools. Each `<option>` now carries `data-wcb`, because the same key can exist on several boards with different contents and the board is not recoverable from the key alone. Bodies are cached per `<wcb>/<key>` and dropped when that board's `seqHash` moves — the fingerprint covers values, so an in-place edit that leaves the name list identical still invalidates. Also fixed: both in-flight markers now self-clear on timeout, where previously a port closed mid-pull left one set and blocked every later pull for the session. |
 | 2026-08-17 | _(uncommitted)_ | Picker groups take an explicit **`ids`** list as well as an id prefix, so `nc-maestro-wcb` (the `;M` sequence + servo verbs) joins the **WCB** group despite being one of NaviCore's own seed boards. `nc-maestro` stays out — raw Pololu bytes to a configured Maestro slot is a controller concern, not a WCB one. `sub()` renders the member as plain `Maestro`, since the qualifier only exists to tell it from the Pololu board outside the group. Note the ordering trap this creates: `nc-maestro-wcb` now sits in the MIDDLE of the WCB run in `NC_CMDLIB_ORDER_TOP` and does not look like it belongs there, but moving it out of the run splits the cluster into two group rows. |
 | 2026-08-17 | _(uncommitted)_ | Picker layout, so the sequence verbs are findable: the six stored-sequence commands split out of the 77-command `wcb-native` into their own vendored board (`wcb-sequences`, a pure move — that is the second local delta to the snapshot, see NOTICE.md), and all six `wcb-*` boards now fold into one **WCB** group. Two ordering facts are load-bearing and easy to trip over — a group renders at the position of its **first** member (so pinning WCB to the top means putting its members first *and contiguous* in `NC_CMDLIB_ORDER_TOP`), and order inside a group is that same array (Sequences leads, the 71-command native config trails). `NC_CMDLIB_ORDER_BOTTOM` is now empty. Added `_cmdlibDropMovedCmds()`: upstream still ships the six inside `wcb-native`, so a "check online" fetch re-adds them and every sequence command would list twice with only one copy carrying the live picker — it is a deliberate no-op when `wcb-sequences` is absent, so it can never strand them. |
 | 2026-08-17 | _(uncommitted)_ | Command library: params can declare a **`source`** — values resolved from the droid at render time rather than a fixed `enum`. First one is `wcb.sequences`, a dropdown of the `?SEQ` keys the boards actually hold (grouped by board, ⟳ to re-read the mesh, manual-entry escape), fed by `GET_WCB_SEQ`. The vendored `wcb-native.json` carries it on `wcb.runSeq` / `wcb.runSeqLong` / `wcb.seqClear` — the snapshot's only local delta, and the shape of the upstream PR — so the note that it is *unmodified* no longer holds. `_cmdlibApplySeqSource()` re-asserts it after every merge because a fetch or import replaces that board wholesale and would otherwise silently drop the picker back to a text box; delete it once the field ships upstream. Lists are cached in memory only (live mesh state, not a setting) and invalidated by a board's `seqHash` moving. |

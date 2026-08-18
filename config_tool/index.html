@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.21:41.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.22:03.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4802,6 +4802,13 @@ let _wcbSeq        = {};   // board number -> pulled inventory
 let wcbSeqHash     = [];   // per-board seqHash from WCB_META (positional, index 0 = board 1)
 let _wcbSeqPending = 0;    // board number a GET_WCB_SEQ is in flight for (0 = idle); one at a time, mesh-wide
 let _wcbSeqWaiters = [];   // callbacks to fire when the in-flight pull settles
+// Sequence CONTENTS, fetched one key at a time on demand (never as a set — see
+// _wcbSeqValRequest). Keyed "<wcb>/<key>" and invalidated by the same seqHash the
+// name lists use, since that fingerprint covers stored values as well as names.
+//   _wcbSeqVal["2/wave"] = { value: ";M1,1***open^;S5,<CA1021>", status: 0, hash: H }
+let _wcbSeqVal        = {};
+let _wcbSeqValPending = '';   // "<wcb>/<key>" a GET_WCB_SEQVAL is in flight for ('' = idle)
+let _wcbSeqValWaiters = [];
 // After a forget, a WCB_STATUS reply the RC BUILT before it processed the forget
 // still carries known[id]=1. sendJSON is fire-and-forget (no response
 // correlation), so that stale reply can land just after we optimistically remove
@@ -4843,6 +4850,7 @@ function startWcbStatusPoll() {
   wcbSelfId   = 0;
   _wcbMetaTries = 0; _wcbMetaReqAt = 0; _wcbLastOnline = [];   // re-fetch aliases + port labels over the bridge this session
   _wcbSeq = {}; wcbSeqHash = []; _wcbSeqPending = 0; _wcbSeqWaiters = [];   // stored-sequence lists are per-droid live state — never carry them across a connect
+  _wcbSeqVal = {}; _wcbSeqValPending = ''; _wcbSeqValWaiters = [];           // ...and so are the sequence bodies
   _wcbMetaResyncAt = Date.now();   // start the periodic re-sync clock now → first auto-refresh ~30s in, after the connect burst
   wcbAliases  = [];
   wcbPortLabels = [];
@@ -8416,6 +8424,24 @@ function handleBoardMessage(line) {
     waiters.forEach(fn => { try { fn(); } catch (e) { console.warn('seq waiter', e); } });
     return;
   }
+  // WCB_SEQVAL — ONE sequence's contents, answering our GET_WCB_SEQVAL. Async, same
+  // as WCB_SEQ. status is a real answer, not an error: 1 = NOTFOUND (the key is gone
+  // from that board), 2 = TOOBIG (stored value exceeds what one reply can carry).
+  // Both are cached so the picker states them instead of re-asking every time.
+  if (msg.type === 'WCB_SEQVAL') {
+    const n = +msg.wcb || 0;
+    const k = String(msg.key || '');
+    if (msg.ok !== false && n && k) {
+      _wcbSeqVal[n + '/' + k] = { value: String(msg.value || ''), status: +msg.status || 0,
+                                  hash: (wcbSeqHash && wcbSeqHash[n - 1]) || 0 };
+    } else if (n) {
+      appendTerminalLine(`< [seq] WCB ${n} ${k}: ${msg.msg || 'no value'}`, 'rx');
+    }
+    _wcbSeqValPending = '';
+    const waiters = _wcbSeqValWaiters; _wcbSeqValWaiters = [];
+    waiters.forEach(fn => { try { fn(); } catch (e) { console.warn('seqval waiter', e); } });
+    return;
+  }
   // WCB_META — the per-board aliases + serial-port labels that don't fit the
   // one-packet bridged WCB_STATUS (they arrive fragmented + on demand). Cache them
   // so the lean 3 s liveness poll never has to carry them.
@@ -11614,6 +11640,13 @@ function _applyWcbSeqHash(arr) {
   arr.forEach((h, i) => {
     const n = i + 1;
     if (h && _wcbSeq[n] && _wcbSeq[n].hash && _wcbSeq[n].hash !== h) delete _wcbSeq[n];
+    // The fingerprint covers stored VALUES too, so an in-place edit — which leaves
+    // the name list identical — has to drop this board's cached bodies as well, or
+    // the picker would keep showing the sequence as it used to read.
+    if (h) for (const k of Object.keys(_wcbSeqVal)) {
+      const e = _wcbSeqVal[k];
+      if (k.startsWith(n + '/') && e && e.hash && e.hash !== h) delete _wcbSeqVal[k];
+    }
   });
   wcbSeqHash = arr;
 }
@@ -11644,7 +11677,12 @@ function _wcbSeqRequest(n) {
   return new Promise(resolve => {
     if (!_wcbSeqConnected()) { resolve(false); return; }
     let done = false;
-    const finish = () => { if (!done) { done = true; resolve(!!_wcbSeq[n]); } };
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (_wcbSeqPending === n) _wcbSeqPending = 0;   // self-clear: on a disconnect the reply handler never runs
+      resolve(!!_wcbSeq[n]);
+    };
     _wcbSeqWaiters.push(finish);
     _wcbSeqPending = n;
     setTimeout(finish, NC_SEQ_TIMEOUT);
@@ -11673,6 +11711,131 @@ async function _wcbSeqRefresh(onEach, force) {
 // `cur` is always offered even when no board reports it — re-opening the composer
 // on an existing action must not silently rewrite its key just because the board
 // is offline, the key was typed by hand, or it lives on a board we can't see.
+
+// ── Showing what a chosen sequence actually does ────────────────────────────
+// Once a key is picked, its BODY is pulled (GET_WCB_SEQVAL) and rendered under the
+// field, one command per line with its `***` comment after it — the same shape the
+// WCB Wizard's sequence editor uses, so the two tools read a sequence identically.
+//
+// One key at a time, on demand, never as a set: a single value is bounded (~1800
+// chars) but the whole set is not, and pulling every body is the failure the WCB's
+// own config pull already has.
+
+// Which boards hold this key, per the pulled name lists. Used when the composer
+// re-opens on an existing action: the row stores only the wire string, so the board
+// the key came from is not recorded anywhere and has to be recovered from the
+// inventory. Empty = we can't know, so nothing is fetched.
+function _wcbSeqBoardsWithKey(key) {
+  const k = String(key || '');
+  if (!k) return [];
+  return Object.keys(_wcbSeq).map(Number).sort((a, b) => a - b)
+    .filter(n => ((_wcbSeq[n] && _wcbSeq[n].names) || []).includes(k));
+}
+
+// Fetch ONE sequence's contents. Resolves when the answer lands or on timeout, and
+// never rejects — same contract as _wcbSeqRequest, and for the same reason.
+function _wcbSeqValRequest(wcbNum, key) {
+  return new Promise(resolve => {
+    if (!_wcbSeqConnected()) { resolve(false); return; }
+    const id = wcbNum + '/' + key;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (_wcbSeqValPending === id) _wcbSeqValPending = '';   // self-clear, same reason as above
+      resolve(!!_wcbSeqVal[id]);
+    };
+    _wcbSeqValWaiters.push(finish);
+    _wcbSeqValPending = id;
+    setTimeout(finish, NC_SEQ_TIMEOUT);
+    sendJSON({ type: 'GET_WCB_SEQVAL', wcb: wcbNum, key }, /*silent=*/true).catch(() => finish());
+  });
+}
+
+// Stored value -> display lines, one command per line.
+//
+// PORTED from the WCB Wizard's seqValueToLines() (Wizard/app.js) and deliberately
+// kept behaviour-identical: a sequence has to read the same in both tools, and the
+// Wizard is where it is authored. Keep them in step if either changes.
+//   ^***text   single delimiter before *** = INLINE comment -> folded onto the
+//              preceding command line, so it displays as "CMD *** text"
+//   ^^***text  the empty segment from ^^ means "own line" -> kept separate
+//   CMD***text already inline -> spacing normalised to exactly one space
+//   IF,...     conditionals gate the NEXT command, with optional ;t delay tokens
+//              between, so the whole group stays on ONE line (literal delimiters
+//              preserved) and the conditional reads as a unit.
+// `delim` defaults to '^': the WCB's delimiter is configurable but is not
+// advertised over WDP, so a remote board's override is not knowable here — the same
+// assumption the tool's `^`-chain warning already makes.
+function _seqValueToLines(value, delim = '^', cmdChar = ';') {
+  if (!value) return [];
+  const rawParts = String(value).split(delim);   // keep empty segments — they signal ^^
+  const lines = [];
+  let prevWasEmpty = false;
+  const cmdEsc  = cmdChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const timerRe = new RegExp('^' + cmdEsc + 't\\d+$', 'i');
+  for (let i = 0; i < rawParts.length; i++) {
+    const part = rawParts[i].trim();
+    if (!part) { prevWasEmpty = true; continue; }
+    if (part.startsWith('***')) {
+      if (prevWasEmpty || lines.length === 0) lines.push(part);        // ^^*** or leading — own line
+      else lines[lines.length - 1] += ' ' + part;                      // ^*** — fold onto the command
+    } else if (/^IF,/i.test(part)) {
+      let group = part.replace(/(\S)\s*(\*\*\*)/, '$1 $2');
+      while (i + 1 < rawParts.length) {
+        const next = rawParts[i + 1].trim();
+        if (!next || next.startsWith('***')) break;                    // ^^ / comment — stop grouping
+        group += delim + next.replace(/(\S)\s*(\*\*\*)/, '$1 $2');
+        i++;
+        if (!timerRe.test(next)) break;                                // gated command consumed
+      }
+      lines.push(group);
+    } else {
+      lines.push(part.replace(/(\S)\s*(\*\*\*)/, '$1 $2'));
+    }
+    prevWasEmpty = false;
+  }
+  return lines;
+}
+
+// Split one display line into its command and its trailing `***` comment.
+function _seqSplitComment(line) {
+  const at = String(line).indexOf('***');
+  if (at < 0) return { cmd: line, comment: '' };
+  return { cmd: String(line).slice(0, at).trimEnd(), comment: String(line).slice(at) };
+}
+
+// The detail block under the field: the chosen sequence's commands, or why there
+// are none to show. Returns '' when there is nothing to say at all (no key picked),
+// so the block collapses instead of leaving an empty bordered box.
+function _wcbSeqDetailHtml(wcbNum, key, state) {
+  const esc = s => escH(String(s == null ? '' : s));
+  if (!key) return '';
+  const wrap = inner =>
+    `<div style="flex-basis:100%;margin-top:6px;padding:8px 10px;border:1px solid var(--border);
+      border-radius:8px;background:var(--card);font-size:12px">${inner}</div>`;
+  const note = t => wrap(`<span style="color:var(--muted)">${esc(t)}</span>`);
+  if (state === 'loading')   return note('reading ' + key + ' from WCB ' + wcbNum + '…');
+  if (state === 'noboard')   return note('Not on a board we can see, so there is nothing to read back.');
+  if (state === 'offline')   return note('Connect to the droid to see what this sequence does.');
+  const entry = _wcbSeqVal[wcbNum + '/' + key];
+  if (!entry)                return note('No answer from WCB ' + wcbNum + ' — press ⟳ to retry.');
+  if (entry.status === 1)    return note('WCB ' + wcbNum + ' no longer has a sequence called "' + key + '".');
+  if (entry.status === 2)    return note('Stored on WCB ' + wcbNum + ', but too large to read back in one reply.');
+  const lines = _seqValueToLines(entry.value);
+  if (!lines.length)         return note('Stored on WCB ' + wcbNum + ', but empty.');
+  const alias = (wcbAliases && wcbAliases[wcbNum - 1]) ? ' · ' + wcbAliases[wcbNum - 1] : '';
+  let html = `<div style="color:var(--muted);margin-bottom:5px">WCB ${esc(wcbNum)}${esc(alias)} — `
+           + `${lines.length} line${lines.length === 1 ? '' : 's'}</div>`;
+  html += `<div style="font-family:monospace;line-height:1.55;white-space:pre-wrap;word-break:break-word">`;
+  lines.forEach(l => {
+    const { cmd, comment } = _seqSplitComment(l);
+    html += `<div>${cmd ? `<span>${esc(cmd)}</span>` : ''}`
+          + `${comment ? `<span style="color:var(--muted);opacity:.85"> ${esc(comment)}</span>` : ''}</div>`;
+  });
+  html += `</div>`;
+  return wrap(html);
+}
 function _wcbSeqOptionsHtml(cur) {
   const esc = s => escH(String(s == null ? '' : s));
   const val = String(cur == null ? '' : cur);
@@ -11686,7 +11849,7 @@ function _wcbSeqOptionsHtml(cur) {
     html += `<optgroup label="WCB ${n}${esc(alias)}">`;
     names.forEach(k => {
       if (k === val) seenCur = true;
-      html += `<option value="${esc(k)}"${k === val ? ' selected' : ''}>${esc(k)}</option>`;
+      html += `<option value="${esc(k)}" data-wcb="${n}"${k === val ? ' selected' : ''}>${esc(k)}</option>`;
     });
     html += `</optgroup>`;
   });
@@ -11711,6 +11874,7 @@ function _wcbSeqFieldHtml(pid, pname, cur) {
     <button type="button" id="${pid}-refresh" class="btn btn-ghost" style="padding:3px 9px"
             title="Read each online WCB's stored sequence list off the mesh">⟳</button>
     <span id="${pid}-note" style="font-size:11px;color:var(--muted)"></span>
+    <div id="${pid}-detail" style="flex-basis:100%"></div>
   </span>`;
 }
 
@@ -12469,11 +12633,51 @@ function _cmdlibShowComposer() {
     const manual  = document.getElementById(sel.id + '-manual');
     const note    = document.getElementById(sel.id + '-note');
     const refresh = document.getElementById(sel.id + '-refresh');
+    const detail  = document.getElementById(sel.id + '-detail');
+    const alive   = () => document.body.contains(sel);
+
+    // Which board's copy of the current key we are showing. The selected <option>
+    // records where it came from; a key typed by hand, or one restored from an
+    // existing action, has no option behind it, so fall back to the boards whose
+    // inventory holds that key. 0 = we can't tell, and nothing is fetched.
+    const boardForKey = key => {
+      const opt = sel.selectedOptions && sel.selectedOptions[0];
+      if (opt && opt.dataset.wcb && opt.value === key) return +opt.dataset.wcb;
+      return _wcbSeqBoardsWithKey(key)[0] || 0;
+    };
+    // Paint the body of the chosen sequence, fetching it first if we don't have it.
+    // Not awaited by callers: the field stays responsive and the block fills in.
+    const showDetail = async () => {
+      if (!detail) return;
+      const key = _cmdlibValues[pname];
+      if (!key) { detail.innerHTML = ''; return; }
+      if (!_wcbSeqConnected()) { detail.innerHTML = _wcbSeqDetailHtml(0, key, 'offline'); return; }
+      const n = boardForKey(key);
+      if (!n) { detail.innerHTML = _wcbSeqDetailHtml(0, key, 'noboard'); return; }
+      if (!_wcbSeqVal[n + '/' + key]) {
+        detail.innerHTML = _wcbSeqDetailHtml(n, key, 'loading');
+        // One value pull in flight at a time — the library rejects a second rather
+        // than queueing it, so a fast click-through would otherwise fire requests
+        // that are refused and land as "no answer".
+        const t0 = Date.now();
+        while (_wcbSeqValPending && (Date.now() - t0) < NC_SEQ_TIMEOUT) {
+          await new Promise(r => setTimeout(r, 120));
+          if (!alive()) return;
+        }
+        await _wcbSeqValRequest(n, key);
+        if (!alive()) return;
+        // The key may have moved on while we waited — don't paint a stale answer.
+        if (_cmdlibValues[pname] !== key) return;
+      }
+      detail.innerHTML = _wcbSeqDetailHtml(n, key, 'ready');
+    };
+
     // Re-render the options in place, keeping whatever the field currently holds
     // selected. Called as each board's list lands during a mesh walk.
     const redraw = () => {
       const keep = _cmdlibValues[pname];
       sel.innerHTML = _wcbSeqOptionsHtml(keep);
+      showDetail();   // a key we couldn't place before may now resolve to a board
     };
     sel.onchange = () => {
       if (sel.value === NC_SEQ_MANUAL) {
@@ -12485,7 +12689,18 @@ function _cmdlibShowComposer() {
       if (manual) manual.style.display = 'none';
       _cmdlibValues[pname] = sel.value;
       _cmdlibUpdatePreview();
+      showDetail();
     };
+    // Typing a key by hand should show its body too, once the typing settles — but
+    // only if some board reports that key, so a half-typed name doesn't fire a pull
+    // per keystroke.
+    if (manual) {
+      let t = null;
+      manual.addEventListener('input', () => {
+        clearTimeout(t);
+        t = setTimeout(() => { if (alive()) showDetail(); }, 400);
+      });
+    }
     if (refresh) refresh.onclick = async () => {
       if (!_wcbSeqConnected()) { if (note) note.textContent = 'not connected'; return; }
       refresh.disabled = true;
@@ -12502,6 +12717,11 @@ function _cmdlibShowComposer() {
       // report success while the dropdown still says nothing was pulled.
       const found = Object.values(_wcbSeq).reduce((a, e) => a + ((e && e.names) || []).length, 0);
       if (note) note.textContent = found ? '' : 'no stored sequences on any board';
+      // Drop the cached BODY of whatever is selected as well, so ⟳ re-reads what the
+      // sequence does — the whole point of pressing it after editing one.
+      const key = _cmdlibValues[pname];
+      if (key) for (const k of Object.keys(_wcbSeqVal)) if (k.endsWith('/' + key)) delete _wcbSeqVal[k];
+      showDetail();
       refresh.disabled = false;
     };
     // Auto-pull on open, so the picker is populated without the user knowing to
@@ -12509,10 +12729,11 @@ function _cmdlibShowComposer() {
     // (see _wcbSeqRefresh), so re-opening the composer is free. Not awaited — the
     // composer renders immediately and the options fill in as boards answer.
     if (_wcbSeqConnected() && !_wcbSeqPending) {
-      _wcbSeqRefresh(() => { if (document.body.contains(sel)) redraw(); }, false)
-        .then(() => { if (document.body.contains(sel)) redraw(); })
+      _wcbSeqRefresh(() => { if (alive()) redraw(); }, false)
+        .then(() => { if (alive()) redraw(); })
         .catch(() => {});
     }
+    showDetail();   // an action re-opened for editing shows its body straight away
   });
   // Servo-pulse params: two linked fields — PWM µs and the raw Maestro value
   // (µs × 4) — that update each other; the stored wire value is the Maestro value.

@@ -92,7 +92,8 @@ Newline-delimited JSON. Handled by `handleSerialInput()` in
 | `{"type":"FORGET_PEER","id":N}` / `"all":true` | — | id 0 or `all` = drop every learned peer |
 | `{"type":"SET_DEBUG_FLAGS","flags":N}` | — | See the debug bitmask below |
 | `{"type":"GET_WCB_STATUS"}` | `{"type":"WCB_STATUS",…}` | See §4 “Bridged status and metadata” |
-| `{"type":"GET_WCB_SEQ","wcb":N}` | `{"type":"WCB_SEQ",…}` **async** | One board's stored-sequence key names, pulled off the mesh. See §4 “Stored-sequence inventory” |
+| `{"type":"GET_WCB_SEQ","wcb":N}` | `{"type":"WCB_SEQ",…}` **async** | One board's stored-sequence key names, pulled off the mesh. See §4 “Stored sequences” |
+| `{"type":"GET_WCB_SEQVAL","wcb":N,"key":"K"}` | `{"type":"WCB_SEQVAL",…}` **async** | ONE sequence's contents. Same section |
 | `{"type":"GET_MESH_STATS"}` | `{"type":"MESH_STATS",…}` | ESP-NOW delivery counters. See below |
 
 `{"type":"ERROR","msg":"JSON parse failed (…)","rxLen":N}` comes back on a malformed
@@ -368,7 +369,7 @@ The data that does not fit comes from `GET_WCB_META` → a **fragmented** `WCB_M
 `aliases[]`, `portLabels[][5]` and `seqHash[]`, which the tool caches. The relay itself is
 deliberately excluded from the positional arrays (it is a transport hop, not a managed board).
 
-### Stored-sequence inventory
+### Stored sequences
 
 `GET_WCB_SEQ` asks one WCB for the **names** of its stored `?SEQ` sequences, so the config
 tool's command library can offer the sequences a board actually holds instead of a
@@ -379,7 +380,18 @@ free-text key box. NaviCore pulls them off the mesh with `WCB_Client`'s
 → {"type":"GET_WCB_SEQ","wcb":2}
 ← {"sys":1,"type":"WCB_SEQ","ok":true,"wcb":2,"hash":H,"names":["wave","dance"]}
 ← {"sys":1,"type":"WCB_SEQ","ok":false,"wcb":2,"msg":"no reply"}
+
+→ {"type":"GET_WCB_SEQVAL","wcb":2,"key":"wave"}
+← {"sys":1,"type":"WCB_SEQVAL","ok":true,"wcb":2,"key":"wave","status":0,
+   "value":";M1,1***open dome^;S5,<CA1021>"}
 ```
+
+`status` is a real answer, not an error: **0** OK, **1** NOTFOUND (no such key on that
+board), **2** TOOBIG (the stored value exceeds what one reply can carry). The target
+distinguishes these explicitly rather than answering with silence — silence is what makes
+the config-pull path unusable. The `value` is passed through verbatim: its `^`
+delimiters and `***` comments are what the consumer renders, so nothing in the firmware
+may reformat it.
 
 Four things about it are load-bearing:
 
@@ -387,17 +399,21 @@ Four things about it are load-bearing:
   arrives when the board answers. A pull that gets no answer is reported as
   `ok:false,"msg":"no reply"` after `WCB_SEQ_TIMEOUT_MS` (6 s) — the library abandons its
   own request silently at ~4 s, so without this the requester would wait forever.
-- **One pull at a time, mesh-wide.** `WCB_Client` allows a single inventory request in
-  flight and rejects a second rather than queueing it, so a consumer walking several
-  boards must go one at a time. A request arriving while one is live gets
-  `ok:false,"msg":"busy"`.
-- **Names only, never bodies.** `WCB_Client` can also fetch a sequence's contents
-  (`requestSequence`), but one at a time and with no ceiling on the total — pulling every
-  body would recreate the failure the WCB's own config pull already has, where the reply
-  exceeds its chunk budget and the target then sends *nothing*.
-- **`wcb` must be in the filter whitelist.** `handleSerialInput()` parses the header with
-  an ArduinoJson filter; an un-whitelisted field is stripped, read as 0, and the pull is
-  rejected as out of range.
+- **One pull at a time, mesh-wide — and the two share that slot.** `WCB_Client` allows a
+  single request in flight across `requestSequenceNames` *and* `requestSequence`, and
+  rejects a second rather than queueing it. So the firmware's slot is tagged with its
+  **kind**: the reply callbacks and the timeout all check it, because a names answer
+  emitted as a value one (or a failure carrying the wrong `type`) settles the wrong
+  request in the tool and leaves the real one hanging. A request arriving while one is
+  live gets `ok:false,"msg":"busy"`.
+- **Bodies one key at a time, on demand, never as a set.** A single value is bounded
+  (~1800 chars) but the whole set is not — pulling every body would recreate the failure
+  the WCB's own config pull already has, where the reply exceeds its chunk budget and the
+  target then sends *nothing*. `GET_WCB_SEQ` is therefore names-only, and a consumer
+  walks that list fetching what it actually needs.
+- **`wcb` and `key` must be in the filter whitelist.** `handleSerialInput()` parses the
+  header with an ArduinoJson filter; an un-whitelisted field is stripped, so `wcb` reads
+  as 0 ("wcb out of range") and `key` reads as empty ("key required").
 
 Both transports carry a per-board **`seqHash[]`** — the WDP SEQHASH fingerprint from
 `WCBNeighbor::seqHash`, which covers sequence names *and* contents and so moves on any
@@ -507,6 +523,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-17 | _(uncommitted)_ | Added `GET_WCB_SEQVAL` → `WCB_SEQVAL` (ONE stored sequence's contents by key, on `WCB_Client` 1.15.0's `requestSequence()`), so the command library can show what a chosen sequence does. `status` is a real answer — 0 OK / 1 NOTFOUND / 2 TOOBIG — not an error, and the `value` is passed through verbatim because its `^` delimiters and `***` comments are what the consumer renders. The load-bearing part: the library allows **one** request in flight across names *and* values, so the firmware's pull slot is now tagged with its kind and every reply and timeout checks it — a names answer emitted as a value one, or a failure carrying the wrong `type`, settles the wrong request in the tool and leaves the real one hanging. `key` joins `wcb` in the `handleSerialInput()` filter whitelist. |
 | 2026-08-17 | _(uncommitted)_ | Added `GET_WCB_SEQ` → `WCB_SEQ` (a WCB's stored-sequence key names, pulled off the mesh with `WCB_Client` 1.15.0's `requestSequenceNames()`) and the per-board `seqHash[]` fingerprint, carried in `WCB_STATUS` on USB and `WCB_META` over the bridge. Four constraints are load-bearing: the reply is **async** (6 s `no reply` timeout, because the library abandons its own pull silently at ~4 s); **one pull at a time mesh-wide** (a second is rejected, not queued); **names only, never bodies** (the whole set has no ceiling — the same failure the WCB config pull already has); and `wcb` must be in the `handleSerialInput()` filter whitelist or it is stripped and read as 0. Bridge replies fragment on `OS_WCB_SEQ`; the pull and every error reply are issued from `tick()` on Core 1 because both are ESP-NOW transmits. Also corrected the `GET_WCB_STATUS` row's stale "See §5" — that content is §4. |
 | 2026-08-13 | _(uncommitted)_ | `MESH_STATS` is now **paged** (`"pg"`/`"last"`) so the full per-board roster crosses the bridge — measured: no per-board data for a 6-board fleet fits one 185 B frame alongside the aggregate at all, so the earlier shed-tier approach could only ever drop boards. Page 0 deliberately carries no rows. Consumer merges by id and promotes only a contiguous set ending in `last`. `agg` keys abbreviated to `rty`/`fail`/`ung` to buy row space. `buildMeshStatsPage()` is the single builder for USB **and** bridged. |
 | 2026-08-12 | _(uncommitted)_ | Added `GET_MESH_STATS` → `MESH_STATS` (ESP-NOW delivery counters, flat per-peer rows, bridged replies shed `peers` to fit one frame). Noted that `recv` is NaviCore's own counter — `WCB_Client` 1.13.0's statistics are outbound-only. |

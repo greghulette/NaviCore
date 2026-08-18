@@ -3101,6 +3101,7 @@ void handleSerialInput() {
         filter["id"]     = true;   // FORGET_PEER (without this the id is stripped → parsed as 0 → "out of range")
         filter["all"]    = true;   // FORGET_PEER
         filter["wcb"]    = true;   // GET_WCB_SEQ (stripped here → parsed as 0 → "wcb out of range")
+        filter["key"]    = true;   // GET_WCB_SEQVAL (stripped → empty → "key required")
         DynamicJsonDocument hdr(256);
         DeserializationError perr = deserializeJson(
             hdr, serialInputBuf,
@@ -3321,7 +3322,18 @@ void handleSerialInput() {
           // The reply is ASYNC (a WCB_SEQ line when the board answers, or an ok:false
           // one on timeout) — this path is Core 1, so the pull is issued directly.
           const int seqB = hdr["wcb"] | 0;   // clamp: a wild value must reject, not wrap into a real board
-          rcTelemetry::startSeqPull((seqB >= 1 && seqB <= 255) ? (uint8_t)seqB : 0, 0);   // 0 = answer on USB
+          rcTelemetry::startSeqPull((seqB >= 1 && seqB <= 255) ? (uint8_t)seqB : 0, 0,
+                                    rcTelemetry::SEQ_PULL_NAMES);   // sender 0 = answer on USB
+
+        } else if (strcmp(type,"GET_WCB_SEQVAL")==0) {
+          // ONE stored sequence's contents, by key — what the command library shows
+          // under a chosen sequence. Deliberately one key at a time: a single value
+          // is bounded (~1800 chars) but the whole set is not, and pulling every body
+          // is the failure mode the WCB's own config pull already has.
+          // Reply is ASYNC (a WCB_SEQVAL line, or an ok:false one on timeout).
+          const int seqVB = hdr["wcb"] | 0;
+          rcTelemetry::startSeqPull((seqVB >= 1 && seqVB <= 255) ? (uint8_t)seqVB : 0, 0,
+                                    rcTelemetry::SEQ_PULL_VALUE, hdr["key"] | "");
 
         } else if (strcmp(type,"GET_WCB_STATUS")==0) {
           // Lightweight liveness poll for the GUI's sidebar WCB Status panel.
@@ -3899,6 +3911,7 @@ void setup() {
     // without it they fall through to the raw-packet hook. Fires on the LOOP task
     // (from wcb->update()), so building the reply String there is safe.
     wcb->onSequenceNames(rcTelemetry::seqNamesReply);
+    wcb->onSequenceValue(rcTelemetry::seqValueReply);   // ONE sequence's contents (GET_WCB_SEQVAL)
     // Create the OTA packet queue here (Core 1) instead of lazily inside the
     // Core-0 RX callback, so the very first OTA frame can't be lost to the
     // create/publish race. The lazy-create in enqueueOtaPacket() stays as a fallback.
