@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.19:34.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.19:52.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8098,7 +8098,19 @@ function _maeReadFeed(line) {
   appendTerminalLine('< ' + term, 'rx', 'main');
 }
 
+// Last inbound line of ANY kind, and a coarse label for it. The live-monitor
+// watchdog reports these: if traffic is still arriving while the SBUS panel is
+// dead, the monitor SUBSCRIPTION lapsed; if nothing is arriving at all, the LINK
+// (or the shared-port hub relaying it) is the problem. Those need opposite fixes,
+// and without this the two look identical from the UI.
+let _lastRxMs = 0;
+let _lastRxKind = '';
+
 function handleBoardMessage(line) {
+  _lastRxMs = Date.now();
+  _lastRxKind = line.startsWith('{')
+    ? (/"type"\s*:\s*"([A-Za-z0-9_]+)"/.exec(line) || [, 'json'])[1]
+    : (line.slice(0, 12).replace(/[^\x20-\x7e]/g, '') || 'text');
   // OTA markers ([OTA:ACK,..]/[OTA:NAK,..]/[OTA:BEGIN,..]/[OTA:END,..]) are not
   // JSON — feed them to the OTA-over-USB orchestrator's marker resolver (when an
   // OTA is active) so it can advance its ACK-paced loop, then echo to the terminal.
@@ -9918,12 +9930,42 @@ function _sbusStaleTick() {
     // `port` is null, so gating on `port` alone meant the self-heal never fired in a
     // second tab — the panel sat at "No data — link idle" forever while the droid was
     // fine. Same omission the Via-WCB keep-alive already fixes for the same reason.
-    if (isMonitoring && (port || sharedActive) && (Date.now() - _lastMonitorResubMs) > 3000) {
+    // Deliberately NOT gated on `isMonitoring`. Re-subscribing is harmless when the
+    // board is already streaming (START_MONITOR just forces the next frame out), and
+    // `isMonitoring` is exactly the flag most likely to be wrongly false — a partial
+    // or aborted disconnect clears it while `port` stays truthy, which would silently
+    // disable the only thing that recovers the panel.
+    if ((port || sharedActive) && (Date.now() - _lastMonitorResubMs) > 3000) {
       _lastMonitorResubMs = Date.now();
-      sendJSON({ type: 'START_MONITOR' }).catch(() => {});
+      sendJSON({ type: 'START_MONITOR' })
+        .then(() => _monitorDiag(gap, 'resubscribe sent'))
+        .catch(e => _monitorDiag(gap, 'resubscribe FAILED: ' + (e && e.message ? e.message : e)));
+    } else {
+      _monitorDiag(gap, (port || sharedActive) ? 'resubscribe throttled' : 'NO LINK — cannot resubscribe');
     }
   }
 }
+// One line, at most every 10 s, naming everything needed to tell the failure modes
+// apart: which transport, who owns the port, whether we still believe we're
+// monitoring, how long since ANY inbound line and what it was, and what the
+// re-subscribe attempt actually did.
+let _monitorDiagMs = 0;
+function _monitorDiag(gap, outcome) {
+  const now = Date.now();
+  if (now - _monitorDiagMs < 10000) return;
+  _monitorDiagMs = now;
+  const hub  = (typeof sharedHub !== 'undefined' && sharedHub) ? sharedHub : null;
+  const rxAgo = _lastRxMs ? ((now - _lastRxMs) / 1000).toFixed(1) + 's (' + _lastRxKind + ')' : 'never';
+  appendTerminalLine(
+    '< [monitor] panel stale ' + (gap / 1000).toFixed(1) + 's'
+    + ' · transport=' + (viaWcbActive ? 'via-wcb' : 'direct')
+    + ' · port=' + (port ? 'own' : (sharedActive ? 'shared' : 'none'))
+    + (hub ? ' hub(role=' + hub.role + ',open=' + hub.portOpen + ')' : '')
+    + ' · monitoring=' + isMonitoring
+    + ' · lastRx=' + rxAgo
+    + ' · ' + outcome, 'rx');
+}
+
 // Re-check the instant the tab becomes visible again (wake / refocus) so a stale
 // green corrects immediately instead of waiting up to one 500 ms watchdog interval.
 document.addEventListener('visibilitychange', () => {
