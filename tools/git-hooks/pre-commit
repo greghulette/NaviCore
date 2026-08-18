@@ -78,12 +78,26 @@ DTG_READABLE="${DAY}.${HHMM%??}:${HHMM#??}.${TZ_LETTER}.${MONTH}.${YEAR4}"
 # Helper: patch FILE in place by running sed-script EXPR; stage the file
 # only if it actually changed. Avoids leaving the working tree dirty when
 # the DTG happens to match (re-commit within the same minute).
+#
+# `git add "$FILE"` stages the file's ENTIRE working-tree content, not just
+# the DTG line — so it is only safe when the working tree and the index
+# already agree for that file. If they don't (WIP sitting unstaged, or a
+# partially staged `git add -p`), stamping would sweep that unstaged work
+# into the commit, including commits that touch neither target file. In
+# that case skip the stamp instead: per this hook's contract above, a
+# missing DTG is better than a surprise in the commit.
 stamp_file() {
   FILE="$1"; EXPR="$2"; LABEL="$3"; SHOWN="$4"
   [ -f "$FILE" ] || return 0
   TMP=$(mktemp 2>/dev/null || mktemp -t dtg)
   sed -E "$EXPR" "$FILE" > "$TMP" 2>/dev/null
   if [ -s "$TMP" ] && ! cmp -s "$FILE" "$TMP"; then
+    # Unstaged changes present (or git itself errored) → do not stage.
+    if ! git diff --quiet -- "$FILE"; then
+      echo "[pre-commit] ${LABEL}: $FILE has unstaged changes — DTG not stamped"
+      rm -f "$TMP"
+      return 0
+    fi
     mv "$TMP" "$FILE"
     git add "$FILE"
     echo "[pre-commit] ${LABEL} DTG stamped: ${SHOWN}"

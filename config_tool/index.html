@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.08:04.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.09:36.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3776,19 +3776,34 @@ function _modeReport() {
 function setModeReportEnabled(checked) {
   const m = _modeReport();
   m.enabled = !!checked;
+  _backfillModeReportTemplate();
   renderModeReport();
+}
+// Drop in the default command whenever the feature is ON but has nothing to send
+// (blank command AND no per-mode overrides) so it works out of the box — whether it
+// was just toggled on OR loaded from a config saved enabled-but-empty (the firmware
+// default template is empty, rc_config.h:884). Editable; to send only per-mode
+// overrides, set an override and the blank command is left as-is. Returns true when
+// it changed something.
+// ORDER-CRITICAL on the load path: this MUST run AFTER the CONFIG handler snapshots
+// _configBaseline. It used to live inside renderModeReport(), which applyConfig calls
+// BEFORE the snapshot — so the backfilled default was baked into the baseline itself,
+// the diff saw "no change", Save shipped nothing, and the tool displayed a command the
+// board did not have. Same trap as _foldLocalMaestroChIntoConfig / _foldLegacyWcbProfiles.
+function _backfillModeReportTemplate() {
+  const m = _modeReport();
+  if (!m.enabled || m.template || m.cmds.some(c => c)) return false;
+  m.template = ';V,MODE,{mode}';
+  return true;
 }
 function setModeReportCmd(i, value) {
   _modeReport().cmds[i] = String(value == null ? '' : value).slice(0, 47);
 }
+// Pure painter — no mutation of config.modeReport. The default-command backfill lives
+// in _backfillModeReportTemplate() because doing it here ran it pre-baseline on the
+// load path and the result was never saved to the board.
 function renderModeReport() {
   const m = _modeReport();
-  // Drop in the default command whenever the feature is ON but has nothing to send
-  // (blank command AND no per-mode overrides) so it works out of the box — whether it
-  // was just toggled on OR loaded from a config saved enabled-but-empty (the firmware
-  // default template is empty, rc_config.h:842). Editable; to send only per-mode
-  // overrides, set an override and the blank command is left as-is.
-  if (m.enabled && !m.template && !m.cmds.some(c => c)) m.template = ';V,MODE,{mode}';
   const en = document.getElementById('modereport-enabled');
   if (en) en.checked = m.enabled;
   const f = document.getElementById('modereport-fields');
@@ -4467,7 +4482,14 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
   // Same reasoning for an in-flight OTA: it owns writer/port for ~2 minutes,
   // and disconnecting mid-stream aborts the update.
   if (_fwFlashing || _otaInProgress) return;
-  if (port || sharedActive) { await disconnect(); return; }
+  // "Attached to the hub" and "the shared port is open" are different states, and the
+  // button label follows the SECOND one: onSharedState() calls setConnected(false) when
+  // the hub reports portOpen:false (leader's read loop ended on an unplug, a step-down,
+  // or exhausted open retries) but leaves sharedActive true. Dispatching on sharedActive
+  // alone therefore spent the click the "Connect" label had just invited on a teardown
+  // with no visible effect, and the chooser only opened on a second click.
+  if (port || (sharedActive && sharedHub && sharedHub.portOpen)) { await disconnect(); return; }
+  if (sharedActive) await disconnect();   // hub-attached but portless — release it, then offer the chooser
   openConnectModal();
 });
 
@@ -4671,6 +4693,13 @@ async function disconnect() {
     _clipItems = null; _clipAsm = null; _clipFsFresh = false;
     _tlDownload = null;
     _tlAbortWaiters('disconnected');   // reject in-flight timeline upload waiters
+    // Half-received fragment sessions and the background-fetch scrim suppressor must
+    // not survive into the next session: a GET_WCB_META whose reply never arrived leaves
+    // _fragSilent latched true, and the next connect's fragmented CONFIG pull would then
+    // run with no progress scrim at all.
+    _fragSessions.clear();
+    _fragSilent = false;
+    if (_fragSilentTimer) { clearTimeout(_fragSilentTimer); _fragSilentTimer = null; }
   }
 }
 
@@ -4941,6 +4970,7 @@ function forgetLearnedPeer(id, btnEl) {
 function _maybeRequestWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already carries names/labels
   if (_bridgeUploadInFlight || _bulkActive) return;   // never fragment a WCB_META download into an in-flight upload
+  if (_fragSessions.size) return;                // a fragmented DOWNLOAD is reassembling — raising _fragSilent now would kill its progress scrim mid-transfer
   // Let the config pull finish FIRST. WCB_META shares the RC's single fragment
   // machine with GET_CONFIG and adds mesh traffic; firing it during the connect-time
   // config pull was starving/dropping it. _configLoaded flips true only once the
@@ -4960,7 +4990,7 @@ function _maybeRequestWcbMeta() {
   const now = Date.now();
   if ((now - _wcbMetaReqAt) < 5000) return;      // throttle
   _wcbMetaTries++; _wcbMetaReqAt = now;
-  _fragSilent = true;   // this is a background fetch — don't pop the loading scrim for it
+  _fragSilentBegin();   // this is a background fetch — don't pop the loading scrim for it
   sendJSON({ type: 'GET_WCB_META' }, /*silent=*/true).catch(() => {});
 }
 
@@ -4978,10 +5008,13 @@ function _maybeResyncWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already refreshes labels every 3 s
   if (!_configLoaded) return;                    // stay strictly secondary to the connect-time config pull
   if (_bridgeUploadInFlight || _bulkActive) return;   // and never spawn a fragmented WCB_META download during an upload
+  // Nor during a fragmented DOWNLOAD: a user-initiated cmdlib/config pull can run well
+  // past 30 s, and raising _fragSilent mid-transfer tears its progress scrim down.
+  if (_fragSessions.size) return;
   const now = Date.now();
   if ((now - _wcbMetaResyncAt) < 30000) return;  // at most once per ~30 s
   _wcbMetaResyncAt = now;
-  _fragSilent = true;   // background fetch — don't pop the loading scrim
+  _fragSilentBegin();   // background fetch — don't pop the loading scrim
   sendJSON({ type: 'GET_WCB_META' }, /*silent=*/true).catch(() => {});
 }
 
@@ -5280,7 +5313,13 @@ async function sendJSON(obj, silent = false) {
   // type string, so an added field is ignored by all existing readers and is
   // fully backward-compatible. Single choke point — covers all typed requests,
   // both serialize paths (direct-USB + via-WCB), and the fragmenter below.
-  obj = { ...obj, sys: 1 };
+  // Stamped FIRST, not last: the firmware's SET_CMDLIB handler pulls the library
+  // out by substring from after `"data":` to the final '}', which is only correct
+  // while "data" is the last key. Appending sys here put it after data and left a
+  // trailing `,"sys":1` in the stored library. The firmware side no longer depends
+  // on key order, but keeping sys first makes its comment true again — and costs
+  // nothing, since every consumer switches on `type`.
+  obj = { sys: 1, ...obj };
   if (!viaWcbActive) {
     await sendLine(JSON.stringify(obj), silent);
     return;
@@ -5458,6 +5497,7 @@ function setDebugFilter(key, on) {
   sendDebugFlagsToBoard();
 }
 
+const TERM_MAX_LINES = 3000;   // per pane — recent scrollback is what the terminal is for
 function appendTerminalLine(text, type = 'info', pane = 'main') {
   const output = document.getElementById(pane === 'wcb' ? 'terminal-output-wcb' : 'terminal-output');
   if (!output) return;
@@ -5474,6 +5514,12 @@ function appendTerminalLine(text, type = 'info', pane = 'main') {
   line.className = 'terminal-line ' + type;
   line.textContent = (terminalShowTimestamps ? `[${new Date().toLocaleTimeString()}] ` : '') + text;
   output.appendChild(line);
+  // Bound the scrollback. Nothing else ever removes a node from these panes — the
+  // Clear button is the only other removal path — so an enabled debug chip over a
+  // chatty stream (or a dead shared port logging a write failure every few seconds)
+  // grows the tree without limit, and the autoscroll write below reflows against all
+  // of it, so append cost climbs with the pane. Trim the head instead.
+  while (output.childElementCount > TERM_MAX_LINES) output.removeChild(output.firstChild);
   if (terminalAutoScroll) output.scrollTop = output.scrollHeight;
 }
 
@@ -6387,6 +6433,17 @@ async function _tlSave() {
   const clip = _tlClip;
   const events = _tlFlattenEvents();
   if (!events.length) { alert('Nothing to save — the timeline is empty.'); return; }
+  // Clear `dirty` against the SNAPSHOT, not against the clip as it looks when the
+  // upload finishes. The modal stays fully interactive for the whole transfer (only
+  // the Save button is disabled), and over the WCB bridge a 300-event clip takes tens
+  // of seconds — every keyframe drag or action edit in that window sets dirty=true
+  // again on the live model, which _tlFlattenEvents() already deep-copied past.
+  // Clearing at the end would mark those edits saved: closeTimelineEditor() would then
+  // shut without its "Discard unsaved timeline edits?" prompt and drop them, while the
+  // board holds the pre-edit version. Clearing HERE means a concurrent edit leaves the
+  // flag set, so the prompt still fires and a second Save ships it.
+  const wasDirty = clip.dirty;
+  clip.dirty = false;
   clip.uploading = true;
   const saveBtn = document.getElementById('tl-save-btn');
   if (saveBtn) saveBtn.disabled = true;
@@ -6434,11 +6491,13 @@ async function _tlSave() {
       throw new Error('board rejected save' + (m ? ' — ' + m[1] : '') + ' (check the terminal for details)');
     }
 
-    clip.dirty = false;
-    _tlSetStatus(`Saved ✓ (${events.length} events)`);
+    _tlSetStatus(clip.dirty
+      ? `Saved ✓ (${events.length} events) — you have newer edits, Save again`
+      : `Saved ✓ (${events.length} events)`);
     showToast(`Timeline "${clip.name}" saved to NaviCore (${events.length} events)`, 'success');
     clipsRefresh();
   } catch (e) {
+    clip.dirty = wasDirty || clip.dirty;   // the snapshot never landed — restore the guard
     _tlSetStatus('Save FAILED: ' + e.message);
     showToast('Timeline save failed — ' + e.message, 'error');
     sendRcCli('?REC,EDITCANCEL');
@@ -8547,6 +8606,10 @@ function handleBoardMessage(line) {
       appendTerminalLine('< [wcb] Saved WCB profiles found in this browser — imported into the config. Open Config → WCB Network and Save to store them on the NaviCore.', 'rx');
       showToast('Imported your saved WCB profiles — Save to store them on the NaviCore', 'info');
     }
+    // Same order-critical rule for the mode-report default command: a board stored
+    // enabled-but-empty sends nothing, so backfill the default AFTER the baseline —
+    // then the diff sees it and a Save actually stores it on the droid.
+    if (_backfillModeReportTemplate()) renderModeReport();
     renderWcbProfiles();
     _syncMaestroChFromConfig();
     renderMaestroLocations();   // badges reflect the freshly-synced mirror
@@ -8669,8 +8732,18 @@ function applyConfig(data) {
                         // baseline and fabricates a phantom "unsaved config changes" prompt on close.
   if (data.hcrDest)     config.hcrDest    = data.hcrDest;
   if (Array.isArray(data.maestros) && data.maestros.length) {
-    // Pad / truncate to NUM_MAESTRO_SLOTS so the array length is stable
-    config.maestros = data.maestros.slice(0, NUM_MAESTRO_SLOTS);
+    // Pad / truncate to NUM_MAESTRO_SLOTS so the array length is stable, and give every
+    // slot a `channels` array HERE — before the CONFIG handler snapshots the diff
+    // baseline. rcConfigToJSON emits `channels` SPARSELY (rc_config.h ≈1278: a slot with
+    // no named channels has no key at all), while _foldLocalMaestroChIntoConfig and
+    // _syncMaestroChFromConfig both pad it in unconditionally — and they run AFTER the
+    // snapshot. Padding there made the live config differ from the baseline by that one
+    // key on every slot, so the first Save after each load shipped the whole 8-slot
+    // maestros branch for nothing. Normalizing pre-baseline costs nothing: the fold still
+    // REPLACES channels with a populated array when it has one, so that migration is
+    // still seen by the diff and still reaches the board.
+    config.maestros = data.maestros.slice(0, NUM_MAESTRO_SLOTS)
+                        .map(m => ({ ...m, channels: Array.isArray(m.channels) ? m.channels : [] }));
     while (config.maestros.length < NUM_MAESTRO_SLOTS) {
       config.maestros.push({ type: 0, device: 1 + config.maestros.length, channels: [] });
     }
@@ -10238,11 +10311,19 @@ function updateChannelsGrid(channels) {
 }
 
 function updatePWMDisplay(matrixVal, modeVal, btn, mode) {
-  _liveCh6 = matrixVal; _liveCh16 = modeVal; _liveBtn = btn; _liveMode = mode;
+  // A missing matrix/mode value means "no channel data with this update", not a value:
+  // the rc_trig branch of handleBoardMessage passes undefined for both because a bridged
+  // trigger carries no channel frame, and it only wants the btn-highlight branch below.
+  // Writing it through anyway painted the literal "undefined" (SBUS) or NaN (µs) into the
+  // big Button Matrix readout on every bridged button press, and poisoned the _liveCh6
+  // cache the SBUS/µs toggle repaints from. Leave the last real value in place instead.
+  if (Number.isFinite(matrixVal)) _liveCh6  = matrixVal;
+  if (Number.isFinite(modeVal))   _liveCh16 = modeVal;
+  _liveBtn = btn; _liveMode = mode;
   // Big matrix-channel display + tooltip (the per-channel grid handles
   // all other channels; CH7/CH12 pwm-row bars were removed).
   const bigCh6 = document.getElementById('live-ch6');
-  if (bigCh6) { bigCh6.textContent = fmtVal(matrixVal); bigCh6.title = `${altLbl(matrixVal)}`; }
+  if (bigCh6 && Number.isFinite(matrixVal)) { bigCh6.textContent = fmtVal(matrixVal); bigCh6.title = `${altLbl(matrixVal)}`; }
   const sub   = document.getElementById('live-ch6-sub');
   if (sub) sub.textContent = `Channel ${_liveMatrixCh} — Button Matrix (${unitLbl()})`;
 
@@ -12230,7 +12311,13 @@ function _ncCommandPattern(cmd) {
       const codes = ((en && en.values) || []).map(v => _reEscape(String(v.code))).sort((a, b) => b.length - a.length);
       if (codes.length) re += '(' + codes.join('|') + ')';
       else { isFreeText = true; re += '(.+?)'; }
-    } else if (p.type === 'int') re += '(\\d+)';
+    // Sign-tolerant only where the param's own range allows a negative — several
+    // vendored commands are signed (roam-a-dome's rotate/spin, r2uppityspinner-alt's
+    // rotary), and a bare (\d+) can't match the leading '-'. Encoding never checked, so
+    // ":DPR-30" authored fine and then failed to decode: no 📚 hint chip, and 📚 Change
+    // dropped the user at the board list instead of the pre-filled composer, while the
+    // identical command with +30 worked — a failure that looks random.
+    } else if (p.type === 'int') re += (p.min != null && +p.min < 0) ? '(-?\\d+)' : '(\\d+)';
     else { isFreeText = true; re += '(.+?)'; }
     if (literalBefore === '' && prevWasFreeText && isFreeText) ambiguous = true;
     prevWasFreeText = isFreeText;
@@ -13223,6 +13310,20 @@ let _fragProgTimer = null;
 // fragmented payload at a time (single _outSend), so this only ever gates that fetch;
 // cleared on completion / expiry so a later user-initiated CONFIG/CMDLIB pull shows it.
 let _fragSilent = false;
+let _fragSilentTimer = null;
+// Raise the flag with a self-healing timer. Its only two clear sites live INSIDE the
+// reassembler — the completion branch and the expiry sweep — and the sweep only walks
+// sessions that already exist. If the GET_WCB_META request or its entire reply is lost
+// on the mesh, no session is ever created, so there is nothing to complete and nothing
+// to expire: the flag latches true and the next USER-initiated pull (the connect-time
+// CONFIG, a cmdlib fetch) runs with no progress scrim at all, so the tool just looks
+// frozen for tens of seconds. The timer bounds that to one round-trip window; disconnect()
+// clears it too, so it can't survive into the next session.
+function _fragSilentBegin() {
+  _fragSilent = true;
+  if (_fragSilentTimer) clearTimeout(_fragSilentTimer);
+  _fragSilentTimer = setTimeout(() => { _fragSilent = false; _fragSilentTimer = null; }, FRAG_TIMEOUT_MS + 2000);
+}
 function _fragProgress(got, total, label) {
   let el = document.getElementById('frag-progress');
   if (!el) {
@@ -17307,6 +17408,32 @@ function handleConfigImportFile(event) {
       let csvHadMaestros = false;
       const newSwitches = {};
       const newKnobs = {};
+      let droppedOverfull = 0;   // actions past MAX_ACTIONS_PER_TIER — surfaced in the final alert
+
+      // Buttons and switches are rebuilt from scratch below, so anything the flat CSV
+      // has no column for is lost unless it's seeded here. These run BEFORE
+      // `config = imported`, so config.mappings / config.switches still hold the
+      // pre-import values. Same rule the knob and Maestro-channel branches follow: a
+      // CSV that's silent about a field means "no opinion", never "wipe it from the
+      // board". Without the seed the next Save ships the branch and rc_config.h:1497 /
+      // :1520 read the absent tNnote/pNnote key back as "" — every user-typed Action
+      // Name gone from the droid and the cheat sheet, with nothing reporting it.
+      const seedMapping = (key) => {
+        if (imported.mappings[key]) return imported.mappings[key];
+        const prev = (config.mappings || {})[key] || {};
+        const m = {};
+        for (let t = 1; t <= 3; t++) if (prev['t' + t + 'note']) m['t' + t + 'note'] = prev['t' + t + 'note'];
+        imported.mappings[key] = m;
+        return m;
+      };
+      const seedSwitch = (name) => {
+        if (newSwitches[name]) return newSwitches[name];
+        const prev = (config.switches || {})[name] || {};
+        const s = {};
+        for (let p = 0; p <= 2; p++) if (prev['p' + p + 'note']) s['p' + p + 'note'] = prev['p' + p + 'note'];
+        newSwitches[name] = s;
+        return s;
+      };
 
       const cellStr = (row, idx) => idx >= 0 ? String(row[idx] || '').trim() : '';
       const cellNum = (row, idx) => {
@@ -17625,39 +17752,42 @@ function handleConfigImportFile(event) {
           }
           const key = String(mode * 100 + buttonId);
           if (!actionType) {
-            if (exclusive === '1') {
-              imported.mappings[key] = imported.mappings[key] || {};
-              imported.mappings[key].exclusive = true;
-            }
+            if (exclusive === '1') seedMapping(key).exclusive = true;
             continue;
           }
-          imported.mappings[key] = imported.mappings[key] || {};
-          if (exclusive === '1') imported.mappings[key].exclusive = true;
+          const map = seedMapping(key);
+          if (exclusive === '1') map.exclusive = true;
           const tierKey = 't' + tier;
-          imported.mappings[key][tierKey] = imported.mappings[key][tierKey] || [];
+          map[tierKey] = map[tierKey] || [];
           const action = buildAction();
-          if (action) imported.mappings[key][tierKey].push(action);
+          // Clamp to the same cap the editor enforces. The firmware stops at
+          // RC_ACTIONS_PER_TIER with a bare `break` (rc_config.h:1503) — an extra row
+          // would be accepted, rendered, diffed, shipped and then silently dropped by
+          // the board, leaving the tool's baseline claiming an action the droid hasn't got.
+          if (action) {
+            if (map[tierKey].length >= MAX_ACTIONS_PER_TIER) droppedOverfull++;
+            else map[tierKey].push(action);
+          }
           continue;
         }
 
         if (type === 'switch-hw' || type === 'switch') {
           const swName = controlName;
           if (!swName) continue;
-          const sw = newSwitches[swName] || {};
+          const sw = seedSwitch(swName);
           if (Number.isFinite(channel)) sw.channel = Number(channel);
           if (Number.isFinite(positions)) sw.positions = Number(positions);
           if (type === 'switch') {
             const posIdx = positionNameToIndex(positionLabel);
-            if (posIdx === null || !actionType) {
-              newSwitches[swName] = sw;
-              continue;
-            }
+            if (posIdx === null || !actionType) continue;
             const tierKey = 'p' + posIdx;
             sw[tierKey] = sw[tierKey] || [];
             const action = buildAction();
-            if (action) sw[tierKey].push(action);
+            if (action) {   // same firmware cap as buttons — rc_config.h:1526
+              if (sw[tierKey].length >= MAX_ACTIONS_PER_TIER) droppedOverfull++;
+              else sw[tierKey].push(action);
+            }
           }
-          newSwitches[swName] = sw;
           continue;
         }
 
@@ -17689,6 +17819,30 @@ function handleConfigImportFile(event) {
       _maeReset.forEach(idx => {
         if (!_maeHadChan.has(idx)) imported.maestros[idx].channels = _maePrevChannels[idx] || [];
       });
+
+      // Carry each action's skipRunning gate across the rebuild — the CSV has no column
+      // for it, so without this every "don't re-fire while already running" flag is
+      // cleared and the next Save disarms it on the droid (actionFromJson reads the
+      // absent key as false, rc_config.h:1021). Matched on the action's CSV-visible
+      // identity and ONLY when that match is unique within the tier: a reordered or
+      // hand-edited list simply doesn't match, which loses the flag rather than arming
+      // it on the wrong action. Guessing here would move a real gate on real hardware.
+      const _skipSig = a => [a.type, a.target, a.port, a.cmd, a.slot, a.maestroCh].join('');
+      const _restoreSkip = (newList, oldList) => {
+        if (!Array.isArray(newList) || !Array.isArray(oldList)) return;
+        newList.forEach(a => {
+          const hits = oldList.filter(o => o && _skipSig(o) === _skipSig(a));
+          if (hits.length === 1 && hits[0].skipRunning) a.skipRunning = true;
+        });
+      };
+      Object.keys(imported.mappings).forEach(key => {
+        const prev = (config.mappings || {})[key];
+        if (prev) for (let t = 1; t <= 3; t++) _restoreSkip(imported.mappings[key]['t' + t], prev['t' + t]);
+      });
+      Object.keys(newSwitches).forEach(name => {
+        const prev = (config.switches || {})[name];
+        if (prev) for (let p = 0; p <= 2; p++) _restoreSkip(newSwitches[name]['p' + p], prev['p' + p]);
+      });
       config = imported;
       // Compact any holes (out-of-order / sparse profile indices), cap, normalize.
       config.wcbProfiles = Array.isArray(config.wcbProfiles)
@@ -17712,7 +17866,10 @@ function handleConfigImportFile(event) {
       if (csvHadHcrDest)  extras.push('HCR destination');
       if (csvHadMaestros) extras.push('Maestro Locations');
       const extraNote = extras.length ? ` (incl. ${extras.join(' + ')})` : '';
-      alert('Config CSV imported successfully' + extraNote + '.');
+      const dropNote = droppedOverfull
+        ? `\n\n${droppedOverfull} action row(s) were dropped: a tier/position holds at most ${MAX_ACTIONS_PER_TIER} actions (the firmware's hard limit).`
+        : '';
+      alert('Config CSV imported successfully' + extraNote + '.' + dropNote);
       renderAssignmentList();
       updateButtonHighlights();
       renderSwitchHighlights();
@@ -18111,8 +18268,10 @@ const CS_QR_TOKEN    = 'jf;af7kljaf8LJK*RELKFja;fff';
 //  ----------------------------------------------------------------------------
 //  Reuses the cheat-sheet Cloudflare Worker (CS_QR_ENDPOINT), but its /cfg/ route
 //  stores WITHOUT a TTL. Everything private lives in the WCB password:
-//    • the KV slot base is SHA-256(password) → unguessable, so nobody can even
-//      FIND your backups without it;
+//    • the KV slot base is PBKDF2(password) → unguessable, so nobody can even
+//      FIND your backups without it — and because it is the same 150k-iteration
+//      derivation as the key, seeing a request URL is no cheaper to attack than
+//      seeing the ciphertext;
 //    • the config is AES-GCM encrypted in THIS browser (PBKDF2 key from the same
 //      password) → the Worker / Cloudflare only ever see ciphertext.
 //  A rolling ring of CFG_BACKUP_MAX slots keeps your last N exports; slot reuse
@@ -18136,10 +18295,31 @@ const CFG_CREDS_LS     = 'navicore-cfg-creds-v1';   // remembered {u,p} when "re
 // encodeURIComponent so a '|' inside either field can't be confused for the
 // separator, keeping distinct (user,pw) pairs in distinct namespaces.
 function _cfgSecret(user, pw) { return encodeURIComponent(user) + '|' + encodeURIComponent(pw); }
-// SHA-256(slotSalt|user|pw) as 64-hex → the unguessable base for THIS user+password's
+// PBKDF2(user|pw, slotSalt) as 64-hex → the unguessable base for THIS user+password's
 // slots + manifest. Deriving from BOTH means the backup list is invisible unless you
 // supply the right username AND password (wrong either → a different, empty namespace).
+// It MUST be as expensive to attack as _cfgKey, and for a while it wasn't: the base was
+// a single SHA-256 over the same secret PBKDF2 protects, and it travels in the URL PATH
+// of every request (Worker/Cloudflare request logs, a TLS-inspecting corporate proxy, a
+// HAR or devtools log on a shared machine). Anyone holding one path could then test
+// (user,pw) guesses offline at ~150,000x the cost of attacking the ciphertext — the
+// weakest derivation sets the strength of the whole scheme. Same iteration count as
+// _cfgKey, different salt, so the two outputs can never collide.
+const _cfgSlotBaseMemo = new Map();   // secret → hex; PBKDF2 is deliberately slow — don't re-run it per request
 async function _cfgSlotBase(user, pw) {
+  const secret = _cfgSecret(user, pw);
+  if (_cfgSlotBaseMemo.has(secret)) return _cfgSlotBaseMemo.get(secret);
+  const enc  = new TextEncoder();
+  const seed = await crypto.subtle.importKey('raw', enc.encode(secret), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(CFG_SLOT_SALT), iterations: CFG_PBKDF2_ITERS, hash: 'SHA-256' }, seed, 256);
+  const hex = Array.from(new Uint8Array(bits), b => b.toString(16).padStart(2, '0')).join('');
+  _cfgSlotBaseMemo.set(secret, hex);
+  return hex;
+}
+// The ORIGINAL cheap slot base. Kept ONLY so backups written before the line above moved
+// to PBKDF2 are still findable — never written to any more. See _cfgFetchSlot.
+async function _cfgSlotBaseLegacy(user, pw) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(CFG_SLOT_SALT + '|' + _cfgSecret(user, pw)));
   return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -18185,7 +18365,20 @@ async function _cfgFetch(key) {
   if (!r.ok) throw new Error('fetch failed (' + r.status + ')');
   return r.text();
 }
-async function _cfgLoadManifest(user, pw, base) {
+// Read one key ('m', or 's<idx>') from THIS user's namespace, falling back to the
+// pre-PBKDF2 namespace when the current one 404s. Backups taken before the slot base
+// moved to PBKDF2 live under _cfgSlotBaseLegacy and would otherwise be unreachable —
+// the ciphertext is untouched by the change (the AES-GCM key derivation is byte-for-byte
+// what it always was), so an old blob decrypts normally once found. WRITES always go to
+// the current base, so the ring migrates one slot at a time as new backups are taken and
+// nothing is stranded in the meantime. Only a true 404 falls through; a 5xx/network error
+// still propagates, so a transient failure can't be read as "not there".
+async function _cfgFetchSlot(user, pw, suffix) {
+  const cur = await _cfgFetch((await _cfgSlotBase(user, pw)) + suffix);
+  if (cur != null) return cur;
+  return _cfgFetch((await _cfgSlotBaseLegacy(user, pw)) + suffix);
+}
+async function _cfgLoadManifest(user, pw) {
   // Return the empty ring ONLY for a true 404 (no manifest yet / first use, OR a
   // wrong user+password → a different, non-existent namespace). A transient fetch
   // error (5xx / network) or a corrupt/undecryptable body must PROPAGATE — else
@@ -18194,7 +18387,7 @@ async function _cfgLoadManifest(user, pw, base) {
   // The manifest is ENCRYPTED (it holds your notes + timestamps); since the base is
   // per-(user,pw), only THIS key ever wrote it, so a 200 that won't decrypt is
   // genuine corruption, not a wrong password.
-  const m = await _cfgFetch(base + 'm');   // throws on non-404 errors → caller aborts
+  const m = await _cfgFetchSlot(user, pw, 'm');   // throws on non-404 errors → caller aborts
   if (m == null) return { next: 0, list: [] };
   let o;
   try { o = JSON.parse(await _cfgDecrypt(user, pw, m)); }
@@ -18211,7 +18404,7 @@ async function cfgBackup(user, pw, note) {
   if (!_cfgSecureContextOk()) return;
   if (!user || !pw) throw new Error('enter a username and password — together they encrypt + address the backup');
   const base     = await _cfgSlotBase(user, pw);
-  const manifest = await _cfgLoadManifest(user, pw, base);
+  const manifest = await _cfgLoadManifest(user, pw);
   const idx      = manifest.next % CFG_BACKUP_MAX;
   const blob     = await _cfgEncrypt(user, pw, JSON.stringify({ v: 1, savedAt: Date.now(), config }));
   await _cfgPut(base + 's' + idx, blob);
@@ -18227,7 +18420,7 @@ async function cfgBackup(user, pw, note) {
 async function cfgRenameBackup(user, pw, i, note) {
   if (!_cfgSecureContextOk()) return;
   const base = await _cfgSlotBase(user, pw);
-  const manifest = await _cfgLoadManifest(user, pw, base);
+  const manifest = await _cfgLoadManifest(user, pw);
   const entry = manifest.list.find(e => e.i === i);
   if (!entry) throw new Error('that backup is no longer in the index');
   entry.note = (note || '').slice(0, 80);
@@ -18239,8 +18432,7 @@ async function cfgRenameBackup(user, pw, i, note) {
 // Save to push it.
 async function cfgRestore(user, pw, i) {
   if (!_cfgSecureContextOk()) return;
-  const base = await _cfgSlotBase(user, pw);
-  const blob = await _cfgFetch(base + 's' + i);
+  const blob = await _cfgFetchSlot(user, pw, 's' + i);
   if (!blob) throw new Error('that backup slot is empty');
   let obj;
   try { obj = JSON.parse(await _cfgDecrypt(user, pw, blob)); }
@@ -18285,8 +18477,7 @@ function _cfgExtractConfig(parsed) {
 // config .json file — the portable, human-inspectable form of a cloud backup.
 async function cfgDownload(user, pw, i, note, ts) {
   if (!_cfgSecureContextOk()) return;
-  const base = await _cfgSlotBase(user, pw);
-  const blob = await _cfgFetch(base + 's' + i);
+  const blob = await _cfgFetchSlot(user, pw, 's' + i);
   if (!blob) throw new Error('that backup slot is empty');
   let obj;
   try { obj = JSON.parse(await _cfgDecrypt(user, pw, blob)); }
@@ -18309,7 +18500,7 @@ async function cfgUploadFile(user, pw, file) {
   catch (e) { throw new Error('that file is not valid JSON'); }
   const cfg      = _cfgExtractConfig(parsed);
   const base     = await _cfgSlotBase(user, pw);
-  const manifest = await _cfgLoadManifest(user, pw, base);
+  const manifest = await _cfgLoadManifest(user, pw);
   const idx      = manifest.next % CFG_BACKUP_MAX;
   const blob     = await _cfgEncrypt(user, pw, JSON.stringify({ v: 1, savedAt: Date.now(), config: cfg }));
   await _cfgPut(base + 's' + idx, blob);
@@ -18402,7 +18593,7 @@ function cfgOpenCloudModal() {
     _persistCreds();
     setStatus('Loading backups…');
     let manifest;
-    try { manifest = await _cfgLoadManifest(user, pw, await _cfgSlotBase(user, pw)); }
+    try { manifest = await _cfgLoadManifest(user, pw); }
     catch (e) { setStatus(e.message || 'Could not reach the backup service.', true); return; }
     const wrap = $('cfg-cloud-list-wrap');
     const list = manifest.list.slice().sort((a, b) => b.ts - a.ts);

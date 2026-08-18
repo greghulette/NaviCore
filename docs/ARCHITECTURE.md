@@ -101,8 +101,10 @@ the code but no current board uses it.
 
 **Silkscreen vs. firmware names.** The NaviCore v2 PCB labels its aux headers
 *Serial 1 / 2 / 3*; the firmware calls the same ports **S3 / S4 / S5** (inherited from
-WCB numbering). Any user-facing text must translate. See
-[ROADMAP.md](ROADMAP.md) — a planned change renumbers the mesh-facing names to S1–S3.
+WCB numbering). Any user-facing text must translate — and the **mesh-facing** names already
+do: `;s<n>` routing and WDP PORTLABEL use **S1 / S2 / S3**, converted once at the edge by
+`rcFwPortForMesh()` / `rcMeshPortForFw()` (rc_config.h). Everything past that edge is in
+firmware numbering. See [ROADMAP.md §1](ROADMAP.md).
 
 ---
 
@@ -175,6 +177,7 @@ wcb->update()                  mesh heartbeats, ACKs, WCBStream flush
 naviota::drainOtaPackets()     + checkOtaTimeout()
 drainRemoteCli()               relayed CLI lines → execCliLine with output tee'd to RTERM
 maePumpRemoteEmits()           mesh-relayed Maestro read replies → [MAE:] markers
+drainMaestroCmd()              inbound ;M routed here by a WCB → local Maestro (one per pass)
 drainPeerEvents()              new-peer action + LED alert
 checkBootRollCall()            one shot at 30 s — name any configured board never heard
 drainRemoteTriggers()          remote TRIGGER → rcDispatch on the right core
@@ -189,6 +192,7 @@ checkPendingActions()          delayed actions
 sendPWMUpdate()                PWM_UPDATE stream (50 ms) when monitoring
 handleSerialInput()            one USB line per pass
 pollAuxSerialRx()              drain S3/S4/S5 RX so their FIFOs never overflow
+drainSerialFwd()               queued mesh→serial writes, a few bytes per pass
 HCR fade tick / maestroIdleReleaseTick() / trackSbusFps() / #L10 live dump
 ```
 
@@ -211,11 +215,17 @@ executed inline.** The queues:
 |---|---|---|---|
 | `remoteTriggerQueue` | `onWCBCommand` → `rcTelemetry::handle` | `drainRemoteTriggers()` | `{mode, btn, tap}` |
 | `remoteCliQueue` | `onWCBCommand` | `drainRemoteCli()` | relay id + CLI line |
+| `serialFwdQueue` | `onWCBCommand` — targeted `;s<n>` + broadcast-out | `drainSerialFwd()` | `{fwPort, text[201]}` |
+| `maestroCmdQueue` | `onWCBCommand` — inbound `;M` | `drainMaestroCmd()` | `{sender, text[48]}` |
 | `forgetPeerQueue` | Via-WCB `FORGET_PEER` | `drainForgetPeer()` | board id (0 = all) |
 | `peerEventQueue` | `onWcbNeighbor` | `drainPeerEvents()` | board id |
 | `naviota::otaPktQueue` | `otaRawPacketHook` | `drainOtaPackets()` | OTA control/data structs |
-| `navirec` capture queue | `rcExecuteActionNow` (**either core**) | `navirec::drain()` | `RecEvent` |
+| `navirec` capture queue | `rcExecuteActionNow` (Core 1 — hop kept as a safeguard) | `navirec::drain()` | `RecEvent` |
 | `rcTelemetry` pending slots | `handle()` under `_pendingMutex` | `tick()` | deferred config saves, test actions |
+
+The two serial queues are not conveniences: S4/S5 are bit-banged `SoftwareSerial`, so a write blocks
+with interrupts off for the whole frame time, and a Maestro `get*` blocks up to 25 ms waiting
+on the reply. Either one on the WiFi task stalls ESP-NOW and jitters the SBUS path.
 
 Enqueue helpers are marked `__attribute__((noinline))` so their locals do not inflate the
 ESP-NOW callback's stack frame — a prior stack overflow was fixed exactly this way.
@@ -375,6 +385,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | §7/§8 completed: the loop sequence and the Core-0→Core-1 queue table gained `drainMaestroCmd()` / `serialFwdQueue` and `drainSerialFwd()` / `maestroCmdQueue`, with the reason they must be deferred (bit-banged S4/S5 writes block with interrupts off; a Maestro `get*` blocks 25 ms). §8's `navirec` capture row now reads **Core 1** — remote TRIGGERs are deferred through `drainRemoteTriggers()`, so the queue hop is a safeguard rather than a cross-core requirement. §4: the mesh-facing **S1–S3** renumber is shipped, stated as current instead of planned. |
 | 2026-08-18 | _(uncommitted)_ | Core-0 stack: both `FragSession` slot-clear sites now call `rcTelemetry::_fragClear()` instead of assigning `FragSession{}`, which was materialising a ~3.3 KB temporary per site and ~7 KB nested on the ESP-NOW callback (`handle()` 3632→368 B, `_findOrAllocSession()` 3328→32 B, `-fstack-usage`). Recorded the wider rule in §8. `processKnobs()` now returns early while `calibrationActive` (§9) — dispatch muting alone let passthrough servos track the wizard's full-range sweeps. Post-save live re-apply factored into `applyConfigSideEffects()` and called from BOTH the USB and Via-WCB save paths (§13); the mesh path previously skipped it entirely. |
 | 2026-08-12 | _(uncommitted)_ | `rcTelemetry::tick()` gained the 30 s mesh-stats `;V` push and the deferred bridged `MESH_STATS` reply (`_pendingMeshStatsSender`, same Core-0-defer discipline as `WCB_STATUS`). Inbound COMMANDs are now counted in `onWCBCommand` (`g_meshRxCount`/`g_meshRxFrom`) because `WCB_Client`'s own statistics are outbound-only. |
 | 2026-08-12 | _(uncommitted)_ | `onStatusChange`/`onWcbStatus` + the 30 s boot roll call added to the setup order and the loop sequence. Recorded the concurrency rule that `onWcbStatus` is the **one callback firing on both cores** (ONLINE from the RX task, OFFLINE from `update()`), and why its name must come from `rcTelemetry::wcbAlias()` rather than `getNeighbor()->name`. |

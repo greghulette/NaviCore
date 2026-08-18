@@ -74,7 +74,8 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 | `wledSlots[4]` | `RcWledSlot` | Per-id WLED routing |
 | `auxBaud[3]` | `uint32_t` | `[0]`=S3, `[1]`=S4, `[2]`=S5 |
 | `maestroBaud` | `uint32_t` | Serial2 line rate |
-| `serialLabels[5][25]` | `char` | WDP port-label **overrides**; `""` = auto-derive |
+| `serialLabels[4][25]` | `char` | WDP port-label **overrides**, indexed by FIRMWARE port (`RC_SLBL_S3`/`S4`/`S5`/`MAESTRO`); `""` = auto-derive |
+| `serialBcastOut[3]` / `serialBcastIn[3]` | `bool` | Per-aux-port mesh bridging, indexed like `auxBaud` (`[0]`=S3, `[1]`=S4, `[2]`=S5). JSON key `serialBcast`, keyed `"S3"/"S4"/"S5"` with `{out,in}`. Both default **off** — a port only joins the broadcast domain when asked; targeted `;s<n>` writes need neither flag. See [ROADMAP.md §1](ROADMAP.md) |
 | `maeGateMs` | `uint16_t` | Remote Maestro busy-gate validity (default 250; fails **open**) |
 | `smoothProfiles[6]` | `RcSmoothProfile` | ~4.6 KB of per-mode/per-channel speed+accel |
 | `peerNewActions` | `RcTier` | Up to 5 actions fired when a new mesh peer appears |
@@ -174,13 +175,22 @@ acts on — they exist so the tool's labels travel with the config.
 
 ### Serial port labels
 
-`serialLabels[5]` maps to WDP ports 1–5: `[0]` SBUS, `[1]` local Maestro, `[2]`–`[4]` =
-S3/S4/S5. An empty string falls back to `rcSerialLabelAuto()`, which derives a label from
+`serialLabels[4]` is indexed by **firmware** port — `RC_SLBL_S3`/`S4`/`S5`/`MAESTRO` — so the
+stored config stays independent of the mesh S1/S2/S3 numbering, and its JSON keys are the same
+strings `auxBaud` uses: `"S3"/"S4"/"S5"/"maestro"`. There is no SBUS slot. An empty string
+falls back to `rcSerialLabelAuto()`, which derives a label from
 what the config routes there (`Maestro`, `HCR`, `MP3`, `DFPlayer`, `WLED`). That one
 function is also what `auxPortHasDevice()` reads, so a device added there is automatically
 excluded from the serial broadcast fan-out — there is no second list. `rcSerialLabel()` applies
-override-then-auto and `rcAdvertiseSerialLabels()` pushes all five to
-`WCB_Client::setPortLabel()`.
+override-then-auto, and `rcAdvertiseSerialLabels()` pushes the four through
+`rcWdpPortForLabel()`: S3/S4/S5 advertise as **WDP 1/2/3**, the local Maestro as **WDP 4**
+(labelled but deliberately not reachable by `;s<n>` — it is a binary bus), then WDP 5 is
+explicitly cleared because NaviCore has no fifth labelable port.
+
+**An unrecognised key is worse than ignored.** `rcConfigFromJSON()` memsets all four slots
+before matching keys, so a `serialLabels` object written the old way (WDP numbers `"1"`–`"5"`)
+does not just fail to apply — it clears every stored override, and every port falls back to
+its auto-derived default.
 
 ---
 
@@ -287,6 +297,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | §3 gained `serialBcastOut[3]` / `serialBcastIn[3]` (JSON `serialBcast`) — the per-aux-port mesh bridging flags were shipped but undocumented here. Corrected `serialLabels`: **4** slots indexed by firmware port (`RC_SLBL_S3/S4/S5/MAESTRO`, JSON keys `"S3"/"S4"/"S5"/"maestro"`), not 5 indexed by WDP port with an SBUS slot — the page still described the pre-migration layout. Recorded that `rcConfigFromJSON()` memsets the slots before matching, so an old-style (`"1"`–`"5"`) object clears every override rather than misapplying it. |
 | 2026-08-13 | _(uncommitted)_ | `statsReport.wcb` documented as **optional** (0 = collect/display, ship nothing) and `enabled` clarified as a statement of intent — the counters run from boot regardless and are never reset in-session, so nothing here gates collection. |
 | 2026-08-12 | _(uncommitted)_ | Added `statsReport` (`{enabled, wcb}`) — the optional 30 s `;V` push of this board's ESP-NOW delivery counters to one WCB, with the one-variable-per-counter and `;V`-not-`;VP` constraints. Also documented `modeReport`, which was in the firmware but missing from this table. |
 | 2026-08-11 | _(uncommitted)_ | Added `wcbProfiles[≤6]` + `wcbProfileCount` (`RcWcbProfile`) — saved WCB mesh identities the config tool switches between, now stored in the config (was browser localStorage) so they travel with the droid + backups. New capacity constant `RC_MAX_WCB_PROFILES` (6) and its cross-file pair `WCB_MAX_PROFILES`. |

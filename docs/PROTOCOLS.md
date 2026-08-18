@@ -346,13 +346,23 @@ Streams straight to LittleFS by byte offset — **O(1) RAM**. Implemented in `WC
 | Direction | Frame |
 |---|---|
 | tool → RC | `{"bb":sid,"n":chunks,"t":totalLen,"g":"cmdlib","h":hash}` |
-| tool → RC | `{"bc":sid,"q":seq,"o":offset,"s":"<base64 of 96 raw bytes>"}` |
-| tool → RC | `{"bd":sid}` |
-| RC → tool | `{"bs":sid,"got":N,"miss":[…]}` — selective NACK |
-| RC → tool | `{"bs":sid,"done":1,"ok":0\|1,"hash":H}` |
+| tool → RC | `{"bc":sid,"q":seq,"s":"<base64 of ≤96 raw bytes>"}` — **no offset on the wire** |
+| tool → RC | `{"bd":sid,"r":round}` |
+| RC → tool | `{"bs":sid,"got":N,"r":round,"miss":[…]}` — selective NACK; `miss[]` is advisory |
+| RC → tool | `{"bs":sid,"nb":1}` — need-BEGIN: the RC lost the session, resend BEGIN + every chunk (rate-limited to 400 ms) |
+| RC → tool | `{"bs":sid,"done":1,"ok":0\|1,"hash":H,"r":round}` |
 
 `BULK_CHUNK_RAW = 96`, `BULK_MAX_CHUNKS = 512`, envelope cap 187 B, 150 ms pacing. Hash is
 FNV-1a over the bytes. Staging file: `/cmdlib.json.bulk.tmp`, cleared at boot.
+
+**A chunk's byte offset is derived, never carried.** The receiver computes
+`q * BULK_CHUNK_RAW` itself, so a corrupt or hostile frame cannot make it seek anywhere the
+index does not allow — do not add an offset field back.
+
+**`r` is the retry round**, and both sides need it. The sender re-sends DONE each round and
+discards any STATUS carrying an older round, so a late reply from a previous round can't be
+read as progress. A `nb` reply is the only recovery from a droid that rebooted mid-transfer:
+without handling it a sender simply stalls, because the RC will never accept another chunk.
 
 ### Bridged status and metadata
 
@@ -523,6 +533,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | §4 bulk-transfer frames corrected to the wire as implemented: CHUNK carries **no** `"o"` offset (the receiver derives `q * BULK_CHUNK_RAW` and deliberately never trusts one), DONE/STATUS/FINAL all carry `"r":round`, and the `{"bs":sid,"nb":1}` need-BEGIN reply — previously undocumented, and the only recovery from a droid that reboots mid-transfer — now has a row. |
 | 2026-08-17 | _(uncommitted)_ | Added `GET_WCB_SEQVAL` → `WCB_SEQVAL` (ONE stored sequence's contents by key, on `WCB_Client` 1.15.0's `requestSequence()`), so the command library can show what a chosen sequence does. `status` is a real answer — 0 OK / 1 NOTFOUND / 2 TOOBIG — not an error, and the `value` is passed through verbatim because its `^` delimiters and `***` comments are what the consumer renders. The load-bearing part: the library allows **one** request in flight across names *and* values, so the firmware's pull slot is now tagged with its kind and every reply and timeout checks it — a names answer emitted as a value one, or a failure carrying the wrong `type`, settles the wrong request in the tool and leaves the real one hanging. `key` joins `wcb` in the `handleSerialInput()` filter whitelist. |
 | 2026-08-17 | _(uncommitted)_ | Added `GET_WCB_SEQ` → `WCB_SEQ` (a WCB's stored-sequence key names, pulled off the mesh with `WCB_Client` 1.15.0's `requestSequenceNames()`) and the per-board `seqHash[]` fingerprint, carried in `WCB_STATUS` on USB and `WCB_META` over the bridge. Four constraints are load-bearing: the reply is **async** (6 s `no reply` timeout, because the library abandons its own pull silently at ~4 s); **one pull at a time mesh-wide** (a second is rejected, not queued); **names only, never bodies** (the whole set has no ceiling — the same failure the WCB config pull already has); and `wcb` must be in the `handleSerialInput()` filter whitelist or it is stripped and read as 0. Bridge replies fragment on `OS_WCB_SEQ`; the pull and every error reply are issued from `tick()` on Core 1 because both are ESP-NOW transmits. Also corrected the `GET_WCB_STATUS` row's stale "See §5" — that content is §4. |
 | 2026-08-13 | _(uncommitted)_ | `MESH_STATS` is now **paged** (`"pg"`/`"last"`) so the full per-board roster crosses the bridge — measured: no per-board data for a 6-board fleet fits one 185 B frame alongside the aggregate at all, so the earlier shed-tier approach could only ever drop boards. Page 0 deliberately carries no rows. Consumer merges by id and promotes only a contiguous set ending in `last`. `agg` keys abbreviated to `rty`/`fail`/`ung` to buy row space. `buildMeshStatsPage()` is the single builder for USB **and** bridged. |

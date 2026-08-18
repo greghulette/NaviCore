@@ -13,10 +13,12 @@
 // dispatch helpers are `static`, so we reach them through callbacks registered
 // from NaviCore.ino (recBegin).
 //
-// CONCURRENCY (the load-bearing part): the action tap (rcExecuteActionNow) runs
-// on BOTH cores — Core 0 for a remote ESP-NOW TRIGGER (onWCBCommand ->
-// rcTelemetry::handle -> rcDispatch, no defer) and Core 1 for local input. So
-// captures go through a FreeRTOS queue (non-blocking, drop-if-full, small POD,
+// CONCURRENCY (the load-bearing part): the action tap (rcExecuteActionNow) is
+// treated as if it can run on EITHER core. A remote ESP-NOW TRIGGER no longer
+// dispatches inline on Core 0 — onWCBCommand queues it and drainRemoteTriggers()
+// runs it on Core 1 — but the queue discipline below is what makes that safe to
+// rely on, and any new Core-0 caller would land here first. So captures go
+// through a FreeRTOS queue (non-blocking, drop-if-full, small POD,
 // noinline enqueue — same discipline as the OTA/remote-CLI queues that fixed the
 // prior WiFi-task stack overflow). loop() drains the queue into the PSRAM buffer
 // on Core 1 as the SOLE writer. The lastPos servo shadow is a single atomic
@@ -203,6 +205,14 @@ inline uint32_t eventCount()     { return _count; }
 // what it stopped so the CLI can report it. Replay-abort hands live control back
 // next loop (the isReplaying() gates clear).
 inline uint8_t stop() {
+  // ST_EDITING is NOT ours to clear: a timeline upload owns `_buf`/`_count`
+  // between EDITBEGIN and EDITEND, and this is reachable mid-upload from a
+  // mapped Stop button, a relayed mesh RA_STOP trigger, and `?REC,STOP`.
+  // Dropping to ST_IDLE there NAKs every remaining EDITEV and makes the save
+  // fail, and leaves the partially-uploaded buffer exposed to a following
+  // STOP+SAVE (saveClip only gates on ST_IDLE). Abandoning an upload is
+  // editCancel()'s explicit job.
+  if (_state == ST_EDITING) return _state;
   uint8_t was = _state;
   if (_state == ST_RECORDING) { _capturing = false; drain(); }
   _state = ST_IDLE;
@@ -291,7 +301,13 @@ inline void _rewindCurves() {
       if (!cv.active) continue;
       cv.tPrev = 0;
       cv.nextIdx = cv.firstIdx;
-      cv.reanchor = false;
+      // Re-derive pose knowledge instead of blanket-clearing it: if a goHome /
+      // stopScript / Set-Target-0 fired mid-lap, the servo snapped somewhere we
+      // can't read back and pPrev is stale. Clearing reanchor here would ease
+      // the next lap outward from that stale anchor at speed/accel 0 (unlimited)
+      // — a full-speed slam, every lap. Channels whose pose IS known keep the
+      // smooth seam this function exists for.
+      cv.reanchor = (_lastPos[s][c] == LASTPOS_NONE);
     }
   }
 }
@@ -430,6 +446,24 @@ inline bool saveClip(const char* name) {
 
 inline int _cmpEventByTime(const void* a, const void* b);   // defined below; used by loadClip's re-sort
 
+// Chronological re-sort, but ONLY when the buffer is actually out of order.
+// `qsort` is not a stable sort and the comparator ties on equal tMs, so sorting
+// an ALREADY-ordered clip can invert two events captured in the same
+// millisecond — which a button tier reliably produces (rcExecuteAction fires
+// every action of a tier inside one loop iteration, so they all get the same
+// millis()), e.g. [MP3 SetVolume 20][MP3 Play 5] replaying as Play-then-Volume.
+// Both real producers already emit ordered events — the recorder monotonically,
+// and the timeline editor via JS's stable Array.sort before upload — so the scan
+// is the entire cost on every well-formed clip and capture order survives
+// verbatim. The sort stays as the defensive path for a corrupt or externally-
+// authored .ncr; it remains qsort rather than a stable insertion sort because
+// _cap is 24000 events of ~130 bytes and an O(n²) shuffle of that is unbounded.
+inline void _ensureTimeOrdered() {
+  for (uint32_t i = 1; i < _count; i++) {
+    if (_buf[i].tMs < _buf[i - 1].tMs) { qsort(_buf, _count, sizeof(RecEvent), _cmpEventByTime); return; }
+  }
+}
+
 inline bool loadClip(const char* name) {
   if (!_clipFS || _state != ST_IDLE || !_buf) return false;
   char path[48]; if (!_clipPath(path, sizeof(path), name)) return false;
@@ -446,8 +480,9 @@ inline bool loadClip(const char* name) {
   // event cursor, clipDurationMs() (reads the LAST slot), and the phase-1b
   // curve-chain builder all assume time-ordered events, so a corrupt or
   // externally-authored .ncr can't drive replay off the rails. Same re-sort
-  // editEnd() performs after a timeline upload; idempotent for a good clip.
-  if (_count > 1) qsort(_buf, _count, sizeof(RecEvent), _cmpEventByTime);
+  // editEnd() performs after a timeline upload; a no-op for a good clip, which
+  // is what keeps same-millisecond capture order intact (see _ensureTimeOrdered).
+  _ensureTimeOrdered();
   return _count > 0;
 }
 
@@ -483,9 +518,11 @@ inline bool renameClip(const char* from, const char* to) {
 //       ?REC,EDITEV,<event json>  → [CLIPUL:ACK,<count>] | [CLIPUL:NAK,<reason>]
 //       ?REC,EDITEND,<name>       → [CLIPUL:END,OK|ERR,<reason>]
 //     `ST_EDITING` (new state) blocks a concurrent live Record/Play trigger
-//     mid-upload from stomping `_buf`/`_count` out from under it — every other
-//     entry point already gates on `_state==ST_IDLE`, so adding one more state
-//     value automatically fences it out (no other call site needs to change).
+//     mid-upload from stomping `_buf`/`_count` out from under it — pollControl's
+//     Record and Play branches gate on `_state==ST_IDLE`, so the new state value
+//     fences those out for free. `stop()` is the exception: it gated on nothing
+//     and needs (and has) its own explicit ST_EDITING early-return — don't assume
+//     a future entry point is fenced just because this state exists.
 //     A JSON event can carry a long WCB command (cmd[] is 95 chars) and, same as
 //     download, could exceed 160 B — the config tool applies the SAME per-source
 //     fragment-reassembly it already uses for [CLIPLIST] to any [CLIPDL:EV] that
@@ -596,7 +633,7 @@ inline const char* editEnd(const char* name) {
   // fail — the original bug.)
   _state = ST_IDLE;
   if (_count == 0) return "empty-clip";
-  qsort(_buf, _count, sizeof(RecEvent), _cmpEventByTime);
+  _ensureTimeOrdered();
   return saveClip(name) ? nullptr : "save-failed";   // saveClip prints the specific reason to the terminal
 }
 

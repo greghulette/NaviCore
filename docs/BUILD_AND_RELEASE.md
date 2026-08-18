@@ -129,10 +129,20 @@ Three bins per build:
 | Suffix | Flash address | Contents |
 |---|---|---|
 | `_ESP32S3.bin` | `0x10000` | Application (`ota_0`) |
-| `_ESP32S3_boot.bin` | `0x0` | Second-stage bootloader |
-| `_ESP32S3_part.bin` | `0x8000` | Partition table |
+| `_ESP32S3_boot.bin` | *not flashed* | Per-build bootloader artifact — see below |
+| `_ESP32S3_part.bin` | `0x8000` | Partition table, built from [`partitions.csv`](../partitions.csv) |
 
-The flasher matches by **suffix**, so the version prefix can change freely.
+The flasher finds the app by its `_ESP32S3.bin` **suffix**, then requires a `_part.bin` carrying the
+IDENTICAL version prefix — an app and a table from two different builds can never be paired (a table
+without the `clips` row flashes silently and only shows up later as an unmounted clips FS).
+
+**The bootloader at `0x0` is not the per-build `_ESP32S3_boot.bin`.** `flasher.js` fetches
+`firmware/WCB_S3_custom_bootloader_16MB_wdt3s.bin` by that **fixed** name — the custom
+short-WDT 16 MB bootloader (cold-boot auto-retry), the matched pair of the in-app boot guard.
+The name is fixed precisely so a per-build `_boot.bin` can never shadow it: `build-firmware.ps1`
+copies the custom bootloader under that name while `build-firmware.sh` (the CI path) copies
+arduino-cli's stock one, and neither is ever written to a board. See
+[firmware/README.md](../firmware/README.md).
 
 ---
 
@@ -159,7 +169,7 @@ API, so a fresh CI build is available to users the moment the workflow finishes.
 
 | Button | Effect |
 |---|---|
-| **⬆ Update Firmware** | Routine update. NVS at `0x9000` untouched; auto-detects whether app-only is safe or a full bootloader+partition+app write is needed |
+| **⬆ Update Firmware** | Routine update. NVS at `0x9000` untouched. Writes bootloader + partition table + app **unconditionally** — there is deliberately no read-back to decide app-only, because `readFlash()` over the S3's native USB wedges the esptool stub and times out the *next* write |
 | **⚠ Full Wipe & Flash** | First-time programming or recovery. Also erases NVS (`0x9000`, 20 KB) and OTA data (`0xE000`, 8 KB). **Erases all saved settings** |
 
 A serial app-flash preserves `/config.json` (it lives in LittleFS, not NVS). Blank boards
@@ -194,4 +204,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | §5/§7 corrected against `flasher.js`: the per-build `_ESP32S3_boot.bin` is **never flashed** — the flasher writes the fixed-name `WCB_S3_custom_bootloader_16MB_wdt3s.bin` at `0x0`, which is why that name is fixed (a per-build `_boot.bin` must not shadow it) — and **Update Firmware** writes bootloader + partition table + app unconditionally rather than auto-detecting, because reading flash back over the S3's native USB wedges the esptool stub. Also recorded the app/table version pairing rule. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

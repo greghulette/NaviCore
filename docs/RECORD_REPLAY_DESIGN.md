@@ -1,7 +1,9 @@
 # NaviCore Record / Replay — Design Spec (v2, validated)
 
-Status: **DESIGN — validated against code, ready for phase-1 build.**
-Last updated 2026-06-30. v2 folds in a 22-agent validation pass (see §12 changelog).
+Status: **BUILT** — phase 1, phase 1b (interpolated replay) and phase 2 (the timeline editor)
+are all shipped; §10 and §13 record what each covers. This page stays the reference for the
+data model. Where it describes something that was designed but never built, the section says
+so explicitly — trust the labels, not the prose. History is in §12.
 
 ## Goal
 
@@ -30,31 +32,49 @@ that picker on a timeline.
 
 | Tap | Captures | Core |
 |---|---|---|
-| `rcExecuteActionNow()` (NaviCore.ino:926) | Every discrete action (WCB uni/broadcast, Maestro, Serial, HCR, MP3) | **Core 1 AND Core 0** ⚠ |
-| `processKnobs()` sinks — `maestroSetTarget` (:1196), `dispatchHcrVolume` (:1199) | Continuous gimbal/knob streams (synthesized as `setTarget`/`SetVolume` events) | Core 1 |
+| `rcExecuteActionNow()` (NaviCore.ino ≈1820) | Every discrete action (WCB uni/broadcast, Maestro, Serial, HCR, MP3) | Core 1 |
+| `processKnobs()` sinks — `maestroSetTarget` (≈963), `dispatchHcrVolume` (≈2147) | Continuous gimbal/knob streams (synthesized as `setTarget`/`SetVolume` events) | Core 1 |
 
-⚠ **`rcExecuteActionNow` runs on Core 0** for a remote ESP-NOW TRIGGER (`onWCBCommand` →
-`rcTelemetry::handle` → `rcDispatch` → `rcExecuteActionNow`, rc_telemetry.h:863-871, no defer to
-loop). It also runs on Core 1 (local press, `checkPendingActions`, Web-Serial TRIGGER). This dual-core
-reachability **dictates the recorder's concurrency design** (§6) — it is the exact class of bug that
-crashed the board during the OTA work.
+**All dispatch lands on Core 1.** A remote ESP-NOW TRIGGER arrives on Core 0, but
+`rcTelemetry::handle()` does not dispatch it — it calls `queueRemoteTrigger()` (rc_telemetry.h
+≈1960) and `drainRemoteTriggers()` runs `rcDispatch()` from `loop()` on Core 1, the same path a
+local press takes. So the capture tap has exactly one caller core, and the queue hop in §6 is
+kept as a cheap safeguard rather than a hard requirement — `rcExecuteActionNow`'s own comment
+says exactly that.
+
+**Do not "simplify" `drainRemoteTriggers()` back to inline dispatch.** That is what puts
+Maestro/Serial2 writes and cache mutation back on the Core-0 WiFi task, which is the class of
+bug that crashed the board during the OTA work.
 
 ---
 
-## 2. Clip structure — baseline header + event list
+## 2. Clip structure — header + event list
 
-The header snapshots the **global state** the events silently depend on.
+The shipped on-disk header is **five fields** (`ClipFileHeader`, `navicore_record.h`), written by
+`saveClip()`; the body is a raw `RecEvent[count]` array immediately after it, and nothing else.
 
-| Header field | Why |
+| Header field | Notes |
 |---|---|
-| `version, name[32], durationMs, createdDtg` | Metadata (tool stamps real date on save). |
-| `mode` (1–3) | Context. |
+| `magic[4]` = `"NCR1"` | The **only** thing `loadClip()` validates. Adding a field to this struct therefore does not reject older clips — it silently misreads every clip already on the 12 MB `clips` partition, because the magic still matches while every following field shifts. A layout change needs a new magic or a version gate, never a quiet append. |
+| `version` (1) | Format version. |
+| `mode` (1–3) | `FunctionSwState` at record time — clip context. |
+| `count` | `RecEvent` entries following the header. |
+| `durationMs` | Clip length, from `clipDurationMs()` at save. |
+
+### Designed, not built — the baseline-state snapshot
+
+The original design also snapshotted the **global state** the events silently depend on. None of
+it is stored today; the rows are kept because the reasoning is what a future format revision needs.
+
+| Header field | Why it was wanted |
+|---|---|
+| `name[32]`, `createdDtg` | Metadata (tool stamps real date on save). The name lives in the filename instead. |
 | `boardType` + `auxBaud[3]` | A clip replayed on the *other* board profile (v2 PCB vs WCB 3.2) would mis-route / mis-speed local serial; record so the tool can warn on mismatch. |
 | `hcrDest` {transport, target[6], wcbPort} | HCR actions carry only `fn/chan/track`; destination is **global**. |
 | `mp3Dest` {transport, target[6]} | Same — MP3 destination is global. |
 | `maestros[8]` {type, device} | Maestro actions carry a **logical slot id**; wiring + Pololu device # live here. |
 | `hcrLocalVol[3]`, `mp3LocalVolume` | Volume **shadows** — restore before replay so relative *volume* ops replay deterministically. |
-| `servoHome[]` {slot, ch, pos} | Last-commanded position per **slot+ch** (see §6) at clip start → ease-in. Excludes channels never driven or invalidated by `goHome` (sentinel `0xFFFF`). **Key strictly by slot id (1–8), never device#** — two slots may legally share a device# on different buses (NaviCore.ino:432-434), so a device#-keyed shadow would alias two servos. |
+| `servoHome[]` {slot, ch, pos} | Last-commanded position per **slot+ch** (see §6) at clip start → ease-in. Excludes channels never driven or invalidated by `goHome` (sentinel `0xFFFF`). **Key strictly by slot id (1–8), never device#** — two slots may legally share a device# on different buses (NaviCore.ino:432-434), so a device#-keyed shadow would alias two servos. **Built differently:** the ease-from anchor is the LIVE `_lastPos` shadow, read at replay start by `_buildCurveIndex()`, not a stored header field — see §6. |
 
 ### Event records (tagged, timestamped)
 
@@ -97,8 +117,10 @@ The header snapshots the **global state** the events silently depend on.
 - **Replay re-dispatches through the same path** (`rcExecuteActionNow` → `executeHcrAction`/…), so the
   emotion-`chan=4`→Overload rewrite, numeric-vs-readable-verb WCB encoding, and absolute-volume
   derivation re-apply for free. Store the raw `RcAction`; the dispatcher does the rest.
-- **Relative *volume* ops are deterministic** (HCR VolumeUp/Down, MP3 Vol±) because the header restores
-  the volume shadows.
+- **Relative *volume* ops are NOT restored to a baseline.** The header carries no volume shadows
+  (§2) and `startReplay()` restores nothing, so HCR VolumeUp/Down and MP3 Vol± replay against
+  whatever the live volume happens to be. Absolute `SetVolume` keyframes (`0x03`) are unaffected —
+  prefer them in anything that has to replay identically.
 - **MP3 `NEXT`/`PREV` are NOT deterministic on replay** — they advance the module relative to its live
   track pointer, which NaviCore doesn't shadow and the module won't read back. *Phase-1 policy:* mark
   them best-effort and recommend absolute `Play track` in recorded routines. *(Optional later: capture
@@ -118,18 +140,19 @@ a latched limit would fight it). Recording auto-suppresses during calibration.
 
 ## 6. Recorder mechanics — concurrency is the critical part
 
-**Single producer-safe queue, single PSRAM writer.** Because `rcExecuteActionNow` runs on both cores
-(§1), the recorder MUST mirror the proven OTA / remote-CLI pattern:
+**Single producer-safe queue, single PSRAM writer.** All dispatch now lands on Core 1 (§1), so the
+queue hop is a safeguard rather than a hard requirement — but it stays, because it is free and it is
+what keeps the tap itself blocking-free. The recorder mirrors the proven OTA / remote-CLI pattern:
 
 - **Both taps enqueue** a fixed POD event (`{tMs, RcAction}`, ~144 B) into ONE FreeRTOS queue via a
   `static __attribute__((noinline))` helper doing only `xQueueSend(q, &ev, 0)` (non-blocking,
-  drop-if-full). **No alloc, no flash, no mutex, no Serial, no large stack frame** in the tap — the tap
-  sits 4 frames deep on the Core-0 ESP-NOW stack on top of the ArduinoJson parse; the `noinline` + small
-  POD is exactly the `queueRemoteCli` fix that resolved the prior WiFi-task stack overflow
-  (NaviCore.ino:1338-1347). Drop-if-full is acceptable (a dropped keyframe thins one frame).
-- **`drainRecorder()` in `loop()` (Core 1)** — placed by `drainOtaPackets()`/`drainRemoteCli()`
-  (NaviCore.ino:2246/2252) — is the **sole** writer/serializer of the PSRAM grow buffer (all
-  realloc/append on Core 1 only; no mutex on the buffer needed).
+  drop-if-full). **No alloc, no flash, no mutex, no Serial, no large stack frame** in the tap — it sits
+  inside dispatch, which the SBUS path calls every frame, and the `noinline` + small POD is exactly the
+  `queueRemoteCli` discipline that resolved the prior WiFi-task stack overflow. Drop-if-full is
+  acceptable (a dropped keyframe thins one frame).
+- **`navirec::drain()` in `loop()` (Core 1)** — sitting with `drainOtaPackets()`/`drainRemoteCli()` —
+  is the **sole** writer/serializer of the PSRAM grow buffer (all realloc/append on Core 1 only; no
+  mutex on the buffer needed).
 - **Create the queue in `setup()` BEFORE `wcb->begin()`** (cf. `remoteCliQueue`) or the first remote
   TRIGGER hits a null queue.
 - **Capture-enable flag is `volatile`/atomic** (read once at top of tap), gated off during replay so
@@ -140,16 +163,19 @@ a latched limit would fight it). Recording auto-suppresses during calibration.
 **`lastPos` shadow (for `servoHome`):** a `volatile uint16_t lastPos[8][32]`, init to `0xFFFF`
 (never-commanded sentinel). `maestroSetTarget(slot,ch,pos)` writes `lastPos[slot-1][ch] = pos` — a
 single naturally-aligned 16-bit store, **lock-free and torn-write-free on Xtensa** even across cores.
-**Do NOT add any bitmap/counter/dirty-list RMW** in that tap (that would be the real race). At
-clip-start the recorder snapshots `lastPos` on Core 1 (skipping `0xFFFF`).
+**Do NOT add any bitmap/counter/dirty-list RMW** in that tap (that would be the real race). The shadow
+is read at **replay** start, not clip start — `_buildCurveIndex()` anchors each channel's curve on the
+live value, and a channel still holding the sentinel gets `reanchor` instead of an anchor.
 
 **`goHome` invalidates the shadow + curve:** `goHome`/`stopScript`/`restartScript` bypass `setTarget`,
 so hook `maestroGoHome(slot)` to set `lastPos[slot-1][*] = 0xFFFF` for all channels (home pose unknown
 → omit from `servoHome`); the player clears that slot's active curves when it re-emits `goHome`.
 
-**Save / replay:** stop → serialize header+events to `clip<N>.ncr` in the clips FS. Replay → restore
-shadows → reset speed/accel → ease to `servoHome` → schedule events by `tMs`, interpolating curves;
-**suspend live dispatch** and gate capture off.
+**Save / replay:** stop → serialize header+events to `<name>.ncr` in the clips FS. Replay →
+`_buildCurveIndex()` resets speed/accel on every channel the clip touches and anchors each curve on
+the **live** `_lastPos` shadow (a channel with no known position gets `reanchor`, so its first
+keyframe snaps instead of easing from 0) → schedule events by `tMs`, interpolating curves; gate
+capture off so re-dispatched events are not re-recorded.
 
 ---
 
@@ -198,10 +224,11 @@ clips,     data, spiffs,   0x400000,  0xC00000    # NEW — 12 MB, fills the 16 
 - **Build wiring (these files change together — `.github/workflows` is NOT touched, only `tools/`):**
   - Add `NaviCore/partitions.csv` (the 7 rows above).
   - `tools/build-firmware.ps1` **and** `tools/build-firmware.sh`: FQBN `PartitionScheme=custom` +
-    `FlashSize=16M`. **`build-firmware.sh` must also copy the custom 16 MB
-    `WCB_S3_custom_bootloader_16MB_wdt3s.bin`** (it currently copies arduino-cli's 4 MB stock — the
-    `.ps1` already copies the custom one). Otherwise CI republishes a stock table+bootloader and
-    **reverts** the change (the workflow auto-commits `firmware/*.bin`).
+    `FlashSize=16M`. Both, because the workflow auto-commits `firmware/*.bin` — a script left on the
+    stock scheme republishes a stock `_part.bin` and **reverts** the change. The per-build `_boot.bin`
+    is not part of that risk: the two scripts emit different ones (`.ps1` the custom 16 MB bootloader,
+    `.sh` arduino-cli's stock) and neither is ever flashed — `flasher.js` writes
+    `WCB_S3_custom_bootloader_16MB_wdt3s.bin` by that fixed name instead.
   - Update doc/comment mentions of `min_spiffs` in `firmware/README.md`, `build-firmware.ps1`, and the
     `flasher.js` layout comments (lines ~91-95 / ~279-284). `flasher.js` *logic* needs no change — it
     writes `part.bin@0x8000` unconditionally and never keys off the config/clips offsets; the otadata
@@ -240,7 +267,8 @@ Maestro/record/play/stop) — writing the clip back via a new `EDITBEGIN/EDITEV/
 - ✅ `goHome` shadow/curve desync → invalidate shadow + clear curve.
 - ✅ `hold` infeasible on matrix buttons → `toggle` for buttons, `hold`/`level` for switches.
 - ⚠ Residual (documented, low-impact): MP3 NEXT/PREV non-deterministic; slot/device aliasing affects
-  only ease-in pre-roll (config already illegal); cross-board replay mismatch (header warns).
+  only ease-in pre-roll (config already illegal); cross-board replay mismatch is **unmitigated** —
+  no `boardType` is stored in the header (§2), so nothing warns.
 
 ## 13. Phase 2 — timeline editor (built 2026-07-01, config-tool-verified; NOT hardware-tested)
 
@@ -311,6 +339,18 @@ as edited.
 
 ## 12. Changelog
 
+- **doc sync (2026-08-18, no code change):** page reconciled with the shipped firmware. Status is
+  **BUILT**, not "ready for phase-1 build". §1: `rcExecuteActionNow` runs on **Core 1 only** — a remote
+  ESP-NOW TRIGGER is queued by `rcTelemetry::handle()` and dispatched by `drainRemoteTriggers()` from
+  `loop()`, so the capture queue is a safeguard, not a cross-core requirement (§6 restated to match).
+  §2: the on-disk header is the five-field `ClipFileHeader` (`magic`/`version`/`mode`/`count`/
+  `durationMs`) followed by raw `RecEvent[count]`; the baseline-state snapshot is relabelled
+  **designed, not built**, with the trap that `loadClip()` validates only the magic, so appending a
+  header field misreads every stored clip instead of rejecting it. §4: no volume shadows are restored,
+  so relative volume ops are not deterministic. §6: the ease-from anchor is the live `_lastPos` shadow
+  read at replay start, not a stored `servoHome[]`. §11: cross-board replay mismatch is unmitigated —
+  there is no header field and no warning. §8: the per-build `_boot.bin` is never flashed, so only the
+  partition half of the build wiring can be reverted by CI.
 - **v3.24 (2026-07-03, config-tool only):** Second adversarial review sweep (27 raised → 10 confirmed → all
   fixed/dispositioned) + **Maestro script export**.
   **Review fixes:** (1) Maestro-channel MIGRATION actually persists now — the localStorage→config fold ran inside

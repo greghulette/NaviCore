@@ -99,7 +99,21 @@ public:
       // lockStreak_; under multi-ms loop timing that repeats every frame and the
       // stream NEVER locks (silent total loss of servo control). A partial just
       // keeps accumulating across read() calls instead.
-      if (inFrame_ && sinceLastByte > INTER_FRAME_GAP_US && bufIsCompleteFrame()) {
+      //
+      // The 25-byte case needs the extra prefix guard below, because "complete"
+      // is ambiguous there: a 25-byte SBUS-16 frame is a byte-for-byte PREFIX of
+      // a 36-byte SBUS-24 frame, and the gap measured here is the LOOP period,
+      // not a real line gap. So on a 24-ch stream whose data byte 24 is 0x00, a
+      // drain that happens to stop at index 25 gets flushed as a 16-frame on the
+      // next (slow) pass — knocking a confirmed 24-lock down to streak 1 and
+      // freezing every channel for ~4 frames. The byte in hand IS the byte that
+      // follows the 25 buffered ones, and after a REAL 16-frame that is always
+      // the next frame's header — the same test pendingLen16Check_ makes below,
+      // just applied synchronously. Do NOT gate on lockVariant_/detectedFrameLen
+      // instead: a receiver swapped 24→16 while powered would then never produce
+      // a parse at all, so the stale 24 lock could never be broken.
+      if (inFrame_ && sinceLastByte > INTER_FRAME_GAP_US && bufIsCompleteFrame() &&
+          (bufIdx_ != FRAME_LEN_16 || b == SBUS_HEADER)) {
         gotFrame = tryParseAndReset() || gotFrame;
       }
 

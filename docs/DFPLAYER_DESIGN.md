@@ -8,7 +8,7 @@ Companion pages: [ARCHITECTURE.md](ARCHITECTURE.md) (where executors live),
 [PROTOCOLS.md](PROTOCOLS.md) (the `;` verb space), [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) (the
 config object), [CONFIG_TOOL.md](CONFIG_TOOL.md) (the GUI).
 
-**Status: in progress.** Section 9 tracks what is built and what is not.
+**Status: shipped**, in every repo §8 lists. Section 9 is the piece-by-piece record.
 
 ---
 
@@ -228,16 +228,18 @@ Build order matters — `WcbCmd` ships first, because both firmwares compile it.
 | Wikis — WCB (new `DFPlayer-Mini` page, `Command-Reference`, `Home`, `_Sidebar`) | **done** |
 | `WcbCmd` golden vectors for `;D` | **done** — 20 byte-exact frames + 8 rejection cases in `examples/GoldenVectors`, compiles clean |
 
-**Nothing is pushed.** Six repos hold uncommitted work: `WcbCmd`, `NaviCore`,
-`Wireless_Communication_Board-WCB`, `WCBClient`, `Arduino-Code` (sketchbook mirrors), and both
-wikis. Push order is §8 — **`WcbCmd` first**, because both firmwares' CI clones it and neither
-will build until it lands.
+**Everything is pushed.** All six repos in §8 are on their masters — `WcbCmd` 0.8.0 first (the
+prerequisite both firmwares' CI clones), then `NaviCore` firmware + tool,
+`Wireless_Communication_Board-WCB`, `WCBClient`, the `Arduino-Code` sketchbook mirrors, and
+both wikis. §8's order is the rule for the *next* change that touches `WcbCmd`, not
+outstanding work.
 
 **Verification note.** Both firmwares were compiled against the **repo** `WcbCmd` via
 `--library c:/Users/ghulette/Documents/GitHub/WcbCmd`. Without that flag the sketchbook copy
 shadows it and neither build would see `DfPlayerCodec` at all. The sketchbook copy has since
-been refreshed, so a plain local compile works too — but CI clones `greghulette/WcbCmd`, and
-**nothing ships until that repo's master has the push**.
+been refreshed, so a plain local compile works too — and CI clones `greghulette/WcbCmd`, whose
+master carries 0.8.0. That gate is permanent: **nothing ships until that repo's master has the
+push**, so any future `;D` change goes there first.
 
 ---
 
@@ -248,4 +250,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | Status corrected to **shipped** — the header and the §9 tail still read "in progress" / "Nothing is pushed" after every repo had landed, which reads as a build-blocking `WcbCmd` prerequisite that was satisfied long ago. §8's push order restated as the rule for the next change rather than outstanding work. |
 | 2026-08-05 | _(uncommitted)_ | Feature built across all five repos: `WcbCmd` `DfPlayerCodec` (0.8.0), NaviCore `RA_DFPLAYER` + `dfpDest` + `;D` dispatch, config-tool Audio tab and DFPlayer editor, WCB `WCB_DFP` + `?DFP` + `;D` routing + `WDP_CAP_DFPLAYER`, capability mirrors, both wikis. Page written alongside — decisions locked, wire format and verb table, data model, routing, traps, repo build order. |

@@ -890,7 +890,12 @@ void rcConfigLoadDefaults() {
   // remember.  The user must set the matching device # in Maestro Control
   // Center on each physical Maestro for the dispatcher's address filter to
   // route correctly.
+  // memset the WHOLE slot, not just type/device: channels[] carries the imported
+  // per-channel names and travel endpoints, and this runs on a live rcConfig for
+  // RESET_DEFAULTS. Assigning only the two scalars leaves ~7 KB of stale tool
+  // metadata behind, which GET_CONFIG then re-emits on a supposedly clean board.
   for (int i = 0; i < RC_NUM_MAESTROS; i++) {
+    memset(&rcConfig.maestros[i], 0, sizeof(rcConfig.maestros[i]));
     rcConfig.maestros[i].type   = 0;
     rcConfig.maestros[i].device = (uint8_t)(1 + i);   // 1, 2, ..., 8
   }
@@ -1423,6 +1428,18 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
 // without firing a phantom action. Read + cleared on Core 1 in processSwitches().
 inline bool g_switchSeedPending = true;
 
+// Baud sanity on the INPUT path. ArduinoJson's `|` dispatches on is<T>(), not on
+// truthiness, so an explicit JSON 0 (or any other junk that parses as a number) is
+// taken as the value and would be persisted to /config.json. applySerialBauds()
+// clamps again at apply time — that second clamp is what keeps an already-corrupt
+// stored config bootable — but without this one the bad value survives the save and
+// is silently re-corrected at every boot. Keep this range and the per-port defaults
+// identical to sanBaud()'s in NaviCore.ino; if the two disagree, a value accepted
+// here is rewritten there and the tool shows a baud the port isn't running at.
+static inline uint32_t rcSanBaud(uint32_t b, uint32_t def) {
+  return (b >= 1200 && b <= 115200) ? b : def;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Load config from JSON object (from SET_CONFIG WebSocket message)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1728,10 +1745,12 @@ bool rcConfigFromJSON(const JsonObject& doc) {
 
   if (doc.containsKey("auxBaud")) {
     JsonObject auxObj = doc["auxBaud"];
-    rcConfig.auxBaud[0] = (uint32_t)(auxObj["S3"]      | rcConfig.auxBaud[0]);
-    rcConfig.auxBaud[1] = (uint32_t)(auxObj["S4"]      | rcConfig.auxBaud[1]);
-    rcConfig.auxBaud[2] = (uint32_t)(auxObj["S5"]      | rcConfig.auxBaud[2]);
-    rcConfig.maestroBaud = (uint32_t)(auxObj["maestro"] | rcConfig.maestroBaud);
+    // rcSanBaud on every read — see its note: `|` accepts an explicit JSON 0.
+    rcConfig.auxBaud[0] = rcSanBaud((uint32_t)(auxObj["S3"]      | rcConfig.auxBaud[0]), 9600);
+    rcConfig.auxBaud[1] = rcSanBaud((uint32_t)(auxObj["S4"]      | rcConfig.auxBaud[1]), 9600);
+    rcConfig.auxBaud[2] = rcSanBaud((uint32_t)(auxObj["S5"]      | rcConfig.auxBaud[2]), 9600);
+    rcConfig.maestroBaud = rcSanBaud((uint32_t)(auxObj["maestro"] | rcConfig.maestroBaud),
+                                     LOCAL_MAESTRO_BAUD_RATE);
   }
   // Per-port override labels, keyed by firmware port ("S3"/"S4"/"S5"/"maestro").
   // Guarded by containsKey so a diff-save that omits it can't wipe them;
@@ -2458,10 +2477,14 @@ void rcConfigLoadNVS() {
     DynamicJsonDocument doc(128);
     if (deserializeJson(doc, s) == DeserializationError::Ok) {
       JsonObject root = doc.as<JsonObject>();
-      rcConfig.auxBaud[0]  = (uint32_t)(root["S3"]      | rcConfig.auxBaud[0]);
-      rcConfig.auxBaud[1]  = (uint32_t)(root["S4"]      | rcConfig.auxBaud[1]);
-      rcConfig.auxBaud[2]  = (uint32_t)(root["S5"]      | rcConfig.auxBaud[2]);
-      rcConfig.maestroBaud = (uint32_t)(root["maestro"] | rcConfig.maestroBaud);
+      // Same rcSanBaud clamp as the JSON path — this is the NVS migration source,
+      // so an out-of-range value stored before the clamp existed must not survive
+      // the move to LittleFS.
+      rcConfig.auxBaud[0]  = rcSanBaud((uint32_t)(root["S3"]      | rcConfig.auxBaud[0]), 9600);
+      rcConfig.auxBaud[1]  = rcSanBaud((uint32_t)(root["S4"]      | rcConfig.auxBaud[1]), 9600);
+      rcConfig.auxBaud[2]  = rcSanBaud((uint32_t)(root["S5"]      | rcConfig.auxBaud[2]), 9600);
+      rcConfig.maestroBaud = rcSanBaud((uint32_t)(root["maestro"] | rcConfig.maestroBaud),
+                                       LOCAL_MAESTRO_BAUD_RATE);
     }
   }
 

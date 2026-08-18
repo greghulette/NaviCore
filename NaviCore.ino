@@ -85,6 +85,11 @@ navirterm::CaptureSink rtermSink;
 // the OTA packet queue.
 struct RemoteCliMsg { uint8_t relay; char cmd[200]; };
 QueueHandle_t remoteCliQueue = nullptr;
+// Relay id of the CLI line drainRemoteCli() is running right now; 0 while a locally
+// typed (USB) line runs. A command whose answer arrives ASYNCHRONOUSLY — long after
+// the tee is disarmed — latches this so it can re-arm the tee for its own reply (see
+// maeLatchRemoteRelay / maePumpRemoteEmits).
+static uint8_t g_rtermRelay = 0;
 
 // ── New-peer detection → configured action + passive alert ──────────────────
 // wcb->onNeighbor() fires on the WiFi/ESP-NOW task (Core 0) whenever a WDP advert
@@ -700,7 +705,8 @@ static int maestroLocalQuery(uint8_t id, uint8_t cmd_compact,
 // config tool intercepts it (handleBoardMessage → _maeReadFeed) to fill that slot's
 // inline readout and echo a friendly terminal line; a direct USB user just sees the
 // JSON. kind: 0=position (ch used), 1=moving-state, 2=errors. `n` = maestroLocalQuery()
-// return (bytes read, -1 remote, -2 disabled).
+// return (bytes read, -1 remote, -2 disabled, -3 remote read sent — answer emits later
+// from maePumpRemoteEmits(), so this prints nothing).
 static void maestroReportQuery(uint8_t slot, uint8_t kind, uint8_t ch, int n, uint16_t val) {
   if (n == -3) return;                                      // Remote query sent async — the :MQR reply emits later
   const int   want = (kind == 1) ? 1 : 2;
@@ -725,8 +731,10 @@ static void maestroReportQuery(uint8_t slot, uint8_t kind, uint8_t ch, int n, ui
 // text into this per-slot cache, which the skip-if-running gate reads.
 // pendMask bits (1=pos, 2=mov, 4=err) flag a just-arrived reply for maePumpRemoteEmits()
 // to surface as a [MAE:] marker on Core 1; pendCh carries the channel a POS reply is for.
+// `relay` is the bridge the read was ASKED over (0 = USB), latched at query time so
+// maePumpRemoteEmits() can re-arm the RTERM tee for the answer.
 struct MaeRemoteCache { uint16_t pos; uint8_t moving; uint16_t err; uint32_t ms; bool valid;
-                        uint8_t pendMask; uint8_t pendCh; };
+                        uint8_t pendMask; uint8_t pendCh; uint8_t relay; };
 static MaeRemoteCache g_maeRemote[RC_NUM_MAESTROS] = {};
 // The skip-if-running freshness window is configurable: rcConfig.maeGateMs (default 250).
 // A busy-state older than that — or none at all — is not trusted: the REMOTE gate reads it
@@ -743,6 +751,13 @@ static uint8_t maeRemoteSlotForDevice(uint8_t dev) {
   for (uint8_t s = 1; s <= RC_NUM_MAESTROS; s++)
     if (rcConfig.maestros[s - 1].type == 2 && rcConfig.maestros[s - 1].device == dev) return s;
   return 0;
+}
+
+// Remember WHERE a remote read was asked from. Called with maestroLocalQuery()'s return,
+// so it only latches on -3 (verb sent, answer coming back async over the mesh). Always
+// overwrites — a USB-asked read latches 0, which is what sends its answer to USB only.
+static inline void maeLatchRemoteRelay(uint8_t slot, int n) {
+  if (n == -3 && slot >= 1 && slot <= RC_NUM_MAESTROS) g_maeRemote[slot - 1].relay = g_rtermRelay;
 }
 
 // Parse ":MQR,<dev>,<chan>,<KIND>,<value>" (KIND = POS|MOV|ERR) into g_maeRemote.
@@ -774,9 +789,17 @@ static void maePumpRemoteEmits() {
     const uint8_t m = c.pendMask;
     if (!m) continue;
     c.pendMask &= ~m;                                        // clear only the bits we're emitting now
+    // A remote read answers long after drainRemoteCli() disarmed the capture tee, so
+    // without re-arming it here the [MAE:] marker goes to USB only and a read asked
+    // over the bridge sits at "…" until the tool gives up. NOT cleared on emit: a
+    // second reply for the same slot can land in a later loop() pass, and the next
+    // read re-latches it (0 for a USB-asked read). Core 1 — loop() only.
+    const uint8_t relay = c.relay;
+    if (relay) { rtermSink.begin(wcb, relay); rcSerial.armCapture(&rtermSink); }
     if (m & 0x01) maestroReportQuery(i + 1, 0, c.pendCh, 2, c.pos);
     if (m & 0x02) maestroReportQuery(i + 1, 1, 0,        1, c.moving);
     if (m & 0x04) maestroReportQuery(i + 1, 2, 0,        2, c.err);
+    if (relay) { rtermSink.finish(); rcSerial.disarmCapture(); }
   }
 }
 
@@ -820,6 +843,10 @@ static bool maestroSequenceBusy(uint8_t id) {
     const MaeRemoteCache& c = g_maeRemote[id - 1];
     if (c.valid && (millis() - c.ms) <= rcConfig.maeGateMs) return c.moving != 0;   // fresh → trust it
     maestroBroadcastReadVerb(id, 0x93, 0);                  // stale/unknown → warm via ;M<dev>,getMovingState (async :MQR) …
+    // Nobody asked for this read — it's the gate warming itself. Drop any relay a
+    // previous CLI read latched so the :MQR's [MAE:] marker isn't mirrored to a
+    // bridge as if it were an answer to a "Read live" click.
+    g_maeRemote[id - 1].relay = 0;
     dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u gate: cache stale → sent getMovingState, fail-open\n", id);
     return false;                                           // … and fail open right now
   }
@@ -1376,7 +1403,10 @@ static void vlogf(const char* fmt, ...) {
   int n = vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   if (n <= 0) return;
-  if (n > (int)sizeof(buf)) n = sizeof(buf);
+  // vsnprintf returns the length the line WOULD have been, and on truncation it
+  // wrote sizeof(buf)-1 chars + a NUL. Clamp to the char count, not the buffer
+  // size, or the terminating NUL ships as a payload byte on the console.
+  if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
   if (Serial.availableForWrite() >= n) Serial.write((const uint8_t*)buf, (size_t)n);
 }
 
@@ -1770,7 +1800,13 @@ static void executeWledAction(const RcAction& a) {
       dlog(DBG_WLED, "[DISPATCH] WLED %u: local S%u not available on this board — skipped\n", w.wledID, w.serialPort);
       return;
     }
-    bool ok = WcbWled::emit(*port, body, &Serial);   // build ;L verb → WLED JSON, newline-framed
+    // nullptr diag sink, deliberately: WcbWled's parse-error paths write to the
+    // Print* with unguarded println/printf — no availableForWrite() room check
+    // and no g_dbgFlags gate — which is exactly the blocking-Serial hot-path
+    // pattern vlogf() exists to prevent. The dlog() below already reports the
+    // no-op through the non-blocking, category-gated path. (Matches g_mp3/g_dfp,
+    // which both take the default diag = nullptr.)
+    bool ok = WcbWled::emit(*port, body, nullptr);   // build ;L verb → WLED JSON, newline-framed
     dlog(DBG_WLED, "[DISPATCH] WLED %u→S%u  %s  %s\n", w.wledID, w.serialPort, body, ok ? "OK" : "no-op");
   } else if (w.remoteWCB >= 1 && w.remoteWCB <= WCB_MAX_BOARDS) {
     if (!wcb || !wcbReady) { dlog(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
@@ -1959,12 +1995,19 @@ static void recCbEmitHcrVol(uint8_t chan, uint8_t vol) {
 void checkPendingActions() {
   unsigned long now = millis();
   for (int i = 0; i < PENDING_ACTION_SLOTS; i++) {
-    if (pendingActions[i].active && now >= pendingActions[i].fireAt) {
+    // Signed difference, not `now >= fireAt`: fireAt is millis()+delayMs, which
+    // wraps for actions scheduled in the last delayMs of the 49.7-day millis()
+    // epoch. An absolute compare then fires them instantly with the delay dropped.
+    if (pendingActions[i].active && (int32_t)(now - pendingActions[i].fireAt) >= 0) {
+      const RcAction& pa = pendingActions[i].action;
       pendingActions[i].active = false;
       // Fire the EFFECT directly (NOT rcExecuteAction) so the action's own
-      // delayMs can't re-queue it forever. Honor a calibration that started
-      // after it was scheduled.
-      if (!calibrationActive) rcExecuteActionNow(pendingActions[i].action);
+      // delayMs can't re-queue it forever. Honor a calibration — or a replay —
+      // that started after it was scheduled: rcExecuteAction applies both gates
+      // at schedule time, and a delayed action must not step on the outputs a
+      // clip now owns. Same record/play/stop exemption as that gate.
+      bool recCtl = (pa.type == RA_RECORD || pa.type == RA_PLAY || pa.type == RA_STOP);
+      if (!calibrationActive && (!navirec::isReplaying() || recCtl)) rcExecuteActionNow(pa);
     }
   }
 }
@@ -2045,7 +2088,11 @@ void RCRadio_Matrix_Buttons(int val) {
 
 void checkDeferredTap() {
   if (!tapState.deferredPending) return;
-  if (millis() >= tapState.deferredFireAt) {
+  // Signed difference, not `millis() >= deferredFireAt`: deferredFireAt is
+  // now+tapWindowMs, which wraps in the last tapWindowMs of the millis() epoch.
+  // An absolute compare fires the gesture on the next loop() pass, so a
+  // multi-tap started there degrades into repeated tier-1 dispatches.
+  if ((int32_t)(millis() - tapState.deferredFireAt) >= 0) {
     tapState.deferredPending = false;
     rcDispatch(tapState.deferredBtn, tapState.deferredTaps);
     tapState.tapCount = 0;
@@ -2100,22 +2147,19 @@ void processSwitches() {
 struct HcrVolCache {
   int8_t        lastVol[4]  = { -1, -1, -1, -1 };
   unsigned long lastSent[4] = {  0,  0,  0,  0 };
+  // Trailing-edge latch (-1 = nothing pending). A value that arrives inside the
+  // throttle window is held here, not dropped — see dispatchHcrVolume().
+  int8_t        pendVol[4]  = { -1, -1, -1, -1 };
 };
 static HcrVolCache hcrVolCache;
 static const unsigned long HCR_VOLUME_MIN_INTERVAL_MS = 80;  // ~12 Hz max per chan
 
-static void dispatchHcrVolume(uint8_t audioChan, uint8_t vol) {
-  if (audioChan > 3) {
-    dlog(DBG_HCR, "[DISPATCH] HCR volume: audio channel %u out of range (0-3 = V/A/B/All) — "
-         "check the knob's HCR output target; skipped\n", audioChan);
-    return;
-  }
-  if (vol > 99) vol = 99;
-  if ((int8_t)vol == hcrVolCache.lastVol[audioChan]) return;
-  unsigned long now = millis();
-  if (now - hcrVolCache.lastSent[audioChan] < HCR_VOLUME_MIN_INTERVAL_MS) return;
-  hcrVolCache.lastVol[audioChan]  = vol;
-  hcrVolCache.lastSent[audioChan] = now;
+// Emit one HCR SetVolume and re-arm the rate limiter. audioChan/vol must already
+// be validated and clamped by the caller.
+static void hcrVolEmit(uint8_t audioChan, uint8_t vol) {
+  hcrVolCache.lastVol[audioChan]  = (int8_t)vol;
+  hcrVolCache.lastSent[audioChan] = millis();
+  hcrVolCache.pendVol[audioChan]  = -1;
   // Build a synthetic RA_HCR action and reuse the existing dispatcher so
   // it automatically honors rcConfig.hcrDest (serial vs WCB transport).
   RcAction a{};
@@ -2125,6 +2169,45 @@ static void dispatchHcrVolume(uint8_t audioChan, uint8_t vol) {
   a.track = (int16_t)vol;
   executeHcrAction(a);
   navirec::captureHcrVolKf(audioChan, vol);   // record the EMITTED (post-gate) knob volume
+}
+
+static void dispatchHcrVolume(uint8_t audioChan, uint8_t vol) {
+  if (audioChan > 3) {
+    dlog(DBG_HCR, "[DISPATCH] HCR volume: audio channel %u out of range (0-3 = V/A/B/All) — "
+         "check the knob's HCR output target; skipped\n", audioChan);
+    return;
+  }
+  if (vol > 99) vol = 99;
+  if ((int8_t)vol == hcrVolCache.lastVol[audioChan]) { hcrVolCache.pendVol[audioChan] = -1; return; }
+  unsigned long now = millis();
+  if ((uint32_t)(now - hcrVolCache.lastSent[audioChan]) < HCR_VOLUME_MIN_INTERVAL_MS) {
+    // Latch, don't drop. processKnobs() commits lastKnobRaw[] before calling us,
+    // so once the knob stops moving the deadband blocks every later frame and
+    // nothing calls this again — a leading-edge-only throttle would leave the HCR
+    // at whatever landed up to 80 ms before the end of the sweep. hcrVolFlushTick()
+    // sends the latched value once the interval expires.
+    hcrVolCache.pendVol[audioChan] = (int8_t)vol;
+    return;
+  }
+  hcrVolEmit(audioChan, vol);
+}
+
+// Trailing edge of the HCR volume throttle — flush any latched value once its
+// interval has elapsed, so the knob's final resting position always lands.
+// Core 1 only (loop()); executeHcrAction touches serial/mesh.
+static void hcrVolFlushTick() {
+  // Same gates processKnobs() applies — a value latched just before a clip started
+  // (or calibration opened) must not be flushed into outputs they now own.
+  if (calibrationActive || navirec::isReplaying()) return;
+  unsigned long now = millis();
+  for (uint8_t c = 0; c < 4; c++) {
+    if (hcrVolCache.pendVol[c] < 0) continue;
+    if ((uint32_t)(now - hcrVolCache.lastSent[c]) < HCR_VOLUME_MIN_INTERVAL_MS) continue;
+    int8_t v = hcrVolCache.pendVol[c];
+    hcrVolCache.pendVol[c] = -1;
+    if (v == hcrVolCache.lastVol[c]) continue;   // already there — nothing to send
+    hcrVolEmit(c, (uint8_t)v);
+  }
 }
 
 // Per-knob last-processed raw SBUS value. Knobs only re-dispatch when their
@@ -2936,6 +3019,7 @@ bool execCliLine(const String& line) {
         uint8_t rb[2]; uint16_t val = 0;
         int n = maestroLocalQuery(slot, 0x90, &ch, 1, rb, WcbMaestro::replyLen(WcbMaestro::ReplyKind::POS));
         if (n > 0) WcbMaestro::decodeReply(WcbMaestro::ReplyKind::POS, rb, (size_t)n, val);
+        maeLatchRemoteRelay(slot, n);   // remote read → answer emits later; remember where to send it
         maestroReportQuery(slot, 0, ch, n, val);
       }
     } else if (verb.equalsIgnoreCase("MOVING")) {       // ?MAE,MOVING,<slot> — Get Moving State
@@ -2944,6 +3028,7 @@ bool execCliLine(const String& line) {
         uint8_t rb[1]; uint16_t val = 0;
         int n = maestroLocalQuery(slot, 0x93, nullptr, 0, rb, WcbMaestro::replyLen(WcbMaestro::ReplyKind::MOV));
         if (n > 0) WcbMaestro::decodeReply(WcbMaestro::ReplyKind::MOV, rb, (size_t)n, val);
+        maeLatchRemoteRelay(slot, n);
         maestroReportQuery(slot, 1, 0, n, val);
       }
     } else if (verb.equalsIgnoreCase("ERR")) {          // ?MAE,ERR,<slot> — Get Errors (clears on read)
@@ -2952,6 +3037,7 @@ bool execCliLine(const String& line) {
         uint8_t rb[2]; uint16_t val = 0;
         int n = maestroLocalQuery(slot, 0xA1, nullptr, 0, rb, WcbMaestro::replyLen(WcbMaestro::ReplyKind::ERR));
         if (n > 0) WcbMaestro::decodeReply(WcbMaestro::ReplyKind::ERR, rb, (size_t)n, val);
+        maeLatchRemoteRelay(slot, n);
         maestroReportQuery(slot, 2, 0, n, val);
       }
     } else if (c1 > 0 && c2 > c1) {                     // ?MAE,<slot>,<ch>,<pos> — set target
@@ -3162,9 +3248,10 @@ bool execCliLine(const String& line) {
 // the dlog is a no-op (nothing sent) unless the Serial debug chip is on.
 #define AUX_RX_BUF 128
 // One assembled chunk off an aux port. `terminated` is true only for a real CR/LF
-// line — a buffer-full or idle flush is a FRAGMENT, shown on the terminal but never
-// broadcast, because a command is a line (the same rule processIncomingSerial uses
-// on a WCB). Runs on Core 1 (loop), so broadcasting from here is safe.
+// line — a buffer-full or idle flush is a FRAGMENT, and so is the REMAINDER of a line
+// that was already cut that way (see `cut` below). A fragment is shown on the terminal
+// but never broadcast, because a command is a line (the same rule processIncomingSerial
+// uses on a WCB). Runs on Core 1 (loop), so broadcasting from here is safe.
 static void auxRxLine(int idx, const char* buf, bool terminated) {
   dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s]  %s\n", auxPortLabel(idx), buf);
   if (!terminated || !rcConfig.serialBcastIn[idx]) return;
@@ -3183,27 +3270,34 @@ static void auxRxLine(int idx, const char* buf, bool terminated) {
   queueSerialBroadcastOut(buf, fwPort);
   dlog(DBG_SERIAL, "[DISPATCH] Serial RX [%s] → mesh broadcast\n", auxPortLabel(idx));
 }
-static void auxRxPollPort(Stream* p, int idx, char* buf, uint8_t& len, unsigned long& lastMs) {
+// `cut` remembers that THIS physical line was already flushed once as a fragment
+// (buffer-full or idle split). Without it the remainder of an over-long line hits
+// the CR/LF branch and is reported terminated=true, so auxRxLine broadcasts the
+// tail to the whole mesh as if it were a complete command. The tail of a cut line
+// is still just a fragment.
+static void auxRxPollPort(Stream* p, int idx, char* buf, uint8_t& len, unsigned long& lastMs, bool& cut) {
   if (!p) return;
   while (p->available()) {
     int c = p->read();
     lastMs = millis();
     if (c == '\n' || c == '\r') {
-      if (len) { buf[len] = 0; auxRxLine(idx, buf, true); len = 0; }
+      if (len) { buf[len] = 0; auxRxLine(idx, buf, !cut); len = 0; }
+      cut = false;                                        // next line starts clean
     } else {
-      if (len >= AUX_RX_BUF - 1) { buf[len] = 0; auxRxLine(idx, buf, false); len = 0; }
+      if (len >= AUX_RX_BUF - 1) { buf[len] = 0; auxRxLine(idx, buf, false); len = 0; cut = true; }
       buf[len++] = (c >= 32 && c < 127) ? (char)c : '.';   // sanitize non-printable for the terminal
     }
   }
-  if (len && (millis() - lastMs) > 60) { buf[len] = 0; auxRxLine(idx, buf, false); len = 0; }
+  if (len && (millis() - lastMs) > 60) { buf[len] = 0; auxRxLine(idx, buf, false); len = 0; cut = true; }
 }
 static void pollAuxSerialRx() {
   static char b3[AUX_RX_BUF], b4[AUX_RX_BUF], b5[AUX_RX_BUF];
   static uint8_t l3 = 0, l4 = 0, l5 = 0;
   static unsigned long m3 = 0, m4 = 0, m5 = 0;
-  auxRxPollPort(s3, 0, b3, l3, m3);
-  auxRxPollPort(s4, 1, b4, l4, m4);
-  auxRxPollPort(s5, 2, b5, l5, m5);
+  static bool c3 = false, c4 = false, c5 = false;
+  auxRxPollPort(s3, 0, b3, l3, m3, c3);
+  auxRxPollPort(s4, 1, b4, l4, m4, c4);
+  auxRxPollPort(s5, 2, b5, l5, m5, c5);
 }
 
 void handleSerialInput() {
@@ -3306,14 +3400,38 @@ void handleSerialInput() {
 
         } else if (strcmp(type,"SET_CMDLIB")==0) {
           // Persist the library OPAQUELY. Pull the raw "data" value by substring
-          // (it can be many KB — avoid a second big parse); data is the LAST field.
+          // (it can be many KB — avoid a second big parse), but find its END by
+          // matching brackets, NOT by taking the message's last '}'. `data` is not
+          // guaranteed to be the last field — the config tool's sendJSON() stamps
+          // its "sys":1 marker after spreading the caller's object — and the naive
+          // lastIndexOf('}') swallowed the trailing `,"sys":1` into the stored
+          // library, so /cmdlib.json wasn't valid JSON on its own and its
+          // size/hash covered bytes that were not library content (which then
+          // read as "different library" against a mesh-saved copy).
           bool ok = false; unsigned h = 0, sz = 0;
-          int k   = serialInputBuf.indexOf("\"data\":");
-          int end = serialInputBuf.lastIndexOf('}');
-          if (k >= 0 && end > k + 7) {
-            String lib = serialInputBuf.substring(k + 7, end);
-            lib.trim();
-            if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
+          int k = serialInputBuf.indexOf("\"data\":");
+          if (k >= 0) {
+            int s = k + 7, blen = (int)serialInputBuf.length();
+            while (s < blen && isspace((unsigned char)serialInputBuf[s])) s++;
+            int end = -1;
+            if (s < blen && (serialInputBuf[s] == '{' || serialInputBuf[s] == '[')) {
+              const char open  = serialInputBuf[s];
+              const char close = (open == '{') ? '}' : ']';
+              int depth = 0; bool inStr = false, esc = false;
+              for (int i = s; i < blen; i++) {
+                char c = serialInputBuf[i];
+                if (esc)      { esc = false;  continue; }
+                if (inStr)    { if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
+                if (c == '"') { inStr = true; continue; }
+                if (c == open)  { depth++; continue; }
+                if (c == close) { if (--depth == 0) { end = i + 1; break; } }
+              }
+            }
+            if (end > s) {
+              String lib = serialInputBuf.substring(s, end);
+              lib.trim();
+              if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
+            }
           }
           Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}\n",
                         ok ? "true" : "false", sz, h);
@@ -3321,10 +3439,20 @@ void handleSerialInput() {
         } else if (strcmp(type,"SET_CONFIG")==0) {
           DynamicJsonDocument bigDoc(98304);
           if (deserializeJson(bigDoc, serialInputBuf) != DeserializationError::Ok) {
+            // No saveId echoed here — the parse failed, so we genuinely don't know
+            // which save this was. The tool treats a missing saveId as "old
+            // firmware" and still rolls the baseline back, which is what we want.
             Serial.println("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"parse failed\"}");
           } else if (!bigDoc.containsKey("data")) {
-            Serial.println("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"missing data\"}");
+            Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"missing data\",\"saveId\":%ld}\n",
+                          (long)(bigDoc["saveId"] | 0));
           } else {
+            // Echo the tool's per-save correlation id on every reply, exactly as the
+            // Via-WCB path does (rc_telemetry.h). Without it the tool's stale-ACK gate
+            // permanently takes its "undefined saveId = old firmware" fallback on USB,
+            // so a late ACK from a timed-out save is attributed to a newer one.
+            // bigDoc is parsed UN-filtered, so no filter-whitelist entry is needed.
+            const long saveId = (long)(bigDoc["saveId"] | 0);
             bool ok = rcConfigFromJSON(bigDoc["data"].as<JsonObject>());
             if (ok) {
               bool saved = rcConfigSaveLFS();
@@ -3344,10 +3472,10 @@ void handleSerialInput() {
               matrixCandidate    = 0;
               matrixCandCount    = 0;
               matrixNeutralCount = 0;
-              if (saved) Serial.println("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":true}");
-              else       Serial.println("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"applied to RAM but could not be saved to flash (LittleFS write error)\"}");
+              if (saved) Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":true,\"saveId\":%ld}\n", saveId);
+              else       Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"applied to RAM but could not be saved to flash (LittleFS write error)\",\"saveId\":%ld}\n", saveId);
             } else {
-              Serial.println("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"config apply failed\"}");
+              Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"config apply failed\",\"saveId\":%ld}\n", saveId);
             }
           }
 
@@ -3595,23 +3723,30 @@ void handleSerialInput() {
           //
           // Built by rcTelemetry::buildMeshStatsPage — the SAME builder the
           // bridged reply uses, so the two payload shapes cannot drift. USB has
-          // no packet budget, so it asks for one page with a `fit` larger than
-          // any possible roster: the paging never triggers and the whole fleet
-          // arrives in a single line marked "last":1, which is exactly what the
-          // tool's merge treats as a complete set.
+          // no packet budget, so a full roster normally arrives in one line; but
+          // the builder still pages if the roster plus its counters overrun the
+          // buffer, and a page it had to cut carries NO "last":1 — which the
+          // tool's merge refuses to promote, silently freezing the panel. So
+          // drain the pages the way tick() does instead of assuming one. Each
+          // continuation writes at least one row, so nextPeer always advances;
+          // the page cap is a backstop, not an expected exit.
           //
           // No "sys":1 here: that marker exists so the WCB Wizard can mute tool
           // chatter when it shares the BRIDGE board's port, and a direct-USB
           // reply has no Wizard to mute it for — matching WCB_STATUS above.
           //
-          // 20 boards x ~30 B + the aggregate sits well inside 900; static so a
-          // buffer this size never lands on the loop task's stack.
+          // 20 boards x up to 71 B (the builder's own row buffer) + the aggregate
+          // can exceed 900 once the counters reach 5-6 digits; static so a buffer
+          // this size never lands on the loop task's stack.
           static char msbuf[900];
-          int msNext = 0;
-          rcTelemetry::buildMeshStatsPage(msbuf, sizeof(msbuf), sizeof(msbuf) - 1,
-                                          /*page=*/0, /*startPeer=*/1, &msNext,
-                                          /*includeSys=*/false);
-          Serial.println(msbuf);
+          int msNext = 0, msPage = 0, msStart = 1;
+          do {
+            rcTelemetry::buildMeshStatsPage(msbuf, sizeof(msbuf), sizeof(msbuf) - 1,
+                                            msPage++, msStart, &msNext,
+                                            /*includeSys=*/false);
+            Serial.println(msbuf);
+            msStart = msNext;
+          } while (msNext && msPage <= WCB_MAX_BOARDS);
 
         } else {
           Serial.println("{\"type\":\"ERROR\",\"msg\":\"unknown type\"}");
@@ -4049,6 +4184,12 @@ void setup() {
     forgetPeerQueue    = xQueueCreate(4, sizeof(uint8_t));       // FORGET_PEER (Via-WCB) → drainForgetPeer()
     serialFwdQueue     = xQueueCreate(4, sizeof(SerialFwdMsg));  // mesh→serial writes → drainSerialFwd()
     maestroCmdQueue    = xQueueCreate(6, sizeof(MaestroCmdMsg)); // inbound ;M → drainMaestroCmd()
+    // Same rule for the OTA packet queue: create it here (Core 1) BEFORE the raw-
+    // packet hook goes live, so the very first OTA frame can't be lost to the
+    // create/publish race. Registering onRawPacket first left a window where the
+    // Core-0 hook lazily created its own queue and this line then overwrote the
+    // handle — leaking that queue and anything already in it.
+    naviota::otaPktQueue = xQueueCreate(12, sizeof(naviota::OtaPktSlot));
     wcb->onCommand(onWCBCommand);   // queues must be live BEFORE the callback that feeds them
     wcb->onRawPacket(naviota::otaRawPacketHook);   // OTA control/data structs (55/243 B) over the mesh
     // Bulk command-library push (config tool → mesh → LittleFS). These fire on the
@@ -4062,10 +4203,6 @@ void setup() {
     // (from wcb->update()), so building the reply String there is safe.
     wcb->onSequenceNames(rcTelemetry::seqNamesReply);
     wcb->onSequenceValue(rcTelemetry::seqValueReply);   // ONE sequence's contents (GET_WCB_SEQVAL)
-    // Create the OTA packet queue here (Core 1) instead of lazily inside the
-    // Core-0 RX callback, so the very first OTA frame can't be lost to the
-    // create/publish race. The lazy-create in enqueueOtaPacket() stays as a fallback.
-    naviota::otaPktQueue = xQueueCreate(12, sizeof(naviota::OtaPktSlot));
     // WDP device-identity advertising (WCB_Client 1.7.0 "WDP-DA") — announce this
     // NaviCore on the mesh so every WCB auto-discovers it (it appears in ?WDP,LIST
     // / the config tool with its firmware + board, no manual labeling). The advert
@@ -4182,9 +4319,11 @@ void drainRemoteCli() {
 
   rtermSink.begin(wcb, m.relay);
   rcSerial.armCapture(&rtermSink);          // mirror this command's Serial output to the bridge
+  g_rtermRelay = m.relay;                    // so an ASYNC reply (remote Maestro read) can re-arm the tee
   bool recognised = execCliLine(String(m.cmd));
   if (!recognised)
     Serial.printf("Unknown command: %s\n", m.cmd);
+  g_rtermRelay = 0;
   rtermSink.finish();                        // flush any trailing partial line
   rcSerial.disarmCapture();
 }
@@ -4655,6 +4794,10 @@ void loop() {
   // Auto-release idle passthrough servos (RcKnobOutput.releaseIdleMs) — de-energize a
   // resting servo so it stops buzzing/hunting; the next stick move re-energizes it.
   maestroIdleReleaseTick();
+
+  // Trailing edge of the HCR volume throttle — send the last value a knob sweep
+  // asked for, which the leading-edge gate held back.
+  hcrVolFlushTick();
 
   // FPS counter
   trackSbusFps();

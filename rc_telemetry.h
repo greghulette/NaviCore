@@ -696,6 +696,19 @@ inline bool _startFragSendFile(uint8_t target, const char* path, const char* wha
 // can't be sent (empty / too large for the fragment budget); true if armed.
 inline bool _startGetConfigSend(uint8_t target) {
   String body = rcConfigToJSON();
+  // rcConfigToJSON() returns an ERROR envelope, NOT a config, when the document
+  // overflowed — that guard exists precisely so a truncated config never reaches
+  // the tool.  Splicing it into "data" defeats it: the tool would reassemble a
+  // CONFIG whose payload has no config fields, keep its built-in defaults, latch
+  // them as the baseline, and the next Save would ship those defaults over the
+  // good on-board config.  There is no top-level error channel on the fragment
+  // path, so refuse to arm the send at all — the caller NACKs and the tool
+  // reports a failed pull, which is the honest outcome.  Same guard as the
+  // direct-USB GET_CONFIG in NaviCore.ino.
+  if (body.startsWith("{\"type\":\"ERROR\"")) {
+    Serial.println("[RC] GET_CONFIG (via WCB) aborted — config failed to serialize");
+    return false;
+  }
   String wrapped;
   wrapped.reserve(body.length() + 40);
   wrapped += "{\"type\":\"CONFIG\",\"id\":";
@@ -1956,7 +1969,19 @@ inline bool handle(uint8_t senderID, const char* command) {
   // WCB_SUBSCRIPTION_MS past the tool's disconnect, saturating the network. A
   // completed multi-fragment payload still counts as activity: it recurses
   // into handle() as reassembled JSON (which has no "f" field) and renews here.
-  if (!doc.containsKey("f")) _lastWcbInbound = millis();
+  //
+  // Nor on an rc_* frame.  Our telemetry is BROADCAST, so on a mesh carrying two
+  // controllers each board's rc_hb — emitted every 2 s unconditionally, well
+  // inside WCB_SUBSCRIPTION_MS — would renew the OTHER board's subscription and
+  // latch both rc_ch streams on permanently with no config tool connected, which
+  // is the exact thing this gate exists to prevent.  Only tool traffic may renew.
+  // The WCB firmware was bitten by the same loop from its end (its own rc_hb
+  // renewing the USB subscription made a single ;w stream forever).
+  {
+    const char* t = doc["type"] | "";
+    if (!doc.containsKey("f") && !(t[0] == 'r' && t[1] == 'c' && t[2] == '_'))
+      _lastWcbInbound = millis();
+  }
 
   // ── Fragment envelope ────────────────────────────────────────────────────
   // {"f":<n>,"of":<N>,"sid":<S>,"s":"<chunk>"} — slice of a larger JSON
@@ -2054,6 +2079,14 @@ inline bool handle(uint8_t senderID, const char* command) {
       type[0] == 'r' && type[1] == 'c' && type[2] == '_') {
     return false;
   }
+
+  // A PEER controller's telemetry (rc_hb / rc_ch / rc_trig / rc_mode carrying a
+  // different deviceId).  Nothing here consumes it, but letting it reach the
+  // "unknown type" log at the bottom of this function would fire an unguarded
+  // Serial.printf per peer frame — up to 20/s at chRateHz — on this Core-0
+  // callback, the HWCDC-stall / Core-1 interleave hazard this file gates
+  // RC_TELEM_VERBOSE on.  Consume it quietly.
+  if (type[0] == 'r' && type[1] == 'c' && type[2] == '_') return true;
 
   // ── PING ─────────────────────────────────────────────────────────────────
   // Unicast a PONG back to the sender, then force an immediate heartbeat +
@@ -2245,7 +2278,12 @@ inline bool handle(uint8_t senderID, const char* command) {
     _pendingMeshStatsSender = senderID;
     _meshStatsPage     = 0;    // restart the page walk for this request
     _meshStatsNextPeer = 1;
-    _meshStatsNextMs   = 0;    // first page goes out on the next tick, unpaced
+    // Already-due TIMESTAMP, not a 0 sentinel: tick()'s gate is the rollover-safe
+    // (int32_t)(millis() - _meshStatsNextMs) >= 0, and against 0 that reduces to
+    // (int32_t)millis(), which is negative for the whole half of the millis() range
+    // above 2^31.  With a 0 here the gate never opens between 24.9 d and 49.7 d of
+    // uptime and a bridged Mesh Stats panel stays permanently empty.
+    _meshStatsNextMs   = millis();   // first page goes out on the next tick, unpaced
     return true;
   }
 

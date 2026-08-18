@@ -457,7 +457,11 @@ static QueueHandle_t otaPktQueue = nullptr;
 
 inline void enqueueOtaPacket(const uint8_t *raw, uint16_t len) {
   if (len == 0 || len > 244) return;
-  if (!otaPktQueue) { otaPktQueue = xQueueCreate(12, sizeof(OtaPktSlot)); if (!otaPktQueue) return; }
+  // Plain guard, NOT a lazy create. setup() creates this queue on Core 1 before
+  // onRawPacket is registered, so by the time this runs it exists. Creating it
+  // here would race that: this runs on Core 0, and a queue made here can be
+  // overwritten by the Core-1 create, leaking it and everything already in it.
+  if (!otaPktQueue) return;
   OtaPktSlot slot; memcpy(slot.buf, raw, len); slot.len = len;
   xQueueSend(otaPktQueue, &slot, 0);   // drop if full — the browser resends from its cursor
 }
