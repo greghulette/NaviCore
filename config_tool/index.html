@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.10:29.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.14:12.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3792,7 +3792,8 @@ function setModeReportEnabled(checked) {
 // _configBaseline. It used to live inside renderModeReport(), which applyConfig calls
 // BEFORE the snapshot — so the backfilled default was baked into the baseline itself,
 // the diff saw "no change", Save shipped nothing, and the tool displayed a command the
-// board did not have. Same trap as _foldLocalMaestroChIntoConfig / _foldLegacyWcbProfiles.
+// board did not have. Any backfill that must reach the droid has to run AFTER the
+// baseline snapshot, not before it.
 function _backfillModeReportTemplate() {
   const m = _modeReport();
   if (!m.enabled || m.template || m.cmds.some(c => c)) return false;
@@ -8595,20 +8596,10 @@ function handleBoardMessage(line) {
       _dismissToast(_saveToast); _saveToast = null;
       showToast('Refresh loaded fresh board state — re-Save if you had unsaved edits', 'warn');
     }
-    // Maestro-channel migration, ORDER-CRITICAL: fold any localStorage-era
-    // import into config AFTER the baseline (so the diff sees it and Save
-    // ships it to the board), THEN sync the mirror to match the config
-    // exactly (deleting stale mirror entries for slots the board cleared).
-    if (_foldLocalMaestroChIntoConfig()) {
-      appendTerminalLine('< [config] Imported Maestro channel names/limits found in this browser — open Config and Save to store them on the NaviCore.', 'rx');
-    }
-    // Same order-critical migration for the pre-config WCB profiles: adopt any
-    // browser-stored ones AFTER the baseline (only when the board carried none) so a
-    // Save actually ships them to the droid. Then repaint the profile list.
-    if (_foldLegacyWcbProfiles()) {
-      appendTerminalLine('< [wcb] Saved WCB profiles found in this browser — imported into the config. Open Config → WCB Network and Save to store them on the NaviCore.', 'rx');
-      showToast('Imported your saved WCB profiles — Save to store them on the NaviCore', 'info');
-    }
+    // The two pre-config localStorage migrations (Maestro channel names, WCB
+    // credential profiles) were removed deliberately: the droid is the only home for
+    // configuration, so nothing in browser storage may write into the config. The
+    // stale keys are purged at startup — see _purgeLegacyConfigKeys().
     // Same order-critical rule for the mode-report default command: a board stored
     // enabled-but-empty sends nothing, so backfill the default AFTER the baseline —
     // then the diff sees it and a Save actually stores it on the droid.
@@ -8738,9 +8729,8 @@ function applyConfig(data) {
     // Pad / truncate to NUM_MAESTRO_SLOTS so the array length is stable, and give every
     // slot a `channels` array HERE — before the CONFIG handler snapshots the diff
     // baseline. rcConfigToJSON emits `channels` SPARSELY (rc_config.h ≈1278: a slot with
-    // no named channels has no key at all), while _foldLocalMaestroChIntoConfig and
-    // _syncMaestroChFromConfig both pad it in unconditionally — and they run AFTER the
-    // snapshot. Padding there made the live config differ from the baseline by that one
+    // no named channels has no key at all), while _syncMaestroChFromConfig pads it in
+    // unconditionally — and that runs AFTER the snapshot. Padding there made the live config differ from the baseline by that one
     // key on every slot, so the first Save after each load shipped the whole 8-slot
     // maestros branch for nothing. Normalizing pre-baseline costs nothing: the fold still
     // REPLACES channels with a populated array when it has one, so that migration is
@@ -8751,10 +8741,9 @@ function applyConfig(data) {
       config.maestros.push({ type: 0, device: 1 + config.maestros.length, channels: [] });
     }
   }
-  // NOTE: the _maestroCh mirror is NOT synced here — the CONFIG handler does
-  // baseline-snapshot → _foldLocalMaestroChIntoConfig → _syncMaestroChFromConfig
-  // in that order, so a localStorage-era import folds into the config AFTER the
-  // diff baseline (making Save actually ship it to the board).
+  // NOTE: the _maestroCh mirror is NOT synced here — the CONFIG handler snapshots the
+  // diff baseline first, then calls _syncMaestroChFromConfig(). The mirror is derived
+  // from the config and in-memory only; it never writes back into it.
   if (data.wcbNetwork) {
     config.wcbNetwork = { ...config.wcbNetwork, ...data.wcbNetwork };
     // Coerce the numeric fields — if any arrive as strings they'd register as a
@@ -8767,9 +8756,9 @@ function applyConfig(data) {
     if (w.deviceId !== undefined) w.deviceId = +w.deviceId;
   }
   // Saved WCB-credential profiles. Full-replace from the board (normalized so a
-  // string field can't fabricate a phantom dirty diff); absent = old firmware → empty
-  // here, then _foldLegacyWcbProfiles() in the CONFIG handler (AFTER the baseline)
-  // adopts any pre-config browser-stored ones so a Save ships them.
+  // string field can't fabricate a phantom dirty diff); absent = old firmware → empty.
+  // The droid is the only source: the pre-config browser store is gone, so an old
+  // firmware simply reports no profiles rather than adopting a browser copy.
   config.wcbProfiles = Array.isArray(data.wcbProfiles) ? data.wcbProfiles.filter(Boolean).map(_normWcbProfile) : [];
   _wcbSelectedProfile = '';   // a fresh load isn't "editing" a profile — the radio falls back to the config-match
   if (data.dfpDest) {
@@ -8890,8 +8879,20 @@ function applyBindingsUI() {
 // `_maestroCh` is an in-memory MIRROR of that, kept because many consumers read
 // it; localStorage is only a pre-connection cache / migration source.
 let _maestroCh = {};   // { "<slot 1-8>": { "<ch 0-31>": {min,max,name} } }
-(function () { try { _maestroCh = JSON.parse(localStorage.getItem('rc_maestro_channels') || '{}') || {}; } catch (_) { _maestroCh = {}; } })();
-function _saveMaestroCh() { try { localStorage.setItem('rc_maestro_channels', JSON.stringify(_maestroCh)); } catch (_) {} }
+// IN-MEMORY ONLY. _syncMaestroChFromConfig() rebuilds this from config.maestros[] on
+// every config load, so persisting it bought nothing while putting a full copy of the
+// servo names and travel endpoints in browser storage. The droid is the only home for
+// configuration.
+function _saveMaestroCh() { /* deliberately not persisted — see above */ }
+
+// Purge the pre-config browser keys. They once fed the config and no longer do;
+// deleting them stops a stale browser copy resurfacing as configuration.
+function _purgeLegacyConfigKeys() {
+  try {
+    ['rc_maestro_channels', 'navicore-wcb-profiles-v1'].forEach(k => localStorage.removeItem(k));
+  } catch (_) {}
+}
+_purgeLegacyConfigKeys();
 // _maestroCh[slot] (a {ch:{}} map) → the config.maestros[].channels array form.
 function _maestroChSlotToArray(slot) {
   const s = _maestroCh[String(slot)] || {};
@@ -8924,20 +8925,6 @@ function _syncMaestroChFromConfig() {
 // MUST run AFTER the diff baseline is snapshot (see the CONFIG handler) — folding
 // before the snapshot bakes the channels into the baseline, the diff sees "no
 // change", and the migration silently never reaches the device.
-function _foldLocalMaestroChIntoConfig() {
-  if (!config || !Array.isArray(config.maestros)) return 0;
-  let folded = 0;
-  for (let i = 0; i < config.maestros.length; i++) {
-    const m = config.maestros[i]; if (!m) continue;
-    if (!Array.isArray(m.channels)) m.channels = [];
-    const slot = String(i + 1);
-    if (!m.channels.length && _maestroCh[slot] && Object.keys(_maestroCh[slot]).length) {
-      m.channels = _maestroChSlotToArray(slot);
-      folded++;
-    }
-  }
-  return folded;
-}
 // Stray file dropped OUTSIDE a drop target → swallow it so the browser doesn't
 // navigate away from the tool (which would lose unsaved config). The per-row
 // drop handlers still run first and do the actual import.
@@ -9679,7 +9666,6 @@ function applyWcbNetworkUI() {
 // profile is loaded; the firmware still has one active network, written on Save
 // (Direct USB only). Adding/removing a profile is a config change like any other,
 // saved to the droid on the next Save.
-const WCB_PROFILES_LEGACY_LS = 'navicore-wcb-profiles-v1';   // pre-config store; read once for migration (_foldLegacyWcbProfiles), then dormant
 const WCB_MAX_PROFILES = 6;   // capacity — MUST match RC_MAX_WCB_PROFILES in rc_config.h
 function _wcbProfiles() {
   if (!Array.isArray(config.wcbProfiles)) config.wcbProfiles = [];
@@ -9701,18 +9687,6 @@ function _snapshotLiveIntoSelectedProfile() {
   if (!_wcbSelectedProfile) return;
   const p = _wcbProfiles().find(pr => pr.name === _wcbSelectedProfile);
   if (p) Object.assign(p, _wcbProfileParams(config.wcbNetwork));
-}
-// One-time adoption of the pre-config localStorage profiles: only when the config
-// carries none (board didn't supply them / old firmware). Returns true if it imported
-// any. Called from the CONFIG handler AFTER the diff baseline so a Save ships them.
-function _foldLegacyWcbProfiles() {
-  try {
-    if (Array.isArray(config.wcbProfiles) && config.wcbProfiles.length) return false;
-    const arr = JSON.parse(localStorage.getItem(WCB_PROFILES_LEGACY_LS) || '[]');
-    if (!Array.isArray(arr) || !arr.length) return false;
-    config.wcbProfiles = arr.slice(0, WCB_MAX_PROFILES).map(_normWcbProfile);
-    return true;
-  } catch (_) { return false; }
 }
 function _wcbProfileParams(w) {
   w = w || {};

@@ -308,9 +308,27 @@ cannot duplicate an event. It can also export a clip as Maestro **script source*
 | `rcCalibAutoAdvance` | Calibration wizard |
 | `rcConfigLastTab` | Reopen on the last tab |
 | `rc_via_wcb_on` | Remember bridge mode |
-| `rc_maestro_channels` | Imported Maestro channel metadata (also folded into the config) |
 | `nc_cmdlib_droid_sig` | Cached droid library signature |
 | `rc_fw_branch` | **Dev only** — flash from a non-`main` branch |
+
+**Nothing in browser storage may affect the configuration.** Every key above is a UI
+preference or a cache. The droid is the only home for config: `/config.json` for the
+`RcConfig` object and `/cmdlib.json` for the custom command library.
+
+Two keys used to break that rule and were removed — `rc_maestro_channels` (imported Maestro
+channel names and travel endpoints) and `navicore-wcb-profiles-v1` (pre-config WCB credential
+profiles). Both had a one-time fold that wrote a browser copy *into* the config when the board
+carried none. Both folds are gone and the keys are purged at startup by
+`_purgeLegacyConfigKeys()`. The `_maestroCh` mirror still exists but is **in-memory only** —
+`_syncMaestroChFromConfig()` rebuilds it from `config.maestros[]` on every load, so it is
+derived from the droid and never writes back.
+
+The one deliberate exception is the custom command library. It is homed on the droid in
+`/cmdlib.json` (see the Revision log for 2026-07-31), but a browser copy is retained as the
+edit buffer and as the store for **bridge mode** — auto-syncing the library over the WCB bridge
+is a multi-KB fragment transfer that suppressed `rc_hb`/`rc_ch` for its whole duration and
+took config, live channel and SBUS down with it. Library sync is Direct-USB only for that
+reason; do not "fix" it by re-enabling the bridged pull.
 
 ---
 
@@ -433,6 +451,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | Browser storage no longer holds anything that affects the configuration. Removed `_foldLocalMaestroChIntoConfig()` and `_foldLegacyWcbProfiles()` — the two pre-config migrations that let a localStorage copy write into the config when the board carried none — and purge `rc_maestro_channels` / `navicore-wcb-profiles-v1` at startup. `_maestroCh` is now in-memory only, rebuilt from the config by `_syncMaestroChFromConfig()`. The custom command library keeps its browser copy deliberately: it is the edit buffer and the bridge-mode store, because a bridged library pull kills telemetry. |
 | 2026-08-18 | _(uncommitted)_ | Calibration wizard: the manual-channel box is pre-populated, so it always outranked auto-detect and the "move the control, then Capture" path was unreachable. `renderCalibrationStep()` now records `calibrationState.manualSeed` and `captureCalibrationValue()` treats the box as an override only when the user changed it. New-peer action editor: `renderPeerEventEditor()` now calls `syncPeerEventFromDom()` first, so edits held only in the DOM survive a tab switch / profile load / modal reopen instead of being silently discarded. |
 | 2026-08-17 | _(uncommitted)_ | Added `NC_CMDLIB_HIDDEN` and hid `wcb-native` (71 setup/config/routing/system/power verbs). The library builds ACTIONS — things a pilot fires from a transmitter switch — and none of those are: nobody binds a button to "set the hardware version" or "erase NVS", and the WCB Wizard is built for them. Hidden rather than deleted so the vendored snapshot stays byte-for-byte upstream apart from the sequence split, and so a re-fetch cannot bring it back; the board keeps its `NC_CMDLIB_ORDER_TOP` entry so removing the id restores its old slot. Known consequence: `ncDecodeCommand()` only searches present boards, so an action row already holding one of those commands still works but loses its 📚 hint and re-opens at the list. The WCB group is six members now, ending at WLED. |
 | 2026-08-17 | _(uncommitted)_ | Added `NC_CMDLIB_HIDDEN` and hid `wcb-native` (71 setup/config/routing/system/power verbs). The library builds ACTIONS — things a pilot fires from a transmitter switch — and none of those are: nobody binds a button to "set the hardware version" or "erase NVS", and the WCB Wizard is built for them. Hidden rather than deleted so the vendored snapshot stays byte-for-byte upstream apart from the sequence split, and so a re-fetch cannot bring it back; the board keeps its `NC_CMDLIB_ORDER_TOP` entry so removing the id restores its old slot. Known consequence: `ncDecodeCommand()` only searches present boards, so an action row already holding one of those commands still works but loses its `📚` hint and re-opens at the list. The WCB group is six members now, ending at WLED. |
