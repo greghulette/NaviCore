@@ -108,7 +108,7 @@ Where to look when changing a given area:
 | Mesh stats | `_meshStatsChipLine()` (sidebar per-board), `_meshStatsGlanceHtml()` (footer), `renderMeshStats()` (modal table), `_meshStatsMergePage()` (paged reply), `requestMeshStats()` · `_statsReport()`, `renderStatsReport()` (the saved `?STATS,RPT` push setting) |
 | Action rows | `buildActionRow()`, `renderArgs()`, `_renderMaestroActionArgs()`, `renderHcrParamFields()`, `renderMp3ArgField()` |
 | Wire-command row (command + "Send to") | `_appendCommandView()` — shared by the tier rows *and* the timeline popover; `readActionFromFid()` reads it back |
-| Command library | `ncCommandLibrary()`, `ncEncodeCommand()`, `ncDecodeCommand()`, `_cmdlibDestFieldHtml()` |
+| Command library | `ncCommandLibrary()`, `ncEncodeCommand()`, `ncDecodeCommand()`, `_cmdlibDestFieldHtml()` · live sequence source: `_wcbSeqRefresh()`, `_wcbSeqOptionsHtml()`, `_wcbSeqFieldHtml()`, `_cmdlibApplySeqSource()` |
 | Maestro panel | `renderMaestroLocations()`, `_importMaestroFile()` (Control Center XML), `_maestroChInfo()` |
 | Smoothing | `renderSmoothingPane()`, `_smoothProfiles()` |
 | Clips | `clipsRefresh()`, `_clipListFeed()`, `renderClips()`, `clipRename()`, `clipDelete()` |
@@ -156,10 +156,11 @@ cmdlib/
   navicore/manifest.json  + navicore.json   NaviCore-native verbs (record / play / stop)
 ```
 
-`cmdlib/droidnet/` is a **vendored, unmodified MPL-2.0 snapshot** — NaviCore's own boards
-never go in there. They live inline in `NC_CMDLIB_SEED` in `index.html`; `wcb-dfplayer`
-(the `;D` verb set) is one of them. A param's `enum` field is a **string id** into the
-library-level `enums` map, not an inline list.
+`cmdlib/droidnet/` is a **vendored MPL-2.0 snapshot** — NaviCore's own boards never go in
+there. They live inline in `NC_CMDLIB_SEED` in `index.html`; `wcb-dfplayer` (the `;D` verb
+set) is one of them. The only local delta to the snapshot is the `source` field described
+below. A param's `enum` field is a **string id** into the library-level `enums` map, not an
+inline list.
 
 Each command declares `id, name, safety, encoder, template, params[], examples,
 commentLabel, category`, plus routing metadata (`class`, `nativeWrapper`,
@@ -171,6 +172,45 @@ Users can add **private boards**, stored in `localStorage` and pushable to the d
 `/cmdlib.json` — small libraries over `SET_CMDLIB`, large ones over the bulk-transfer path
 (`_bulk*`). The droid stores the JSON opaquely; only size + FNV-1a hash are interpreted, so
 the tool can skip re-pulling an unchanged library.
+
+### Live param sources
+
+A param normally offers a fixed `enum` or a free-text box. It can instead declare a
+**`source`** — a set of values that only exists on the droid, resolved at composer-render
+time. One today:
+
+| `source` | Field | Fed by |
+|---|---|---|
+| `wcb.sequences` | Dropdown of stored `?SEQ` keys, grouped by the board holding them, with a ⟳ that re-reads the mesh and a manual-entry escape | `GET_WCB_SEQ` → `WCB_SEQ` ([PROTOCOLS.md](PROTOCOLS.md#stored-sequence-inventory)) |
+
+It is a `source` and not an `enum` because the values are not knowable to the library —
+they are whatever the boards happen to store today. That also keeps the board file
+portable: a consumer that does not implement the source sees an unknown extra field and
+falls back to the plain text input, which is what makes it shippable upstream rather than
+a NaviCore-only fork. Board files therefore keep the param's `pattern` as the validation
+and fallback.
+
+Things worth knowing before touching it:
+
+- **The list is per board, and the destination is not chosen in the composer.** The action
+  row picks where a command goes, so the picker offers every board's keys grouped by board
+  rather than filtering to one — `;C<key>` is routinely broadcast, and a key that exists
+  only on WCB 3 is still a valid broadcast.
+- **The current value is always offered**, even when no board reports it. Re-opening the
+  composer on an existing action must not rewrite its key just because that board is
+  offline or the key was typed by hand.
+- **Cached in memory only, keyed by board, validated against `seqHash`.** This is live
+  mesh state, not a setting; a list that outlived the droid it came from would offer
+  sequences that no longer exist. A board's hash moving invalidates its list
+  (`_applyWcbSeqHash`), so an edit made in the Wizard shows up without polling.
+- **Pulls are sequential** — `WCB_Client` allows one inventory request in flight mesh-wide
+  and rejects a second rather than queueing it (`_wcbSeqRefresh`).
+- **`_cmdlibApplySeqSource()` re-asserts the field after every merge.** The vendored
+  `wcb-native.json` carries it on `wcb.runSeq` / `wcb.runSeqLong` / `wcb.seqClear` (a
+  three-line delta, and the shape of the upstream PR), but a "check online" fetch or a
+  user importing their own copy of the DroidNet file replaces that board wholesale — which
+  would silently drop the picker back to a text box with no error. Delete the re-assert
+  once the field is upstream.
 
 ---
 
@@ -321,6 +361,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-17 | _(uncommitted)_ | Command library: params can declare a **`source`** — values resolved from the droid at render time rather than a fixed `enum`. First one is `wcb.sequences`, a dropdown of the `?SEQ` keys the boards actually hold (grouped by board, ⟳ to re-read the mesh, manual-entry escape), fed by `GET_WCB_SEQ`. The vendored `wcb-native.json` carries it on `wcb.runSeq` / `wcb.runSeqLong` / `wcb.seqClear` — the snapshot's only local delta, and the shape of the upstream PR — so the note that it is *unmodified* no longer holds. `_cmdlibApplySeqSource()` re-asserts it after every merge because a fetch or import replaces that board wholesale and would otherwise silently drop the picker back to a text box; delete it once the field ships upstream. Lists are cached in memory only (live mesh state, not a setting) and invalidated by a board's `seqHash` moving. |
 | 2026-08-13 | _(uncommitted)_ | Added `_releaseSerialOnUnload()` on `pagehide`: deasserts DTR/RTS, closes the port, and calls `sharedHub.leave()`. The Direct USB path had no teardown at all, so a refresh abandoned an open port. |
 | 2026-08-13 | _(uncommitted)_ | Hovering a WCB Status chip now shows that board's serial-port map, from the WDP labels already cached in `wcbPortLabels` (`_wcbPortTooltip()`). Real WCBs only — a client device has no WCB ports. Distinguishes "nothing advertised yet" from "ports are empty". |
 | 2026-08-13 | _(uncommitted)_ | Sidebar stats are now seeded from the droid config (`statsReport.enabled`) on every config load, so they appear **from connect** rather than needing a box ticked; the header checkbox is a session override and is no longer persisted in localStorage. |

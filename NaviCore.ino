@@ -3100,6 +3100,7 @@ void handleSerialInput() {
         filter["tap"]    = true;   // TRIGGER
         filter["id"]     = true;   // FORGET_PEER (without this the id is stripped → parsed as 0 → "out of range")
         filter["all"]    = true;   // FORGET_PEER
+        filter["wcb"]    = true;   // GET_WCB_SEQ (stripped here → parsed as 0 → "wcb out of range")
         DynamicJsonDocument hdr(256);
         DeserializationError perr = deserializeJson(
             hdr, serialInputBuf,
@@ -3311,6 +3312,17 @@ void handleSerialInput() {
           Serial.printf("[DBG] flags=0x%02X\n", (unsigned)g_dbgFlags);
           Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
+        } else if (strcmp(type,"GET_WCB_SEQ")==0) {
+          // Stored-sequence key list for ONE board, for the config tool's command
+          // library — so a "Run Sequence" action offers the sequences that board
+          // actually holds instead of a free-text key box. NAMES ONLY: the library
+          // can fetch a sequence body too, but one at a time and with no ceiling on
+          // the set, which is the failure mode the WCB's own config pull already has.
+          // The reply is ASYNC (a WCB_SEQ line when the board answers, or an ok:false
+          // one on timeout) — this path is Core 1, so the pull is issued directly.
+          const int seqB = hdr["wcb"] | 0;   // clamp: a wild value must reject, not wrap into a real board
+          rcTelemetry::startSeqPull((seqB >= 1 && seqB <= 255) ? (uint8_t)seqB : 0, 0);   // 0 = answer on USB
+
         } else if (strcmp(type,"GET_WCB_STATUS")==0) {
           // Lightweight liveness poll for the GUI's sidebar WCB Status panel.
           // Reads wcb->isOnline(i) for the floor (1..quantity) PLUS any auto-
@@ -3396,6 +3408,18 @@ void handleSerialInput() {
               Serial.printf("%s\"%s\"", p ? "," : "", safe);
             }
             Serial.print("]");
+          }
+          // Per-board stored-sequence fingerprint (WDP SEQHASH, WCBNeighbor::seqHash)
+          // — covers sequence NAMES and CONTENTS, so it moves on any save, rename,
+          // edit or erase. The tool caches a board's key list (GET_WCB_SEQ) against
+          // this and re-pulls only when it changes. USB path only, mirroring
+          // portLabels above; the bridge gets it in the fragmented WCB_META instead.
+          // 0 = not yet known — NOT "no sequences" (an empty inventory hashes non-zero).
+          Serial.print("],\"seqHash\":[");
+          for (int i = 1; i <= hi; i++) {
+            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+            Serial.printf("%s%u", (i > 1) ? "," : "",
+                          (unsigned)((nb && !nb->isClient) ? nb->seqHash : 0));
           }
           Serial.println("]}");
 
@@ -3870,6 +3894,11 @@ void setup() {
     wcb->onBulkBegin(rcTelemetry::bulkBegin);
     wcb->onBulkChunk(rcTelemetry::bulkChunk);
     wcb->onBulkComplete(rcTelemetry::bulkComplete);
+    // Stored-sequence inventory replies (GET_WCB_SEQ → WCB_SEQ). Registering the
+    // callback is also what ARMS interception of the reply packets in WCB_Client —
+    // without it they fall through to the raw-packet hook. Fires on the LOOP task
+    // (from wcb->update()), so building the reply String there is safe.
+    wcb->onSequenceNames(rcTelemetry::seqNamesReply);
     // Create the OTA packet queue here (Core 1) instead of lazily inside the
     // Core-0 RX callback, so the very first OTA frame can't be lost to the
     // create/publish race. The lazy-create in enqueueOtaPacket() stays as a fallback.

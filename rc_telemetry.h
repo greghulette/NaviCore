@@ -262,6 +262,110 @@ inline uint8_t _pendingGetCmdlibMetaSender = 0;
 // with GET_CONFIG/GET_CMDLIB), answered from tick() on Core 1.
 inline uint8_t _pendingGetWcbMetaSender = 0;
 
+// ── Stored-sequence inventory (GET_WCB_SEQ → WCB_SEQ) ────────────────────────
+// A WCB's ?SEQ keys, pulled over the mesh by WCB_Client's requestSequenceNames()
+// so the config tool's command library can offer the sequences a board ACTUALLY
+// holds instead of a free-text key box.
+//
+// NAMES ONLY, deliberately. The library can also fetch a sequence's BODY
+// (requestSequence), but one at a time and with no aggregate ceiling on the set —
+// pulling every body would recreate the failure the WCB's own config pull already
+// has (over its chunk budget → the target sends NOTHING). The inventory is ~16
+// bytes per entry and answers the only question the picker asks: what exists.
+//
+// The pull is ASYNC: requestSequenceNames() just transmits, and WCB_Client calls
+// seqNamesReply() later — on the LOOP task from wcb->update(), so building a
+// String and touching the fragment machine there is safe (unlike the Core-0
+// callbacks). Exactly one request may be in flight library-wide, so a single slot
+// tracks it and a second asker is answered "busy" rather than queued.
+inline uint8_t  _seqPullBoard    = 0;      // board this pull is asking (0 = idle)
+inline uint8_t  _seqPullSender   = 0;      // who to answer: 0 = USB console, else WCB id (bridge)
+inline uint32_t _seqPullDeadline = 0;      // millis() to give up at — see WCB_SEQ_TIMEOUT_MS
+inline uint8_t  _pendingSeqBoard = 0;      // bridge request waiting to be ISSUED from tick() (Core 1)
+inline uint8_t  _pendingSeqSender= 0;      // ...and who asked for it
+inline String   _seqReplyJson;             // built bridge reply waiting for a free fragment machine
+inline uint8_t  _seqReplyTo      = 0;      // bridge requester _seqReplyJson is for (0 = none)
+// The library abandons a pull silently after ~4 s. Give it a margin and then tell
+// the tool, so a picker waiting on the answer shows "no reply" instead of spinning
+// forever on a board that is powered off.
+constexpr uint32_t WCB_SEQ_TIMEOUT_MS = 6000;
+
+// Build the WCB_SEQ reply. `names` is the library's comma-separated key list;
+// re-emitted as a JSON array so the tool doesn't re-split it. Keys can never
+// contain a comma (the WCB takes a stored key as everything before the first one),
+// so the split is safe — but they are still EXTERNAL input, so strip the same
+// JSON-hostile characters buildWcbMeta() strips from port labels. Without that a
+// stray quote breaks this hand-built JSON and the tool drops the whole line.
+inline String buildWcbSeq(uint8_t board, uint32_t hash, uint16_t count, const char* names) {
+  String s; s.reserve(96 + (count * 18));
+  s += "{\"sys\":1,\"type\":\"WCB_SEQ\",\"ok\":true,\"wcb\":";
+  s += (int)board;
+  s += ",\"hash\":"; s += (unsigned long)hash;
+  s += ",\"names\":[";
+  bool first = true;
+  const char* p = names ? names : "";
+  while (*p) {
+    const char* e = strchr(p, ',');
+    size_t len = e ? (size_t)(e - p) : strlen(p);
+    if (len) {
+      if (!first) s += ',';
+      first = false;
+      s += '"';
+      for (size_t k = 0; k < len && k < WCB_SEQ_KEY_MAX; k++) {
+        char c = p[k];
+        if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;
+        s += c;
+      }
+      s += '"';
+    }
+    if (!e) break;
+    p = e + 1;
+  }
+  s += "]}";
+  return s;
+}
+
+// Emit a WCB_SEQ failure to whoever asked (0 = USB console, else the bridge).
+inline void _seqReplyError(uint8_t board, uint8_t sender, const char* why) {
+  char buf[104];
+  snprintf(buf, sizeof(buf),
+           "{\"sys\":1,\"type\":\"WCB_SEQ\",\"ok\":false,\"wcb\":%d,\"msg\":\"%s\"}",
+           (int)board, why);
+  if (sender == 0) Serial.println(buf);
+  else if (wcb)    wcb->send(sender, buf);
+}
+
+// WCB_Client's onSequenceNames callback — a board answered our requestSequenceNames().
+// Runs on the LOOP task (from wcb->update()), never the Core-0 receive path.
+// The USB reply goes straight out; a BRIDGE reply is parked for tick() to send,
+// because it can be a few hundred bytes (fragmented) and the fragment machine may
+// be mid-transfer — _startFragSend has no busy guard of its own, its callers do.
+inline void seqNamesReply(uint8_t wcbNumber, uint32_t hash, uint16_t count, const char* names) {
+  // Ignore anything that is not the pull we are tracking WITHOUT touching the slot:
+  // clearing it here would strand a still-outstanding request, and its timeout with it,
+  // so that requester would never be answered at all.
+  if (_seqPullBoard != wcbNumber) return;
+  const uint8_t to = _seqPullSender;
+  _seqPullBoard = 0; _seqPullDeadline = 0;   // our pull is settled — free the slot
+  if (to == 0) { Serial.println(buildWcbSeq(wcbNumber, hash, count, names)); return; }
+  _seqReplyJson = buildWcbSeq(wcbNumber, hash, count, names);
+  _seqReplyTo   = to;
+}
+
+// Ask `board` for its stored-sequence names on behalf of `sender` (0 = USB).
+// MUST be called from Core 1 — it transmits. Answers the asker immediately on
+// any failure so no requester is left waiting on a reply that will never come.
+inline bool startSeqPull(uint8_t board, uint8_t sender) {
+  if (board < 1 || board > WCB_MAX_BOARDS) { _seqReplyError(board, sender, "wcb out of range"); return false; }
+  if (!wcb || !wcbReady)        { _seqReplyError(board, sender, "WCB not ready");   return false; }
+  if (_seqPullBoard != 0)       { _seqReplyError(board, sender, "busy");            return false; }
+  if (!wcb->requestSequenceNames(board)) { _seqReplyError(board, sender, "request rejected"); return false; }
+  _seqPullBoard    = board;
+  _seqPullSender   = sender;
+  _seqPullDeadline = millis() + WCB_SEQ_TIMEOUT_MS;
+  return true;
+}
+
 // Deferred bridged WCB_STATUS reply. handle() runs in the WCB_Client receive
 // callback (Core 0 WiFi task); building the status fires ?WHOAMI ESP-NOW sends
 // AND the reply is itself an ESP-NOW TX. Doing that burst inline in the callback
@@ -296,7 +400,7 @@ constexpr uint32_t FRAG_PACING_MS = 150;
 // that requester's pending slot on completion — CMDLIB/WCB_META manage their own
 // slots up-front, so an untyped clear would wrongly zero a GET_CONFIG queued during
 // a CMDLIB/WCB_META send and drop it.
-enum OutboundKind { OS_CONFIG, OS_CMDLIB, OS_WCB_META };
+enum OutboundKind { OS_CONFIG, OS_CMDLIB, OS_WCB_META, OS_WCB_SEQ };
 
 // In-progress send state.  One outstanding send at a time — the requester
 // re-issues GET_CONFIG if it times out, so we never need to queue two.
@@ -1165,6 +1269,32 @@ inline void tick() {
     _pendingGetWcbMetaSender = 0;
     _startFragSend(to, buildWcbMeta(), "WCB_META", OS_WCB_META);
   }
+  // ── Stored-sequence inventory (GET_WCB_SEQ) ──────────────────────────────
+  // Issue a bridge-requested pull here on Core 1: requestSequenceNames() is an
+  // ESP-NOW TX, and handle() runs in the Core-0 receive callback (same reason
+  // WCB_STATUS is deferred). The USB path already runs on Core 1 and calls
+  // startSeqPull() directly.
+  if (_pendingSeqSender != 0) {   // non-zero sender = a bridge request is parked (board may be invalid)
+    const uint8_t b = _pendingSeqBoard, to = _pendingSeqSender;
+    _pendingSeqBoard = 0; _pendingSeqSender = 0;
+    startSeqPull(b, to);   // answers the requester itself on failure
+  }
+  // The board answered and the reply is for the bridge — send it once the
+  // fragment machine is free, exactly like the WCB_META pull above.
+  if (_seqReplyTo != 0 && !_outSend.active) {
+    const uint8_t to = _seqReplyTo;
+    _seqReplyTo = 0;
+    _startFragSend(to, _seqReplyJson, "WCB_SEQ", OS_WCB_SEQ);
+    _seqReplyJson = String();   // release the buffer — _startFragSend copied it
+  }
+  // No answer in time (board offline, or the mesh ate the request — the library
+  // abandons its own pull silently at ~4 s). Tell the requester so a picker
+  // waiting on the reply reports it instead of spinning.
+  if (_seqPullBoard != 0 && (int32_t)(millis() - _seqPullDeadline) >= 0) {
+    const uint8_t b = _seqPullBoard, to = _seqPullSender;
+    _seqPullBoard = 0; _seqPullDeadline = 0;
+    _seqReplyError(b, to, "no reply");
+  }
   // GET_CMDLIB_META — one tiny packet (size + signature) so the tool can skip a
   // re-pull when its cache already matches. Flash read done here on Core 1. Only
   // when the fragment machine is idle, so it never interleaves with a transfer.
@@ -1541,20 +1671,19 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
   // so this is used only by the caller to detect overflow (test: l >= bufsize).
   return len;
 }
-
-// Build the WCB_META reply — the per-board friendly aliases + serial-port labels
-// that don't fit the one-packet bridged WCB_STATUS. Sent FRAGMENTED (the tool
-// reassembles) on demand (GET_WCB_META) and CACHED by the tool, so the frequent
-// liveness poll stays lean. Same positional-array shape as the USB WCB_STATUS
-// aliases[]/portLabels[] fields, so the tool parses it identically. Aliases are
-// already sanitized (setWcbAlias); port labels are external WDP input, cleaned here.
+// Build the WCB_META reply — the per-board friendly aliases, serial-port labels and
+// stored-sequence hashes that don't fit the one-packet bridged WCB_STATUS. Sent
+// FRAGMENTED (the tool reassembles) on demand (GET_WCB_META) and CACHED by the tool,
+// so the frequent liveness poll stays lean. Same positional-array shape as the USB
+// WCB_STATUS aliases[]/portLabels[] fields, so the tool parses it identically. Aliases
+// are sanitized already (setWcbAlias); port labels are external WDP input, cleaned here.
 inline String buildWcbMeta() {
   int q = rcConfig.wcbNetwork.quantity;
   if (q < 0) q = 0;
   if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
   const int selfId = rcConfig.wcbNetwork.deviceId;
   const int hi = wcbHighestKnown(q);
-  String s; s.reserve(320);
+  String s; s.reserve(400);
   s += "{\"sys\":1,\"type\":\"WCB_META\",\"aliases\":[";   // sys:1 to match the other JSON emitters (Wizard mute)
   for (int i = 1; i <= hi; i++) {
     if (i > 1) s += ',';
@@ -1577,6 +1706,18 @@ inline String buildWcbMeta() {
       s += '"';
     }
     s += ']';
+  }
+  // Per-board stored-sequence fingerprint (WDP SEQHASH, WCBNeighbor::seqHash) —
+  // covers NAMES and CONTENTS, so it moves whenever a sequence is saved, renamed,
+  // edited or erased on that board. The tool caches a board's key list against
+  // this and re-pulls (GET_WCB_SEQ) only when it changes, which is what keeps the
+  // command library's sequence picker current without polling the mesh for it.
+  // 0 = not yet known — NOT "no sequences" (an empty inventory hashes non-zero).
+  s += "],\"seqHash\":[";
+  for (int i = 1; i <= hi; i++) {
+    if (i > 1) s += ',';
+    const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+    s += (unsigned long)((nb && !nb->isClient) ? nb->seqHash : 0);
   }
   s += "]}";
   return s;
@@ -1811,6 +1952,19 @@ inline bool handle(uint8_t senderID, const char* command) {
   // Deferred + single-flight on the fragment machine (answered from tick(), Core 1).
   if (!strcmp(type, "GET_WCB_META")) {
     if (_pendingGetWcbMetaSender == 0) _pendingGetWcbMetaSender = senderID;
+    return true;
+  }
+  // GET_WCB_SEQ — the stored-sequence key list for ONE board, so the config tool's
+  // command library can offer real sequences instead of a free-text key box.
+  // PARK ONLY: every outcome here — the pull, and the error replies for a bad
+  // board number or a busy slot — is an ESP-NOW transmit, and we are in the Core-0
+  // receive callback. tick() validates and answers on Core 1 (startSeqPull).
+  // A second asker while one is parked simply replaces it: the tool re-requests,
+  // and the newest request is the one whose answer it is still waiting for.
+  if (!strcmp(type, "GET_WCB_SEQ")) {
+    const int b = doc["wcb"] | 0;
+    _pendingSeqBoard  = (b >= 1 && b <= 255) ? (uint8_t)b : 0;   // 0 = invalid; tick() answers "out of range"
+    _pendingSeqSender = senderID;                                // non-zero = a request is parked
     return true;
   }
 
