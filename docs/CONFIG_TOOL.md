@@ -177,23 +177,34 @@ the tool can skip re-pulling an unchanged library.
 ### Picker layout
 
 Boards render collapsed. Related boards fold one level further into a **group**
-(`NC_CMDLIB_GROUPS`, prefix-matched), so a cluster is one row instead of six:
+(`NC_CMDLIB_GROUPS`), so a cluster is one row instead of seven:
 
-| Group | Prefix | Members |
-|---|---|---|
-| **WCB** | `wcb-` | Stored Sequences, HCR Vocalizer, MP3 Trigger, DFPlayer Mini, WLED Lighting, Native config |
-| **AstroPixels** | `astropixels-` | General, Sound, PSI, Logics, Holo, Servo |
+| Group | Members |
+|---|---|
+| **WCB** | Stored Sequences, HCR Vocalizer, MP3 Trigger, DFPlayer Mini, Maestro, WLED Lighting, Native config |
+| **AstroPixels** | General, Sound, PSI, Logics, Holo, Servo |
+
+A board joins by **id prefix** (`wcb-`, `astropixels-`) *or* by an explicit **`ids`**
+listing — either is enough. `ids` exists for the member a prefix can't reach:
+`nc-maestro-wcb` (the `;M` sequence + servo verbs) is routed by the WCB exactly like the
+rest of the group, but it is one of NaviCore's own seed boards so its id doesn't start
+with `wcb-`. Its sibling `nc-maestro` is deliberately **out** — raw Pololu bytes to a
+configured Maestro slot is a controller concern, not a WCB one.
 
 Each group's `sub()` shortens a member's label inside it, since the shared part is now the
 group header — `"WCB · HCR Vocalizer"` → `HCR Vocalizer`, `"WCB (native config)"` →
-`Native config`. Naming a new board `WCB · <thing>` is what makes it fold in cleanly.
+`Native config`, `"Maestro (via WCB)"` → `Maestro` (the qualifier only exists to tell it
+from the Pololu board outside, and the group header already says WCB). Naming a new board
+`WCB · <thing>` is what makes it fold in cleanly without touching `ids`.
 
 Two ordering facts are easy to trip over:
 
 - **A group renders at the position of its FIRST member**, so pinning a group means
   putting its members first *and contiguous* in `NC_CMDLIB_ORDER_TOP`. That is what puts
-  WCB at the very top of the picker. `_cmdlibNormalize()` does the sort, and the sort is
-  stable, so unlisted boards keep their manifest order in the middle.
+  WCB at the very top of the picker. A gap in that run — easy to introduce, since
+  `nc-maestro-wcb` sits in the middle of it and does not look like it belongs — splits
+  the cluster into two separate group rows. `_cmdlibNormalize()` does the sort, and the
+  sort is stable, so unlisted boards keep their manifest order in the middle.
 - **Order inside a group is that same array.** Stored Sequences leads the WCB group and
   the 71-command Native config trails it, because that is the order you reach for them.
 
@@ -392,6 +403,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-17 | _(uncommitted)_ | Picker groups take an explicit **`ids`** list as well as an id prefix, so `nc-maestro-wcb` (the `;M` sequence + servo verbs) joins the **WCB** group despite being one of NaviCore's own seed boards. `nc-maestro` stays out — raw Pololu bytes to a configured Maestro slot is a controller concern, not a WCB one. `sub()` renders the member as plain `Maestro`, since the qualifier only exists to tell it from the Pololu board outside the group. Note the ordering trap this creates: `nc-maestro-wcb` now sits in the MIDDLE of the WCB run in `NC_CMDLIB_ORDER_TOP` and does not look like it belongs there, but moving it out of the run splits the cluster into two group rows. |
 | 2026-08-17 | _(uncommitted)_ | Picker layout, so the sequence verbs are findable: the six stored-sequence commands split out of the 77-command `wcb-native` into their own vendored board (`wcb-sequences`, a pure move — that is the second local delta to the snapshot, see NOTICE.md), and all six `wcb-*` boards now fold into one **WCB** group. Two ordering facts are load-bearing and easy to trip over — a group renders at the position of its **first** member (so pinning WCB to the top means putting its members first *and contiguous* in `NC_CMDLIB_ORDER_TOP`), and order inside a group is that same array (Sequences leads, the 71-command native config trails). `NC_CMDLIB_ORDER_BOTTOM` is now empty. Added `_cmdlibDropMovedCmds()`: upstream still ships the six inside `wcb-native`, so a "check online" fetch re-adds them and every sequence command would list twice with only one copy carrying the live picker — it is a deliberate no-op when `wcb-sequences` is absent, so it can never strand them. |
 | 2026-08-17 | _(uncommitted)_ | Command library: params can declare a **`source`** — values resolved from the droid at render time rather than a fixed `enum`. First one is `wcb.sequences`, a dropdown of the `?SEQ` keys the boards actually hold (grouped by board, ⟳ to re-read the mesh, manual-entry escape), fed by `GET_WCB_SEQ`. The vendored `wcb-native.json` carries it on `wcb.runSeq` / `wcb.runSeqLong` / `wcb.seqClear` — the snapshot's only local delta, and the shape of the upstream PR — so the note that it is *unmodified* no longer holds. `_cmdlibApplySeqSource()` re-asserts it after every merge because a fetch or import replaces that board wholesale and would otherwise silently drop the picker back to a text box; delete it once the field ships upstream. Lists are cached in memory only (live mesh state, not a setting) and invalidated by a board's `seqHash` moving. |
 | 2026-08-13 | _(uncommitted)_ | Added `_releaseSerialOnUnload()` on `pagehide`: deasserts DTR/RTS, closes the port, and calls `sharedHub.leave()`. The Direct USB path had no teardown at all, so a refresh abandoned an open port. |
