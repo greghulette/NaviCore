@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.22:19.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.01:38.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9667,6 +9667,11 @@ let _peerEventDirty = false;
 // New-peer event editor (WCB Network tab): the passive-alert checkbox + an inline
 // action editor reusing the button/switch tier machinery under the 'peer' key.
 function renderPeerEventEditor() {
+  // Commit whatever is in the DOM BEFORE we blow the rows away. These edits live
+  // only in the DOM until Save, so every re-render path (tab switch, profile load,
+  // modal reopen) used to silently discard them. Guarded on #rows-peer existing,
+  // so this is a no-op on the first build.
+  syncPeerEventFromDom();
   if (!config.peerEvent) config.peerEvent = { alert: true, actions: [] };
   const cb = document.getElementById('peer-alert');
   if (cb) cb.checked = config.peerEvent.alert !== false;
@@ -16438,6 +16443,11 @@ function renderCalibrationStep() {
     const def    = (defMap && defMap[name]) || {};
     const ch     = (+cur.channel) || (+def.channel) || 0;
     manualInput.value = (ch >= 1 && ch <= 24) ? String(ch) : '';
+    // Remember what WE pre-filled. captureCalibrationValue treats the manual box
+    // as an override only when it differs from this seed — otherwise the box we
+    // just populated would outrank auto-detect on every single step, making the
+    // "move the control and Capture" path unreachable.
+    if (calibrationState) calibrationState.manualSeed = manualInput.value;
   }
   highlightCalibrationTarget(step);
 }
@@ -16620,7 +16630,12 @@ function captureCalibrationValue() {
 
     const manualInput = document.getElementById('calib-manual-channel');
     const manualVal   = manualInput ? parseInt(manualInput.value, 10) : NaN;
-    const hasManual   = Number.isFinite(manualVal) && manualVal >= 1 && manualVal <= 24;
+    // Only a value the USER changed counts as a manual override — see manualSeed
+    // in renderCalibrationStep(). Comparing against the seed (not against "is it
+    // non-empty") is what lets auto-detect run at all.
+    const manualSeed   = (calibrationState && calibrationState.manualSeed) || '';
+    const manualEdited = manualInput ? (String(manualInput.value).trim() !== String(manualSeed).trim()) : false;
+    const hasManual   = manualEdited && Number.isFinite(manualVal) && manualVal >= 1 && manualVal <= 24;
 
     let chosenCh;
     let savedNote;

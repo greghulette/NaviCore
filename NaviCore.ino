@@ -2085,6 +2085,11 @@ static int8_t lastKnobMode[RC_NUM_KNOBS] = {0};
 static bool knobPrimed[RC_NUM_KNOBS] = {false};
 
 void processKnobs() {
+  // The calibration wizard asks the operator to sweep every source to its
+  // extremes. Dispatch is already muted while it runs, but passthrough is NOT a
+  // dispatch — without this gate every passthrough servo tracks those sweeps and
+  // slams its full mechanical travel while the user is just reading the wizard.
+  if (calibrationActive) return;
   if (navirec::isReplaying()) return;   // replay owns the servos/volume during playback
   for (int i = 0; i < RC_NUM_KNOBS; i++) {
     RcKnob& kn = rcConfig.knobs[i];
@@ -2372,8 +2377,11 @@ void dumpSbusState() {
 // Enqueue a relayed CLI line for drainRemoteCli(). MUST stay noinline: the
 // 200-byte RemoteCliMsg lives in THIS frame, not onWCBCommand's, so it isn't
 // reserved on the Core-0 ESP-NOW callback stack while rcTelemetry::handle()
-// does its (stack-heavy) ArduinoJson parsing — that extra 200 bytes was enough
-// to overflow the WiFi-task stack and crash the board on every mesh command.
+// runs — that extra 200 bytes was enough to overflow the WiFi-task stack and
+// crash the board on every mesh command. (The weight in handle() is NOT the
+// ArduinoJson parse, as this comment used to claim: JsonDocument is heap-pooled
+// in ArduinoJson 7. It was the FragSession slot-clear temporary — see
+// _fragClear() in rc_telemetry.h.)
 static void __attribute__((noinline)) queueRemoteCli(uint8_t relay, const char* command) {
   RemoteCliMsg m;
   m.relay = relay;
@@ -2731,6 +2739,33 @@ static void applySbusOut(bool initial) {
     Serial.println("[SBUS] OUT disabled (passthrough off — no CPU cost)");
   }
   sbusOutApplied = want;
+}
+
+// Live re-apply of everything a saved config can change at runtime.  Shared by
+// BOTH save transports: the USB SET_CONFIG handler and rcTelemetry's Via-WCB
+// _applyReassembled().  It exists as one function because the two paths drifted
+// — the mesh path used to skip all of this, so a Save over the bridge left the
+// board running the OLD baud / SBUS-OUT / easing / auto-release state until the
+// next reboot, with no indication anything was pending.  Any new post-save
+// fixup belongs HERE, not in one caller.
+//
+// Returns false when boardType changed: the pin profile is assigned only at boot
+// (applyBoardProfile runs once in setup()), so re-opening ports now would use the
+// OLD board's pins.  Everything pin-dependent defers to the reboot the GUI
+// already prompts for after a board change; the caller reports that its own way.
+bool applyConfigSideEffects() {
+  if (rcConfig.boardType != appliedBoardType) return false;
+  applySerialBauds(false);   // HCR / MP3 / Maestro pick up a new rate immediately
+  applySbusOut(false);       // apply a flipped SBUS-OUT toggle live
+  // Re-apply Maestro easing so a changed smoothing profile / knob assignment /
+  // profile value takes effect IMMEDIATELY (matching the switch path) instead of
+  // waiting for a stick move — and resets any channel the new profile leaves
+  // uncovered (the steady-state hot path won't drive those down, so without this
+  // a re-assigned profile could leave the OLD easing stuck on the servo).
+  // Cache-gated, so a save that didn't touch easing is a no-op.
+  for (uint8_t mid = 1; mid <= RC_NUM_MAESTROS; mid++) reapplyMaestroEasing(mid);
+  resetMaestroReleaseState();   // re-derive auto-release policy (no stale idle release)
+  return true;
 }
 
 // =============================================================================
@@ -3173,27 +3208,10 @@ void handleSerialInput() {
             if (ok) {
               bool saved = rcConfigSaveLFS();
               rcAdvertiseSerialLabels();   // a changed port label / HCR/MP3/WLED dest → re-advertise over WDP
-              // Apply baud / SBUS-OUT changes live so HCR / MP3 / Maestro pick up
-              // a new rate immediately — no reboot required. BUT the pin profile is
-              // assigned only at boot (applyBoardProfile runs once in setup()), so if
-              // this Save also changed boardType, re-opening ports now would use the
-              // OLD board's pins; defer all pin-dependent apply to the reboot the GUI
-              // already prompts for after a board change.
-              if (rcConfig.boardType == appliedBoardType) {
-                applySerialBauds(false);
-                applySbusOut(false);     // apply a flipped SBUS-OUT toggle live
-                // Re-apply Maestro easing so a changed smoothing profile / knob
-                // assignment / profile value takes effect IMMEDIATELY (matching the
-                // switch path) instead of waiting for a stick move — and resets any
-                // channel the new profile leaves uncovered (the steady-state hot path
-                // won't drive those down, so without this a re-assigned profile could
-                // leave the OLD easing stuck on the servo). Cache-gated, so a save that
-                // didn't touch easing is a no-op. See reapplyMaestroEasing().
-                for (uint8_t mid = 1; mid <= RC_NUM_MAESTROS; mid++) reapplyMaestroEasing(mid);
-                resetMaestroReleaseState();   // re-derive auto-release policy from the fresh config (no stale idle release)
-              } else {
+              // Live re-apply of baud / SBUS-OUT / easing / auto-release. Shared with the
+              // Via-WCB save path — see applyConfigSideEffects().
+              if (!applyConfigSideEffects())
                 Serial.println("{\"type\":\"INFO\",\"msg\":\"boardType changed — reboot to apply the new pin profile\"}");
-              }
               // rcConfigSaveLFS() (flash write) + applySerialBauds()
               // block loop() for 100+ ms, during which processSbus() can't
               // run.  If the operator was holding a matrix button across

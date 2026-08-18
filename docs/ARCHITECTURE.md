@@ -220,6 +220,14 @@ executed inline.** The queues:
 Enqueue helpers are marked `__attribute__((noinline))` so their locals do not inflate the
 ESP-NOW callback's stack frame — a prior stack overflow was fixed exactly this way.
 
+**Nothing on the Core-0 path may materialise a large temporary.** The rule is wider than
+locals: `slot = BigStruct{}` is not elided on assignment, so it builds a full-size temporary
+in the *caller's* frame. `FragSession` is ~3.3 KB, and clearing it that way put ~7 KB on the
+WiFi-task stack once `handle()` and `_findOrAllocSession()` nested. Both sites now call
+`rcTelemetry::_fragClear()`, which clears in place and is itself `noinline`; measured with
+`-fstack-usage`, `handle()` is 368 B and `_findOrAllocSession()` 32 B. Never reintroduce
+whole-struct assignment on this path.
+
 `navirec` additionally uses `volatile` single-word flags (`_pendingCtl`, `_capturing`,
 `_lastPos`) as lock-free edges; those are safe **only** because each is a single aligned
 store with one logical writer.
@@ -272,7 +280,11 @@ fires each tier as it is reached.
 `rcExecuteAction()` (schedules if `delayMs`, else `rcExecuteActionNow()`). Delays are
 measured **from the trigger instant and run in parallel**, not cumulatively.
 
-While `calibrationActive` is set (the tool's calibration wizard), all dispatch is muted.
+While `calibrationActive` is set (the tool's calibration wizard), all dispatch is muted **and
+`processKnobs()` returns early**. Muting dispatch alone is not enough: passthrough is not a
+dispatch, so without the second gate every passthrough servo tracked the operator's calibration
+sweeps and drove its full mechanical travel. Any new path that moves hardware from SBUS input
+needs its own `calibrationActive` check.
 
 ---
 
@@ -338,6 +350,11 @@ droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
 
 - **`rcTelemetry`** — the bridge. Outbound `rc_hb`/`rc_ch`/`rc_trig`/`rc_mode`; inbound JSON
   reassembly and dispatch; WCB status/alias/port-label metadata; bulk-transfer sink.
+  A saved config is applied identically on both transports: USB `SET_CONFIG` and the bridged
+  `_applyReassembled()` both call **`applyConfigSideEffects()`** (in the .ino) for the live
+  re-apply of baud, SBUS-OUT, Maestro easing and auto-release policy. **Any new post-save fixup
+  belongs in that helper, not in one caller** — the two paths previously drifted, and a Save
+  over the mesh silently left the board on its old settings until the next reboot.
 - **`navirec`** — records dispatched actions plus synthesized servo/volume keyframes into a
   PSRAM clip, saves named clips to `clipsFS`, replays them with per-channel interpolation
   and ease-from-home anchoring, and streams clips to/from the tool's timeline editor.
@@ -358,6 +375,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-18 | _(uncommitted)_ | Core-0 stack: both `FragSession` slot-clear sites now call `rcTelemetry::_fragClear()` instead of assigning `FragSession{}`, which was materialising a ~3.3 KB temporary per site and ~7 KB nested on the ESP-NOW callback (`handle()` 3632→368 B, `_findOrAllocSession()` 3328→32 B, `-fstack-usage`). Recorded the wider rule in §8. `processKnobs()` now returns early while `calibrationActive` (§9) — dispatch muting alone let passthrough servos track the wizard's full-range sweeps. Post-save live re-apply factored into `applyConfigSideEffects()` and called from BOTH the USB and Via-WCB save paths (§13); the mesh path previously skipped it entirely. |
 | 2026-08-12 | _(uncommitted)_ | `rcTelemetry::tick()` gained the 30 s mesh-stats `;V` push and the deferred bridged `MESH_STATS` reply (`_pendingMeshStatsSender`, same Core-0-defer discipline as `WCB_STATUS`). Inbound COMMANDs are now counted in `onWCBCommand` (`g_meshRxCount`/`g_meshRxFrom`) because `WCB_Client`'s own statistics are outbound-only. |
 | 2026-08-12 | _(uncommitted)_ | `onStatusChange`/`onWcbStatus` + the 30 s boot roll call added to the setup order and the loop sequence. Recorded the concurrency rule that `onWcbStatus` is the **one callback firing on both cores** (ONLINE from the RX task, OFFLINE from `update()`), and why its name must come from `rcTelemetry::wcbAlias()` rather than `getNeighbor()->name`. |
 | 2026-08-05 | _(uncommitted)_ | `RA_DFPLAYER` (13) added to the executor table + `dfpDest`; noted why it is a separate type from `RA_MP3` (inverse volume scales, different verb sets). |

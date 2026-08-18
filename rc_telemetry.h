@@ -88,6 +88,7 @@ void                rcDispatch(int buttonId, uint8_t tapCount);
 void                queueRemoteTrigger(int mode, int btn, uint8_t tap);   // Core-0 → loop hop for remote TRIGGER (defined in .ino)
 void                queueForgetPeer(uint8_t id);   // Core-0 → loop hop for FORGET_PEER; id 0 = all (defined in .ino)
 void                resetModeAwareKnobs();   // re-arm mode-aware knobs on a mode change (defined in .ino)
+bool                applyConfigSideEffects();   // post-save live re-apply, shared with the USB path (defined in .ino)
 
 // Forward declarations from rc_config.h — needed for SET_CONFIG / GET_CONFIG
 // fragmentation handlers below.  Both already exist; declared here so
@@ -174,6 +175,21 @@ struct FragSession {
 inline FragSession _fragPool[FRAG_POOL_SIZE] = {};
 inline uint16_t    _nextOutSid = 1;            // sender-side sid generator
 
+// Clear a pool slot IN PLACE.  Never write `s = FragSession{}` here: assignment
+// from a prvalue is not elided, so the compiler materialises a full ~3.3 KB
+// FragSession temporary (String parts[192] + received[192]) in the CALLER's
+// stack frame.  Both clear sites sit on the Core-0 ESP-NOW receive-callback
+// path and nest (handle() -> _findOrAllocSession), which put ~7 KB on the
+// WiFi-task stack — on a frame where an extra 200 bytes has already caused a
+// documented overflow (see queueRemoteCli in NaviCore.ino).  noinline for the
+// same reason as the .ino enqueue helpers: keep this loop's own frame out of
+// the callers.  Semantically identical — the aggregate move-assign it replaces
+// did exactly this per-element String move-assign.
+inline void __attribute__((noinline)) _fragClear(FragSession& s) {
+  s.sid = 0; s.total = 0; s.got = 0; s.senderID = 0; s.expireAt = 0;
+  for (uint16_t i = 0; i < FRAG_MAX_PARTS; i++) { s.parts[i] = String(); s.received[i] = false; }
+}
+
 inline FragSession* _findOrAllocSession(uint16_t sid, uint16_t total, uint8_t senderID) {
   const uint32_t now = millis();
   FragSession* freeSlot = nullptr;
@@ -185,7 +201,7 @@ inline FragSession* _findOrAllocSession(uint16_t sid, uint16_t total, uint8_t se
   // guarantees that any returned slot is either fresh-claimed or genuine.
   for (auto& s : _fragPool) {
     if (s.sid != 0 && (int32_t)(now - s.expireAt) >= 0) {
-      s = FragSession{};
+      _fragClear(s);
     }
   }
   for (auto& s : _fragPool) {
@@ -1040,6 +1056,12 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
       Serial.println(saved ? "[RC] SET_CONFIG → applied + saved to LittleFS"
                            : "[RC] SET_CONFIG → applied but SAVE FAILED (not persisted)");
       rcAdvertiseSerialLabels();   // config may have changed a port label / dest → re-advertise
+      // Same live re-apply the USB save path performs. Without this a Save over the
+      // bridge left the board on the OLD baud / SBUS-OUT / easing / auto-release
+      // state until the next reboot. Safe here: _applyReassembled runs from tick()
+      // on Core 1, not in the ESP-NOW callback.
+      if (!applyConfigSideEffects())
+        Serial.println("[RC] SET_CONFIG: boardType changed — reboot to apply the new pin profile");
     } else {
       Serial.println("[RC] SET_CONFIG → rcConfigFromJSON returned false");
     }
@@ -1872,7 +1894,7 @@ inline bool handle(uint8_t senderID, const char* command) {
       full.reserve(sess->total * FRAG_CHUNK_BYTES);
       for (uint16_t i = 0; i < sess->total; i++) full += sess->parts[i];
       uint8_t fromId = sess->senderID;
-      *sess = FragSession{};   // free the slot before stashing
+      _fragClear(*sess);       // free the slot before stashing
       Serial.printf("[RC] frag sid=%u COMPLETE, deferring %u bytes to main loop\n",
                     (unsigned)sid, (unsigned)full.length());
       // ── DEFER to main loop ────────────────────────────────────────────
