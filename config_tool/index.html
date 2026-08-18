@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">17.22:19.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.09:36.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3776,19 +3776,34 @@ function _modeReport() {
 function setModeReportEnabled(checked) {
   const m = _modeReport();
   m.enabled = !!checked;
+  _backfillModeReportTemplate();
   renderModeReport();
+}
+// Drop in the default command whenever the feature is ON but has nothing to send
+// (blank command AND no per-mode overrides) so it works out of the box — whether it
+// was just toggled on OR loaded from a config saved enabled-but-empty (the firmware
+// default template is empty, rc_config.h:884). Editable; to send only per-mode
+// overrides, set an override and the blank command is left as-is. Returns true when
+// it changed something.
+// ORDER-CRITICAL on the load path: this MUST run AFTER the CONFIG handler snapshots
+// _configBaseline. It used to live inside renderModeReport(), which applyConfig calls
+// BEFORE the snapshot — so the backfilled default was baked into the baseline itself,
+// the diff saw "no change", Save shipped nothing, and the tool displayed a command the
+// board did not have. Same trap as _foldLocalMaestroChIntoConfig / _foldLegacyWcbProfiles.
+function _backfillModeReportTemplate() {
+  const m = _modeReport();
+  if (!m.enabled || m.template || m.cmds.some(c => c)) return false;
+  m.template = ';V,MODE,{mode}';
+  return true;
 }
 function setModeReportCmd(i, value) {
   _modeReport().cmds[i] = String(value == null ? '' : value).slice(0, 47);
 }
+// Pure painter — no mutation of config.modeReport. The default-command backfill lives
+// in _backfillModeReportTemplate() because doing it here ran it pre-baseline on the
+// load path and the result was never saved to the board.
 function renderModeReport() {
   const m = _modeReport();
-  // Drop in the default command whenever the feature is ON but has nothing to send
-  // (blank command AND no per-mode overrides) so it works out of the box — whether it
-  // was just toggled on OR loaded from a config saved enabled-but-empty (the firmware
-  // default template is empty, rc_config.h:842). Editable; to send only per-mode
-  // overrides, set an override and the blank command is left as-is.
-  if (m.enabled && !m.template && !m.cmds.some(c => c)) m.template = ';V,MODE,{mode}';
   const en = document.getElementById('modereport-enabled');
   if (en) en.checked = m.enabled;
   const f = document.getElementById('modereport-fields');
@@ -4464,8 +4479,17 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
   // port for the duration, and a competing Web Serial session would corrupt
   // the flash (or the resumed session).  The button is also disabled while
   // flashing; this guard is defense-in-depth in case a click slips through.
-  if (_fwFlashing) return;
-  if (port || sharedActive) { await disconnect(); return; }
+  // Same reasoning for an in-flight OTA: it owns writer/port for ~2 minutes,
+  // and disconnecting mid-stream aborts the update.
+  if (_fwFlashing || _otaInProgress) return;
+  // "Attached to the hub" and "the shared port is open" are different states, and the
+  // button label follows the SECOND one: onSharedState() calls setConnected(false) when
+  // the hub reports portOpen:false (leader's read loop ended on an unplug, a step-down,
+  // or exhausted open retries) but leaves sharedActive true. Dispatching on sharedActive
+  // alone therefore spent the click the "Connect" label had just invited on a teardown
+  // with no visible effect, and the chooser only opened on a second click.
+  if (port || (sharedActive && sharedHub && sharedHub.portOpen)) { await disconnect(); return; }
+  if (sharedActive) await disconnect();   // hub-attached but portless — release it, then offer the chooser
   openConnectModal();
 });
 
@@ -4669,6 +4693,13 @@ async function disconnect() {
     _clipItems = null; _clipAsm = null; _clipFsFresh = false;
     _tlDownload = null;
     _tlAbortWaiters('disconnected');   // reject in-flight timeline upload waiters
+    // Half-received fragment sessions and the background-fetch scrim suppressor must
+    // not survive into the next session: a GET_WCB_META whose reply never arrived leaves
+    // _fragSilent latched true, and the next connect's fragmented CONFIG pull would then
+    // run with no progress scrim at all.
+    _fragSessions.clear();
+    _fragSilent = false;
+    if (_fragSilentTimer) { clearTimeout(_fragSilentTimer); _fragSilentTimer = null; }
   }
 }
 
@@ -4939,6 +4970,7 @@ function forgetLearnedPeer(id, btnEl) {
 function _maybeRequestWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already carries names/labels
   if (_bridgeUploadInFlight || _bulkActive) return;   // never fragment a WCB_META download into an in-flight upload
+  if (_fragSessions.size) return;                // a fragmented DOWNLOAD is reassembling — raising _fragSilent now would kill its progress scrim mid-transfer
   // Let the config pull finish FIRST. WCB_META shares the RC's single fragment
   // machine with GET_CONFIG and adds mesh traffic; firing it during the connect-time
   // config pull was starving/dropping it. _configLoaded flips true only once the
@@ -4958,7 +4990,7 @@ function _maybeRequestWcbMeta() {
   const now = Date.now();
   if ((now - _wcbMetaReqAt) < 5000) return;      // throttle
   _wcbMetaTries++; _wcbMetaReqAt = now;
-  _fragSilent = true;   // this is a background fetch — don't pop the loading scrim for it
+  _fragSilentBegin();   // this is a background fetch — don't pop the loading scrim for it
   sendJSON({ type: 'GET_WCB_META' }, /*silent=*/true).catch(() => {});
 }
 
@@ -4976,10 +5008,13 @@ function _maybeResyncWcbMeta() {
   if (!viaWcbActive && !sharedActive) return;    // USB status already refreshes labels every 3 s
   if (!_configLoaded) return;                    // stay strictly secondary to the connect-time config pull
   if (_bridgeUploadInFlight || _bulkActive) return;   // and never spawn a fragmented WCB_META download during an upload
+  // Nor during a fragmented DOWNLOAD: a user-initiated cmdlib/config pull can run well
+  // past 30 s, and raising _fragSilent mid-transfer tears its progress scrim down.
+  if (_fragSessions.size) return;
   const now = Date.now();
   if ((now - _wcbMetaResyncAt) < 30000) return;  // at most once per ~30 s
   _wcbMetaResyncAt = now;
-  _fragSilent = true;   // background fetch — don't pop the loading scrim
+  _fragSilentBegin();   // background fetch — don't pop the loading scrim
   sendJSON({ type: 'GET_WCB_META' }, /*silent=*/true).catch(() => {});
 }
 
@@ -5278,7 +5313,13 @@ async function sendJSON(obj, silent = false) {
   // type string, so an added field is ignored by all existing readers and is
   // fully backward-compatible. Single choke point — covers all typed requests,
   // both serialize paths (direct-USB + via-WCB), and the fragmenter below.
-  obj = { ...obj, sys: 1 };
+  // Stamped FIRST, not last: the firmware's SET_CMDLIB handler pulls the library
+  // out by substring from after `"data":` to the final '}', which is only correct
+  // while "data" is the last key. Appending sys here put it after data and left a
+  // trailing `,"sys":1` in the stored library. The firmware side no longer depends
+  // on key order, but keeping sys first makes its comment true again — and costs
+  // nothing, since every consumer switches on `type`.
+  obj = { sys: 1, ...obj };
   if (!viaWcbActive) {
     await sendLine(JSON.stringify(obj), silent);
     return;
@@ -5456,6 +5497,7 @@ function setDebugFilter(key, on) {
   sendDebugFlagsToBoard();
 }
 
+const TERM_MAX_LINES = 3000;   // per pane — recent scrollback is what the terminal is for
 function appendTerminalLine(text, type = 'info', pane = 'main') {
   const output = document.getElementById(pane === 'wcb' ? 'terminal-output-wcb' : 'terminal-output');
   if (!output) return;
@@ -5472,6 +5514,12 @@ function appendTerminalLine(text, type = 'info', pane = 'main') {
   line.className = 'terminal-line ' + type;
   line.textContent = (terminalShowTimestamps ? `[${new Date().toLocaleTimeString()}] ` : '') + text;
   output.appendChild(line);
+  // Bound the scrollback. Nothing else ever removes a node from these panes — the
+  // Clear button is the only other removal path — so an enabled debug chip over a
+  // chatty stream (or a dead shared port logging a write failure every few seconds)
+  // grows the tree without limit, and the autoscroll write below reflows against all
+  // of it, so append cost climbs with the pane. Trim the head instead.
+  while (output.childElementCount > TERM_MAX_LINES) output.removeChild(output.firstChild);
   if (terminalAutoScroll) output.scrollTop = output.scrollHeight;
 }
 
@@ -6068,7 +6116,22 @@ async function clipRecordToggle() {
   const btn = document.getElementById('clip-record-btn');
   const nameEl = document.getElementById('clip-record-name');
   if (!_clipRecording) {
+    // The board REFUSES START unless it is idle (navicore_record.h startRecord:
+    // replaying/recording/editing all return false). Flipping the button on the
+    // bare write means the stop half then fires ?REC,SAVE for a take that never
+    // started — and saveClip persists whatever is in the RAM buffer, which after
+    // a ?REC,PLAY is the clip that was just loaded. That silently writes a copy
+    // of the played clip over the typed name (saveClip opens with "w", no
+    // clobber guard). Wait for the board's marker instead. Timeout → pre-marker
+    // firmware: fall back to the legacy assume-ok behavior (same pattern as
+    // clipRename above).
+    const startP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:REC'), 1500).catch(() => null);
     if (!(await sendRcCli('?REC,START'))) return;
+    const r = await startP;
+    if (r && r.includes('ERR')) {
+      alert('The board refused to start recording — it is busy (playing, already recording, or editing). Stop that first, then try again.');
+      return;
+    }
     _clipRecording = true;
     if (btn) { btn.textContent = '■ Stop & Save'; btn.classList.remove('btn-danger'); btn.classList.add('btn-blue'); }
   } else {
@@ -6370,6 +6433,17 @@ async function _tlSave() {
   const clip = _tlClip;
   const events = _tlFlattenEvents();
   if (!events.length) { alert('Nothing to save — the timeline is empty.'); return; }
+  // Clear `dirty` against the SNAPSHOT, not against the clip as it looks when the
+  // upload finishes. The modal stays fully interactive for the whole transfer (only
+  // the Save button is disabled), and over the WCB bridge a 300-event clip takes tens
+  // of seconds — every keyframe drag or action edit in that window sets dirty=true
+  // again on the live model, which _tlFlattenEvents() already deep-copied past.
+  // Clearing at the end would mark those edits saved: closeTimelineEditor() would then
+  // shut without its "Discard unsaved timeline edits?" prompt and drop them, while the
+  // board holds the pre-edit version. Clearing HERE means a concurrent edit leaves the
+  // flag set, so the prompt still fires and a second Save ships it.
+  const wasDirty = clip.dirty;
+  clip.dirty = false;
   clip.uploading = true;
   const saveBtn = document.getElementById('tl-save-btn');
   if (saveBtn) saveBtn.disabled = true;
@@ -6417,11 +6491,13 @@ async function _tlSave() {
       throw new Error('board rejected save' + (m ? ' — ' + m[1] : '') + ' (check the terminal for details)');
     }
 
-    clip.dirty = false;
-    _tlSetStatus(`Saved ✓ (${events.length} events)`);
+    _tlSetStatus(clip.dirty
+      ? `Saved ✓ (${events.length} events) — you have newer edits, Save again`
+      : `Saved ✓ (${events.length} events)`);
     showToast(`Timeline "${clip.name}" saved to NaviCore (${events.length} events)`, 'success');
     clipsRefresh();
   } catch (e) {
+    clip.dirty = wasDirty || clip.dirty;   // the snapshot never landed — restore the guard
     _tlSetStatus('Save FAILED: ' + e.message);
     showToast('Timeline save failed — ' + e.message, 'error');
     sendRcCli('?REC,EDITCANCEL');
@@ -6447,6 +6523,19 @@ function _tlSvgEl(tag, attrs) {
 
 function _tlTimeToX(t) { return TL_LEFT + t * _tlClip.pxPerMs; }
 function _tlXToTime(x) { return Math.max(0, Math.round((x - TL_LEFT) / _tlClip.pxPerMs)); }
+// Time for a keyframe/action being DRAGGED. durationMs is not recomputed from the
+// keyframes after load (only _tlTrimStart/_tlSetLength/_tlUndo change it), and
+// _tlRender sizes the SVG — and therefore the scroller — from it. A point dropped
+// past the end would render outside the viewport at EVERY zoom level (zoom scales
+// width and position together) and could never be grabbed again, while still being
+// flattened and uploaded: the saved clip's length silently jumps, because the
+// firmware derives duration from the LAST event. So grow the clip to follow the
+// point instead. Ceiling matches _tlSetLength's 10-minute bound.
+function _tlDragTime(t) {
+  const nt = Math.max(0, Math.min(600000, Math.round(t)));
+  if (_tlClip && nt > _tlClip.durationMs) _tlClip.durationMs = nt;
+  return nt;
+}
 // Lane height is TL_ROW_H per-track normally, or the tall shared lane in overlay
 // mode. Read from the global flag so every value↔Y site (render AND the live
 // drag handlers) stays consistent without threading a height through each call.
@@ -7068,7 +7157,7 @@ function _tlStartDragKeyframe(ev, track, kf, lo, hi, rowTop) {
       origins.forEach(o => {
         const w = solo ? (o.k.id === kf.id ? 1 : 0) : _tlSoftWeight(Math.abs(o.t0 - self.t0));
         if (w === 0 && o.k.id !== kf.id) return;             // outside the radius — untouched
-        if (o.k.id === kf.id) o.k.t = Math.max(0, Math.round(o.t0 + dt));
+        if (o.k.id === kf.id) o.k.t = _tlDragTime(o.t0 + dt);   // grows durationMs past the end — see _tlDragTime
         setVal(o.k, o.v0 + w * dv);
       });
       arr.sort((a, b) => a.t - b.t);
@@ -7137,7 +7226,7 @@ function _tlStartDragAction(ev, a) {
     try {
       moved = true;
       const rect = document.getElementById('tl-svg').getBoundingClientRect();
-      a.t = Math.max(0, _tlXToTime(mv.clientX - rect.left));
+      a.t = _tlDragTime(_tlXToTime(mv.clientX - rect.left));   // grows durationMs past the end — see _tlDragTime
       _tlClip.dirty = true;
       _tlRender();
     } catch (e) { console.error('timeline action drag error', e); finish(); }
@@ -8517,6 +8606,10 @@ function handleBoardMessage(line) {
       appendTerminalLine('< [wcb] Saved WCB profiles found in this browser — imported into the config. Open Config → WCB Network and Save to store them on the NaviCore.', 'rx');
       showToast('Imported your saved WCB profiles — Save to store them on the NaviCore', 'info');
     }
+    // Same order-critical rule for the mode-report default command: a board stored
+    // enabled-but-empty sends nothing, so backfill the default AFTER the baseline —
+    // then the diff sees it and a Save actually stores it on the droid.
+    if (_backfillModeReportTemplate()) renderModeReport();
     renderWcbProfiles();
     _syncMaestroChFromConfig();
     renderMaestroLocations();   // badges reflect the freshly-synced mirror
@@ -8639,8 +8732,18 @@ function applyConfig(data) {
                         // baseline and fabricates a phantom "unsaved config changes" prompt on close.
   if (data.hcrDest)     config.hcrDest    = data.hcrDest;
   if (Array.isArray(data.maestros) && data.maestros.length) {
-    // Pad / truncate to NUM_MAESTRO_SLOTS so the array length is stable
-    config.maestros = data.maestros.slice(0, NUM_MAESTRO_SLOTS);
+    // Pad / truncate to NUM_MAESTRO_SLOTS so the array length is stable, and give every
+    // slot a `channels` array HERE — before the CONFIG handler snapshots the diff
+    // baseline. rcConfigToJSON emits `channels` SPARSELY (rc_config.h ≈1278: a slot with
+    // no named channels has no key at all), while _foldLocalMaestroChIntoConfig and
+    // _syncMaestroChFromConfig both pad it in unconditionally — and they run AFTER the
+    // snapshot. Padding there made the live config differ from the baseline by that one
+    // key on every slot, so the first Save after each load shipped the whole 8-slot
+    // maestros branch for nothing. Normalizing pre-baseline costs nothing: the fold still
+    // REPLACES channels with a populated array when it has one, so that migration is
+    // still seen by the diff and still reaches the board.
+    config.maestros = data.maestros.slice(0, NUM_MAESTRO_SLOTS)
+                        .map(m => ({ ...m, channels: Array.isArray(m.channels) ? m.channels : [] }));
     while (config.maestros.length < NUM_MAESTRO_SLOTS) {
       config.maestros.push({ type: 0, device: 1 + config.maestros.length, channels: [] });
     }
@@ -8878,7 +8981,18 @@ function _applyMaestroRangesToKnobs(slot) {
   const applyOuts = outs => { if (Array.isArray(outs)) outs.forEach(o => {
     if (+o.target !== +slot) return;
     const r = _maestroChInfo(slot, o.maestroCh);
-    if (r) { o.posMin = r.min; o.posMax = r.max; n++; }
+    // Snap to the imported endpoints but KEEP the configured direction. posMin >
+    // posMax is a first-class, deliberately supported state — it's how a mirrored
+    // servo is reversed (the knob modal's help text teaches it, and the firmware's
+    // sbusToRange clamps order-independently for exactly this case). The parser
+    // always yields an ascending {min,max}, so assigning it verbatim would silently
+    // un-reverse the output — the panel then travels the wrong way with nothing in
+    // the import summary hinting that direction changed.
+    if (r) {
+      if (+o.posMin > +o.posMax) { o.posMin = r.max; o.posMax = r.min; }
+      else                       { o.posMin = r.min; o.posMax = r.max; }
+      n++;
+    }
   }); };
   for (const name in config.knobs) {
     const k = config.knobs[name];
@@ -9667,6 +9781,11 @@ let _peerEventDirty = false;
 // New-peer event editor (WCB Network tab): the passive-alert checkbox + an inline
 // action editor reusing the button/switch tier machinery under the 'peer' key.
 function renderPeerEventEditor() {
+  // Commit whatever is in the DOM BEFORE we blow the rows away. These edits live
+  // only in the DOM until Save, so every re-render path (tab switch, profile load,
+  // modal reopen) used to silently discard them. Guarded on #rows-peer existing,
+  // so this is a no-op on the first build.
+  syncPeerEventFromDom();
   if (!config.peerEvent) config.peerEvent = { alert: true, actions: [] };
   const cb = document.getElementById('peer-alert');
   if (cb) cb.checked = config.peerEvent.alert !== false;
@@ -10192,11 +10311,19 @@ function updateChannelsGrid(channels) {
 }
 
 function updatePWMDisplay(matrixVal, modeVal, btn, mode) {
-  _liveCh6 = matrixVal; _liveCh16 = modeVal; _liveBtn = btn; _liveMode = mode;
+  // A missing matrix/mode value means "no channel data with this update", not a value:
+  // the rc_trig branch of handleBoardMessage passes undefined for both because a bridged
+  // trigger carries no channel frame, and it only wants the btn-highlight branch below.
+  // Writing it through anyway painted the literal "undefined" (SBUS) or NaN (µs) into the
+  // big Button Matrix readout on every bridged button press, and poisoned the _liveCh6
+  // cache the SBUS/µs toggle repaints from. Leave the last real value in place instead.
+  if (Number.isFinite(matrixVal)) _liveCh6  = matrixVal;
+  if (Number.isFinite(modeVal))   _liveCh16 = modeVal;
+  _liveBtn = btn; _liveMode = mode;
   // Big matrix-channel display + tooltip (the per-channel grid handles
   // all other channels; CH7/CH12 pwm-row bars were removed).
   const bigCh6 = document.getElementById('live-ch6');
-  if (bigCh6) { bigCh6.textContent = fmtVal(matrixVal); bigCh6.title = `${altLbl(matrixVal)}`; }
+  if (bigCh6 && Number.isFinite(matrixVal)) { bigCh6.textContent = fmtVal(matrixVal); bigCh6.title = `${altLbl(matrixVal)}`; }
   const sub   = document.getElementById('live-ch6-sub');
   if (sub) sub.textContent = `Channel ${_liveMatrixCh} — Button Matrix (${unitLbl()})`;
 
@@ -10272,11 +10399,16 @@ function renderThresholds() {
     if ((slot === 19 || slot === 20) && !threeAxisOn) return;
     const row = document.createElement('tr');
     const center = Math.round((t.minPwm + t.maxPwm) / 2);
+    // Trigger cell: parseVal returns NULL (not NaN) for a blank field, and
+    // `null-10`/`null+10` are -10/10 — so an unguarded write would turn a cleared
+    // cell into a LIVE band around zero. This table renders physical buttons only,
+    // and for those blank means "leave unchanged" (see the button modal's comment
+    // and its Number.isFinite guard); the 0/0 inert band is a LOGICAL-button idiom.
     row.innerHTML = `
       <td>${t.id}</td>
       <td><input type="text" value="${escH(t.label)}" style="width:90px" onchange="config.thresholds[${i}].label=this.value"></td>
       <td><input type="number" value="${fmtVal(center)}" style="width:65px" title="min ${fmtVal(t.minPwm)} / max ${fmtVal(t.maxPwm)}"
-                 onchange="(function(v){ config.thresholds[${i}].minPwm=v-10; config.thresholds[${i}].maxPwm=v+10; renderThresholds(); updatePWMTooltips(); })(parseVal(this.value))"></td>`;
+                 onchange="(function(v){ if(!Number.isFinite(v)) return; config.thresholds[${i}].minPwm=Math.max(0,v-10); config.thresholds[${i}].maxPwm=v+10; renderThresholds(); updatePWMTooltips(); })(parseVal(this.value))"></td>`;
     tbody.appendChild(row);
   });
 }
@@ -10297,7 +10429,11 @@ function renderSwitchesTable() {
   (model.switches || []).forEach(name => {
     const cur = config.switches[name] || {};
     const dflt = switchDefaults[name] || { channel: 0, positions: 3 };
-    const ch   = (cur.channel  | 0) || dflt.channel;
+    // Channel 0 is the firmware's DISABLED state, not "unset" — SI/SJ ship at 0
+    // (rc_config.h RC_SWITCH_DEFAULT_CH) and processSbus skips them. Falling back
+    // to the tool's default for a stored 0 would show a channel the board is not
+    // reading. Fall back only when the key is genuinely absent (older schema).
+    const ch   = (cur.channel !== undefined) ? (cur.channel | 0) : dflt.channel;
     const pos  = (cur.positions| 0) || dflt.positions;
     const row = document.createElement('tr');
     row.innerHTML = `
@@ -10308,7 +10444,8 @@ function renderSwitchesTable() {
           <option value="3"${pos===3?' selected':''}>3 (Down / Mid / Up)</option>
         </select>
       </td>
-      <td><input type="number" min="1" max="24" value="${ch}" style="width:60px"
+      <td><input type="number" min="0" max="24" value="${ch}" style="width:60px"
+                 title="0 = disabled, 1-24 = SBUS channel number"
                  data-sw="${name}" data-field="channel"></td>`;
     tbody.appendChild(row);
   });
@@ -10349,13 +10486,19 @@ function renderAxesTable() {
   }).forEach(name => {
     const cur = config.knobs[name] || {};
     const dflt = knobDefaults[name] || { channel: 0 };
-    const ch = (cur.channel | 0) || dflt.channel;
+    // Channel 0 is the firmware's DISABLED state, not "unset" — LS/RS/S3/J5/J6
+    // ship at 0 (rc_config.h RC_KNOB_DEFAULT_CH) and processKnobs skips them.
+    // Falling back to the tool's default for a stored 0 would advertise a channel
+    // the board is not reading, while the knob modal shows the true 0. Fall back
+    // only when the key is genuinely absent (older schema).
+    const ch = (cur.channel !== undefined) ? (cur.channel | 0) : dflt.channel;
     const reverse = !!cur.reverse;
     const friendly = (dflt.friendly || name).replace(/^[^—]+ — /, '');   // strip "S1 — " prefix
     const row = document.createElement('tr');
     row.innerHTML = `
       <td><b>${name}</b>${friendly && friendly !== name ? `<small style="color:var(--muted);margin-left:6px">${escH(friendly)}</small>` : ''}</td>
-      <td><input type="number" min="1" max="24" value="${ch}" style="width:60px"
+      <td><input type="number" min="0" max="24" value="${ch}" style="width:60px"
+                 title="0 = disabled, 1-24 = SBUS channel number"
                  data-knob-ch="${name}"></td>
       <td style="text-align:center"><input type="checkbox" data-knob-rev="${name}" ${reverse ? 'checked' : ''}
                  title="Invert this axis around its centre before dispatch (stick up → reads as down for downstream outputs)"></td>`;
@@ -11321,8 +11464,14 @@ function renderHcrParamFields(container, fn, curChan, curTrack) {
     } else {
       chanW = mkNum('-chan', curChan, 99); chanL = 'Chan';
     }
-    trackW = mkNum('-track', curTrack, 9999); trackL = 'Track/Val';
-    trackTitle = 'Track/file number (PlayWAV), volume (SetVolume), or level (SetEmotion 0-100).';
+    // Only PlayWAV (14) takes a 0-9999 file number. HcrCodec::normalize caps
+    // track at 99 for SetEmotion (2) and SetVolume (17) — WcbCmd/src/WcbHcr.cpp
+    // — and a rejected action produces an EMPTY command that executeHcrAction
+    // drops with no user-visible error (only a dlog behind DBG_HCR). Authoring
+    // 100 here (the obvious value for "full volume") would be a silent no-op.
+    const tMax = (fn === 14) ? 9999 : 99;
+    trackW = mkNum('-track', curTrack, tMax); trackL = 'Track/Val';
+    trackTitle = 'Track/file number (PlayWAV 0-9999), volume (SetVolume 0-99), or level (SetEmotion 0-99).';
   }
   if (trackW && trackTitle) trackW.title = trackTitle;
 
@@ -12162,7 +12311,13 @@ function _ncCommandPattern(cmd) {
       const codes = ((en && en.values) || []).map(v => _reEscape(String(v.code))).sort((a, b) => b.length - a.length);
       if (codes.length) re += '(' + codes.join('|') + ')';
       else { isFreeText = true; re += '(.+?)'; }
-    } else if (p.type === 'int') re += '(\\d+)';
+    // Sign-tolerant only where the param's own range allows a negative — several
+    // vendored commands are signed (roam-a-dome's rotate/spin, r2uppityspinner-alt's
+    // rotary), and a bare (\d+) can't match the leading '-'. Encoding never checked, so
+    // ":DPR-30" authored fine and then failed to decode: no 📚 hint chip, and 📚 Change
+    // dropped the user at the board list instead of the pre-filled composer, while the
+    // identical command with +30 worked — a failure that looks random.
+    } else if (p.type === 'int') re += (p.min != null && +p.min < 0) ? '(-?\\d+)' : '(\\d+)';
     else { isFreeText = true; re += '(.+?)'; }
     if (literalBefore === '' && prevWasFreeText && isFreeText) ambiguous = true;
     prevWasFreeText = isFreeText;
@@ -12601,7 +12756,10 @@ function _cmdlibShowComposer() {
     } else if (p.type === 'int') {
       field = `<input type="number" id="${pid}" data-pname="${esc(p.name)}" ${p.min != null ? `min="${esc(p.min)}"` : ''} ${p.max != null ? `max="${esc(p.max)}"` : ''} value="${esc(_cmdlibValues[p.name])}" style="width:110px">`;
     } else {
-      field = `<input type="text" id="${pid}" data-pname="${esc(p.name)}" value="${esc(_cmdlibValues[p.name])}" style="width:180px">`;
+      // maxlength = the whole stored-command budget: a free-text param (wled.json's
+      // raw-JSON payload) is otherwise unbounded, and _cmdlibUse's length check is
+      // the only other thing between it and the firmware's silent truncation.
+      field = `<input type="text" id="${pid}" data-pname="${esc(p.name)}" maxlength="${RC_ACTION_CMD_MAX}" value="${esc(_cmdlibValues[p.name])}" style="width:180px">`;
     }
     html += `<div class="field-group"><label>${esc(p.label || p.name)}</label>${field}</div>`;
   });
@@ -12780,6 +12938,19 @@ function _cmdlibUse() {
   const wire = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
   const board = _cmdlibSel.board, cmd = _cmdlibSel.cmd, fid = _cmdlibFid;
   const mode = _cmdlibDestMode(board, cmd);
+  // A catalog entry that declares a custom `encoder` and carries NO `template`
+  // (e.g. rseries-logic's "Logic Effect", encoder "rseries-le") encodes to an
+  // EMPTY wire string — ncEncodeCommand only does template substitution, and
+  // nothing in this tool reads `encoder`. Authoring it would write an action
+  // that is nothing but the routing prefix: it dispatches, the device never
+  // moves, and no error is reported anywhere. A legitimately wire-less command
+  // declares `local` instead (navicore.json's nc.stop) and is handled below, so
+  // gate on "not local AND empty wire" rather than on a missing template.
+  if (mode !== 'local' && !String(wire).trim()) {
+    alert('That command cannot be built here yet — the library entry uses a custom encoder this tool does not implement, so it produces an empty command.\n\n' +
+          'Pick a different command, or type the raw device string into the row by hand.');
+    return;
+  }
   let action;
   // On a re-edit (📚 Change of a row that already holds a command) the row already
   // carries the destination the user chose — preserve it; only DEFAULT the
@@ -12842,6 +13013,17 @@ function _cmdlibUse() {
   if (action && (action.type === 'wcb_unicast' || action.type === 'wcb_broadcast')
       && /;M[1-8]/i.test(action.cmd || '') && document.getElementById(fid + '-skiprun')?.checked) {
     action.skipRunning = 1;
+  }
+  // The composer writes action.cmd into the row PROGRAMMATICALLY, and the field's
+  // maxLength constrains typing only — so the 95-char store (RC_ACTION_CMD_MAX)
+  // has to be enforced here as well. Reachable via a free-text param (wled.json's
+  // raw-JSON payload, or any param in an imported library) plus the ";W<w>;S<p>"
+  // routing prefix added above. Refuse rather than let the firmware's strlcpy
+  // truncate it silently.
+  if (action && typeof action.cmd === 'string' && action.cmd.length > RC_ACTION_CMD_MAX) {
+    alert(`That command is ${action.cmd.length} characters — the board stores only ${RC_ACTION_CMD_MAX} ` +
+          `(routing prefix included) and drops the rest without an error.\n\nShorten the values and try again.`);
+    return;
   }
   _applyResolvedActionToRow(fid, action);
   closeCmdLibrary();
@@ -13128,6 +13310,20 @@ let _fragProgTimer = null;
 // fragmented payload at a time (single _outSend), so this only ever gates that fetch;
 // cleared on completion / expiry so a later user-initiated CONFIG/CMDLIB pull shows it.
 let _fragSilent = false;
+let _fragSilentTimer = null;
+// Raise the flag with a self-healing timer. Its only two clear sites live INSIDE the
+// reassembler — the completion branch and the expiry sweep — and the sweep only walks
+// sessions that already exist. If the GET_WCB_META request or its entire reply is lost
+// on the mesh, no session is ever created, so there is nothing to complete and nothing
+// to expire: the flag latches true and the next USER-initiated pull (the connect-time
+// CONFIG, a cmdlib fetch) runs with no progress scrim at all, so the tool just looks
+// frozen for tens of seconds. The timer bounds that to one round-trip window; disconnect()
+// clears it too, so it can't survive into the next session.
+function _fragSilentBegin() {
+  _fragSilent = true;
+  if (_fragSilentTimer) clearTimeout(_fragSilentTimer);
+  _fragSilentTimer = setTimeout(() => { _fragSilent = false; _fragSilentTimer = null; }, FRAG_TIMEOUT_MS + 2000);
+}
 function _fragProgress(got, total, label) {
   let el = document.getElementById('frag-progress');
   if (!el) {
@@ -13529,6 +13725,32 @@ function _cmdViewMode(type, action) {
   return 'wire';
 }
 
+// ── The stored-command length cap ────────────────────────────────────────────
+// RcAction::cmd is char[96] in the firmware (rc_config.h ≈129) — 95 chars + NUL —
+// and rcConfigFromJSON copies it with strlcpy, which truncates anything longer
+// and discards the would-be length. Neither side reports it: the action still
+// dispatches, and a truncated "^"-chain can parse as a different-but-valid
+// command ("half my action works").
+//
+// The trap: what gets STORED is not what the user typed. A WCB-serial-port
+// destination prepends a ";W<wcb>;S<port>" routing prefix (6 chars ";W1;S1" to
+// 7 chars ";W20;S5") on read-back, so the visible field's cap must RESERVE room
+// for it — and the reserve changes when the destination changes. Anything that
+// caps the field at a fixed 95 (or at 90, which is still 2 short of ";W20;S5")
+// lets the stored command reach 102 and silently lose its tail.
+const RC_ACTION_CMD_MAX = 95;
+
+// The routing prefix a "Send to" value contributes to the STORED command.
+// Mirrors the read-back in readActionFromFid's wcb_broadcast branch.
+function _rcDestPrefix(destVal) {
+  const m = /^W(\d+)S(\d)$/.exec(String(destVal || ''));
+  return m ? `;W${m[1]};S${m[2]}` : '';
+}
+// How many characters the VISIBLE field may hold for a given destination.
+function _rcCmdFieldCap(destVal) {
+  return Math.max(1, RC_ACTION_CMD_MAX - _rcDestPrefix(destVal).length);
+}
+
 // Device-native command view: the visible field is the raw DEVICE string; the
 // "Send to" picks a WCB serial port (broadcast ";W<wcb>;S<port>" + string) or a
 // local aux serial. A hidden -cmd holds the full wire string and -port the local
@@ -13546,7 +13768,7 @@ function _appendDeviceView(container, action) {
 
   const devInput = document.createElement('input');
   devInput.type = 'text'; devInput.id = fid + '-devcmd';
-  devInput.maxLength = 90; devInput.value = devStr;
+  devInput.maxLength = _rcCmdFieldCap(curDest); devInput.value = devStr;
   devInput.placeholder = 'pick or type a device command';
   devInput.style.cssText = 'width:200px;font-family:monospace';
   row1.appendChild(makeFieldGroup('Command', devInput));
@@ -13561,12 +13783,25 @@ function _appendDeviceView(container, action) {
   destSel.value = curDest;
   const hint = document.createElement('div');
   hint.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--muted)';
+  const lenWarn = document.createElement('div');
+  lenWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
   const sync = () => {
     const dv = destSel.value, dev = devInput.value;
     const typeSel = document.getElementById(_cmdlibRowTypeSelId(fid));
     const m = /^W(\d+)S(\d+)$/.exec(dv);
     if (m) { if (typeSel) typeSel.value = 'wcb_broadcast'; cmdHidden.value = `;W${m[1]};S${m[2]}` + dev; }
     else   { if (typeSel) typeSel.value = 'serial'; portHidden.value = dv; cmdHidden.value = dev; }
+    // Re-reserve room for the routing prefix — its length changes with the
+    // destination (";W1;S1" = 6, ";W20;S5" = 7). Changing dest can leave an
+    // ALREADY-typed value over the new cap (maxLength never truncates), so warn
+    // rather than silently shipping something the firmware will cut.
+    devInput.maxLength = _rcCmdFieldCap(dv);
+    const over = cmdHidden.value.length - RC_ACTION_CMD_MAX;
+    lenWarn.textContent = over > 0
+      ? `⚠ Too long by ${over} character${over === 1 ? '' : 's'} — the board stores ${RC_ACTION_CMD_MAX} characters `
+        + `(including the "${_rcDestPrefix(dv)}" routing prefix) and silently drops the rest. Shorten it or split the action.`
+      : '';
+    lenWarn.style.display = over > 0 ? '' : 'none';
     let d = null; try { d = ncDecodeCommand(dev); } catch (e) {}
     hint.textContent = d ? `\u{1F4DA} ${d.board.name} · ${d.cmd.name}` : '';
     const mm = /^fields-(.+)-(\d+)$/.exec(fid); if (mm) refreshTierState(mm[1]);
@@ -13574,6 +13809,8 @@ function _appendDeviceView(container, action) {
   devInput.oninput = sync; destSel.onchange = sync;
   row1.appendChild(makeFieldGroup('Send to', destSel));
   container.appendChild(row1);
+  container.appendChild(lenWarn);
+  sync();   // paint the initial cap/warning for an already-stored over-length command
 
   const build = document.createElement('button');
   build.type = 'button'; build.className = 'btn btn-ghost';
@@ -13611,7 +13848,10 @@ function _appendCommandView(container, action) {
   // Command string — editable; the builder fills it, or type it by hand.
   const cmdInput = document.createElement('input');
   cmdInput.type = 'text'; cmdInput.id = fid + '-cmd';
-  cmdInput.maxLength = 95; cmdInput.value = cmd;
+  // Cap the VISIBLE field at 95 minus the routing prefix read-back will prepend
+  // (see RC_ACTION_CMD_MAX) — the field shows the bare command, the board stores
+  // prefix + command.
+  cmdInput.maxLength = _rcCmdFieldCap(wsDest); cmdInput.value = cmd;
   cmdInput.placeholder = 'pick or type a command';
   cmdInput.style.cssText = 'width:200px;font-family:monospace';
   // Line 1: the command and its two destination dropdowns, side by side on ONE
@@ -13653,6 +13893,28 @@ function _appendCommandView(container, action) {
     } else {
       chainWarn.style.display = 'none';
     }
+  };
+
+  // Length guard. The stored command is prefix + field, and the destination can
+  // change AFTER the text was typed (maxLength never truncates an existing
+  // value), so re-apply the cap and surface an overflow instead of letting the
+  // firmware's strlcpy eat the tail silently.
+  const lenWarn = document.createElement('div');
+  lenWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
+  container.appendChild(lenWarn);
+  const refreshLenWarn = () => {
+    const dest   = document.getElementById(fid + '-destsel')?.value || '';
+    const prefix = _rcDestPrefix(dest);
+    cmdInput.maxLength = _rcCmdFieldCap(dest);
+    // Read-back skips the prefix when the user hand-typed their own ";W…" routing.
+    const stored = (prefix && !/^;W/i.test(cmdInput.value) ? prefix : '') + (cmdInput.value || '');
+    const over   = stored.length - RC_ACTION_CMD_MAX;
+    lenWarn.textContent = over > 0
+      ? `⚠ Too long by ${over} character${over === 1 ? '' : 's'} — the board stores ${RC_ACTION_CMD_MAX} characters`
+        + (prefix ? ` (including the "${prefix}" routing prefix)` : '')
+        + ` and silently drops the rest. Shorten it or split the action.`
+      : '';
+    lenWarn.style.display = over > 0 ? '' : 'none';
   };
 
   // Destination — to the right of the command. WLED routes by id (no picker);
@@ -13711,6 +13973,7 @@ function _appendCommandView(container, action) {
       destHidden.value = dest;
       if (typeSel) typeSel.value = tp;
       refreshChainWarn();   // unicast⇄broadcast changes whether a "^" chain is a problem
+      refreshLenWarn();     // the ";W;S" prefix — and so the field's cap — changes with the destination
       const m = /^fields-(.+)-(\d+)$/.exec(fid); if (m) refreshTierState(m[1]);
     };
     wcbSel.onchange  = () => {
@@ -13766,7 +14029,8 @@ function _appendCommandView(container, action) {
     hint.textContent = `\u{1F4DA} ${d.board.name} · ${label}`;
   };
   setHint();
-  cmdInput.oninput = () => { setHint(); refreshChainWarn(); };
+  refreshLenWarn();   // flag an ALREADY-stored over-length command on render, not just on edit
+  cmdInput.oninput = () => { setHint(); refreshChainWarn(); refreshLenWarn(); };
   container.appendChild(hint);
 }
 
@@ -14576,7 +14840,13 @@ function _onKnobOutMaestroChange(idx) {
   const o = editingKnobDraft.outputs[idx];
   if (o) {
     const info = _maestroChInfo(o.target, o.maestroCh);
-    if (info) { o.posMin = info.min; o.posMax = info.max; }
+    // Keep a reversed output reversed — posMin > posMax is how a mirrored servo
+    // is configured (see _applyMaestroRangesToKnobs); the imported range is
+    // always ascending, so assigning it verbatim would flip travel direction.
+    if (info) {
+      if (+o.posMin > +o.posMax) { o.posMin = info.max; o.posMax = info.min; }
+      else                       { o.posMin = info.min; o.posMax = info.max; }
+    }
   }
   renderKnobOutputs();
 }
@@ -14727,12 +14997,20 @@ function openSwitchModal(swName) {
   if (!config.switches) config.switches = {};
   const d = config.switches[swName] || {};
   const defaults = switchDefaults[swName] || { channel: 0, positions: 3 };
+  // The pXnote captions MUST be copied in here. The tier cards render from this
+  // working object and rebuildSwitchTiers/saveSwitchModal write the rendered
+  // boxes straight back into config.switches — so a note that is not seeded
+  // renders blank and is then saved as blank, wiping it from the board (the
+  // firmware memsets the tiers before re-reading, so an absent key erases too).
   const sw = {
     channel:   d.channel   || defaults.channel,
     positions: d.positions || defaults.positions,
     p0: d.p0 || [],
     p1: d.p1 || [],
     p2: d.p2 || [],
+    p0note: d.p0note || '',
+    p1note: d.p1note || '',
+    p2note: d.p2note || '',
   };
 
   document.getElementById('modal-title').textContent = `Switch ${swName}`;
@@ -15331,6 +15609,19 @@ let _saveSeq       = 0;
 document.getElementById('btn-hwsetup-save').addEventListener('click', saveConfigToBoard);
 
 document.getElementById('btn-defaults').addEventListener('click', async () => {
+  // USB only. rcTelemetry::handle() has no RESET_DEFAULTS branch — over the mesh
+  // the board logs "Unknown inbound type" and does nothing, yet the follow-up
+  // GET_CONFIG's CONFIG reply still resolves _pendingDefaultsReset below and
+  // shows a green success toast for an operation that never happened. Gate on
+  // viaWcbActive ONLY: sendJSON routes over the mesh purely on that flag, so a
+  // shared-hub session against a directly-attached NaviCore still takes the USB
+  // path where the firmware DOES handle it.
+  if (viaWcbActive) {
+    alert('Restore Defaults needs a direct USB connection.\n\n' +
+          'The board does not accept a reset over the WCB mesh. Disconnect, uncheck "Via WCB", ' +
+          'reconnect over direct USB, and try again.');
+    return;
+  }
   if (!confirm('Reset all button mappings to factory defaults?')) return;
   // RESET_DEFAULTS has no dedicated ACK — the board resets, then we re-pull.
   // The returning CONFIG is the real confirmation the reset landed, so resolve
@@ -15644,6 +15935,21 @@ let _otaMarkerResolver = null;   // set while awaiting the next [OTA:*] marker
 // (re-arm is a microtask behind `await`). Buffer those instead of dropping them.
 let _otaPendingMarkers = [];
 
+// Lock/unlock the OTHER owners of the serial port for the duration of an OTA.
+// An OTA is a ~2 minute ACK-paced stream over the live session; runFirmwareFlash
+// does `await disconnect()` and hands the port to esptool-js, and Connect/
+// Disconnect tears it down outright — either one kills the transfer mid-stream
+// and leaves the board holding a dangling OTA session until its 30 s reaper.
+// runFirmwareFlash disables the same three buttons for its own duration; this
+// is the mirror image of that block. Call it AFTER _otaInProgress is set (and
+// after it is cleared), because _updateFirmwareBtnState reads that flag to
+// decide the flash buttons' state without fighting the Via-WCB rule.
+function _otaLockPortOwnerButtons(locked) {
+  const btnConnect = document.getElementById('btn-connect');
+  if (btnConnect) btnConnect.disabled = locked;
+  _updateFirmwareBtnState();
+}
+
 // Called from handleBoardMessage for any "[OTA:" line — resolves a pending wait,
 // or buffers the marker if no waiter is armed yet (see _otaPendingMarkers).
 function _otaHandleMarker(line) {
@@ -15685,6 +15991,7 @@ async function otaUpdateOverUsb() {
   _otaPendingMarkers = []; _otaMarkerResolver = null;   // discard any stale marker from a prior/aborted run
   const btn = document.getElementById('btn-fw-ota');
   if (btn) { btn.disabled = true; btn.textContent = '⚡ Updating over USB…'; }
+  _otaLockPortOwnerButtons(true);
   if (logEl) logEl.textContent = '';
   try {
     setStatus('OTA: fetching firmware…');
@@ -15769,6 +16076,7 @@ async function otaUpdateOverUsb() {
     _otaMarkerResolver = null;
     _otaPendingMarkers = [];
     if (btn) { btn.disabled = false; btn.textContent = '⚡ Update over USB (OTA)'; }
+    _otaLockPortOwnerButtons(false);
   }
 }
 
@@ -15811,6 +16119,7 @@ async function otaUpdateOverWcb() {
   _otaPendingMarkers = []; _otaMarkerResolver = null;   // discard any stale marker from a prior/aborted run
   const btn = document.getElementById('btn-fw-ota-wcb');
   if (btn) { btn.disabled = true; btn.textContent = '📡 Updating over WCB…'; }
+  _otaLockPortOwnerButtons(true);
   if (logEl) logEl.textContent = '';
   let session = 0;
   try {
@@ -15946,11 +16255,16 @@ async function otaUpdateOverWcb() {
     _otaMarkerResolver = null;
     _otaPendingMarkers = [];
     if (btn) { btn.disabled = false; btn.textContent = '📡 Update over WCB (OTA)'; }
+    _otaLockPortOwnerButtons(false);
   }
 }
 
 async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
-  if (_fwFlashing) return;
+  // Guard BOTH flags, symmetrically with the two OTA entry points. An OTA is a
+  // ~2 minute ACK-paced loop that owns writer/port; starting a flash under it
+  // calls disconnect() out from under the loop, killing the update with a
+  // misleading "timed out" and leaving the board holding a dead OTA handle.
+  if (_fwFlashing || _otaInProgress) return;
   _fwFlashing = true;
 
   const btnFlash   = document.getElementById('btn-fw-flash');
@@ -16122,10 +16436,11 @@ function _updateFirmwareBtnState() {
     if (btnOtaWcb) btnOtaWcb.disabled = !viaWcbActive;    // relay OTA  = via WCB only
   }
 
-  // While a flash is running, the flash flow owns these buttons' disabled
+  // While a flash OR an OTA is running, that flow owns these buttons' disabled
   // state (it disables them up front, re-enables them in its finally).  Don't
-  // let a Via-WCB toggle mid-flash re-enable them out from under it.
-  if (_fwFlashing) { btnFlash.disabled = true; btnWipe.disabled = true; return; }
+  // let a Via-WCB toggle mid-run re-enable them out from under it — starting a
+  // flash under a live OTA seizes the port the OTA is streaming through.
+  if (_fwFlashing || _otaInProgress) { btnFlash.disabled = true; btnWipe.disabled = true; return; }
   const disable = !!viaWcbActive;
   btnFlash.disabled = disable;
   btnWipe.disabled  = disable;
@@ -16161,6 +16476,10 @@ document.getElementById('btn-fw-flash').addEventListener('click', e => {
           'Disconnect, uncheck "Via WCB", reconnect over direct USB, and try again.');
     return;
   }
+  if (_otaInProgress) {
+    alert('An OTA update is already running. Wait for it to finish (or fail) before flashing.');
+    return;
+  }
   runFirmwareFlash({
     eraseNvs:     false,
     sourceBtn:    e.currentTarget,
@@ -16193,6 +16512,10 @@ document.getElementById('btn-fw-wipe').addEventListener('click', e => {
   if (viaWcbActive) {
     alert('Full Wipe & Flash unavailable while connected via WCB.\n\n' +
           'Disconnect, uncheck "Via WCB", reconnect over direct USB, and try again.');
+    return;
+  }
+  if (_otaInProgress) {
+    alert('An OTA update is already running. Wait for it to finish (or fail) before flashing.');
     return;
   }
   // Destructive — confirm before proceeding. confirm() is intentional: it
@@ -16438,6 +16761,11 @@ function renderCalibrationStep() {
     const def    = (defMap && defMap[name]) || {};
     const ch     = (+cur.channel) || (+def.channel) || 0;
     manualInput.value = (ch >= 1 && ch <= 24) ? String(ch) : '';
+    // Remember what WE pre-filled. captureCalibrationValue treats the manual box
+    // as an override only when it differs from this seed — otherwise the box we
+    // just populated would outrank auto-detect on every single step, making the
+    // "move the control and Capture" path unreachable.
+    if (calibrationState) calibrationState.manualSeed = manualInput.value;
   }
   highlightCalibrationTarget(step);
 }
@@ -16620,7 +16948,12 @@ function captureCalibrationValue() {
 
     const manualInput = document.getElementById('calib-manual-channel');
     const manualVal   = manualInput ? parseInt(manualInput.value, 10) : NaN;
-    const hasManual   = Number.isFinite(manualVal) && manualVal >= 1 && manualVal <= 24;
+    // Only a value the USER changed counts as a manual override — see manualSeed
+    // in renderCalibrationStep(). Comparing against the seed (not against "is it
+    // non-empty") is what lets auto-detect run at all.
+    const manualSeed   = (calibrationState && calibrationState.manualSeed) || '';
+    const manualEdited = manualInput ? (String(manualInput.value).trim() !== String(manualSeed).trim()) : false;
+    const hasManual   = manualEdited && Number.isFinite(manualVal) && manualVal >= 1 && manualVal <= 24;
 
     let chosenCh;
     let savedNote;
@@ -17075,6 +17408,32 @@ function handleConfigImportFile(event) {
       let csvHadMaestros = false;
       const newSwitches = {};
       const newKnobs = {};
+      let droppedOverfull = 0;   // actions past MAX_ACTIONS_PER_TIER — surfaced in the final alert
+
+      // Buttons and switches are rebuilt from scratch below, so anything the flat CSV
+      // has no column for is lost unless it's seeded here. These run BEFORE
+      // `config = imported`, so config.mappings / config.switches still hold the
+      // pre-import values. Same rule the knob and Maestro-channel branches follow: a
+      // CSV that's silent about a field means "no opinion", never "wipe it from the
+      // board". Without the seed the next Save ships the branch and rc_config.h:1497 /
+      // :1520 read the absent tNnote/pNnote key back as "" — every user-typed Action
+      // Name gone from the droid and the cheat sheet, with nothing reporting it.
+      const seedMapping = (key) => {
+        if (imported.mappings[key]) return imported.mappings[key];
+        const prev = (config.mappings || {})[key] || {};
+        const m = {};
+        for (let t = 1; t <= 3; t++) if (prev['t' + t + 'note']) m['t' + t + 'note'] = prev['t' + t + 'note'];
+        imported.mappings[key] = m;
+        return m;
+      };
+      const seedSwitch = (name) => {
+        if (newSwitches[name]) return newSwitches[name];
+        const prev = (config.switches || {})[name] || {};
+        const s = {};
+        for (let p = 0; p <= 2; p++) if (prev['p' + p + 'note']) s['p' + p + 'note'] = prev['p' + p + 'note'];
+        newSwitches[name] = s;
+        return s;
+      };
 
       const cellStr = (row, idx) => idx >= 0 ? String(row[idx] || '').trim() : '';
       const cellNum = (row, idx) => {
@@ -17393,39 +17752,42 @@ function handleConfigImportFile(event) {
           }
           const key = String(mode * 100 + buttonId);
           if (!actionType) {
-            if (exclusive === '1') {
-              imported.mappings[key] = imported.mappings[key] || {};
-              imported.mappings[key].exclusive = true;
-            }
+            if (exclusive === '1') seedMapping(key).exclusive = true;
             continue;
           }
-          imported.mappings[key] = imported.mappings[key] || {};
-          if (exclusive === '1') imported.mappings[key].exclusive = true;
+          const map = seedMapping(key);
+          if (exclusive === '1') map.exclusive = true;
           const tierKey = 't' + tier;
-          imported.mappings[key][tierKey] = imported.mappings[key][tierKey] || [];
+          map[tierKey] = map[tierKey] || [];
           const action = buildAction();
-          if (action) imported.mappings[key][tierKey].push(action);
+          // Clamp to the same cap the editor enforces. The firmware stops at
+          // RC_ACTIONS_PER_TIER with a bare `break` (rc_config.h:1503) — an extra row
+          // would be accepted, rendered, diffed, shipped and then silently dropped by
+          // the board, leaving the tool's baseline claiming an action the droid hasn't got.
+          if (action) {
+            if (map[tierKey].length >= MAX_ACTIONS_PER_TIER) droppedOverfull++;
+            else map[tierKey].push(action);
+          }
           continue;
         }
 
         if (type === 'switch-hw' || type === 'switch') {
           const swName = controlName;
           if (!swName) continue;
-          const sw = newSwitches[swName] || {};
+          const sw = seedSwitch(swName);
           if (Number.isFinite(channel)) sw.channel = Number(channel);
           if (Number.isFinite(positions)) sw.positions = Number(positions);
           if (type === 'switch') {
             const posIdx = positionNameToIndex(positionLabel);
-            if (posIdx === null || !actionType) {
-              newSwitches[swName] = sw;
-              continue;
-            }
+            if (posIdx === null || !actionType) continue;
             const tierKey = 'p' + posIdx;
             sw[tierKey] = sw[tierKey] || [];
             const action = buildAction();
-            if (action) sw[tierKey].push(action);
+            if (action) {   // same firmware cap as buttons — rc_config.h:1526
+              if (sw[tierKey].length >= MAX_ACTIONS_PER_TIER) droppedOverfull++;
+              else sw[tierKey].push(action);
+            }
           }
-          newSwitches[swName] = sw;
           continue;
         }
 
@@ -17457,6 +17819,30 @@ function handleConfigImportFile(event) {
       _maeReset.forEach(idx => {
         if (!_maeHadChan.has(idx)) imported.maestros[idx].channels = _maePrevChannels[idx] || [];
       });
+
+      // Carry each action's skipRunning gate across the rebuild — the CSV has no column
+      // for it, so without this every "don't re-fire while already running" flag is
+      // cleared and the next Save disarms it on the droid (actionFromJson reads the
+      // absent key as false, rc_config.h:1021). Matched on the action's CSV-visible
+      // identity and ONLY when that match is unique within the tier: a reordered or
+      // hand-edited list simply doesn't match, which loses the flag rather than arming
+      // it on the wrong action. Guessing here would move a real gate on real hardware.
+      const _skipSig = a => [a.type, a.target, a.port, a.cmd, a.slot, a.maestroCh].join('');
+      const _restoreSkip = (newList, oldList) => {
+        if (!Array.isArray(newList) || !Array.isArray(oldList)) return;
+        newList.forEach(a => {
+          const hits = oldList.filter(o => o && _skipSig(o) === _skipSig(a));
+          if (hits.length === 1 && hits[0].skipRunning) a.skipRunning = true;
+        });
+      };
+      Object.keys(imported.mappings).forEach(key => {
+        const prev = (config.mappings || {})[key];
+        if (prev) for (let t = 1; t <= 3; t++) _restoreSkip(imported.mappings[key]['t' + t], prev['t' + t]);
+      });
+      Object.keys(newSwitches).forEach(name => {
+        const prev = (config.switches || {})[name];
+        if (prev) for (let p = 0; p <= 2; p++) _restoreSkip(newSwitches[name]['p' + p], prev['p' + p]);
+      });
       config = imported;
       // Compact any holes (out-of-order / sparse profile indices), cap, normalize.
       config.wcbProfiles = Array.isArray(config.wcbProfiles)
@@ -17480,7 +17866,10 @@ function handleConfigImportFile(event) {
       if (csvHadHcrDest)  extras.push('HCR destination');
       if (csvHadMaestros) extras.push('Maestro Locations');
       const extraNote = extras.length ? ` (incl. ${extras.join(' + ')})` : '';
-      alert('Config CSV imported successfully' + extraNote + '.');
+      const dropNote = droppedOverfull
+        ? `\n\n${droppedOverfull} action row(s) were dropped: a tier/position holds at most ${MAX_ACTIONS_PER_TIER} actions (the firmware's hard limit).`
+        : '';
+      alert('Config CSV imported successfully' + extraNote + '.' + dropNote);
       renderAssignmentList();
       updateButtonHighlights();
       renderSwitchHighlights();
@@ -17879,8 +18268,10 @@ const CS_QR_TOKEN    = 'jf;af7kljaf8LJK*RELKFja;fff';
 //  ----------------------------------------------------------------------------
 //  Reuses the cheat-sheet Cloudflare Worker (CS_QR_ENDPOINT), but its /cfg/ route
 //  stores WITHOUT a TTL. Everything private lives in the WCB password:
-//    • the KV slot base is SHA-256(password) → unguessable, so nobody can even
-//      FIND your backups without it;
+//    • the KV slot base is PBKDF2(password) → unguessable, so nobody can even
+//      FIND your backups without it — and because it is the same 150k-iteration
+//      derivation as the key, seeing a request URL is no cheaper to attack than
+//      seeing the ciphertext;
 //    • the config is AES-GCM encrypted in THIS browser (PBKDF2 key from the same
 //      password) → the Worker / Cloudflare only ever see ciphertext.
 //  A rolling ring of CFG_BACKUP_MAX slots keeps your last N exports; slot reuse
@@ -17904,10 +18295,31 @@ const CFG_CREDS_LS     = 'navicore-cfg-creds-v1';   // remembered {u,p} when "re
 // encodeURIComponent so a '|' inside either field can't be confused for the
 // separator, keeping distinct (user,pw) pairs in distinct namespaces.
 function _cfgSecret(user, pw) { return encodeURIComponent(user) + '|' + encodeURIComponent(pw); }
-// SHA-256(slotSalt|user|pw) as 64-hex → the unguessable base for THIS user+password's
+// PBKDF2(user|pw, slotSalt) as 64-hex → the unguessable base for THIS user+password's
 // slots + manifest. Deriving from BOTH means the backup list is invisible unless you
 // supply the right username AND password (wrong either → a different, empty namespace).
+// It MUST be as expensive to attack as _cfgKey, and for a while it wasn't: the base was
+// a single SHA-256 over the same secret PBKDF2 protects, and it travels in the URL PATH
+// of every request (Worker/Cloudflare request logs, a TLS-inspecting corporate proxy, a
+// HAR or devtools log on a shared machine). Anyone holding one path could then test
+// (user,pw) guesses offline at ~150,000x the cost of attacking the ciphertext — the
+// weakest derivation sets the strength of the whole scheme. Same iteration count as
+// _cfgKey, different salt, so the two outputs can never collide.
+const _cfgSlotBaseMemo = new Map();   // secret → hex; PBKDF2 is deliberately slow — don't re-run it per request
 async function _cfgSlotBase(user, pw) {
+  const secret = _cfgSecret(user, pw);
+  if (_cfgSlotBaseMemo.has(secret)) return _cfgSlotBaseMemo.get(secret);
+  const enc  = new TextEncoder();
+  const seed = await crypto.subtle.importKey('raw', enc.encode(secret), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(CFG_SLOT_SALT), iterations: CFG_PBKDF2_ITERS, hash: 'SHA-256' }, seed, 256);
+  const hex = Array.from(new Uint8Array(bits), b => b.toString(16).padStart(2, '0')).join('');
+  _cfgSlotBaseMemo.set(secret, hex);
+  return hex;
+}
+// The ORIGINAL cheap slot base. Kept ONLY so backups written before the line above moved
+// to PBKDF2 are still findable — never written to any more. See _cfgFetchSlot.
+async function _cfgSlotBaseLegacy(user, pw) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(CFG_SLOT_SALT + '|' + _cfgSecret(user, pw)));
   return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -17953,7 +18365,20 @@ async function _cfgFetch(key) {
   if (!r.ok) throw new Error('fetch failed (' + r.status + ')');
   return r.text();
 }
-async function _cfgLoadManifest(user, pw, base) {
+// Read one key ('m', or 's<idx>') from THIS user's namespace, falling back to the
+// pre-PBKDF2 namespace when the current one 404s. Backups taken before the slot base
+// moved to PBKDF2 live under _cfgSlotBaseLegacy and would otherwise be unreachable —
+// the ciphertext is untouched by the change (the AES-GCM key derivation is byte-for-byte
+// what it always was), so an old blob decrypts normally once found. WRITES always go to
+// the current base, so the ring migrates one slot at a time as new backups are taken and
+// nothing is stranded in the meantime. Only a true 404 falls through; a 5xx/network error
+// still propagates, so a transient failure can't be read as "not there".
+async function _cfgFetchSlot(user, pw, suffix) {
+  const cur = await _cfgFetch((await _cfgSlotBase(user, pw)) + suffix);
+  if (cur != null) return cur;
+  return _cfgFetch((await _cfgSlotBaseLegacy(user, pw)) + suffix);
+}
+async function _cfgLoadManifest(user, pw) {
   // Return the empty ring ONLY for a true 404 (no manifest yet / first use, OR a
   // wrong user+password → a different, non-existent namespace). A transient fetch
   // error (5xx / network) or a corrupt/undecryptable body must PROPAGATE — else
@@ -17962,7 +18387,7 @@ async function _cfgLoadManifest(user, pw, base) {
   // The manifest is ENCRYPTED (it holds your notes + timestamps); since the base is
   // per-(user,pw), only THIS key ever wrote it, so a 200 that won't decrypt is
   // genuine corruption, not a wrong password.
-  const m = await _cfgFetch(base + 'm');   // throws on non-404 errors → caller aborts
+  const m = await _cfgFetchSlot(user, pw, 'm');   // throws on non-404 errors → caller aborts
   if (m == null) return { next: 0, list: [] };
   let o;
   try { o = JSON.parse(await _cfgDecrypt(user, pw, m)); }
@@ -17979,7 +18404,7 @@ async function cfgBackup(user, pw, note) {
   if (!_cfgSecureContextOk()) return;
   if (!user || !pw) throw new Error('enter a username and password — together they encrypt + address the backup');
   const base     = await _cfgSlotBase(user, pw);
-  const manifest = await _cfgLoadManifest(user, pw, base);
+  const manifest = await _cfgLoadManifest(user, pw);
   const idx      = manifest.next % CFG_BACKUP_MAX;
   const blob     = await _cfgEncrypt(user, pw, JSON.stringify({ v: 1, savedAt: Date.now(), config }));
   await _cfgPut(base + 's' + idx, blob);
@@ -17995,7 +18420,7 @@ async function cfgBackup(user, pw, note) {
 async function cfgRenameBackup(user, pw, i, note) {
   if (!_cfgSecureContextOk()) return;
   const base = await _cfgSlotBase(user, pw);
-  const manifest = await _cfgLoadManifest(user, pw, base);
+  const manifest = await _cfgLoadManifest(user, pw);
   const entry = manifest.list.find(e => e.i === i);
   if (!entry) throw new Error('that backup is no longer in the index');
   entry.note = (note || '').slice(0, 80);
@@ -18007,8 +18432,7 @@ async function cfgRenameBackup(user, pw, i, note) {
 // Save to push it.
 async function cfgRestore(user, pw, i) {
   if (!_cfgSecureContextOk()) return;
-  const base = await _cfgSlotBase(user, pw);
-  const blob = await _cfgFetch(base + 's' + i);
+  const blob = await _cfgFetchSlot(user, pw, 's' + i);
   if (!blob) throw new Error('that backup slot is empty');
   let obj;
   try { obj = JSON.parse(await _cfgDecrypt(user, pw, blob)); }
@@ -18033,17 +18457,27 @@ function _cfgDownloadTextFile(name, text) {
 // Given a parsed JSON value, return the config object inside it. Accepts either the
 // Download wrapper ({navicore, savedAt, note, config}) or a bare config object, so a
 // downloaded file round-trips and a hand-exported config still loads.
+// A NaviCore config must contain at least ONE key applyConfig recognises. Type-
+// checking alone let ANY JSON object through (a WCB Wizard export, a package.json,
+// even "{}"), and the callers then report success and set _configLoaded = true —
+// the one guard that stops a Save from clobbering the board with the tool's static
+// defaults. Worse, applyConfig full-replaces a few branches (wcbProfiles,
+// serialLabels, serialBcast, modeReport, statsReport), so a stray file WIPES them
+// even from a properly loaded config. Reject the file instead.
+const CFG_KNOWN_KEYS = ['thresholds', 'mappings', 'switches', 'knobs', 'maestros', 'wcbNetwork',
+                        'hcrDest', 'mp3Dest', 'dfpDest', 'wledSlots', 'txModel', 'matrixChannel',
+                        'funcBindings', 'smoothProfiles'];
 function _cfgExtractConfig(parsed) {
   const cfg = (parsed && parsed.config && typeof parsed.config === 'object') ? parsed.config : parsed;
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('that file has no config in it');
+  if (!CFG_KNOWN_KEYS.some(k => k in cfg)) throw new Error('that file is not a NaviCore config');
   return cfg;
 }
 // Fetch + decrypt backup slot `i` under (user, pw) and save it to disk as a readable
 // config .json file — the portable, human-inspectable form of a cloud backup.
 async function cfgDownload(user, pw, i, note, ts) {
   if (!_cfgSecureContextOk()) return;
-  const base = await _cfgSlotBase(user, pw);
-  const blob = await _cfgFetch(base + 's' + i);
+  const blob = await _cfgFetchSlot(user, pw, 's' + i);
   if (!blob) throw new Error('that backup slot is empty');
   let obj;
   try { obj = JSON.parse(await _cfgDecrypt(user, pw, blob)); }
@@ -18066,7 +18500,7 @@ async function cfgUploadFile(user, pw, file) {
   catch (e) { throw new Error('that file is not valid JSON'); }
   const cfg      = _cfgExtractConfig(parsed);
   const base     = await _cfgSlotBase(user, pw);
-  const manifest = await _cfgLoadManifest(user, pw, base);
+  const manifest = await _cfgLoadManifest(user, pw);
   const idx      = manifest.next % CFG_BACKUP_MAX;
   const blob     = await _cfgEncrypt(user, pw, JSON.stringify({ v: 1, savedAt: Date.now(), config: cfg }));
   await _cfgPut(base + 's' + idx, blob);
@@ -18159,7 +18593,7 @@ function cfgOpenCloudModal() {
     _persistCreds();
     setStatus('Loading backups…');
     let manifest;
-    try { manifest = await _cfgLoadManifest(user, pw, await _cfgSlotBase(user, pw)); }
+    try { manifest = await _cfgLoadManifest(user, pw); }
     catch (e) { setStatus(e.message || 'Could not reach the backup service.', true); return; }
     const wrap = $('cfg-cloud-list-wrap');
     const list = manifest.list.slice().sort((a, b) => b.ts - a.ts);

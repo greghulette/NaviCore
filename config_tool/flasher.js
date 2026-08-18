@@ -13,8 +13,9 @@
 //  Firmware binaries are hosted in the NaviCore repo under
 //  /firmware/ on GitHub.  The Contents API is used to list the
 //  directory so a freshly built binary with a versioned filename
-//  (e.g. NaviCore_201500RMAY26_ESP32S3.bin) is picked up
-//  automatically — only the suffix needs to be stable.
+//  (e.g. NaviCore_v0.2.0_172203QAUG26_ESP32S3.bin) is picked up
+//  automatically — the NaviCore_<version>_ESP32S3 name SHAPE is
+//  what has to stay stable, not any one version.
 //
 //  Public surface:
 //    flashFirmware(port, callbacks)  → Promise<void>
@@ -26,11 +27,14 @@ const ESPTOOL_CDN  = 'https://cdn.jsdelivr.net/npm/esptool-js@0.4.7/+esm';
 const CRYPTOJS_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js';
 
 // ── Firmware source config ───────────────────────────────────────
-// Binaries live in /firmware/ on GitHub with versioned names ending
-// in one of three stable suffixes:
-//   _ESP32S3.bin       — application image           → 0x10000
-//   _ESP32S3_boot.bin  — second-stage bootloader     → 0x0
-//   _ESP32S3_part.bin  — partition table            → 0x8000
+// Binaries live in /firmware/ on GitHub.  Three files are read:
+//   NaviCore_<version>_ESP32S3.bin       — application image  → 0x10000
+//   NaviCore_<version>_ESP32S3_part.bin  — partition table    → 0x8000
+//   WCB_S3_custom_bootloader_16MB_wdt3s.bin — bootloader      → 0x0
+//
+// The bootloader is a FIXED name, not a per-build one: CI also emits a stock
+// NaviCore_<version>_ESP32S3_boot.bin, which is NOT the one we want (see the
+// pairing comment in fetchFirmwareImages).
 //
 // Only the application image is required.  If boot+part are missing
 // we fall back to an app-only flash (works on already-programmed
@@ -88,11 +92,11 @@ function loadScript(src) {
 // ── Binary fetching ──────────────────────────────────────────────
 // Returns [{ buf, address }, ...] in ascending-address order.
 //
-// Flash map (ESP32-S3, min_spiffs partition scheme):
+// Flash map (ESP32-S3, 16 MB, the custom table in partitions.csv):
 //   boot   → 0x0       (bootloader)
 //   part   → 0x8000    (partition table)
 //   nvs    → 0x9000    (NVS — NOT touched here so saved config survives)
-//   ota_0  → 0x10000   (application)
+//   app0   → 0x10000   (application)
 function _otaSleep(ms) { return new Promise(res => setTimeout(res, ms)); }
 // Fetch a URL, retrying through GitHub's transient rate-limits (HTTP 429, and
 // the 403 GitHub uses for abuse throttling) and 5xx. Honors Retry-After when
@@ -136,23 +140,47 @@ async function fetchFirmwareImages(onLog) {
   if (!listResp.ok) throw new Error(`GitHub API: HTTP ${listResp.status}`);
   const files = await listResp.json();
 
-  async function fetchBySuffix(suffix, required) {
-    const match = files.find(f => f.type === 'file' && f.name.endsWith(suffix));
-    if (!match) {
-      if (required) throw new Error(`No file ending with "${suffix}" found in ${GITHUB_BIN_PATH}/`);
+  // Select by ANCHORED name, never by bare suffix. firmware/ is a shared
+  // directory: it also holds another product's bins (RC-Controller_*_ESP32S3*.bin,
+  // which the build scripts' NaviCore_-scoped prune never removes) and may hold
+  // older NaviCore builds (build-firmware.ps1 -KeepOld leaves them). An
+  // endsWith() match resolves to whichever name sorts first in the API listing,
+  // which has already locked onto the wrong (oldest) image once — see the note
+  // in .github/workflows/build-firmware.yml. DTG tags do not sort chronologically,
+  // so alphabetical order is not a safety net.
+  function pick(re) {
+    return files.find(f => f.type === 'file' && re.test(f.name)) || null;
+  }
+  function pickExact(name) {
+    return files.find(f => f.type === 'file' && f.name === name) || null;
+  }
+
+  async function download(entry, required, what) {
+    if (!entry) {
+      if (required) throw new Error(`No ${what} found in ${GITHUB_BIN_PATH}/`);
       return null;
     }
-    onLog(`Found: ${match.name}`);
-    const r = await _fetchRetry(match.download_url, onLog, match.name);
-    if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${match.name}`);
+    onLog(`Found: ${entry.name}`);
+    const r = await _fetchRetry(entry.download_url, onLog, entry.name);
+    if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${entry.name}`);
     const buf = await r.arrayBuffer();
-    if (buf.byteLength === 0) throw new Error(`${match.name} is empty`);
+    if (buf.byteLength === 0) throw new Error(`${entry.name} is empty`);
     return buf;
   }
 
   // App is required; boot + part are optional (paired — either both or neither).
-  const appBuf = await fetchBySuffix('_ESP32S3.bin', true);
-  const images = [{ buf: appBuf, address: 0x10000 }];
+  // Same strict regex as fetchLatestFirmwareVersion() so the "Latest on GitHub"
+  // line and the image actually written can never disagree.
+  const appEntry = pick(/^NaviCore_.+_ESP32S3\.bin$/);
+  const appBuf   = await download(appEntry, true, 'NaviCore app image (NaviCore_*_ESP32S3.bin)');
+  const images   = [{ buf: appBuf, address: 0x10000 }];
+
+  // Version captured from the app filename — the partition table is then required
+  // to carry the IDENTICAL version, so an app and a table from two different
+  // builds can never be paired. A mismatched table flashes silently and the
+  // damage only shows later (e.g. a table without the `clips` row leaves
+  // clipsFS unmounted and every record/replay save fails).
+  const fwVersion = appEntry.name.match(/^NaviCore_(.+)_ESP32S3\.bin$/)[1];
 
   // Bootloader + partition table are a PAIR — flash both or neither. Fetch each
   // as optional (non-throwing) and inspect them independently:
@@ -165,11 +193,14 @@ async function fetchFirmwareImages(onLog) {
   // Bootloader = the CUSTOM short-WDT 16MB bootloader (cold-boot auto-retry),
   // committed under a FIXED name so CI's stock per-build _ESP32S3_boot.bin can
   // never shadow it. It is the matched pair of the firmware's in-app boot guard.
-  // Partition table stays the tagged per-build _ESP32S3_part.bin.
+  // Partition table stays the tagged per-build _ESP32S3_part.bin, matched to the
+  // app's exact version (a table from a different build is treated as missing →
+  // the "exactly one" abort below, not a silent mismatched flash).
   // Sequential (not Promise.all) so we don't fire concurrent large raw-content
   // fetches at GitHub — a burst is more likely to trip its per-IP rate limit.
-  const bootBuf = await fetchBySuffix('WCB_S3_custom_bootloader_16MB_wdt3s.bin', false);
-  const partBuf = await fetchBySuffix('_ESP32S3_part.bin', false);
+  const partName = `NaviCore_${fwVersion}_ESP32S3_part.bin`;
+  const bootBuf  = await download(pickExact('WCB_S3_custom_bootloader_16MB_wdt3s.bin'), false);
+  const partBuf  = await download(pickExact(partName), false);
   let hasBootPart = false;
   if (bootBuf && partBuf) {
     images.unshift(
@@ -178,7 +209,7 @@ async function fetchFirmwareImages(onLog) {
     );
     hasBootPart = true;
   } else if (bootBuf || partBuf) {
-    const missing = bootBuf ? 'partition table (_ESP32S3_part.bin)'
+    const missing = bootBuf ? `partition table (${partName})`
                             : 'custom bootloader (WCB_S3_custom_bootloader_16MB_wdt3s.bin)';
     throw new Error(`Incomplete firmware on GitHub: the ${missing} is missing while ` +
       `its pair is present. Refusing to flash a partial set — app-only onto a blank ` +
@@ -219,19 +250,19 @@ const _isWindowsPlatform = /Win/i.test(navigator.platform || '');
 //                eraseNvs  : bool   — true → full wipe (factory state)
 //              }
 //
-//  Modes:
+//  Both modes write bootloader + partition table + app unconditionally.
+//  There is NO read-back / auto-detect of what is already on the board —
+//  see Step 3b for why reading flash over the S3's native USB was removed.
+//  The ONLY difference between the two is what gets erased:
+//
 //    eraseNvs = false  (default — "Update" path):
-//      Smart auto-detect, NVS preserved.
-//        • Blank board (magic 0xFF)       → full flash (boot + part + app)
-//        • Existing firmware (magic 0xE9) → app-only flash, NVS preserved
-//        • Partition-table mismatch       → full flash, NVS preserved
-//        • Anything else / read failure   → full flash, NVS preserved
+//      Erase otadata (0xE000, 8 KB) so the boot selector returns to app0.
+//      NVS (0x9000) is left alone, so the saved config survives.
 //
 //    eraseNvs = true   ("Full Wipe / Initial Push" path):
-//      Unconditional full flash + erase NVS (0x9000, 20 KB) + erase
-//      otadata (0xE000, 8 KB).  Use for first-time programming, recovery
-//      from a bricked board, or whenever a factory-fresh config is wanted.
-//      Skip detection entirely — we don't care what was there before.
+//      Erase otadata AND NVS (0x9000, 20 KB).  Use for first-time
+//      programming, recovery from a bricked board, or whenever a
+//      factory-fresh config is wanted.
 // ════════════════════════════════════════════════════════════════
 async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = false }) {
 
@@ -296,8 +327,8 @@ async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = fal
   //
   // Instead: ALWAYS write bootloader + partition table + app. The bootloader
   // (~20 KB) and partition table (~3 KB) are tiny next to the ~1 MB app and
-  // are identical on every build (fixed min_spiffs scheme), so always
-  // writing them costs almost nothing and is reliable on BOTH blank and
+  // are identical on every build (the fixed custom table in partitions.csv),
+  // so always writing them costs almost nothing and is reliable on BOTH blank and
   // already-programmed boards. The only difference between Update and Full
   // Wipe is whether we also erase NVS/otadata (Step 3c below) — Update never
   // touches NVS at 0x9000, so saved config is preserved.
@@ -307,11 +338,15 @@ async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = fal
     : 'Update — flashing bootloader + partitions + app (NVS preserved).');
 
   // ── Step 3c: optionally prepend NVS + otadata erase images ────
-  // NaviCore partition layout (PartitionScheme=min_spiffs):
-  //   nvs     @ 0x9000,  size 0x5000 (20 KB)
-  //   otadata @ 0xE000,  size 0x2000  (8 KB — two 4 KB flash sectors)
-  //   ota_0   @ 0x10000, size 0x1E0000 (~1.9 MB)
-  //   ota_1   @ 0x1F0000
+  // NaviCore partition layout (PartitionScheme=custom + FlashSize=16M — the
+  // table in partitions.csv; rows 0-5 are byte-identical to stock min_spiffs):
+  //   nvs      @ 0x9000,   size 0x5000   (20 KB)
+  //   otadata  @ 0xE000,   size 0x2000   (8 KB — two 4 KB flash sectors)
+  //   app0     @ 0x10000,  size 0x1E0000 (~1.9 MB)
+  //   app1     @ 0x1F0000, size 0x1E0000
+  //   spiffs   @ 0x3D0000, size 0x20000  (config LittleFS — /config.json)
+  //   coredump @ 0x3F0000, size 0x10000
+  //   clips    @ 0x400000, size 0xC00000 (12 MB record/replay LittleFS)
   //
   // Writing 0xFF buffers causes esptool to erase then rewrite those sectors,
   // returning them to factory-fresh state. Both otadata sectors MUST be
