@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">18.19:52.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">19.13:38.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8015,6 +8015,8 @@ async function startReading() {
   // mojibake (corrupted clip names / terminal text). Reset on error recovery
   // below since a TextDecoder can't be reset in place.
   let decoder = new TextDecoder();
+  // Consecutive read failures. Reset on any successful chunk — see the catch below.
+  let readFailStreak = 0;
   while (port && port.readable && !disconnecting) {
     try {
       reader = port.readable.getReader();
@@ -8023,6 +8025,7 @@ async function startReading() {
           const { value, done } = await reader.read();
           if (done) break;
           readBuffer += decoder.decode(value, { stream: true });
+          readFailStreak = 0;          // data flowing again — forget earlier glitches
           let idx;
           while ((idx = readBuffer.indexOf('\n')) !== -1) {
             const line = readBuffer.slice(0, idx).trim();
@@ -8036,6 +8039,22 @@ async function startReading() {
       }
     } catch (e) {
       if (!port || disconnecting) break;
+      // FATAL vs transient — this distinction is the whole point of the block.
+      // Framing / parity / buffer-overrun glitches are genuinely recoverable by
+      // re-acquiring the reader, and that is what the retry below is for. But a
+      // NetworkError ("The device has been lost.") means the USB device re-enumerated
+      // or went away: the SerialPort handle is dead and every subsequent read AND write
+      // fails forever. Retrying THAT spun here at 50 ms intervals without ever leaving
+      // the loop, so handleLinkLost() at the bottom was never reached — the UI sat on
+      // "Connected" with a frozen live panel indefinitely (observed in the field at
+      // 16.7 h) while the droid itself was perfectly healthy and passthrough kept
+      // working. Break instead, and let handleLinkLost() tear down + auto-reconnect.
+      const fatal = e && (e.name === 'NetworkError' || e.name === 'InvalidStateError');
+      if (fatal || ++readFailStreak > 40) {
+        console.warn('Serial read FATAL:', (e && (e.name || e.message)) || 'error',
+                     fatal ? '— device gone, tearing down' : '— too many consecutive failures, tearing down');
+        break;
+      }
       console.warn('Read recovered after:', e.name || 'error', '— continuing');
       readBuffer = '';
       decoder = new TextDecoder();   // drop any half-consumed multi-byte state so it can't prepend garbage
