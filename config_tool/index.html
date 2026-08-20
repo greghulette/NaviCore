@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">19.20:20.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">19.22:14.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4685,6 +4685,10 @@ async function disconnect() {
     // Also stop the universal SBUS-staleness watchdog and forget the freshness clock, so it
     // can't keep repainting a torn-down session; the next real data re-arms it on reconnect.
     if (_sbusStaleTimer) { clearInterval(_sbusStaleTimer); _sbusStaleTimer = null; }
+    // Session-scoped: without this the first diag after a reconnect reports the PREVIOUS
+    // session's lastRx (reading as "traffic is arriving") and can be suppressed entirely
+    // by the old throttle window.
+    _lastRxMs = 0; _lastRxKind = ''; _monitorDiagMs = 0; _lastMonitorResubMs = 0;
     _sbusFreshMs = 0;
     // Paint the SBUS block dead immediately — a manual Disconnect must not leave a stale
     // green "Receiving" until the 4 s watchdog would have caught it.
@@ -5165,8 +5169,7 @@ async function sendLine(msg, silent = false) {
       // from here too. NOT awaited: handleLinkLost() sends STOP_MONITOR, which
       // re-enters sendLine and would deadlock behind this send's own chain slot
       // (released in the finally below).
-      if (e && (e.name === 'NetworkError' || e.name === 'InvalidStateError')
-            && !disconnecting && port) {
+      if (_isFatalSerialError(e) && !disconnecting && port) {
         console.warn('Serial write FATAL:', e.name, '— device gone, tearing down');
         handleLinkLost();
       }
@@ -5231,7 +5234,10 @@ function onViaWcbToggle(checked) {
   // programmatically (connect auto-detect), where the element's .checked
   // wouldn't otherwise update to reflect the detected transport.
   { const tg = document.getElementById('via-wcb-toggle'); if (tg) tg.checked = viaWcbActive; }
-  try { localStorage.setItem('rc_via_wcb_on', viaWcbActive ? '1' : '0'); } catch (_) {}
+  // NOTE: bridge mode is deliberately NOT persisted — openPortAndStart() forces
+  // viaWcbActive=false on every connect, because a stale preference silently strips
+  // WCB Network edits out of a Save. The old rc_via_wcb_on key was write-only for
+  // exactly that reason; the write is gone rather than left looking meaningful.
   const status = document.getElementById('status-text');
   if ((port || sharedActive) && status) {
     status.textContent = viaWcbActive
@@ -8032,14 +8038,21 @@ window.addEventListener('keydown', e => {
 });
 
 // ── Read loop ──────────────────────────────────────────────────────────────
+// The Web Serial spec names the RECOVERABLE stream errors — the ones re-acquiring the
+// reader genuinely clears. Classify against that closed set rather than an allowlist of
+// the fatal names we happen to have seen: NetworkError ("The device has been lost."),
+// InvalidStateError, and a TypeError from getReader() on an already-locked stream are all
+// unrecoverable by retrying, and only the closed-world test catches the ones we have not
+// met yet.
+const SERIAL_RECOVERABLE = new Set(['BufferOverrunError', 'BreakError', 'FramingError', 'ParityError']);
+function _isFatalSerialError(e) { return !SERIAL_RECOVERABLE.has(e && e.name); }
+
 async function startReading() {
   // Persist decoder state across reads with {stream:true} so a multi-byte UTF-8
   // character split across two USB chunks is reassembled instead of turning into
   // mojibake (corrupted clip names / terminal text). Reset on error recovery
   // below since a TextDecoder can't be reset in place.
   let decoder = new TextDecoder();
-  // Consecutive read failures. Reset on any successful chunk — see the catch below.
-  let readFailStreak = 0;
   // This loop belongs to THIS port object. A read() parked on a device that vanished
   // can settle long after the teardown — possibly after a reconnect has already
   // installed a NEW port — and a loop that checked only the bare `port` global would
@@ -8056,7 +8069,6 @@ async function startReading() {
           const { value, done } = await r.read();
           if (done) break;
           readBuffer += decoder.decode(value, { stream: true });
-          readFailStreak = 0;          // data flowing again — forget earlier glitches
           let idx;
           while ((idx = readBuffer.indexOf('\n')) !== -1) {
             const line = readBuffer.slice(0, idx).trim();
@@ -8080,10 +8092,12 @@ async function startReading() {
       // "Connected" with a frozen live panel indefinitely (observed in the field at
       // 16.7 h) while the droid itself was perfectly healthy and passthrough kept
       // working. Break instead, and let handleLinkLost() tear down + auto-reconnect.
-      const fatal = e && (e.name === 'NetworkError' || e.name === 'InvalidStateError');
-      if (fatal || ++readFailStreak > 40) {
-        console.warn('Serial read FATAL:', (e && (e.name || e.message)) || 'error',
-                     fatal ? '— device gone, tearing down' : '— too many consecutive failures, tearing down');
+      // No consecutive-failure backstop: reopening the port RESETS a NaviCore v2
+      // (ESP_RST_USB — see docs/TROUBLESHOOTING.md), so tearing down after N recoverable
+      // errors would make a marginal cable power-cycle the droid every few seconds. A
+      // genuinely recoverable error is allowed to repeat indefinitely.
+      if (_isFatalSerialError(e)) {
+        console.warn('Serial read FATAL:', (e && (e.name || e.message)) || 'error', '— tearing down');
         break;
       }
       console.warn('Read recovered after:', e.name || 'error', '— continuing');
@@ -8157,8 +8171,17 @@ let _lastRxMs = 0;
 let _lastRxKind = '';
 
 function handleBoardMessage(line) {
-  _lastRxMs = Date.now();
-  _lastRxKind = line.startsWith('{')
+  // Bridge WCBs verbosely echo the commands WE relay to slot 20 ("Processing input
+  // from Serial0: ;w20,{...}" / "Sending Unicast ESP-NOW message to WCB20: {...}").
+  // Those are OUR traffic coming back, not the NaviCore talking. Counting them made
+  // lastRx impossible to age past ~3 s in Via-WCB / shared mode — our own status poll
+  // and keep-alive guaranteed an echo — which would point the operator at the monitor
+  // subscription for a NaviCore that had fallen off the mesh entirely. Exclude them.
+  const _rcId = RC_WCB_DEVICE_ID;
+  const _isOwnEcho = line.includes(';w' + _rcId + ',') ||
+                     line.includes('ESP-NOW message to WCB' + _rcId + ':');
+  if (!_isOwnEcho) { _lastRxMs = Date.now(); }
+  _lastRxKind = _isOwnEcho ? _lastRxKind : line.startsWith('{')
     ? (/"type"\s*:\s*"([A-Za-z0-9_]+)"/.exec(line) || [, 'json'])[1]
     : (line.slice(0, 12).replace(/[^\x20-\x7e]/g, '') || 'text');
   // OTA markers ([OTA:ACK,..]/[OTA:NAK,..]/[OTA:BEGIN,..]/[OTA:END,..]) are not
@@ -8661,7 +8684,7 @@ function handleBoardMessage(line) {
     // The two pre-config localStorage migrations (Maestro channel names, WCB
     // credential profiles) were removed deliberately: the droid is the only home for
     // configuration, so nothing in browser storage may write into the config. The
-    // stale keys are purged at startup — see _purgeLegacyConfigKeys().
+    // the stale keys are left in place but never read — see the note by _maestroCh.
     // Same order-critical rule for the mode-report default command: a board stored
     // enabled-but-empty sends nothing, so backfill the default AFTER the baseline —
     // then the diff sees it and a Save actually stores it on the droid.
@@ -8938,23 +8961,20 @@ function applyBindingsUI() {
 //
 // SOURCE OF TRUTH is the DEVICE CONFIG: config.maestros[i].channels[] round-trips
 // to the NaviCore (persists on the board, travels with config export/import).
-// `_maestroCh` is an in-memory MIRROR of that, kept because many consumers read
-// it; localStorage is only a pre-connection cache / migration source.
+// `_maestroCh` is an IN-MEMORY mirror of that, kept because many consumers read it.
+// It is never persisted: _syncMaestroChFromConfig() rebuilds it from
+// config.maestros[] on every config load, so storing it bought nothing while putting a
+// full copy of the servo names and travel endpoints in browser storage. The droid is
+// the only home for configuration.
 let _maestroCh = {};   // { "<slot 1-8>": { "<ch 0-31>": {min,max,name} } }
-// IN-MEMORY ONLY. _syncMaestroChFromConfig() rebuilds this from config.maestros[] on
-// every config load, so persisting it bought nothing while putting a full copy of the
-// servo names and travel endpoints in browser storage. The droid is the only home for
-// configuration.
-function _saveMaestroCh() { /* deliberately not persisted — see above */ }
 
-// Purge the pre-config browser keys. They once fed the config and no longer do;
-// deleting them stops a stale browser copy resurfacing as configuration.
-function _purgeLegacyConfigKeys() {
-  try {
-    ['rc_maestro_channels', 'navicore-wcb-profiles-v1'].forEach(k => localStorage.removeItem(k));
-  } catch (_) {}
-}
-_purgeLegacyConfigKeys();
+// The pre-config keys ('rc_maestro_channels', 'navicore-wcb-profiles-v1') are
+// deliberately LEFT IN PLACE, just no longer read. Removing the folds is what the
+// "nothing in browser storage affects the configuration" rule requires — once nothing
+// reads them they are inert. Deleting them too would destroy the only copy of Maestro
+// channel names / travel endpoints and WCB mesh credentials belonging to anyone who had
+// not yet Saved them to a droid, with no rescue path. Inert data is recoverable from
+// DevTools; deleted data is not.
 // _maestroCh[slot] (a {ch:{}} map) → the config.maestros[].channels array form.
 function _maestroChSlotToArray(slot) {
   const s = _maestroCh[String(slot)] || {};
@@ -8980,13 +9000,7 @@ function _syncMaestroChFromConfig() {
       delete _maestroCh[slot];
     }
   }
-  _saveMaestroCh();
 }
-// Migration: fold a browser-local (localStorage-era) import into the config for
-// any slot the DEVICE has no channels for, so a Save persists it on the board.
-// MUST run AFTER the diff baseline is snapshot (see the CONFIG handler) — folding
-// before the snapshot bakes the channels into the baseline, the diff sees "no
-// change", and the migration silently never reaches the device.
 // Stray file dropped OUTSIDE a drop target → swallow it so the browser doesn't
 // navigate away from the tool (which would lose unsaved config). The per-row
 // drop handlers still run first and do the actual import.
@@ -9068,7 +9082,6 @@ async function _importMaestroFile(slot, file) {
     return;
   }
   _maestroCh[String(slot)] = parsed;
-  _saveMaestroCh();
   // Write the names/endpoints INTO the device config so a Save persists them on
   // the NaviCore and they travel with config export/import (no longer browser-only).
   if (Array.isArray(config.maestros) && config.maestros[slot - 1]) config.maestros[slot - 1].channels = _maestroChSlotToArray(slot);
@@ -9084,7 +9097,6 @@ function _clearMaestroImport(slot) {
   if (!_maestroCh[String(slot)]) return;
   if (!confirm(`Forget the imported settings for Maestro ${slot}? (Passthrough ranges you already set are kept. Click Save afterward to clear them on the NaviCore too.)`)) return;
   delete _maestroCh[String(slot)];
-  _saveMaestroCh();
   if (Array.isArray(config.maestros) && config.maestros[slot - 1]) config.maestros[slot - 1].channels = [];
   renderMaestroLocations();
 }
@@ -9985,14 +9997,32 @@ function _sbusStaleTick() {
     // `isMonitoring` is exactly the flag most likely to be wrongly false — a partial
     // or aborted disconnect clears it while `port` stays truthy, which would silently
     // disable the only thing that recovers the panel.
-    if ((port || sharedActive) && (Date.now() - _lastMonitorResubMs) > 3000) {
+    // `!disconnecting` is load-bearing: disconnect() sends STOP_MONITOR, clears
+    // isMonitoring, then awaits reader.cancel()/port.close() — and _sbusStaleTimer keeps
+    // firing across those awaits. A tick landing in that window would re-send
+    // START_MONITOR AFTER the stop, leaving the board emitting a ~640-byte PWM_UPDATE
+    // every 50 ms into a closed port until power-cycled (wsMonitorActive clears only on an
+    // explicit STOP_MONITOR or a reboot). Guarding on `disconnecting` closes exactly that
+    // window without restoring the `isMonitoring` gate, which a partial disconnect leaves
+    // wrongly false and which would disable the self-heal entirely.
+    if (!disconnecting && (port || sharedActive) && (Date.now() - _lastMonitorResubMs) > 3000) {
       _lastMonitorResubMs = Date.now();
-      sendJSON({ type: 'START_MONITOR' })
-        .then(() => _monitorDiag(gap, 'resubscribe sent'))
-        .catch(e => _monitorDiag(gap, 'resubscribe FAILED: ' + (e && e.message ? e.message : e)));
-    } else {
-      _monitorDiag(gap, (port || sharedActive) ? 'resubscribe throttled' : 'NO LINK — cannot resubscribe');
+      // sendLine() returns early — RESOLVED — when there is nothing to write to, and
+      // WcbSerialHub.send() never rejects at all. So a bare .then() would print
+      // "sent" for bytes that never reached a wire. Say what we actually know.
+      const writable = sharedActive ? 'shared (delivery unconfirmed)' : (writer ? 'own port' : null);
+      if (!writable) {
+        _monitorDiag(gap, 'NOT SENT — no writable link (writer released)');
+      } else {
+        sendJSON({ type: 'START_MONITOR' })
+          .then(() => _monitorDiag(gap, 'resubscribe sent via ' + writable))
+          .catch(e => _monitorDiag(gap, 'resubscribe FAILED: ' + (e && e.message ? e.message : e)));
+      }
     }
+    // NOTE: deliberately no diag on the throttled path. The resubscribe throttle is 3 s
+    // and the diag throttle 10 s, so the first eligible tick after a print was always a
+    // throttled one — every line after the first read "resubscribe throttled" and the
+    // informative outcomes were never seen.
   }
 }
 // One line, at most every 10 s, naming everything needed to tell the failure modes
