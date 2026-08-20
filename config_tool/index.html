@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">20.09:25.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">20.09:35.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4553,9 +4553,30 @@ async function connectSharedPort() {
     return;
   }
   if (!sharedHub) sharedHub = new WcbSerialHub({ baudRate: 115200 });
-  // Pick a port inside this click gesture: the FIRST tab to share becomes the owner
-  // and picks the WCB; a follower (the Wizard already owns it) can just cancel the picker.
-  try { await sharedHub.requestPort(); } catch (_) {}
+  // Pick a port inside this click gesture. As the SOLE tab this is how we become our own
+  // leader and own the tethered WCB directly — the Wizard is NOT required. Cancelling is
+  // only valid when another tab already shares the port (then we just follow it).
+  //
+  // This used to swallow every failure, including the user dismissing the picker. The tab
+  // then joined portless, sat out the 4 s election it could never win, and showed a notice
+  // telling the user to go open the WCB Wizard — for what was really "no port chosen".
+  // That is why sharing from the Wizard looked like a hard requirement.
+  let gotPort = false;
+  try { await sharedHub.requestPort(); gotPort = true; }
+  catch (e) {
+    const noLeader = !(sharedHub.portOpen);
+    if (noLeader) {
+      appendTerminalLine('· shared: no port selected — click Connect and choose the tethered WCB when the browser asks.', 'sys');
+      if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }
+      _shareWaitToast = showToast(
+        'No port selected. Click Connect again and choose your tethered WCB (e.g. the MgmtRelay board) ' +
+        "in the browser's port picker — you do not need the WCB Wizard open.", 'warn', 0);
+      return;   // nothing to attach to and nothing to wait for
+    }
+    // Someone else already holds the shared port — cancelling the picker is the normal
+    // way to say "just follow that tab", so carry on and attach as a follower.
+    appendTerminalLine('· shared: picker dismissed — following the tab that already holds the port.', 'sys');
+  }
   if (!_sharedWired) {
     _sharedWired = true;
     sharedHub.on('data',  onSharedData);
@@ -4583,9 +4604,12 @@ async function connectSharedPort() {
     // now the rare case. (Don't infer "I'm alone" from role: a port-less tab is never leader now.)
     if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }
     _shareWaitToast = showToast(
-      'Couldn’t attach to a shared WCB. In the WCB Wizard, connect a board and choose “Share port ' +
-      'across tabs” (or click Open), then click Connect here again. If it still won’t attach, close ' +
-      'any other NaviCore config-tool tabs.',
+      gotPort
+        ? 'Selected a port but could not open it. It is usually held by another program — close the ' +
+          'Arduino IDE serial monitor, esptool, or another browser tab using it, then click Connect again.'
+        : 'Couldn’t attach to a shared WCB. Either choose the tethered WCB in the port picker when ' +
+          'Connect asks, or — if the WCB Wizard already has it — share it there with “Share port ' +
+          'across tabs”. If it still won’t attach, close any other NaviCore config-tool tabs.',
       'warn', 0);
     appendTerminalLine('· shared: no shared port yet — share a board in the WCB Wizard (or close any other config-tool tab), then reconnect.', 'sys');
     return;
