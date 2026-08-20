@@ -97,6 +97,7 @@
       this._leaderPortOpen = false;  // follower's view of whether SOME leader has the port open
       this._sawLeaderPort  = false;  // have we EVER seen a real leader hold an open port? gates failover adopt
       this._portlessRetries = 0;     // consecutive portless failover promotions → escalating step-down backoff (reset on any real port)
+      this._portlessTimer   = null;  // pending step-down re-campaign, so join() can pre-empt it
 
       this._listeners  = { data: [], role: [], state: [], log: [] };
     }
@@ -135,6 +136,15 @@
       this._bc.onmessage = (ev) => this._onBusMessage(ev.data);
 
       this._setRole('follower');
+      // join() is only ever called from a user gesture (clicking Connect). Clear the
+      // step-down backoff and any pending re-campaign first: the escalation exists to stop
+      // a permanently-absent device churning leader<->follower in the background, and it
+      // climbs to 30 s. Inheriting it here meant a user who tried a few times BEFORE
+      // sharing a port in the Wizard then sat behind a 30 s timer while the attach path
+      // waits only 4 s — so every subsequent click failed instantly and escalated it
+      // further, and the tool looked like it would not even try.
+      this._portlessRetries = 0;
+      if (this._portlessTimer) { clearTimeout(this._portlessTimer); this._portlessTimer = null; }
       this._post({ t: 'hello' });        // ask any existing leader to announce its state
       this._maybeCampaign();             // enter the lock election ONLY if we hold a port (or saw one) — a portless tab just follows, never squats the lock
 
@@ -193,6 +203,7 @@
 
       if (this._visHandler) { try { document.removeEventListener('visibilitychange', this._visHandler); } catch (_) {} this._visHandler = null; }
       if (this._claimTimer) { try { clearTimeout(this._claimTimer); } catch (_) {} this._claimTimer = null; }
+      if (this._portlessTimer) { try { clearTimeout(this._portlessTimer); } catch (_) {} this._portlessTimer = null; }
 
       await this._closePort();
 
@@ -267,7 +278,13 @@
       // returns (the counter is reset on any real port — a successful open + 'state' portOpen).
       this._portlessRetries++;
       const delay = Math.min(800 * Math.pow(2, this._portlessRetries - 1), 30000) + Math.floor(Math.random() * 700);
-      setTimeout(() => { if (this._joined && !this._leaving) this._maybeCampaign(); }, delay);
+      // Keep the handle: an explicit join() (a user clicking Connect) must be able to
+      // pre-empt this, or the click waits out a backoff it did not ask for.
+      if (this._portlessTimer) clearTimeout(this._portlessTimer);
+      this._portlessTimer = setTimeout(() => {
+        this._portlessTimer = null;
+        if (this._joined && !this._leaving) this._maybeCampaign();
+      }, delay);
     }
 
     // A promoted follower usually has no SerialPort object of its own — but the port was
