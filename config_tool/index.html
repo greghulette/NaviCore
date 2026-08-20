@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">20.09:35.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">20.09:59.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -12699,7 +12699,8 @@ function _cmdlibGroupEntries(boards) {
 // summary text (used to shorten a member's name inside a group).
 function _cmdlibRenderBoard(board, f, esc, label, customIds) {
   const matches = (board.commands || []).filter(c =>
-    !f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f));
+    !NC_CMDLIB_HIDDEN_CMDS.has(c && c.id) &&
+    (!f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f)));
   if (!matches.length) return { html: '', count: 0 };
   const cnt = matches.length;
   const cntLabel = f ? (cnt + ' match' + (cnt === 1 ? '' : 'es')) : (cnt + ' cmd' + (cnt === 1 ? '' : 's'));
@@ -13285,6 +13286,21 @@ function _cmdlibMergeLibraryData(data) {
 // hint and re-opens at the list instead of the composer.
 const NC_CMDLIB_HIDDEN = new Set([
   'wcb-native',   // 71 setup/config/routing/system/power verbs — configuration, not actions
+]);
+// Individual commands hidden from the PICKER for the same reason a whole board can be:
+// they are not actions. Stored Sequences is the case today — a pilot fires a sequence from
+// a switch, but never authors, lists or deletes one from an action mapping (that is done
+// from the terminal or the Wizard).
+//
+// Hidden at RENDER time only, deliberately: the commands stay in the library so
+// ncDecodeCommand() can still recognise an existing action that uses one and show it with
+// its proper widget instead of degrading it to raw text. Removing them from the library
+// would silently downgrade any mapping already saved on a droid.
+const NC_CMDLIB_HIDDEN_CMDS = new Set([
+  'wcb.seqSave',      // ?SEQ,SAVE,{key},{value}
+  'wcb.seqList',      // ?SEQ,LIST
+  'wcb.seqClearAll',  // ?SEQ,CLEAR,ALL
+  'wcb.seqClear',     // ?SEQ,CLEAR,{key}
 ]);
 // vendored id -> NaviCore seed id that replaces it when both are present.
 const NC_CMDLIB_SUPERSEDE = {
