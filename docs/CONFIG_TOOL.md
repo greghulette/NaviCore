@@ -63,7 +63,10 @@ disabled while Via WCB is active.
 **Page teardown releases the port.** A `pagehide` handler (`_releaseSerialOnUnload()`) deasserts DTR/RTS and closes, because a refresh otherwise abandons an open port and the CDC control lines settle wherever the driver leaves them — and on a NaviCore v2 (native USB, no bridge chip) those lines are what the USB Serial/JTAG peripheral watches to reset the chip. It also calls `sharedHub.leave()`, whose cross-tab `bye` posts synchronously so a follower can take a shared port over without waiting out the Web Lock.
 
 Link loss (sleep, unplug) is caught by `handleLinkLost()` → `tryAutoReconnect()`, gated on
-`_wantAutoReconnect` so a deliberate disconnect never re-opens the port.
+`_wantAutoReconnect` so a deliberate disconnect never re-opens the port. It is reached from
+**both** directions: a fatal read error in `startReading()`, and a fatal write error in
+`sendLine()` — a `read()` on a lost device can hang forever without ever rejecting, so the
+write side is often the only thing that notices.
 
 ---
 
@@ -451,6 +454,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-19 | _(uncommitted)_ | `sendLine()` treats a `NetworkError`/`InvalidStateError` write failure as link loss and calls `handleLinkLost()`, so a dead port is detected even when the parked `read()` never rejects. |
 | 2026-08-18 | _(uncommitted)_ | Browser storage no longer holds anything that affects the configuration. Removed `_foldLocalMaestroChIntoConfig()` and `_foldLegacyWcbProfiles()` — the two pre-config migrations that let a localStorage copy write into the config when the board carried none — and purge `rc_maestro_channels` / `navicore-wcb-profiles-v1` at startup. `_maestroCh` is now in-memory only, rebuilt from the config by `_syncMaestroChFromConfig()`. The custom command library keeps its browser copy deliberately: it is the edit buffer and the bridge-mode store, because a bridged library pull kills telemetry. |
 | 2026-08-18 | _(uncommitted)_ | Calibration wizard: the manual-channel box is pre-populated, so it always outranked auto-detect and the "move the control, then Capture" path was unreachable. `renderCalibrationStep()` now records `calibrationState.manualSeed` and `captureCalibrationValue()` treats the box as an override only when the user changed it. New-peer action editor: `renderPeerEventEditor()` now calls `syncPeerEventFromDom()` first, so edits held only in the DOM survive a tab switch / profile load / modal reopen instead of being silently discarded. |
 | 2026-08-17 | _(uncommitted)_ | Added `NC_CMDLIB_HIDDEN` and hid `wcb-native` (71 setup/config/routing/system/power verbs). The library builds ACTIONS — things a pilot fires from a transmitter switch — and none of those are: nobody binds a button to "set the hardware version" or "erase NVS", and the WCB Wizard is built for them. Hidden rather than deleted so the vendored snapshot stays byte-for-byte upstream apart from the sequence split, and so a re-fetch cannot bring it back; the board keeps its `NC_CMDLIB_ORDER_TOP` entry so removing the id restores its old slot. Known consequence: `ncDecodeCommand()` only searches present boards, so an action row already holding one of those commands still works but loses its 📚 hint and re-opens at the list. The WCB group is six members now, ending at WLED. |
