@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">19.13:38.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">19.20:20.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4718,6 +4718,10 @@ async function disconnect() {
 async function handleLinkLost() {
   if (disconnecting || !port) return;   // a manual teardown is already running, or we're already down
   console.warn('Serial link lost (sleep / unplug / board reboot) — tearing down session.');
+  // Say it in the TERMINAL too, not just the console. The stale-monitor diagnostics
+  // land there, so a teardown that left no trace there would break the trail at the
+  // exact moment it matters most.
+  try { appendTerminalLine('< [link] serial link lost — tearing down and attempting to reconnect', 'error'); } catch (_) {}
   // Reflect it on the SBUS block right away instead of waiting for the 4 s watchdog.
   try { updateSbusStatus({ ok: false, lost: false, failsafe: false, chCount: 0, fps: 0, ageMs: 0, _stale: true }); } catch (_) {}
   await disconnect();                   // bounded (settleWithin) — safe even on an already-dead port
@@ -5141,13 +5145,32 @@ async function sendLine(msg, silent = false) {
     // overflow before loop() drains it (a ~10 KB SET_CONFIG / SET_CMDLIB otherwise
     // dropped bytes → "JSON parse failed"). Small writes go in one shot.
     const USB_CHUNK = 512;
-    if (encoded.length <= USB_CHUNK) {
-      await writer.write(encoded);
-    } else {
-      for (let i = 0; i < encoded.length; i += USB_CHUNK) {
-        await writer.write(encoded.subarray(i, Math.min(i + USB_CHUNK, encoded.length)));
-        await new Promise(r => setTimeout(r, 4));   // let the RC's loop() drain the RX buffer
+    try {
+      if (encoded.length <= USB_CHUNK) {
+        await writer.write(encoded);
+      } else {
+        for (let i = 0; i < encoded.length; i += USB_CHUNK) {
+          await writer.write(encoded.subarray(i, Math.min(i + USB_CHUNK, encoded.length)));
+          await new Promise(r => setTimeout(r, 4));   // let the RC's loop() drain the RX buffer
+        }
       }
+    } catch (e) {
+      // A WRITE is the only liveness proof left once the board goes quiet. The read
+      // loop's fatal-error teardown only runs if read() REJECTS — and a read parked
+      // on a device that vanished can simply never settle. Observed at 1.8 h: live
+      // panel frozen, header still green, and the monitor self-heal re-sending
+      // START_MONITOR every 3 s into a dead handle, each one rejecting with
+      // "The device has been lost." and only being logged. Writes fail INSTANTLY in
+      // that state, so classify them exactly as the read loop does and tear down
+      // from here too. NOT awaited: handleLinkLost() sends STOP_MONITOR, which
+      // re-enters sendLine and would deadlock behind this send's own chain slot
+      // (released in the finally below).
+      if (e && (e.name === 'NetworkError' || e.name === 'InvalidStateError')
+            && !disconnecting && port) {
+        console.warn('Serial write FATAL:', e.name, '— device gone, tearing down');
+        handleLinkLost();
+      }
+      throw e;    // callers (OTA chunking, save-ACK waits) still see the failure
     }
   } finally {
     release();                            // let the next queued send proceed
@@ -8017,12 +8040,20 @@ async function startReading() {
   let decoder = new TextDecoder();
   // Consecutive read failures. Reset on any successful chunk — see the catch below.
   let readFailStreak = 0;
-  while (port && port.readable && !disconnecting) {
+  // This loop belongs to THIS port object. A read() parked on a device that vanished
+  // can settle long after the teardown — possibly after a reconnect has already
+  // installed a NEW port — and a loop that checked only the bare `port` global would
+  // then grab a reader on the healthy session's stream, or tear it down as "lost".
+  const myPort = port;
+  if (!myPort) return;
+  while (port === myPort && myPort.readable && !disconnecting) {
+    let r = null;
     try {
-      reader = port.readable.getReader();
+      r = myPort.readable.getReader();
+      reader = r;
       try {
         while (true) {
-          const { value, done } = await reader.read();
+          const { value, done } = await r.read();
           if (done) break;
           readBuffer += decoder.decode(value, { stream: true });
           readFailStreak = 0;          // data flowing again — forget earlier glitches
@@ -8034,11 +8065,11 @@ async function startReading() {
           }
         }
       } finally {
-        try { reader.releaseLock(); } catch(_) {}
-        reader = null;
+        try { r.releaseLock(); } catch(_) {}
+        if (reader === r) reader = null;   // never clobber a newer session's reader
       }
     } catch (e) {
-      if (!port || disconnecting) break;
+      if (port !== myPort || disconnecting) break;
       // FATAL vs transient — this distinction is the whole point of the block.
       // Framing / parity / buffer-overrun glitches are genuinely recoverable by
       // re-acquiring the reader, and that is what the retry below is for. But a
@@ -8064,7 +8095,7 @@ async function startReading() {
   // Fell out of the read loop. If this was NOT a user Disconnect, the port died on
   // us (host sleep / unplug / board reboot) — surface it instead of leaving a stale
   // "Connected". handleLinkLost() re-checks the guards itself and is idempotent.
-  if (!disconnecting && port) handleLinkLost();
+  if (!disconnecting && port === myPort) handleLinkLost();
 }
 
 // ── Via WCB fragment reassembly buffer (receive-side) ───────────────────────
