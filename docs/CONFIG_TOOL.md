@@ -310,12 +310,18 @@ cannot duplicate an event. It can also export a clip as Maestro **script source*
 | `rcTerminalAutoScroll`, `rcTerminalTimestamps` | Terminal prefs |
 | `rcCalibAutoAdvance` | Calibration wizard |
 | `rcConfigLastTab` | Reopen on the last tab |
-| `rc_via_wcb_on` | Remember bridge mode |
 | `nc_cmdlib_droid_sig` | Cached droid library signature |
 | `rc_fw_branch` | **Dev only** — flash from a non-`main` branch |
+| `navicore-cfg-creds-v1` | Cloud-backup username + password, **plaintext**, only when "remember on this device" is ticked |
+| `nc_cmdlib_custom_v1` | Private command-library boards — the edit buffer and the bridge-mode store (see below) |
+| theme key | Light/dark choice |
+| `navicore-wcb-profiles-v1`, `rc_maestro_channels` | **Dormant.** Pre-config stores, no longer read; left in place so un-migrated data stays recoverable |
 
 **Nothing in browser storage may affect the configuration.** Every key above is a UI
-preference or a cache. The droid is the only home for config: `/config.json` for the
+preference, a cache, or dormant — with one exception that is credentials rather than
+configuration: `navicore-cfg-creds-v1` holds the cloud-backup username and password in
+plaintext on the shared `greghulette.github.io` origin, and those are the key material for
+every stored backup. It is opt-in ("remember on this device") and still outstanding. The droid is the only home for config: `/config.json` for the
 `RcConfig` object and `/cmdlib.json` for the custom command library.
 
 Two keys used to break that rule and were removed — `rc_maestro_channels` (imported Maestro
@@ -425,9 +431,13 @@ a profile makes the WCB Network fields **edit that profile** — change a value 
 back into the profile on the next profile switch or Save (`_snapshotLiveIntoSelectedProfile`);
 editing the active identity that merely *matches* a profile (nothing selected) never rewrites
 it. Loading a profile writes `config.wcbNetwork`, and because WCB Network changes apply over
-**Direct USB only**, it still needs a Save over USB to switch the droid's mesh. Profiles saved
-in the earlier localStorage build (`navicore-wcb-profiles-v1`) are auto-imported into the config
-on the next Load (then Save to store them on the droid).
+**Direct USB only**, it still needs a Save over USB to switch the droid's mesh.
+
+Profiles saved in the pre-config localStorage build (`navicore-wcb-profiles-v1`) are **no
+longer imported** — that migration was removed along with the Maestro-channel one, because
+nothing in browser storage may write into the config. The key is left in place but never read,
+so anyone who never Saved those profiles to a droid can still recover them from DevTools; they
+will not reappear on their own.
 
 ---
 
@@ -454,6 +464,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-19 | _(uncommitted)_ | Code-review follow-ups. Stopped purging the dormant pre-config keys — removing the folds is what the browser-storage rule requires, and deleting the keys as well destroyed the only copy of un-migrated Maestro channel data and WCB credentials. §9 no longer claims those profiles auto-import. The §8 key table was incomplete (missing the plaintext cloud-backup credentials, the custom command library, and the theme key) while asserting a complete audit; the write-only  key and its dead write are gone. |
 | 2026-08-19 | _(uncommitted)_ | `sendLine()` treats a `NetworkError`/`InvalidStateError` write failure as link loss and calls `handleLinkLost()`, so a dead port is detected even when the parked `read()` never rejects. |
 | 2026-08-18 | _(uncommitted)_ | Browser storage no longer holds anything that affects the configuration. Removed `_foldLocalMaestroChIntoConfig()` and `_foldLegacyWcbProfiles()` — the two pre-config migrations that let a localStorage copy write into the config when the board carried none — and purge `rc_maestro_channels` / `navicore-wcb-profiles-v1` at startup. `_maestroCh` is now in-memory only, rebuilt from the config by `_syncMaestroChFromConfig()`. The custom command library keeps its browser copy deliberately: it is the edit buffer and the bridge-mode store, because a bridged library pull kills telemetry. |
 | 2026-08-18 | _(uncommitted)_ | Calibration wizard: the manual-channel box is pre-populated, so it always outranked auto-detect and the "move the control, then Capture" path was unreachable. `renderCalibrationStep()` now records `calibrationState.manualSeed` and `captureCalibrationValue()` treats the box as an override only when the user changed it. New-peer action editor: `renderPeerEventEditor()` now calls `syncPeerEventFromDom()` first, so edits held only in the DOM survive a tab switch / profile load / modal reopen instead of being silently discarded. |

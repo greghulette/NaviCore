@@ -28,3 +28,11 @@ desktop.ini
 # Claude Code worktree / session state
 .claude/
 PCB/NaviCore_V1/.history/
+
+# FrSky Ethos Simulator working files. The simulator writes into model/ and
+# creates deeply-recursive copies of itself (model/Ethos Simulator/<ver>/Ethos
+# Simulator/<ver>/...). 208 MB of it was committed by accident in Aug 2026 via
+# `git add -A`; the .wasm payloads alone are 20-40 MB each. Only the hand-authored
+# transmitter model files below belong in the repo.
+model/Ethos Simulator/
+*.wasm
