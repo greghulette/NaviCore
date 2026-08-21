@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.15:12.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.15:52.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -11174,8 +11174,14 @@ function refreshTierState(tier) {
   const rowEls = rows.querySelectorAll('.action-row');
   const multi = rowEls.length > 1;
   rowEls.forEach((r, idx) => {
+    // Remove stays available on the LAST row: deleting it is how you clear a tier that
+    // should no longer fire anything. Hiding it there meant the only way to empty a tier
+    // was to blank the row's fields and rely on readActionFromUI() dropping it on save —
+    // undiscoverable, and it left a populated-looking row behind. An empty tier is a valid
+    // state (collectTierActions returns [], the firmware fires nothing) and "+ Add action"
+    // lives on the card, not the row, so it is always recoverable.
     const x = r.querySelector('.btn-remove-action');
-    if (x) x.style.visibility = multi ? 'visible' : 'hidden';
+    if (x) x.style.visibility = 'visible';
     // Reorder arrows: only meaningful with 2+ rows; the ends can't go further.
     const up = r.querySelector('.btn-move-up');
     const dn = r.querySelector('.btn-move-down');
