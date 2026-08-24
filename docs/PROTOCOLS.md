@@ -200,6 +200,15 @@ report with fewer than 8 fields is dropped whole rather than stored partially.
 | Message | Rate | Contents |
 |---|---|---|
 | `PWM_UPDATE` | 50 ms while monitoring | 24 channels, decoded mode/button, SBUS health |
+| `rc_trig` | on every dispatch | `id, mode, btn, tap` — **the same JSON shape `rcDispatch()` broadcasts to the mesh**, printed to USB as well |
+
+`rc_trig` goes out on **both** transports because `rcTelemetry::emitTrig()` returns early
+without a ready WCB, so a Direct-USB tool previously saw nothing at all for a local button
+press — no way to distinguish "the tier fired and did nothing visible" from "the tier never
+fired". The tool uses it to flash the exact tier row that fired in the assignment cards.
+The mesh copy is a broadcast, so the tool filters it by `id`; the USB copy arrives down the
+wire from the one board it is talking to, so `id` is not checked there (and must not be —
+a board with a non-default `deviceId` would have every event dropped).
 
 Calibration is driven entirely by the tool: it sends `CALIB` on/off to mute dispatch and
 reads channel values out of the `PWM_UPDATE` stream. The board emits no calibration message
@@ -533,6 +542,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-24 | _(uncommitted)_ | `rc_trig` is now emitted on **USB as well as the mesh**. `emitTrig()` returns early without a ready WCB, so a Direct-USB tool saw no dispatch events at all for a local button press. Same JSON shape on both transports; the tool filters the mesh copy by `id` but not the USB copy, which arrives from the one board it is connected to. |
 | 2026-08-24 | `083207c` | `tap` now spans 1–4 on both `TRIGGER` (USB + mesh) and `rc_trig`, where **4 = long press**. No wire-format change — the existing `tap` field carries it, so the WCB bridge and `WcbCmd` are untouched. Three separate bounds enforce it: the USB handler, the mesh clamp in `rcTelemetry::handle()`, and the clamp in `drainRemoteTriggers()`. |
 | 2026-08-18 | _(uncommitted)_ | §4 bulk-transfer frames corrected to the wire as implemented: CHUNK carries **no** `"o"` offset (the receiver derives `q * BULK_CHUNK_RAW` and deliberately never trusts one), DONE/STATUS/FINAL all carry `"r":round`, and the `{"bs":sid,"nb":1}` need-BEGIN reply — previously undocumented, and the only recovery from a droid that reboots mid-transfer — now has a row. |
 | 2026-08-17 | _(uncommitted)_ | Added `GET_WCB_SEQVAL` → `WCB_SEQVAL` (ONE stored sequence's contents by key, on `WCB_Client` 1.15.0's `requestSequence()`), so the command library can show what a chosen sequence does. `status` is a real answer — 0 OK / 1 NOTFOUND / 2 TOOBIG — not an error, and the `value` is passed through verbatim because its `^` delimiters and `***` comments are what the consumer renders. The load-bearing part: the library allows **one** request in flight across names *and* values, so the firmware's pull slot is now tagged with its kind and every reply and timeout checks it — a names answer emitted as a value one, or a failure carrying the wrong `type`, settles the wrong request in the tool and leaves the real one hanging. `key` joins `wcb` in the `handleSerialInput()` filter whitelist. |

@@ -144,6 +144,22 @@ Saving is diff-based, and the guard rails exist because each failure mode actual
 7. The result is reported by a **toast driven by the board's actual ACK**, not by a
    terminal line the user never reads.
 
+### Live trigger flash
+
+`flashAssignmentTier(mode, btn, tap)` lights the exact tier row in the assignment cards when
+an `rc_trig` arrives, in the live-activity orange (`--accent3`) the transmitter graphic
+already uses. It answers "which gesture did the board actually decode?" without inferring it
+from whether hardware moved.
+
+It mirrors `rcDispatch()`'s own rule rather than lighting one row blindly: **exclusive** fires
+only the matched tier, **cumulative** fires every tier up to it, and a **long press (tier 4)
+is always exclusive** regardless of the flag. A tier with no actions has no row, so nothing
+lights — that absence is itself the signal that the gesture is unmapped.
+
+The flash removes and re-adds its class with a forced reflow between, so a repeat tap pulses
+again instead of silently extending the first flash. `transition: none` on the lit state makes
+it snap on and fade off — a pulse, not a swell.
+
 ### Push-budget readout
 
 A Via-WCB `SET_CONFIG` is fragmented, and the board's reassembly pool is
@@ -528,6 +544,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-24 | _(uncommitted)_ | Added the **live trigger flash** (§5) — an `rc_trig` lights the exact tier row that fired in the assignment cards, in the live-activity orange. Mirrors `rcDispatch()`: cumulative lights every tier up to the match, exclusive and long press light only their own. |
 | 2026-08-24 | `8c4584c`+`6d026a3` | Added the **push-budget readout** (§5) — a live fragment count for the next Via-WCB Save, shown in the Config modal footer. `_pushBudgetInfo()` mirrors `saveConfigToBoard()`'s payload construction (branch diff + per-button `mappings` sub-diff, wcbNetwork strip over the bridge, and the `{sys:1,…}` wrapper `sendJSON()` actually chunks); getting any of the three wrong misreports by a large factor. Predicts BOTH bridged refusals — the 192-fragment cap and the per-fragment 187 B escaped-envelope abort (which can fire at 4% of budget). Polls rather than hooking mutations, and is honest that the cap binds only over the mesh. Also added the long-press tier tab and the Long Press (`holdMs`) field in Config → General. |
 | 2026-08-21 | _(uncommitted)_ | The per-action remove (x) is no longer hidden on the LAST row of a tier. Deleting it is how you clear a tier that should fire nothing; hiding it meant the only route to an empty tier was blanking the fields and relying on `readActionFromUI()` dropping the row at save, which is undiscoverable and leaves a populated-looking row on screen. An empty tier is valid (`collectTierActions()` returns []) and "+ Add action" is on the card, so it is always recoverable. Reorder arrows stay gated on 2+ rows. |
 | 2026-08-20 | _(uncommitted)_ | `NC_CMDLIB_HIDDEN_CMDS` hides individual commands from the picker, the per-command counterpart to `NC_CMDLIB_HIDDEN`. First use: Stored Sequences keeps only Run Sequence (short/long); Save / List / Clear All / Clear are management verbs nobody binds to a switch. Filtered in `_cmdlibRenderBoard()` at RENDER time, not stripped from the library — `ncDecodeCommand()` must still recognise an action already saved on a droid that uses one, or it would degrade to raw text. |

@@ -2054,6 +2054,15 @@ void rcDispatch(int buttonId, uint8_t tapCount) {
   // event arrives even if a synchronous action stalls.
   rcTelemetry::emitTrig(mode, btn, tapCount);
 
+  // ...and the same event on USB. emitTrig() above only reaches the MESH (it
+  // returns early without a ready WCB), so a tool on Direct USB saw nothing at
+  // all for a local button press — no way to tell "the tier fired and did
+  // nothing visible" from "the tier never fired". Same JSON shape as the mesh
+  // telemetry so the tool parses one form on either transport. Human-rate, so
+  // the added USB traffic is negligible.
+  Serial.printf("{\"sys\":1,\"type\":\"rc_trig\",\"id\":%u,\"mode\":%d,\"btn\":%d,\"tap\":%d}\n",
+                rcConfig.wcbNetwork.deviceId, mode, btn, tapCount);
+
   const RcMapping& mapping = rcConfig.mappings[rcMapIndex(mode, btn)];
   // A long press is a DIFFERENT GESTURE, not a 4th tap, so it is always
   // dispatched exclusively no matter how `exclusive` is set. Letting it fall
