@@ -466,7 +466,9 @@
   /* Mesh push budget — a live "how big is the next Save" readout in the config
      modal footer. Sized to sit quietly next to Save until it goes amber/red. */
   .push-budget { font-size: 11px; color: var(--muted); align-self: center;
-    margin-right: 10px; white-space: nowrap; display: flex; align-items: center; gap: 7px; }
+    margin-right: 10px; white-space: nowrap; display: flex; align-items: center; gap: 7px;
+    /* the count changes every tick — same reason #status-text sets this */
+    font-variant-numeric: tabular-nums; }
   .push-budget.empty { display: none; }
   .push-budget-bar { width: 62px; height: 5px; border-radius: 3px;
     background: var(--border); overflow: hidden; flex: none; }
@@ -2305,7 +2307,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:20.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:24.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3329,7 +3331,7 @@
       <button class="btn btn-ghost"   onclick="clearModalDispatch()">Clear All</button>
       <button class="btn btn-ghost"   onclick="closeModal()">Cancel</button>
       <button class="btn btn-success" onclick="saveModalDispatch()"
-              title="Apply this mapping and save the full config to the board (same as the top-bar Save). Updates the page only if not connected.">Apply</button>
+              title="Apply this mapping and save the full config to the board (same as the Config window's Save). Updates the page only if not connected.">Apply</button>
     </div>
   </div>
 </div>
@@ -15425,7 +15427,7 @@ async function saveModalDispatch() {
   if (editingKnob)     saveKnobModal();
   else if (editingSw)  saveSwitchModal();
   else                 saveButton();
-  // …then push the whole config to the board, same as the top-bar Save.
+  // …then push the whole config to the board, same as the Config window's Save.
   // No-op if not connected (sendLine bails when there's no writer).
   try { await saveConfigToBoard(); } catch (_) {}
 }
@@ -15718,7 +15720,14 @@ function _pushBudgetInfo() {
     const p = snap.wcbProfiles.find(pr => pr.name === _wcbSelectedProfile);
     if (p) Object.assign(p, _wcbProfileParams(snap.wcbNetwork));
   }
-  let payload = _diffConfigBranches(snap, _configBaseline);
+  // Diff against the SAME base _configUnsaved() uses. While a save is in flight
+  // _pendingSaveBaseline holds the just-sent snapshot; diffing the older
+  // _configBaseline would keep counting that payload as still-pending for the
+  // whole ACK window — up to 12 s, and a 37-fragment bridged save takes ~5.7 s at
+  // 150 ms pacing — showing a live budget for a save already gone, while Save is
+  // blocked and the close prompt correctly reports nothing unsaved.
+  const base = _pendingSaveBaseline || _configBaseline;
+  let payload = _diffConfigBranches(snap, base);
   if (viaWcbActive && payload.wcbNetwork) {
     const { deviceId, macOct2, macOct3, password, quantity, channel, ...rest } = payload.wcbNetwork;
     payload.wcbNetwork = rest;
@@ -15772,6 +15781,17 @@ function updatePushBudget() {
   try { info = _pushBudgetInfo(); }
   catch (e) { el.className = 'push-budget empty'; el.textContent = ''; console.warn('pushBudget:', e); return; }
 
+  // A save already sent and awaiting its ACK. Save is blocked until it resolves
+  // (saveConfigToBoard's overlapping-save guard), so a budget figure here would
+  // describe an action the user cannot currently take.
+  if (_pendingSaveBaseline) {
+    el.className = 'push-budget';
+    el.textContent = info.empty ? 'Save sent — awaiting ACK' : 'Save sent — further edits pending';
+    el.title = 'A SET_CONFIG is in flight. Save is blocked until the board ACKs it (12 s watchdog).' +
+               (info.empty ? '' : '\nEdits made since then will go in the next Save.');
+    return;
+  }
+
   if (info.empty) {
     el.className = 'push-budget';
     el.textContent = 'No changes to save';
@@ -15807,8 +15827,12 @@ function updatePushBudget() {
   const barCol = cls === 'over' ? 'var(--red)' : cls === 'warn' ? 'var(--yellow)' : 'var(--green)';
   const fillPct = Math.min(100, pct);
 
+  // The <=187 B fast path never enters the fragmenter, so it consumes NONE of the
+  // 192-slot pool — report it as a single packet rather than "1/192 (1%)", which
+  // would overstate pool use.
   const label = overCount ? `Mesh push ${info.frags}/${FRAG_MAX_PARTS} — too large`
               : info.envOver ? `Mesh push ${info.frags}/${FRAG_MAX_PARTS} — unsendable`
+              : info.single ? 'Mesh push — single packet'
               : `Mesh push ${info.frags}/${FRAG_MAX_PARTS} (${pct}%)`;
 
   el.className = 'push-budget' + (cls ? ' ' + cls : '');
@@ -15819,7 +15843,7 @@ function updatePushBudget() {
     `This Save: ${kb} → ${info.frags} fragment(s).\n` +
     `Branches: ${branchList}\n` +
     (overCount
-      ? 'Over budget — this Save will be refused. Connect via Direct USB, which has no limit.'
+      ? 'Over budget — this Save will be refused. Save over Direct USB, which has no fragment cap.'
       : info.envOver
         ? `A fragment escapes to ${info.worstEnv} B, over the ${FRAG_MAX_ENV_BYTES} B bridge cap — ` +
           'the send would abort partway even though the fragment count fits. Usually a command ' +
@@ -16120,7 +16144,7 @@ function openHwSetup() {
 function onTxModelChange(modelId) {
   applyTxModel(modelId, /*persist=*/true);
   const help = document.getElementById('tx-model-help');
-  if (help) help.textContent = 'Click Save (top bar) to push this to the board.';
+  if (help) help.textContent = 'Click Save (Config window footer) to push this to the board.';
   // Show/hide the X20-specific options pane.
   const x20Opts = document.getElementById('cfg-x20-options');
   if (x20Opts) x20Opts.style.display = (modelId === TX_MODEL_X20) ? '' : 'none';
