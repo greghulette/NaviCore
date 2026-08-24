@@ -144,6 +144,49 @@ Saving is diff-based, and the guard rails exist because each failure mode actual
 7. The result is reported by a **toast driven by the board's actual ACK**, not by a
    terminal line the user never reads.
 
+### Push-budget readout
+
+A Via-WCB `SET_CONFIG` is fragmented, and the board's reassembly pool is
+`FRAG_MAX_PARTS` (192) **static** `String` slots — a payload needing more is refused by
+`sendJSON()` with *"Use Direct USB for a config this large."* `updatePushBudget()` shows that
+same fragment count live in the Config modal footer so the ceiling is visible on approach
+rather than at Save time.
+
+`_pushBudgetInfo()` **must mirror `saveConfigToBoard()`'s payload construction exactly**, and
+three transforms are easy to miss — each alone makes the number wrong by a large factor:
+
+1. The payload is the **branch diff**, not the whole config, with `mappings` sub-diffed per
+   button. A one-button edit is ~5 fragments; the full config is ~389.
+2. Via WCB additionally **strips the `wcbNetwork` transport fields**.
+3. `sendJSON()` wraps the result as `{sys:1, type:'SET_CONFIG', data, saveId}` and chunks
+   **that** string. The count is over the outer wrapper; the per-fragment envelope is applied
+   *after* chunking and so does not enter the count.
+
+**There are two independent refusals, and the readout predicts both.** The fragment count is
+the obvious one. The second is per-fragment: `sendJSON()` re-checks each *escaped* envelope
+against `FRAG_MAX_ENV_BYTES` (187) and aborts **partway through the send** if one is over.
+A chunk of 80 quote/backslash-heavy bytes escapes to ~193 B while the whole payload is only
+8 fragments — 4 % of budget, solid green on a count-only readout, and the save still dies
+halfway with the board left holding a partial reassembly. `_pushBudgetInfo()` therefore runs
+the same per-chunk envelope check and reports `envOver`.
+
+Two behaviours that are deliberate, not oversights:
+
+- **It does not run the DOM→config commits** that `saveConfigToBoard()` does first. Those
+  mutate `config`, and a passive readout that edits what it measures would fabricate dirty
+  state on every render. The uncommitted sidebar numbers are a few bytes and cannot move an
+  80-byte-per-fragment count.
+- **It polls (750 ms) rather than hooking config mutations.** `config` is written from dozens
+  of editors with no central "changed" event, so per-site hooks would rot on the next editor
+  added. The readout only exists inside the Config modal, so the poll starts in
+  `openHwSetup()` and is cleared in `closeHwSetup()` — self-limiting by construction.
+
+The cap binds **only** on the Via-WCB path, so on Direct USB the readout reports size without
+implying a limit that is not in force. **A full-config push is already ~203 % of budget** —
+normal saves fit only because they are diffs, which is why "Save without loading first"
+(no `_configBaseline` → `_diffConfigBranches` returns the whole config) is called out in the
+tooltip.
+
 ---
 
 ## 6. Command library
@@ -464,6 +507,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-24 | _(uncommitted)_ | Added the **push-budget readout** (§5) — a live fragment count for the next Via-WCB Save, shown in the Config modal footer. `_pushBudgetInfo()` mirrors `saveConfigToBoard()`'s payload construction (branch diff + per-button `mappings` sub-diff, wcbNetwork strip over the bridge, and the `{sys:1,…}` wrapper `sendJSON()` actually chunks); getting any of the three wrong misreports by a large factor. Predicts BOTH bridged refusals — the 192-fragment cap and the per-fragment 187 B escaped-envelope abort (which can fire at 4% of budget). Polls rather than hooking mutations, and is honest that the cap binds only over the mesh. Also added the long-press tier tab and the Long Press (`holdMs`) field in Config → General. |
 | 2026-08-21 | _(uncommitted)_ | The per-action remove (x) is no longer hidden on the LAST row of a tier. Deleting it is how you clear a tier that should fire nothing; hiding it meant the only route to an empty tier was blanking the fields and relying on `readActionFromUI()` dropping the row at save, which is undiscoverable and leaves a populated-looking row on screen. An empty tier is valid (`collectTierActions()` returns []) and "+ Add action" is on the card, so it is always recoverable. Reorder arrows stay gated on 2+ rows. |
 | 2026-08-20 | _(uncommitted)_ | `NC_CMDLIB_HIDDEN_CMDS` hides individual commands from the picker, the per-command counterpart to `NC_CMDLIB_HIDDEN`. First use: Stored Sequences keeps only Run Sequence (short/long); Save / List / Clear All / Clear are management verbs nobody binds to a switch. Filtered in `_cmdlibRenderBoard()` at RENDER time, not stripped from the library — `ncDecodeCommand()` must still recognise an action already saved on a droid that uses one, or it would degrade to raw text. |
 | 2026-08-20 | _(uncommitted)_ | "Via a WCB" is self-sufficient again. The attach path swallowed every `requestPort()` failure, so dismissing the browser port picker made the tab join portless, sit out a 4 s election it could not win, and then advise opening the WCB Wizard — which made sharing from the Wizard look like a hard requirement when the sole tab is meant to elect itself leader and own the tethered WCB directly. A cancelled picker with no existing leader now says so and stops; the open-failed case names a competing program instead. Separately, `join()` resets the step-down backoff, so a user-initiated Connect never waits out a 30 s timer it did not ask for. |

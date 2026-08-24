@@ -463,6 +463,17 @@
     font-size: 11px; font-weight: 700; background: var(--accent); color: #fff; }
   .tier-tab-count.empty { display: none; }
 
+  /* Mesh push budget — a live "how big is the next Save" readout in the config
+     modal footer. Sized to sit quietly next to Save until it goes amber/red. */
+  .push-budget { font-size: 11px; color: var(--muted); align-self: center;
+    margin-right: 10px; white-space: nowrap; display: flex; align-items: center; gap: 7px; }
+  .push-budget.empty { display: none; }
+  .push-budget-bar { width: 62px; height: 5px; border-radius: 3px;
+    background: var(--border); overflow: hidden; flex: none; }
+  .push-budget-bar > div { height: 100%; border-radius: 3px; transition: width .18s, background .18s; }
+  .push-budget.warn { color: var(--yellow); }
+  .push-budget.over { color: var(--red); font-weight: 600; }
+
   /* Command-library picker: collapsible board sections (collapsed by default). */
   .cmdlib-board > summary { list-style: none; }
   .cmdlib-board > summary::-webkit-details-marker { display: none; }
@@ -2294,7 +2305,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:00.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:15.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3243,6 +3254,7 @@
       <button class="btn btn-ghost" id="btn-calibrate" type="button">🎯 Calibrate RC</button>
       <button class="btn btn-warn" id="btn-defaults" disabled
               style="margin-right:auto" type="button">Restore Defaults</button>
+      <span id="push-budget" class="push-budget" title="How much of the Via-WCB upload budget the next Save would use"></span>
       <button class="btn btn-success" id="btn-hwsetup-save" disabled type="button">Save</button>
       <button class="btn btn-ghost" onclick="closeHwSetup()">Done</button>
     </div>
@@ -15660,6 +15672,137 @@ let _shareWaitToast = null; // persistent "couldn't attach to a shared WCB" noti
 let _pendingDefaultsReset = false;   // a RESET_DEFAULTS is awaiting its confirming CONFIG reload
 let _pendingDefaultsTimer = null;    // watchdog for a missing post-reset CONFIG
 
+// ════════════════════════════════════════════════════════════════════════════
+//  Mesh push budget
+// ════════════════════════════════════════════════════════════════════════════
+let _pushBudgetTimer = null;   // poll handle; runs only while the config modal is open
+
+// A Via-WCB SET_CONFIG is app-level fragmented, and the board's reassembly pool
+// is FRAG_MAX_PARTS(192) STATIC String slots — a payload needing more is refused
+// outright by sendJSON with "Use Direct USB for a config this large". That
+// refusal is safe but it arrives at Save time, after the user has done the work.
+// This shows the same number continuously so the ceiling is visible on approach.
+//
+// It MUST mirror the real send path or it lies. Three transforms, all easy to
+// miss, each of which alone makes the number wrong by a large factor:
+//   1. The payload is a BRANCH DIFF against the on-board baseline
+//      (`_diffConfigBranches`), NOT the whole config — and `mappings` is
+//      sub-diffed PER BUTTON, so a one-button edit ships one button.
+//   2. Via WCB additionally strips the wcbNetwork transport fields.
+//   3. sendJSON wraps the result as {sys:1, type:'SET_CONFIG', data, saveId}
+//      and chunks THAT string. The count is over the wrapped envelope, not the
+//      bare diff. (The per-fragment envelope is applied after chunking, so it
+//      does NOT enter the count — only this outer wrapper does.)
+// Anything that changes saveConfigToBoard()'s payload construction has to change
+// here too, or the readout silently drifts from what Save actually sends.
+function _pushBudgetInfo() {
+  // Deliberately does NOT run saveConfigToBoard()'s DOM→config commits
+  // (tapwin/holdms/chrate/peerEvent/profile): those MUTATE config, and a passive
+  // readout that edits the document it measures would fabricate dirty state on
+  // every render. Those fields are a handful of bytes and cannot move a
+  // 80-byte-per-fragment count.
+  let payload = _diffConfigBranches(config, _configBaseline);
+  if (viaWcbActive && payload.wcbNetwork) {
+    const { deviceId, macOct2, macOct3, password, quantity, channel, ...rest } = payload.wcbNetwork;
+    payload.wcbNetwork = rest;
+    if (Object.keys(payload.wcbNetwork).length === 0) delete payload.wcbNetwork;
+  }
+  const branches = Object.keys(payload);
+  if (!branches.length) return { branches, bytes: 0, frags: 0, empty: true };
+
+  // saveId is a small integer whose width can't shift the fragment count; using
+  // the next real one keeps the string byte-identical to what Save would build.
+  const inner = JSON.stringify({ sys: 1, type: 'SET_CONFIG', data: payload, saveId: _saveSeq + 1 });
+  const bytes = new TextEncoder().encode(inner).length;
+  // sendJSON's single-packet fast path: <= FRAG_MAX_ENV_BYTES never enters the
+  // fragmenter at all, so it consumes none of the 192-slot pool.
+  if (bytes <= FRAG_MAX_ENV_BYTES) return { branches, bytes, frags: 1, empty: false, single: true };
+
+  const chunks = _utf8Chunks(inner, FRAG_CHUNK_BYTES);
+  // sendJSON has a SECOND abort the fragment count alone cannot predict: it
+  // re-checks EACH fragment's escaped envelope against FRAG_MAX_ENV_BYTES and
+  // bails mid-send if one is over. A chunk of 80 quote/backslash-heavy bytes can
+  // escape past 187 even when the total fragment count is comfortable — so a
+  // count-only readout would show green on a save that still fails. Run the same
+  // per-chunk check here so the readout predicts BOTH refusals, not just one.
+  // sid is the sender's session id (1..65535); assume its widest form so the
+  // estimate is conservative rather than optimistic.
+  const enc = new TextEncoder();
+  let worstEnv = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const n = enc.encode(JSON.stringify({ f: i + 1, of: chunks.length, sid: 65535, s: chunks[i] })).length;
+    if (n > worstEnv) worstEnv = n;
+  }
+  return { branches, bytes, frags: chunks.length, empty: false, single: false,
+           worstEnv, envOver: worstEnv > FRAG_MAX_ENV_BYTES };
+}
+
+// Render the readout. Honest about transport: the 192-fragment cap binds ONLY on
+// the Via-WCB path, so on Direct USB this reports size WITHOUT implying a limit
+// that is not in force (USB parses the whole line — see the 98304 buffer in
+// handleSerialInput). Never invent a ceiling, never hide a real one.
+function updatePushBudget() {
+  const el = document.getElementById('push-budget');
+  if (!el) return;
+  const connected = !!(port || sharedActive);
+  if (!connected) { el.className = 'push-budget empty'; el.textContent = ''; return; }
+
+  let info;
+  try { info = _pushBudgetInfo(); }
+  catch (e) { el.className = 'push-budget empty'; el.textContent = ''; console.warn('pushBudget:', e); return; }
+
+  if (info.empty) {
+    el.className = 'push-budget';
+    el.textContent = 'No changes to save';
+    el.title = 'The config matches the board — Save would be a no-op.';
+    return;
+  }
+
+  const kb = info.bytes >= 1024 ? (info.bytes / 1024).toFixed(1) + ' KB' : info.bytes + ' B';
+  const branchList = info.branches.join(', ');
+
+  if (!viaWcbActive) {
+    // Direct USB — no fragment cap applies. Report size only.
+    el.className = 'push-budget';
+    el.textContent = `Save: ${kb}`;
+    el.title = `Direct USB — no size limit.\nBranches: ${branchList}\n` +
+               `Over Via WCB this would need ${info.frags} of ${FRAG_MAX_PARTS} fragments.`;
+    return;
+  }
+
+  const pct = Math.round((info.frags / FRAG_MAX_PARTS) * 100);
+  const overCount = info.frags > FRAG_MAX_PARTS;
+  // Two independent ways a bridged Save is refused, and the readout must predict
+  // both: too many fragments, OR one fragment whose escaped envelope busts the
+  // bridge's CRC-suffix budget. The second can fire at a low fragment count.
+  const cls = (overCount || info.envOver) ? 'over' : (pct >= 70 ? 'warn' : '');
+  // Bands: the cost of being wrong is asymmetric. Under-warning means the user
+  // discovers the refusal at Save; over-warning is just noise. Warn at 70%.
+  const barCol = cls === 'over' ? 'var(--red)' : cls === 'warn' ? 'var(--yellow)' : 'var(--green)';
+  const fillPct = Math.min(100, pct);
+
+  const label = overCount ? `Mesh push ${info.frags}/${FRAG_MAX_PARTS} — too large`
+              : info.envOver ? `Mesh push ${info.frags}/${FRAG_MAX_PARTS} — unsendable`
+              : `Mesh push ${info.frags}/${FRAG_MAX_PARTS} (${pct}%)`;
+
+  el.className = 'push-budget' + (cls ? ' ' + cls : '');
+  el.innerHTML = `<span>${label}</span>` +
+    `<span class="push-budget-bar"><div style="width:${fillPct}%;background:${barCol}"></div></span>`;
+  el.title =
+    `Via WCB — a SET_CONFIG is fragmented and the board holds at most ${FRAG_MAX_PARTS} fragments.\n` +
+    `This Save: ${kb} → ${info.frags} fragment(s).\n` +
+    `Branches: ${branchList}\n` +
+    (overCount
+      ? 'Over budget — this Save will be refused. Connect via Direct USB, which has no limit.'
+      : info.envOver
+        ? `A fragment escapes to ${info.worstEnv} B, over the ${FRAG_MAX_ENV_BYTES} B bridge cap — ` +
+          'the send would abort partway even though the fragment count fits. Usually a command ' +
+          'with many quotes or backslashes. Save over Direct USB.'
+        : !_configBaseline
+          ? 'No baseline loaded, so this is a FULL config push. Load from the board first and the next Save ships only what changed.'
+          : 'Only changed branches are sent, so this shrinks as you save.');
+}
+
 async function saveConfigToBoard() {
   if (!_configLoaded) {
     const proceed = confirm(
@@ -15933,6 +16076,15 @@ function openHwSetup() {
   // a field a render lazily padded after the on-board diff baseline was taken.
   _hwSetupBaseline = _deepClone(config);
   document.getElementById('hwsetup-modal').classList.add('open');
+  // Push-budget readout. Polled rather than event-driven ON PURPOSE: config is
+  // mutated from dozens of editors across this file with no central "changed"
+  // event, so hooking each one would rot the moment a new editor is added. The
+  // readout is only visible inside this modal, so the poll is self-limiting —
+  // it starts here and is cleared in closeHwSetup(). Cost is one
+  // _diffConfigBranches, the same call _configUnsaved() already makes.
+  updatePushBudget();
+  clearInterval(_pushBudgetTimer);
+  _pushBudgetTimer = setInterval(updatePushBudget, 750);
 }
 
 // Called by the Transmitter tab's <select> onchange. Applies the new
@@ -15997,6 +16149,8 @@ function closeHwSetup() {
     }
   }
   document.getElementById('hwsetup-modal').classList.remove('open');
+  clearInterval(_pushBudgetTimer);   // readout is invisible now — stop diffing
+  _pushBudgetTimer = null;
 }
 
 // Tabbed Config modal — single function flips the active tab + pane
