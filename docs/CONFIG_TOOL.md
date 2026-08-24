@@ -172,17 +172,33 @@ the same per-chunk envelope check and reports `envOver`.
 
 Two behaviours that are deliberate, not oversights:
 
-- **It does not run the DOM→config commits** that `saveConfigToBoard()` does first. Those
-  mutate `config`, and a passive readout that edits what it measures would fabricate dirty
-  state on every render. The uncommitted sidebar numbers are a few bytes and cannot move an
-  80-byte-per-fragment count.
+- **It replays the DOM→config commits against a clone, not against `config`.** It cannot run
+  them for real — they mutate the object `_configUnsaved()` diffs, so polling them would
+  fabricate dirty state and make `closeHwSetup()` claim unsaved changes nobody made. But it
+  cannot skip them either: the numeric fields are a few bytes and genuinely don't matter,
+  while `syncPeerEventFromDom()` writes a whole action tier into `peerEvent` and
+  `_snapshotLiveIntoSelectedProfile()` writes `wcbProfiles` — **a top-level branch that is
+  *not* stripped over the bridge.** Skipping those can omit an entire branch the real Save
+  ships. Replaying against `_deepClone(config)` is accurate and side-effect free.
 - **It polls (750 ms) rather than hooking config mutations.** `config` is written from dozens
   of editors with no central "changed" event, so per-site hooks would rot on the next editor
   added. The readout only exists inside the Config modal, so the poll starts in
   `openHwSetup()` and is cleared in `closeHwSetup()` — self-limiting by construction.
 
-The cap binds **only** on the Via-WCB path, so on Direct USB the readout reports size without
-implying a limit that is not in force. **A full-config push is already ~203 % of budget** —
+The cap binds **only** on the Via-WCB path, and the readout branches on `viaWcbActive` alone —
+exactly as `sendJSON()` routes. Not on `sharedActive`, and **not on `port`**: a real USB cable
+into a tethered WCB leaves `port` non-null while `viaWcbActive` is true, fully subject to the
+cap. The connected test is the Connect button's
+`port || (sharedActive && sharedHub && sharedHub.portOpen)`, because a shared-hub step-down
+leaves `sharedActive`/`viaWcbActive` set while the header reads Disconnected. Direct USB is
+described as having no *fragment* cap rather than no limit — the firmware's serial accumulator
+and SET_CONFIG parse doc are both 98304 B.
+
+> **There is no 16 KB parse ceiling on the board**, despite what `_applyReassembled()`'s
+> `cap` arithmetic looks like. ArduinoJson here is **7.4.3**, where the
+> `DynamicJsonDocument` capacity argument is a legacy no-op and the document grows
+> elastically. Read as an ArduinoJson 6 hard cap it yields the false conclusion that payloads
+> over ~8 KB fail to parse. The comment there now says so explicitly. **A full-config push is already ~203 % of budget** —
 normal saves fit only because they are diffs, which is why "Save without loading first"
 (no `_configBaseline` → `_diffConfigBranches` returns the whole config) is called out in the
 tooltip.

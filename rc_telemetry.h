@@ -1055,14 +1055,17 @@ inline bool takeTestAction(String& out, uint8_t& sender) {
 // rcConfigFromJSON + rcConfigSaveLFS here — flash I/O blocks the main task
 // but the WiFi/ESP-NOW task on Core 0 stays unblocked.
 inline void _applyReassembled(uint8_t senderID, const String& json) {
-  // 2x heuristic: ArduinoJson docs need roughly the input size plus overhead
-  // for the parsed-object tree.  SET_CONFIG over WCB normally carries a
-  // DIFF (one or two changed branches → small), but a first-save with no
-  // baseline can ship a full config (~3 KB → ~6 KB doc).  Cap at 16 KB so
-  // a full config has headroom; the fragment layer can deliver up to 15 KB
-  // (FRAG_MAX_PARTS × FRAG_CHUNK_BYTES) so this matches the transport's
-  // ceiling.  On overflow deserializeJson returns NoMemory and we bail
-  // WITHOUT applying — we never persist a partially-parsed config.
+  // ⚠ On ArduinoJson 7 (7.4.3 here) this `cap` is a LEGACY NO-OP: the
+  // DynamicJsonDocument capacity argument is ignored and the document grows
+  // elastically on the heap. It is kept only because the type still takes the
+  // argument. Do NOT reason about a 16 KB ceiling from this code — there isn't
+  // one, and reading it as an AJ6 hard cap leads to the false conclusion that
+  // payloads over ~8 KB fail to parse (2× heuristic vs. the 16 KB clamp). The
+  // real bridged ceiling is the FRAGMENT layer: FRAG_MAX_PARTS × FRAG_CHUNK_BYTES,
+  // enforced tool-side before a byte is sent.
+  // The err check below is still live and still correct — a genuinely malformed
+  // or truncated reassembly bails WITHOUT applying, so we never persist a
+  // partially-parsed config.
   size_t cap = json.length() * 2;
   if (cap < 1024)  cap = 1024;
   if (cap > 16384) cap = 16384;
