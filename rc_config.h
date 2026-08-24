@@ -125,7 +125,8 @@ struct RcAction {
   // 96 bytes (95 chars + null) accommodates chained WCB commands like
   // ";h,play,a,1,fadein,4^;t6000^;h,fadeout,a,4" (44+ chars) plus headroom
   // for 3-4 ;-separated segments. Increase carefully — every byte here is
-  // multiplied by RC_NUM_MAPPINGS × 3 tiers × RC_ACTIONS_PER_TIER = 945.
+  // multiplied by RC_NUM_MAPPINGS × RC_NUM_TAP_TIERS × RC_ACTIONS_PER_TIER
+  // = 108 × 4 × 5 = 2160.
   char    cmd[96];
   uint16_t delayMs;       // optional pre-fire delay (ms)
   char    note[20];       // human-readable label shown in GUI (19 chars + null)
@@ -166,9 +167,18 @@ struct RcTier {
   RcAction a[RC_ACTIONS_PER_TIER];
 };
 
+#define RC_NUM_TAP_TIERS 4   // t[0..2] = 1/2/3-tap, t[3] = long press
+#define RC_TAP_LONG      4   // the tapCount value that means "long press" on every
+                             // dispatch path (local matrix, USB TRIGGER, mesh TRIGGER,
+                             // rc_trig telemetry). Reusing the tap field keeps the wire
+                             // format unchanged — no new field, no WCB-side change.
+
 struct RcMapping {
   bool    exclusive;  // true = tap2 replaces tap1 within the tap window
-  RcTier  t[3];       // t[0]=1-tap  t[1]=2-tap  t[2]=3-tap
+  RcTier  t[RC_NUM_TAP_TIERS];   // t[0]=1-tap  t[1]=2-tap  t[2]=3-tap  t[3]=LONG PRESS
+  // t[3] (long press) is ALWAYS dispatched exclusively regardless of `exclusive` —
+  // it is a different gesture, not a 4th tap, so the cumulative rule (fire t1..tN)
+  // must not apply to it. Enforced in rcDispatch(); see the comment there.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -628,7 +638,12 @@ struct RcConfig {
   bool           sbusOutEnabled;        // re-emit SBUS frames on SBUS_OUT_PIN; off saves the per-byte passthrough tee
   uint8_t        boardType;             // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   int            tapWindowMs;
-  uint8_t        chRateHz;        // rc_ch live-monitor broadcast rate in Hz (1–20; default 5). Runtime-tunable from the config tool — higher = smoother monitor, more mesh airtime (20Hz can flood the shared mesh and flap other boards' heartbeats).
+  // Continuous hold (ms) on a matrix button that promotes the gesture to a LONG
+  // PRESS (tap tier 4). MUST stay > tapWindowMs — the tap dispatch is deferred by
+  // tapWindowMs, so a holdMs at or below it would let the single-tap tier fire
+  // before the hold could ever be recognised. Clamped on load in rcConfigFromJSON().
+  int            holdMs;
+  uint8_t        chRateHz;      // rc_ch live-monitor broadcast rate in Hz (1–20; default 5). Runtime-tunable from the config tool — higher = smoother monitor, more mesh airtime (20Hz can flood the shared mesh and flap other boards' heartbeats).
   int            matrixChannel;   // SBUS channel carrying the multiplexed button matrix
   // Consecutive in-band SBUS frames a matrix button must hold before a press
   // is accepted. 1 = fastest (safe for a DIGITAL SBUS source — no analog
@@ -769,7 +784,8 @@ void rcConfigLoadDefaults() {
   rcConfig.maeGateMs        = 250;           // remote skip-if-running fail-open window (ms)
   rcConfig.boardType        = 0;             // 0 = NaviCore v2 PCB (default pinout); 1 = WCB HW 3.2
   rcConfig.tapWindowMs      = 500;
-  rcConfig.chRateHz         = 5;            // rc_ch live-monitor rate (Hz); 5 = smooth + light mesh load (20Hz floods the shared ESP-NOW channel and flaps other boards)
+  rcConfig.holdMs           = 750;          // long-press threshold; must exceed tapWindowMs
+  rcConfig.chRateHz         = 5;          // rc_ch live-monitor rate (Hz); 5 = smooth + light mesh load (20Hz floods the shared ESP-NOW channel and flaps other boards)
   rcConfig.matrixChannel    = 7;            // button matrix on CH7
   rcConfig.matrixDebounceFrames = 1;     // digital SBUS source — fastest; bump for analog matrix
   rcConfig.funcBindings.modeSwitch = SW_SE;  // SE (CH12) drives mode 1/2/3
@@ -1183,7 +1199,8 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   doc["maeGateMs"]            = rcConfig.maeGateMs;         // remote skip-if-running fail-open window (ms)
   doc["boardType"]            = rcConfig.boardType;        // hardware pin profile (0=NaviCore v2, 1=WCB 3.2)
   doc["tapWindowMs"]          = rcConfig.tapWindowMs;
-  doc["chRateHz"]             = rcConfig.chRateHz;          // rc_ch live-monitor broadcast rate (Hz, 1–20)
+  doc["holdMs"]               = rcConfig.holdMs;            // long-press threshold (ms); > tapWindowMs
+  doc["chRateHz"]             = rcConfig.chRateHz;         // rc_ch live-monitor broadcast rate (Hz, 1–20)
   doc["matrixChannel"]        = rcConfig.matrixChannel;
   doc["matrixDebounceFrames"] = rcConfig.matrixDebounceFrames;
 
@@ -1212,13 +1229,13 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
       int idx = rcMapIndex(mode, btn);
       const RcMapping& m = rcConfig.mappings[idx];
       bool hasAny = false;
-      for (int ti = 0; ti < 3 && !hasAny; ti++) if (m.t[ti].count > 0 || m.t[ti].note[0]) hasAny = true;
+      for (int ti = 0; ti < RC_NUM_TAP_TIERS && !hasAny; ti++) if (m.t[ti].count > 0 || m.t[ti].note[0]) hasAny = true;
       if (!hasAny && !m.exclusive) continue;
 
       String key = String(mode * 100 + btn);
       JsonObject mObj = mapObj.createNestedObject(key);
       mObj["exclusive"] = m.exclusive;
-      for (int ti = 0; ti < 3; ti++) {
+      for (int ti = 0; ti < RC_NUM_TAP_TIERS; ti++) {
         if (m.t[ti].count > 0) {
           String tierKey = String("t") + (ti + 1);
           JsonArray acts = mObj.createNestedArray(tierKey);
@@ -1464,6 +1481,14 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   // effectively always-false, silently killing double/triple taps while single
   // taps keep working. Treat a nonsensically small/zero value as unset → default.
   if (rcConfig.tapWindowMs < 100) rcConfig.tapWindowMs = 500;
+  if (doc.containsKey("holdMs"))        rcConfig.holdMs        = doc["holdMs"];
+  // Long press is recognised by holding PAST the deferred tap dispatch, so the
+  // threshold must clear tapWindowMs with margin — at or below it the single-tap
+  // tier fires first and the hold can never be seen. An absent/zero/too-small
+  // value (old config, hand-edited JSON) is treated as unset → tapWindow + 250.
+  // Upper clamp keeps a fat-fingered value from making the button feel dead.
+  if (rcConfig.holdMs < rcConfig.tapWindowMs + 100) rcConfig.holdMs = rcConfig.tapWindowMs + 250;
+  if (rcConfig.holdMs > 5000)                       rcConfig.holdMs = 5000;
   if (doc.containsKey("chRateHz")) {
     int hz = doc["chRateHz"] | 5;            // rc_ch live-monitor rate; 0/absent → default 5 Hz
     if (hz < 1)  hz = 5;                      // a zero/negative rate would stall the channel stream entirely
@@ -1520,7 +1545,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       memset(&m, 0, sizeof(m));
       JsonObject mObj = kv.value().as<JsonObject>();
       m.exclusive = mObj["exclusive"] | false;
-      for (int ti = 0; ti < 3; ti++) {
+      for (int ti = 0; ti < RC_NUM_TAP_TIERS; ti++) {
         strlcpy(m.t[ti].note, mObj[String("t") + (ti + 1) + "note"] | "", sizeof(m.t[ti].note));
         String tierKey = String("t") + (ti + 1);
         if (!mObj.containsKey(tierKey)) continue;
@@ -2107,6 +2132,12 @@ uint32_t rcCmdlibHashFile(const char* path, size_t* bytes = nullptr) {
   return h;
 }
 
+// DEAD CODE — kept only as the readable mirror of rcConfigLoadNVS()'s key layout.
+// NOTHING CALLS THIS. LittleFS /config.json is the sole save path (rcConfigSaveLFS);
+// NVS survives only as a one-time migration SOURCE on a board that predates it.
+// Consequence: it is frozen at 3 tap tiers and does not persist holdMs — correct,
+// since it can only ever round-trip pre-long-press data. Don't extend it; if you
+// find yourself updating this for a new field, you are editing the wrong function.
 // Returns true only if EVERY NVS value was written successfully.
 bool rcConfigSaveNVS() {
   bool ok = true;
@@ -2347,6 +2378,9 @@ void rcConfigLoadNVS() {
       memset(&m, 0, sizeof(m));
       JsonObject mObj = kv.value().as<JsonObject>();
       m.exclusive = mObj["exclusive"] | false;
+      // Deliberately 3, NOT RC_NUM_TAP_TIERS: this reads the LEGACY NVS store,
+      // which was written before the long-press tier existed and can never
+      // contain a "t4" key. memset above already zeroed t[3]. Do not "fix".
       for (int ti = 0; ti < 3; ti++) {
         String tierKey = String("t") + (ti + 1);
         if (!mObj.containsKey(tierKey)) continue;

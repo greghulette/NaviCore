@@ -505,6 +505,15 @@ struct TapState {
   unsigned long deferredFireAt  = 0;
   int           deferredBtn     = 0;
   uint8_t       deferredTaps    = 0;
+  // ── Long-press (tap tier 4) tracking ──────────────────────────────────────
+  // A press stays "held" from its debounced commit until processSbus() confirms
+  // a debounced NEUTRAL. While held, checkDeferredTap() parks the tap dispatch:
+  // holdMs is by definition longer than tapWindowMs, so firing on the tap window
+  // alone would dispatch the tap tier before the hold could ever be recognised.
+  bool          holdActive      = false;  // a committed press is still physically down
+  int           holdBtn         = 0;      // matrix slot (1..RC_NUM_THRESHOLDS) being held
+  unsigned long holdStartMs     = 0;      // millis() at the press that opened the hold
+  bool          holdFired       = false;  // tier 4 already dispatched for this hold
 };
 TapState tapState;
 
@@ -2036,7 +2045,7 @@ void checkPendingActions() {
 void rcDispatch(int buttonId, uint8_t tapCount) {
   int mode = buttonId / 100, btn = buttonId % 100;
   if (mode < 1 || mode > 3 || btn < 1 || btn > RC_NUM_THRESHOLDS) return;
-  if (tapCount < 1 || tapCount > 3) return;
+  if (tapCount < 1 || tapCount > RC_NUM_TAP_TIERS) return;   // 4 == RC_TAP_LONG (long press)
 
   // Broadcast a "this trigger fired" event over the WCB ESP-NOW network so
   // the config tool's "Via WCB" mode (and any listening Wizard) sees every
@@ -2046,7 +2055,11 @@ void rcDispatch(int buttonId, uint8_t tapCount) {
   rcTelemetry::emitTrig(mode, btn, tapCount);
 
   const RcMapping& mapping = rcConfig.mappings[rcMapIndex(mode, btn)];
-  if (mapping.exclusive) {
+  // A long press is a DIFFERENT GESTURE, not a 4th tap, so it is always
+  // dispatched exclusively no matter how `exclusive` is set. Letting it fall
+  // through to the cumulative branch would fire single+double+triple alongside
+  // it — the tiers below a long press were never "passed through" on the way.
+  if (mapping.exclusive || tapCount == RC_TAP_LONG) {
     // Exclusive: only the matched tier fires (e.g. double-tap fires t2 alone).
     const RcTier& tier = mapping.t[tapCount - 1];
     for (int i = 0; i < tier.count; i++) rcExecuteAction(tier.a[i]);
@@ -2089,6 +2102,8 @@ void RCRadio_Matrix_Buttons(int val) {
     // of a multi-tap; past the window it's a brand-new single tap.
     if ((now - tapState.lastTapMs) < (unsigned long)rcConfig.tapWindowMs) {
       tapState.tapCount++;
+      // Deliberately 3, NOT RC_NUM_TAP_TIERS: tier 4 is the LONG PRESS, reached by
+      // holding — never by a 4th tap. A 4-tap flurry saturates at triple, as before.
       if (tapState.tapCount > 3) tapState.tapCount = 3;
     } else {
       tapState.tapCount = 1;
@@ -2102,10 +2117,66 @@ void RCRadio_Matrix_Buttons(int val) {
   tapState.deferredFireAt  = now + rcConfig.tapWindowMs;
   tapState.deferredBtn     = FunctionSwState * 100 + btn;
   tapState.deferredTaps    = tapState.tapCount;
+
+  // Open a hold window ONLY on the first press of a gesture. A hold on the 2nd
+  // or 3rd tap stays an ordinary double/triple tap: promoting it would make
+  // "tap, tap, hold" ambiguous and turn this into a gesture parser for no gain.
+  // (The press is still parked by checkDeferredTap until release either way, so
+  // a held 2nd tap simply dispatches its tier when the button comes up.)
+  tapState.holdActive  = (tapState.tapCount == 1);
+  tapState.holdBtn     = btn;
+  tapState.holdStartMs = now;
+  tapState.holdFired   = false;
+}
+
+// Long-press threshold reached with the button still down — dispatch tier 4 and
+// consume the gesture so the parked tap never fires. Called from processSbus()
+// (Core 1, same as every other matrix dispatch).
+static void rcMatrixHoldFire() {
+  tapState.holdFired       = true;
+  tapState.deferredPending = false;   // the parked tap is superseded, not queued
+  int btnId = tapState.deferredBtn;   // mode*100+btn, captured at the press
+  tapState.tapCount = 0;
+  tapState.lastBtn  = 0;
+  rcDispatch(btnId, RC_TAP_LONG);
+}
+
+// Debounced NEUTRAL confirmed — the held button came up. Idempotent: processSbus
+// keeps re-confirming neutral every frame while nothing is pressed.
+static void rcMatrixRelease() {
+  if (!tapState.holdActive) return;
+  tapState.holdActive = false;
+  tapState.holdBtn    = 0;
+
+  if (tapState.holdFired) {
+    // Long press already dispatched — the gesture is spent. Drop anything the
+    // release might otherwise re-arm (covers a release racing the threshold).
+    tapState.holdFired       = false;
+    tapState.deferredPending = false;
+    tapState.tapCount        = 0;
+    tapState.lastBtn         = 0;
+    return;
+  }
+
+  // Sub-threshold hold: this was an ordinary tap that simply took a while to let
+  // go of. Re-time BOTH windows from the release instant — people space taps by
+  // the gap between them, not press-to-press, so measuring from the press would
+  // spend a 400 ms hold's worth of the tap window before the finger even lifts
+  // and silently demote the next tap to a fresh single.
+  unsigned long now = millis();
+  tapState.lastTapMs = now;
+  if (tapState.deferredPending) tapState.deferredFireAt = now + rcConfig.tapWindowMs;
 }
 
 void checkDeferredTap() {
   if (!tapState.deferredPending) return;
+  // Park the dispatch while the button is still physically down. holdMs is by
+  // definition longer than tapWindowMs, so firing on the tap window alone would
+  // dispatch the tap tier BEFORE the hold could ever be recognised. A normal tap
+  // is released long before this matters; the visible effect is limited to a
+  // press-and-hold, which now resolves on release (or at holdMs) instead of
+  // mid-hold. rcMatrixRelease() re-times the window when the button comes up.
+  if (tapState.holdActive) return;
   // Signed difference, not `millis() >= deferredFireAt`: deferredFireAt is
   // now+tapWindowMs, which wraps in the last tapWindowMs of the millis() epoch.
   // An absolute compare fires the gesture on the next loop() pass, so a
@@ -2447,6 +2518,12 @@ void processSbus() {
     matrixCandidate    = 0;
     matrixCandCount    = 0;
     matrixNeutralCount = 0;
+    // Abandon any hold in progress. The link dropped mid-press, so we never saw
+    // the release edge that would normally close it — left set, holdActive would
+    // park checkDeferredTap() forever and the button would go dead after recovery.
+    tapState.holdActive = false;
+    tapState.holdFired  = false;
+    tapState.holdBtn    = 0;
     return;
   }
 
@@ -2488,7 +2565,12 @@ void processSbus() {
       matrixCandidate = 0;
       matrixCandCount = 0;
       if (matrixNeutralCount < debFrames) matrixNeutralCount++;
-      if (matrixNeutralCount >= debFrames) matrixArmed = true;   // release confirmed
+      if (matrixNeutralCount >= debFrames) {
+        matrixArmed = true;      // release confirmed
+        rcMatrixRelease();       // ...which is also the "button came up" edge the
+                                 // long-press tracker needs. Idempotent — this
+                                 // branch re-runs every frame while nothing is down.
+      }
     } else {
       // BUTTON candidate. Any in-band reading breaks a neutral run, so a
       // mid-press sweep transient that briefly crosses a neighbor band does
@@ -2505,6 +2587,18 @@ void processSbus() {
       if (matrixArmed && matrixCandCount >= debFrames) {
         matrixArmed = false;             // consume — needs a CONFIRMED neutral to re-arm
         RCRadio_Matrix_Buttons(mxVal);
+      }
+
+      // Long-press promotion. Tested HERE rather than in loop() because
+      // `decoded` is the authoritative "what is in-band right now" — requiring
+      // it to still equal holdBtn means sliding onto a neighbouring band can't
+      // fire the wrong button's long press. A 1-frame transient can't cancel a
+      // hold either: only a debounced NEUTRAL clears it, matching how the
+      // release debounce already refuses to split one press into a phantom double.
+      // Signed compare for the same millis()-wrap reason as checkDeferredTap.
+      if (tapState.holdActive && !tapState.holdFired && decoded == tapState.holdBtn &&
+          (int32_t)(millis() - (tapState.holdStartMs + (unsigned long)rcConfig.holdMs)) >= 0) {
+        rcMatrixHoldFire();
       }
     }
   }
@@ -3556,7 +3650,7 @@ void handleSerialInput() {
           int mode = hdr["mode"] | 1;
           int btn  = hdr["btn"]  | 0;
           int tap  = hdr["tap"]  | 1;
-          if (btn < 1 || btn > RC_NUM_THRESHOLDS || mode < 1 || mode > 3 || tap < 1 || tap > 3) {
+          if (btn < 1 || btn > RC_NUM_THRESHOLDS || mode < 1 || mode > 3 || tap < 1 || tap > RC_NUM_TAP_TIERS) {
             Serial.println("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"bad mode/btn/tap\"}");
           } else {
             Serial.printf("[TRIGGER] mode=%d btn=%d tap=%d\n", mode, btn, tap);
@@ -4688,7 +4782,7 @@ void drainRemoteTriggers() {
   while (xQueueReceive(remoteTriggerQueue, &t, 0) == pdTRUE) {
     if (t.mode < 1 || t.mode > 3) continue;
     if (t.btn  < 1 || t.btn  > RC_NUM_THRESHOLDS) continue;
-    uint8_t tap = t.tap < 1 ? 1 : (t.tap > 3 ? 3 : t.tap);
+    uint8_t tap = t.tap < 1 ? 1 : (t.tap > RC_NUM_TAP_TIERS ? RC_NUM_TAP_TIERS : t.tap);
     rcDispatch(t.mode * 100 + t.btn, tap);
   }
 }

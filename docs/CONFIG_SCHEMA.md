@@ -23,8 +23,8 @@ build requirement and why a failed allocation halts the board with a solid red L
 than crashing later.
 
 Size discipline matters: `RcAction::cmd[96]` is multiplied by
-`RC_NUM_MAPPINGS × 3 tiers × RC_ACTIONS_PER_TIER = 1620` action slots. Widening a field in
-`RcAction` costs kilobytes per byte.
+`RC_NUM_MAPPINGS × RC_NUM_TAP_TIERS × RC_ACTIONS_PER_TIER = 108 × 4 × 5 = 2160` action slots.
+Widening a field in `RcAction` costs kilobytes per byte.
 
 ---
 
@@ -37,6 +37,7 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 | `RC_NUM_THRESHOLDS` | 36 | Total matrix-channel bands |
 | `RC_NUM_MAPPINGS` | 108 | 3 modes × 36 slots |
 | `RC_ACTIONS_PER_TIER` | 5 | Actions per tap tier |
+| `RC_NUM_TAP_TIERS` | 4 | Tap tiers per mapping — `t1`/`t2`/`t3` taps, `t4` = long press (`RC_TAP_LONG`) |
 | `RC_NUM_SWITCHES` | 10 | SA–SJ |
 | `RC_NUM_KNOBS` | 11 | S1, S2, LS, RS, S3, J1–J4, J5, J6 |
 | `RC_KNOB_MAX_OUTPUTS` | 10 | Passthrough/volume outputs per knob |
@@ -57,11 +58,12 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 | `sbusOutEnabled` | `bool` | Enable the SBUS passthrough tee (applies live) |
 | `boardType` | `uint8_t` | 0 = NaviCore v2 PCB, 1 = WCB HW 3.2 — selects the pin profile |
 | `tapWindowMs` | `int` | Multi-tap detection window |
+| `holdMs` | `int` | Long-press (tier `t4`) threshold, default 750. **Must exceed `tapWindowMs`** — the tap dispatch is deferred by `tapWindowMs` and would fire first. Both sides clamp a too-small value to `tapWindowMs + 250`, and 5000 ms is the ceiling |
 | `chRateHz` | `uint8_t` | `rc_ch` broadcast rate, 1–20 (default 5). High rates flood the mesh |
 | `matrixChannel` | `int` | SBUS channel carrying the button matrix |
 | `matrixDebounceFrames` | `int` | 1–4 consecutive in-band frames to commit a press/re-arm |
 | `thresholds[36]` | `RcThreshold` | `{id, label[24], minPwm, maxPwm}` — a `0/0` band is inert |
-| `mappings[108]` | `RcMapping` | `{exclusive, RcTier t[3]}` — indexed `(mode-1)*36 + (slot-1)` |
+| `mappings[108]` | `RcMapping` | `{exclusive, RcTier t[4]}` — indexed `(mode-1)*36 + (slot-1)`. `t[3]` is the long press and is **always dispatched exclusively**, whatever `exclusive` says |
 | `switches[10]` | `RcSwitch` | `{channel, positions, RcTier t[3]}` (down/mid/up) |
 | `knobs[11]` | `RcKnob` | See below |
 | `funcBindings` | `RcFuncBindings` | `{modeSwitch}` — which switch selects the global mode |
@@ -250,6 +252,7 @@ highest-risk category of edit in the repo.
 
 | Firmware | Config tool | Value |
 |---|---|---|
+| `RC_NUM_TAP_TIERS` / `RC_TAP_LONG` | `NUM_TAP_TIERS` / `TAP_LONG` / `TIER_KEYS` | 4 (`t1..t4`, 4 = long press) |
 | `RC_KNOB_MAX_OUTPUTS` | `KNOB_MAX_OUTPUTS` | 10 |
 | `RC_NUM_MAESTROS` | `NUM_MAESTRO_SLOTS` | 8 |
 | `RC_NUM_WLED` | `NUM_WLED_SLOTS` | 4 |
@@ -308,6 +311,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-24 | _(uncommitted)_ | Added `holdMs` (long-press threshold, default 750) and a `RC_NUM_TAP_TIERS`/`NUM_TAP_TIERS` invariants row. Button mappings now carry a 4th tier `t4` (long press); `t4` is omitted from the JSON when empty, same as the other tiers, so it costs nothing until used. |
 | 2026-08-18 | _(uncommitted)_ | `hcrDest`/`mp3Dest`/`dfpDest` gained `transport` **2 = disabled** (JSON `"off"`), and all three now default to it — a fresh config has every audio device switched off until the user sets it up. Executors refuse a disabled device's actions; the stored port/target survives so re-enabling restores it. Round-trips through JSON and CSV. |
 | 2026-08-18 | _(uncommitted)_ | §3 gained `serialBcastOut[3]` / `serialBcastIn[3]` (JSON `serialBcast`) — the per-aux-port mesh bridging flags were shipped but undocumented here. Corrected `serialLabels`: **4** slots indexed by firmware port (`RC_SLBL_S3/S4/S5/MAESTRO`, JSON keys `"S3"/"S4"/"S5"/"maestro"`), not 5 indexed by WDP port with an SBUS slot — the page still described the pre-migration layout. Recorded that `rcConfigFromJSON()` memsets the slots before matching, so an old-style (`"1"`–`"5"`) object clears every override rather than misapplying it. |
 | 2026-08-13 | _(uncommitted)_ | `statsReport.wcb` documented as **optional** (0 = collect/display, ship nothing) and `enabled` clarified as a statement of intent — the counters run from boot regardless and are never reset in-session, so nothing here gates collection. |

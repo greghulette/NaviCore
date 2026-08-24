@@ -96,7 +96,7 @@ bool                applyConfigSideEffects();   // post-save live re-apply, shar
 String rcConfigToJSON();
 bool   rcConfigFromJSON(const String& json);
 bool   rcConfigFromJSON(const JsonObject& doc);   // JsonObject overload — skip the double-parse
-bool   rcConfigSaveNVS();   // legacy NVS save (migration source only)
+bool   rcConfigSaveNVS();   // DEAD — nothing calls it; the NVS *load* is the migration source
 bool   rcConfigSaveLFS();   // primary: persist config to /config.json on LittleFS
 void   rcAdvertiseSerialLabels();   // push effective per-port labels to WCB_Client (WDP PORTLABEL) — def in NaviCore.ino
 bool     rcCmdlibSaveLFS(const String& json); // persist the config tool's private command library to /cmdlib.json
@@ -2129,7 +2129,7 @@ inline bool handle(uint8_t senderID, const char* command) {
     int tap  = doc["tap"]  | 1;
     if (mode >= 1 && mode <= 3 &&
         btn  >= 1 && btn  <= RC_NUM_THRESHOLDS) {
-      if (tap < 1) tap = 1; else if (tap > 3) tap = 3;
+      if (tap < 1) tap = 1; else if (tap > RC_NUM_TAP_TIERS) tap = RC_NUM_TAP_TIERS;   // 4 = long press
       queueRemoteTrigger(mode, btn, (uint8_t)tap);   // defer to Core 1 (see above)
     }
     return true;

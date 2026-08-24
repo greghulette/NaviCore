@@ -87,7 +87,7 @@ Newline-delimited JSON. Handled by `handleSerialInput()` in
 | `{"type":"RESET_DEFAULTS"}` | `ACK` | Reloads factory defaults |
 | `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}` | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects) |
 | `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | |
-| `{"type":"TRIGGER","mode":M,"btn":B,"tap":T}` | — | Virtual button press |
+| `{"type":"TRIGGER","mode":M,"btn":B,"tap":T}` | — | Virtual button press. `tap` 1–4; **4 = long press** (tier `t4`), which always dispatches exclusively |
 | `{"type":"WCB_SEND","target":N,"cmd":"…"}` | — | `target` 0 = broadcast |
 | `{"type":"FORGET_PEER","id":N}` / `"all":true` | — | id 0 or `all` = drop every learned peer |
 | `{"type":"SET_DEBUG_FLAGS","flags":N}` | — | See the debug bitmask below |
@@ -443,7 +443,7 @@ callback.
 |---|---|---|
 | `rc_hb` | 0.5 Hz, broadcast | `id, fw, up, mode, model, sbusFps, sbusAge, sbusLost, sbusFail` |
 | `rc_ch` | `chRateHz` (default 5, range 1–20), **only while a subscriber is heard** | `id, ch[24]` |
-| `rc_trig` | on every trigger — local, USB, or remote | `id, mode, btn, tap` |
+| `rc_trig` | on every trigger — local, USB, or remote | `id, mode, btn, tap` (`tap` 4 = long press) |
 | `rc_mode` | on mode change | `id, mode` |
 | `wcb_alias` | on alias learn | board id + name |
 
@@ -533,6 +533,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-24 | _(uncommitted)_ | `tap` now spans 1–4 on both `TRIGGER` (USB + mesh) and `rc_trig`, where **4 = long press**. No wire-format change — the existing `tap` field carries it, so the WCB bridge and `WcbCmd` are untouched. Three separate bounds enforce it: the USB handler, the mesh clamp in `rcTelemetry::handle()`, and the clamp in `drainRemoteTriggers()`. |
 | 2026-08-18 | _(uncommitted)_ | §4 bulk-transfer frames corrected to the wire as implemented: CHUNK carries **no** `"o"` offset (the receiver derives `q * BULK_CHUNK_RAW` and deliberately never trusts one), DONE/STATUS/FINAL all carry `"r":round`, and the `{"bs":sid,"nb":1}` need-BEGIN reply — previously undocumented, and the only recovery from a droid that reboots mid-transfer — now has a row. |
 | 2026-08-17 | _(uncommitted)_ | Added `GET_WCB_SEQVAL` → `WCB_SEQVAL` (ONE stored sequence's contents by key, on `WCB_Client` 1.15.0's `requestSequence()`), so the command library can show what a chosen sequence does. `status` is a real answer — 0 OK / 1 NOTFOUND / 2 TOOBIG — not an error, and the `value` is passed through verbatim because its `^` delimiters and `***` comments are what the consumer renders. The load-bearing part: the library allows **one** request in flight across names *and* values, so the firmware's pull slot is now tagged with its kind and every reply and timeout checks it — a names answer emitted as a value one, or a failure carrying the wrong `type`, settles the wrong request in the tool and leaves the real one hanging. `key` joins `wcb` in the `handleSerialInput()` filter whitelist. |
 | 2026-08-17 | _(uncommitted)_ | Added `GET_WCB_SEQ` → `WCB_SEQ` (a WCB's stored-sequence key names, pulled off the mesh with `WCB_Client` 1.15.0's `requestSequenceNames()`) and the per-board `seqHash[]` fingerprint, carried in `WCB_STATUS` on USB and `WCB_META` over the bridge. Four constraints are load-bearing: the reply is **async** (6 s `no reply` timeout, because the library abandons its own pull silently at ~4 s); **one pull at a time mesh-wide** (a second is rejected, not queued); **names only, never bodies** (the whole set has no ceiling — the same failure the WCB config pull already has); and `wcb` must be in the `handleSerialInput()` filter whitelist or it is stripped and read as 0. Bridge replies fragment on `OS_WCB_SEQ`; the pull and every error reply are issued from `tick()` on Core 1 because both are ESP-NOW transmits. Also corrected the `GET_WCB_STATUS` row's stale "See §5" — that content is §4. |

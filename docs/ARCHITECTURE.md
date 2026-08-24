@@ -282,9 +282,28 @@ buttons. All decode identically through `pwmToButton()`; a `0/0` band is inert.
 number of frames — so a one-frame dip cannot split one press into a phantom double.
 Runtime-tunable 1–4. Only a true sub-frame tap is unrecoverable (an SBUS-rate limit).
 
-**Taps.** Each mapping has three tiers (`t[0]` single, `t[1]` double, `t[2]` triple) and an
-`exclusive` flag: exclusive fires only the final tier after the window closes; cumulative
-fires each tier as it is reached.
+**Taps.** Each mapping has `RC_NUM_TAP_TIERS = 4` tiers (`t[0]` single, `t[1]` double, `t[2]`
+triple, `t[3]` **long press**) and an `exclusive` flag: exclusive fires only the final tier
+after the window closes; cumulative fires each tier as it is reached.
+
+**Long press.** Holding a matrix button in-band for `holdMs` (default 750, configurable)
+dispatches `t[3]` **at the threshold, while still held** — the release then fires nothing.
+Three constraints make this work, and each is load-bearing:
+
+- `holdMs` **must exceed `tapWindowMs`**, or the deferred tap dispatch fires first and the
+  hold is unreachable. Both firmware and tool clamp a too-small value to `tapWindowMs + 250`.
+- `checkDeferredTap()` **parks the tap dispatch while the button is down** (`holdActive`).
+  Consequence: a press-and-hold now resolves on release (or at `holdMs`), not mid-hold.
+- Tier 4 is **always dispatched exclusively**, regardless of the `exclusive` flag — it is a
+  different gesture, not a 4th tap, so the cumulative rule must not fire t1+t2+t3 alongside it.
+
+A hold only promotes on the **first** press of a gesture; holding the 2nd or 3rd tap leaves it
+an ordinary double/triple. A 4-tap flurry still saturates at triple — tier 4 is reachable only
+by holding. The hold is opened by the debounced press commit and closed by the debounced
+NEUTRAL (`rcMatrixRelease()`), so a one-frame transient cannot cancel it, and sliding onto a
+neighbouring band cannot fire the wrong button's long press (the threshold test requires
+`decoded == holdBtn`). An SBUS failsafe clears the hold — otherwise `holdActive` would park
+the tap dispatch forever and the button would go dead after recovery.
 
 **Dispatch.** `rcDispatch(buttonId, tapCount)` → the tier's up-to-5 `RcAction`s →
 `rcExecuteAction()` (schedules if `delayMs`, else `rcExecuteActionNow()`). Delays are
@@ -385,6 +404,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-24 | _(uncommitted)_ | **Long press added as tap tier 4.** `RcMapping::t[]` is now `RC_NUM_TAP_TIERS = 4`; holding a matrix button for the new `holdMs` config field (default 750) dispatches `t[3]` at the threshold while still held. Three constraints documented in §Taps: `holdMs` must exceed `tapWindowMs`, `checkDeferredTap()` parks the tap dispatch while the button is down (so press-and-hold now resolves on release, not mid-hold), and tier 4 always dispatches exclusively regardless of the `exclusive` flag. |
 | 2026-08-18 | _(uncommitted)_ | The three global audio destinations (`hcrDest`/`mp3Dest`/`dfpDest`) gained a **disabled** state (`transport` 2, JSON `"off"`) and now default to it. `RA_HCR`/`RA_MP3`/`RA_DFPLAYER` are no-ops while their device is disabled — the gate is in the executor, not at the port. |
 | 2026-08-18 | _(uncommitted)_ | §7/§8 completed: the loop sequence and the Core-0→Core-1 queue table gained `drainMaestroCmd()` / `serialFwdQueue` and `drainSerialFwd()` / `maestroCmdQueue`, with the reason they must be deferred (bit-banged S4/S5 writes block with interrupts off; a Maestro `get*` blocks 25 ms). §8's `navirec` capture row now reads **Core 1** — remote TRIGGERs are deferred through `drainRemoteTriggers()`, so the queue hop is a safeguard rather than a cross-core requirement. §4: the mesh-facing **S1–S3** renumber is shipped, stated as current instead of planned. |
 | 2026-08-18 | _(uncommitted)_ | Core-0 stack: both `FragSession` slot-clear sites now call `rcTelemetry::_fragClear()` instead of assigning `FragSession{}`, which was materialising a ~3.3 KB temporary per site and ~7 KB nested on the ESP-NOW callback (`handle()` 3632→368 B, `_findOrAllocSession()` 3328→32 B, `-fstack-usage`). Recorded the wider rule in §8. `processKnobs()` now returns early while `calibrationActive` (§9) — dispatch muting alone let passthrough servos track the wizard's full-range sweeps. Post-save live re-apply factored into `applyConfigSideEffects()` and called from BOTH the USB and Via-WCB save paths (§13); the mesh path previously skipped it entirely. |
