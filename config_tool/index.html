@@ -470,6 +470,18 @@
     /* the count changes every tick — same reason #status-text sets this */
     font-variant-numeric: tabular-nums; }
   .push-budget.empty { display: none; }
+
+  /* Assignment-card tier row flash — lights the exact tier that just fired, in
+     the same orange the transmitter graphic uses for live activity. Fades out
+     on its own so a burst of taps reads as separate pulses. */
+  .tier-row { border-radius: 4px; padding: 1px 4px; margin-left: -4px;
+    transition: background-color .45s ease, color .45s ease, box-shadow .45s ease; }
+  .tier-row.trig-fired {
+    background: rgba(255,122,61,.18);
+    color: var(--accent3) !important;
+    box-shadow: 0 0 0 1px rgba(255,122,61,.45);
+    transition: none;   /* snap ON, fade OFF — a pulse, not a swell */
+  }
   .push-budget-bar { width: 62px; height: 5px; border-radius: 3px;
     background: var(--border); overflow: hidden; flex: none; }
   .push-budget-bar > div { height: 100%; border-radius: 3px; transition: width .18s, background .18s; }
@@ -2307,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:24.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:41.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -8548,7 +8560,13 @@ function handleBoardMessage(line) {
     return;
   }
   if (msg.type === 'rc_trig') {
-    if (msg.id !== RC_WCB_DEVICE_ID) return;
+    // Over the mesh this is a BROADCAST, so the id check keeps another NaviCore's
+    // triggers out. On Direct USB it arrives down the wire from the one board we
+    // are talking to, so the id is irrelevant there — and enforcing it would drop
+    // every event from a board whose deviceId was changed off the default.
+    if (viaWcbActive && msg.id !== RC_WCB_DEVICE_ID) return;
+    // Light the exact tier that fired, in the assignment cards.
+    try { flashAssignmentTier(msg.mode, msg.btn, msg.tap); } catch (_) {}
     // Surface the trigger in the live button-highlight system.  We don't
     // have matrixVal/modeVal here (those come on the locally-detected
     // PWM_UPDATE path); pass undefined so updatePWMDisplay just runs the
@@ -10801,7 +10819,7 @@ function renderAssignmentList() {
     const excBadge = m?.exclusive ? ' <span style="color:var(--yellow);font-size:10px">⚡ excl</span>' : '';
     card.innerHTML = `
       <div style="font-weight:700;margin-bottom:4px;color:${isConfig?'var(--text)':'var(--muted)'}">${getBtnLabel(btn)}${excBadge}</div>
-      ${tierSummary(m, 1)}${tierSummary(m, 2)}${tierSummary(m, 3)}${tierSummary(m, TAP_LONG)}
+      ${tierSummary(m, 1, btn)}${tierSummary(m, 2, btn)}${tierSummary(m, 3, btn)}${tierSummary(m, TAP_LONG, btn)}
     `;
     list.appendChild(card);
   });
@@ -10833,7 +10851,7 @@ function renderAssignmentList() {
       card.innerHTML = `
         <div style="font-weight:700;margin-bottom:4px;color:${isConfig ? 'var(--text)' : 'var(--muted)'}">${escH(lbl)}${excBadge}
           <span style="color:var(--muted);font-weight:400;font-size:10px">· ch${config.matrixChannel || 7}@${center ? fmtVal(center) : '—'}</span></div>
-        ${tierSummary(m, 1)}${tierSummary(m, 2)}${tierSummary(m, 3)}${tierSummary(m, TAP_LONG)}
+        ${tierSummary(m, 1, id)}${tierSummary(m, 2, id)}${tierSummary(m, 3, id)}${tierSummary(m, TAP_LONG, id)}
       `;
       list.appendChild(card);
     });
@@ -10860,14 +10878,48 @@ function updateHoldMsHint() {
   }
 }
 
-function tierSummary(m, tier) {
+// One tier's line in an assignment card. `slot` tags the row so a live trigger
+// can flash the exact tier that fired (see flashAssignmentTier).
+function tierSummary(m, tier, slot) {
   if (!m) return '';
   const acts = m['t' + tier];
   if (!acts || !acts.length) return '';
   const desc = acts.map(actionSummary).join(' + ');
   // Tier 4 is the long press, not a 4th tap — label it as a gesture, not a count.
   const lbl = tier === TAP_LONG ? 'Hold' : `${tier}×`;
-  return `<div style="font-size:11px;color:var(--muted);margin-top:2px">${lbl}: ${desc}</div>`;
+  return `<div class="tier-row" data-slot="${slot == null ? '' : slot}" data-tier="${tier}"` +
+         ` style="font-size:11px;color:var(--muted);margin-top:2px">${lbl}: ${desc}</div>`;
+}
+
+// Flash the tier row(s) that a just-received rc_trig actually fired, so you can
+// see WHICH gesture the board decoded rather than inferring it from whether the
+// hardware moved. Mirrors rcDispatch()'s own rule: exclusive fires only the
+// matched tier, cumulative fires every tier up to it — and a long press (tier 4)
+// is always exclusive regardless, because it is a different gesture, not a 4th tap.
+const _trigFlashTimers = new Map();   // row element → pending clear timeout
+function flashAssignmentTier(mode, btn, tap) {
+  if (mode !== currentMode) return;          // card grid only shows the active mode
+  if (!(tap >= 1 && tap <= NUM_TAP_TIERS)) return;
+  const m = config.mappings[String(mode * 100 + btn)];
+  const cumulative = m && !m.exclusive && tap !== TAP_LONG;
+  const tiers = cumulative ? Array.from({ length: tap }, (_, i) => i + 1) : [tap];
+
+  const list = document.getElementById('assignment-list');
+  if (!list) return;
+  tiers.forEach(t => {
+    const row = list.querySelector(`.tier-row[data-slot="${btn}"][data-tier="${t}"]`);
+    if (!row) return;                        // tier has no actions → no row to light
+    // Re-trigger cleanly on a repeat hit: drop the class, force a reflow, re-add,
+    // so a second tap pulses again instead of extending the first flash silently.
+    clearTimeout(_trigFlashTimers.get(row));
+    row.classList.remove('trig-fired');
+    void row.offsetWidth;
+    row.classList.add('trig-fired');
+    _trigFlashTimers.set(row, setTimeout(() => {
+      row.classList.remove('trig-fired');
+      _trigFlashTimers.delete(row);
+    }, 900));
+  });
 }
 
 // Friendly one-liner for a raw Maestro command string (used in the assignment
