@@ -449,7 +449,7 @@
   #modal .modal-header, #modal .modal-footer { background: #202939; }
   #modal .tier-card { background: #2b3749; border: 1px solid #384662; }
   #modal .action-row { background: #35435a; border: 1px solid #475874; border-left: 3px solid var(--accent); }
-  /* Tap-tier tabs — one tier (single/double/triple tap) shown at a time. */
+  /* Tap-tier tabs — one tier (single/double/triple tap, or long press) shown at a time. */
   .tier-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
   .tier-tab { appearance: none; flex: 1; cursor: pointer; user-select: none; font-family: inherit;
     padding: 9px 8px; border-radius: 8px; border: 1px solid var(--border);
@@ -1109,7 +1109,7 @@
       </div>
 
       <div style="text-align:center; margin-bottom:12px; font-size:12px; color:var(--muted)">
-        Click any button to configure · <b>Shift+Click</b> to fire a TRIGGER (single tap) · <b>Shift+Ctrl+Click</b> for double tap · <b>Shift+Alt+Click</b> for triple tap
+        Click any button to configure · <b>Shift+Click</b> to fire a TRIGGER (single tap) · <b>Shift+Ctrl+Click</b> for double tap · <b>Shift+Alt+Click</b> for triple tap · <b>Shift+Ctrl+Alt+Click</b> for long press
       </div>
 
       <!-- FrSky TANDEM X18 transmitter SVG -->
@@ -2294,7 +2294,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">21.15:52.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:00.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3068,10 +3068,20 @@
           <div class="sb-section">
             <h3>Tap Window</h3>
             <div class="tapwin-row">
-              <input type="number" id="tapwin-input" min="100" max="2000" step="50" value="500">
+              <input type="number" id="tapwin-input" min="100" max="2000" step="50" value="500"
+                     oninput="updateHoldMsHint()">
               <span style="color:var(--muted);font-size:12px">ms</span>
             </div>
             <div class="noconn" style="margin-top:4px">Time window for multi-tap detection</div>
+          </div>
+          <div class="sb-section">
+            <h3>Long Press</h3>
+            <div class="tapwin-row">
+              <input type="number" id="holdms-input" min="200" max="5000" step="50" value="750"
+                     oninput="updateHoldMsHint()">
+              <span style="color:var(--muted);font-size:12px">ms</span>
+            </div>
+            <div class="noconn" style="margin-top:4px" id="holdms-hint">Hold a button this long to fire its Long&nbsp;press tier</div>
           </div>
           <div class="sb-section">
             <h3>Telemetry Rate</h3>
@@ -3299,7 +3309,7 @@
     <div class="modal-body">
       <div class="toggle-row">
         <label class="toggle"><input type="checkbox" id="modal-exclusive"><span class="slider"></span></label>
-        <span style="font-size:13px">Exclusive mode — only the matched tier fires (off = cumulative: a double-tap fires tap 1 <i>and</i> tap 2)</span>
+        <span style="font-size:13px">Exclusive mode — only the matched tier fires (off = cumulative: a double-tap fires tap 1 <i>and</i> tap 2). <b>Long press always fires alone</b>, either way.</span>
       </div>
       <div id="tiers-container"></div>
     </div>
@@ -3632,7 +3642,8 @@ let config = {
   maeGateMs:        250,      // remote/via-WCB skip-if-running fail-open window (ms)
   boardType:        0,        // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   tapWindowMs:   500,
-  chRateHz:      5,          // rc_ch live-monitor broadcast rate (Hz, 1–20; 5 = smooth + light mesh load)
+  holdMs:        750,        // long-press (tap tier 4) threshold; must exceed tapWindowMs
+  chRateHz:      5,       // rc_ch live-monitor broadcast rate (Hz, 1–20; 5 = smooth + light mesh load)
   matrixChannel: 7,
   matrixDebounceFrames: 1,
   funcBindings: { mode: 4 },
@@ -4144,6 +4155,14 @@ const RC_PHYSICAL_SLOTS = 21;
 const RC_LOGICAL_COUNT  = 15;
 const RC_TOTAL_SLOTS    = RC_PHYSICAL_SLOTS + RC_LOGICAL_COUNT;  // 36
 
+// Tap tiers per button mapping. Tiers 1-3 are tap counts; tier 4 is the LONG
+// PRESS (hold past config.holdMs), which is a different gesture rather than a
+// 4th tap — it always dispatches exclusively, and a 4-tap flurry still saturates
+// at triple. Mirrors the firmware's RC_NUM_TAP_TIERS / RC_TAP_LONG.
+const NUM_TAP_TIERS = 4;
+const TAP_LONG      = 4;
+const TIER_KEYS     = ['t1', 't2', 't3', 't4'];   // config.mappings[key] action arrays, tier order
+
 // Display label for a matrix slot — the ONE place label precedence lives.
 // LOGICAL slots (22-36): config.thresholds[].label is the source of truth
 // (user-named in the Logical Buttons tab). PHYSICAL slots (1-21): the active
@@ -4161,7 +4180,7 @@ function getBtnLabel(id) {
 // Shared "configured / in use" predicates — ONE definition used by the
 // assignment cards, the Logical Buttons tab, and the CSV export, so the views
 // can never drift apart on which slots count as in use.
-function mappingHasActions(m) { return !!(m && ((m.t1 && m.t1.length) || (m.t2 && m.t2.length) || (m.t3 && m.t3.length))); }
+function mappingHasActions(m) { return !!(m && TIER_KEYS.some(k => m[k] && m[k].length)); }
 function mappingInUse(m)      { return mappingHasActions(m) || !!(m && m.exclusive); }
 function thresholdHasBand(t)  { return !!(t && (((t.minPwm || 0) !== 0) || ((t.maxPwm || 0) !== 0))); }
 function slotInUseAnyMode(id) {
@@ -6074,7 +6093,7 @@ function _forEachClipActionArray(cb) {
   if (typeof config === 'undefined' || !config) return;
   if (config.mappings) for (const key in config.mappings) {
     const m = config.mappings[key]; if (!m) continue;
-    ['t1', 't2', 't3'].forEach(t => { if (Array.isArray(m[t])) cb(m[t], na => { m[t] = na; }); });
+    TIER_KEYS.forEach(t => { if (Array.isArray(m[t])) cb(m[t], na => { m[t] = na; }); });
   }
   if (config.switches) for (const nm in config.switches) {
     const s = config.switches[nm]; if (!s) continue;
@@ -8799,6 +8818,10 @@ function applyConfig(data) {
     const t = +data.tapWindowMs;                    // coerce: a string here would show
     if (Number.isFinite(t)) config.tapWindowMs = t; // as a false "dirty" diff on save
   }
+  if (data.holdMs !== undefined) {
+    const h = +data.holdMs;                         // same coercion as tapWindowMs
+    if (Number.isFinite(h)) config.holdMs = h;
+  }
   if (data.chRateHz !== undefined) {
     const r = +data.chRateHz;                       // rc_ch live-monitor rate (Hz)
     if (Number.isFinite(r)) config.chRateHz = Math.max(1, Math.min(20, r));
@@ -8922,6 +8945,8 @@ function applyConfig(data) {
     if (showMeshStats) requestMeshStats();
   }
   document.getElementById('tapwin-input').value = config.tapWindowMs;
+  { const h = document.getElementById('holdms-input');
+    if (h) { h.value = config.holdMs ?? 750; updateHoldMsHint(); } }
   { const cr = document.getElementById('chrate-input');
     if (cr) { const hz = Math.max(1, Math.min(20, config.chRateHz ?? 5));
               cr.value = hz;
@@ -10762,7 +10787,7 @@ function renderAssignmentList() {
     const excBadge = m?.exclusive ? ' <span style="color:var(--yellow);font-size:10px">⚡ excl</span>' : '';
     card.innerHTML = `
       <div style="font-weight:700;margin-bottom:4px;color:${isConfig?'var(--text)':'var(--muted)'}">${getBtnLabel(btn)}${excBadge}</div>
-      ${tierSummary(m, 1)}${tierSummary(m, 2)}${tierSummary(m, 3)}
+      ${tierSummary(m, 1)}${tierSummary(m, 2)}${tierSummary(m, 3)}${tierSummary(m, TAP_LONG)}
     `;
     list.appendChild(card);
   });
@@ -10794,10 +10819,30 @@ function renderAssignmentList() {
       card.innerHTML = `
         <div style="font-weight:700;margin-bottom:4px;color:${isConfig ? 'var(--text)' : 'var(--muted)'}">${escH(lbl)}${excBadge}
           <span style="color:var(--muted);font-weight:400;font-size:10px">· ch${config.matrixChannel || 7}@${center ? fmtVal(center) : '—'}</span></div>
-        ${tierSummary(m, 1)}${tierSummary(m, 2)}${tierSummary(m, 3)}
+        ${tierSummary(m, 1)}${tierSummary(m, 2)}${tierSummary(m, 3)}${tierSummary(m, TAP_LONG)}
       `;
       list.appendChild(card);
     });
+  }
+}
+
+// Live warning under the Long Press box. The threshold has to clear the tap
+// window or the deferred tap dispatch fires first and the hold is unreachable —
+// the firmware silently rewrites such a value on load, so say so before Save
+// rather than letting the board hand back a number the user didn't type.
+function updateHoldMsHint() {
+  const inp  = document.getElementById('holdms-input');
+  const hint = document.getElementById('holdms-hint');
+  if (!inp || !hint) return;
+  const hm = parseInt(inp.value, 10);
+  const tw = parseInt(document.getElementById('tapwin-input')?.value, 10) || 500;
+  if (Number.isFinite(hm) && hm < tw + 100) {
+    hint.innerHTML = `⚠ Must be at least ${tw + 100} ms — the ${tw} ms tap window fires first. ` +
+                     `Will be saved as ${tw + 250} ms.`;
+    hint.style.color = 'var(--red)';
+  } else {
+    hint.innerHTML = 'Hold a button this long to fire its Long&nbsp;press tier';
+    hint.style.color = '';
   }
 }
 
@@ -10806,7 +10851,9 @@ function tierSummary(m, tier) {
   const acts = m['t' + tier];
   if (!acts || !acts.length) return '';
   const desc = acts.map(actionSummary).join(' + ');
-  return `<div style="font-size:11px;color:var(--muted);margin-top:2px">${tier}×: ${desc}</div>`;
+  // Tier 4 is the long press, not a 4th tap — label it as a gesture, not a count.
+  const lbl = tier === TAP_LONG ? 'Hold' : `${tier}×`;
+  return `<div style="font-size:11px;color:var(--muted);margin-top:2px">${lbl}: ${desc}</div>`;
 }
 
 // Friendly one-liner for a raw Maestro command string (used in the assignment
@@ -10892,7 +10939,7 @@ function updateButtonHighlights() {
   for (let btn = 1; btn <= RC_VISIBLE_BUTTONS; btn++) {
     const key   = String(currentMode * 100 + btn);
     const m     = config.mappings[key];
-    const hasData = m && (m.t1?.length || m.t2?.length || m.t3?.length);
+    const hasData = m && TIER_KEYS.some(k => m[k]?.length);
     // Several data-btn IDs are shared between the X18 and X-Lite SVG
     // groups (face buttons 1-4, plus trim slots 9-16).  Apply the
     // highlight to ALL matching zones, not just the first — the X-Lite's
@@ -10917,8 +10964,11 @@ function openModal(btn) {
   if (ev && ev.shiftKey) {
     ev.preventDefault();
     let tap = 1;
-    if (ev.ctrlKey || ev.metaKey) tap = 2;
-    else if (ev.altKey)            tap = 3;
+    // Order matters: test the two-modifier chord BEFORE either single modifier,
+    // or Shift+Ctrl+Alt would match the Ctrl branch and fire a double tap.
+    if ((ev.ctrlKey || ev.metaKey) && ev.altKey) tap = TAP_LONG;   // Shift+Ctrl+Alt
+    else if (ev.ctrlKey || ev.metaKey)           tap = 2;
+    else if (ev.altKey)                          tap = 3;
     if (!port && !sharedActive) { alert('Connect to the board first.'); return; }
     sendJSON({ type: 'TRIGGER', mode: currentMode, btn, tap });
     console.log(`TRIGGER → mode=${currentMode} btn=${btn} tap=${tap}`);
@@ -11000,13 +11050,14 @@ function openModal(btn) {
   });
 
   // Tap-tier tabs — show ONE tier at a time so the modal stays short and Apply
-  // stays in view. All three cards are still built (state lives in the DOM; Save
-  // reads all three); the tabs just toggle which is visible, and each tab shows a
-  // count so a configured-but-hidden tier is obvious.
+  // stays in view. All NUM_TAP_TIERS cards are still built (state lives in the
+  // DOM; Save reads them all); the tabs just toggle which is visible, and each
+  // tab shows a count so a configured-but-hidden tier is obvious. The last tab
+  // is the long press, which is a hold rather than a tap count.
   const tabBar = document.createElement('div');
   tabBar.className = 'tier-tabs';
-  const tierNames = ['', 'Single tap', 'Double tap', 'Triple tap'];
-  for (let tier = 1; tier <= 3; tier++) {
+  const tierNames = ['', 'Single tap', 'Double tap', 'Triple tap', 'Long press'];
+  for (let tier = 1; tier <= NUM_TAP_TIERS; tier++) {
     const tb = document.createElement('button');
     tb.type = 'button'; tb.className = 'tier-tab'; tb.dataset.tier = tier;
     tb.onclick = () => setActionTier(tier);
@@ -11015,13 +11066,13 @@ function openModal(btn) {
   }
   container.appendChild(tabBar);
 
-  for (let tier = 1; tier <= 3; tier++) {
+  for (let tier = 1; tier <= NUM_TAP_TIERS; tier++) {
     const acts = m['t' + tier] || [];
     container.appendChild(buildTierCard(tier, acts, m['t' + tier + 'note'] || ''));
   }
   // Now the cards are in the DOM — set the tab counts + row-button state (the
   // build-time call inside buildTierCard runs while the card is still detached).
-  for (let tier = 1; tier <= 3; tier++) refreshTierState(tier);
+  for (let tier = 1; tier <= NUM_TAP_TIERS; tier++) refreshTierState(tier);
   setActionTier(1);   // start on single-tap
 
   document.getElementById('modal').classList.add('open');
@@ -11032,7 +11083,7 @@ function setActionTier(tier) {
   tier = +tier;
   document.querySelectorAll('#tiers-container .tier-tab')
           .forEach(t => t.classList.toggle('active', +t.dataset.tier === tier));
-  for (let t = 1; t <= 3; t++) {
+  for (let t = 1; t <= NUM_TAP_TIERS; t++) {
     const card = document.getElementById(`tier-card-${t}`);
     if (card) card.style.display = (t === tier) ? '' : 'none';
   }
@@ -14598,7 +14649,7 @@ function saveButton() {
   const key = String(currentMode * 100 + editingBtn);
   const exclusive = document.getElementById('modal-exclusive').checked;
   const mapping = { exclusive };
-  for (let tier = 1; tier <= 3; tier++) {
+  for (let tier = 1; tier <= NUM_TAP_TIERS; tier++) {
     const acts = collectTierActions(tier);
     if (acts.length) mapping['t' + tier] = acts;
     const noteEl = document.getElementById('tier-note-' + tier);
@@ -15639,6 +15690,17 @@ async function saveConfigToBoard() {
     // Floor at the UI minimum — a sub-100 ms window silently disables double/
     // triple taps (the firmware applies the same guard on load).
     if (Number.isFinite(tw)) config.tapWindowMs = Math.max(100, tw);
+  }
+  {
+    const hm = parseInt(document.getElementById('holdms-input').value, 10);
+    // Mirror the firmware's load guard exactly (rcConfigFromJSON): a threshold at
+    // or below the tap window can never be reached, because the tap dispatch is
+    // deferred by tapWindowMs and fires first. Clamp here too so the value the
+    // board reports back matches what was sent and Save doesn't look dirty.
+    if (Number.isFinite(hm)) {
+      const floor = (config.tapWindowMs || 500) + 100;
+      config.holdMs = Math.min(5000, hm < floor ? (config.tapWindowMs || 500) + 250 : hm);
+    }
   }
   {
     const cr = parseInt(document.getElementById('chrate-input').value, 10);
@@ -17266,6 +17328,7 @@ function exportConfigCsv() {
 
   rows.push(csvRow(pad(['config','matrixChannel','','' + (config.matrixChannel || '')])));
   rows.push(csvRow(pad(['config','tapWindowMs','','' + (config.tapWindowMs || '')])));
+  rows.push(csvRow(pad(['config','holdMs','','' + (config.holdMs || 750)])));
   rows.push(csvRow(pad(['config','chRateHz','','' + (config.chRateHz || 5)])));
   rows.push(csvRow(pad(['config','matrixDebounceFrames','','' + (config.matrixDebounceFrames || 1)])));
   if (config.funcBindings && config.funcBindings.mode !== undefined) {
@@ -17432,7 +17495,7 @@ function exportConfigCsv() {
       // X20 SK/SL clicks).
       if (btn === RC_PHYSICAL_SLOTS) continue;
       if (btn > RC_PHYSICAL_SLOTS && !slotInUseAnyMode(btn)) continue;
-      for (let tier = 1; tier <= 3; tier++) {
+      for (let tier = 1; tier <= NUM_TAP_TIERS; tier++) {
         const actions = mapping['t' + tier] || [];
         if (!actions.length) {
           rows.push(csvRow(pad(['button', getBtnLabel(btn), btn, config.matrixChannel || '', '', mode, tier, '', '', '', '', '', '', '', '', '', '', '', pwmValue, isExclusive, ''])));
@@ -17595,7 +17658,7 @@ function handleConfigImportFile(event) {
         if (imported.mappings[key]) return imported.mappings[key];
         const prev = (config.mappings || {})[key] || {};
         const m = {};
-        for (let t = 1; t <= 3; t++) if (prev['t' + t + 'note']) m['t' + t + 'note'] = prev['t' + t + 'note'];
+        for (let t = 1; t <= NUM_TAP_TIERS; t++) if (prev['t' + t + 'note']) m['t' + t + 'note'] = prev['t' + t + 'note'];
         imported.mappings[key] = m;
         return m;
       };
@@ -17689,6 +17752,8 @@ function handleConfigImportFile(event) {
             imported.matrixChannel = Number(value || channel || imported.matrixChannel);
           } else if (control === 'tapwindowms') {
             imported.tapWindowMs = Number(value || channel || imported.tapWindowMs);
+          } else if (control === 'holdms') {
+            imported.holdMs = Number(value || channel || imported.holdMs);
           } else if (control === 'chratehz') {
             imported.chRateHz = Math.max(1, Math.min(20, parseInt(value || channel, 10) || 5));
           } else if (control === 'matrixdebounceframes') {
@@ -18012,7 +18077,7 @@ function handleConfigImportFile(event) {
       };
       Object.keys(imported.mappings).forEach(key => {
         const prev = (config.mappings || {})[key];
-        if (prev) for (let t = 1; t <= 3; t++) _restoreSkip(imported.mappings[key]['t' + t], prev['t' + t]);
+        if (prev) for (let t = 1; t <= NUM_TAP_TIERS; t++) _restoreSkip(imported.mappings[key]['t' + t], prev['t' + t]);
       });
       Object.keys(newSwitches).forEach(name => {
         const prev = (config.switches || {})[name];
@@ -18207,7 +18272,7 @@ function _cheatSheetTxSvg() {
 
 function _buildCheatSheetHtml() {
   const dash = '<span style="color:#bbb">—</span>';
-  const tapNames = ['', 'Single tap', 'Double tap', 'Triple tap'];   // local (the UI's tierNames is function-scoped)
+  const tapNames = ['', 'Single tap', 'Double tap', 'Triple tap', 'Long press'];   // local (the UI's tierNames is function-scoped)
   const tierHtml = arr => (Array.isArray(arr) && arr.length)
     ? arr.map(actionSummary).join(' <span style="color:#c0392b;font-weight:700">+</span> ') : '';
   // A tier cell carries BOTH views: a "commands" span (action summaries) and a
@@ -18228,10 +18293,13 @@ function _buildCheatSheetHtml() {
     for (let btn = 1; btn <= RC_TOTAL_SLOTS; btn++) {
       const m = config.mappings[String(mode * 100 + btn)];
       if (!m || !mappingHasActions(m)) continue;
-      rows += `<tr><td class="trig">${escH(getBtnLabel(btn))}</td><td data-label="Single tap">${cell(m.t1, m.t1note)}</td><td data-label="Double tap">${cell(m.t2, m.t2note)}</td><td data-label="Triple tap">${cell(m.t3, m.t3note)}</td></tr>`;
+      const cells = TIER_KEYS.map((k, i) =>
+        `<td data-label="${tapNames[i + 1]}">${cell(m[k], m[k + 'note'])}</td>`).join('');
+      rows += `<tr><td class="trig">${escH(getBtnLabel(btn))}</td>${cells}</tr>`;
     }
     if (!rows) continue;
-    buttonsHtml += `<div class="mblock"><h3>${escH(modeLabels[mode])}</h3><table><thead><tr><th>Button</th><th>Single tap</th><th>Double tap</th><th>Triple tap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const heads = TIER_KEYS.map((_, i) => `<th>${tapNames[i + 1]}</th>`).join('');
+    buttonsHtml += `<div class="mblock"><h3>${escH(modeLabels[mode])}</h3><table><thead><tr><th>Button</th>${heads}</tr></thead><tbody>${rows}</tbody></table></div>`;
   }
   const buttonsSection = buttonsHtml ? `<section><h2>Buttons</h2>${buttonsHtml}</section>` : '';
 
@@ -18269,7 +18337,7 @@ function _buildCheatSheetHtml() {
   const addClip = (a, label) => { if (a && (a.type === 'play' || a.type === 'record') && a.cmd) (clipTriggers[a.cmd] = clipTriggers[a.cmd] || []).push(label); };
   for (let mode = 1; mode <= 3; mode++) for (let btn = 1; btn <= RC_TOTAL_SLOTS; btn++) {
     const m = config.mappings[String(mode * 100 + btn)]; if (!m) continue;
-    ['t1', 't2', 't3'].forEach((tk, ti) => (m[tk] || []).forEach(a => addClip(a, `${modeLabels[mode]} · ${getBtnLabel(btn)} · ${tapNames[ti + 1]}`)));
+    TIER_KEYS.forEach((tk, ti) => (m[tk] || []).forEach(a => addClip(a, `${modeLabels[mode]} · ${getBtnLabel(btn)} · ${tapNames[ti + 1]}`)));
   }
   for (const name of Object.keys(config.switches || {})) {
     const s = config.switches[name]; if (!s) continue;
@@ -18294,7 +18362,7 @@ function _buildCheatSheetHtml() {
       if (!m || !mappingHasActions(m)) continue;
       any = true;
       let r = '';
-      for (let t = 1; t <= 3; t++) {
+      for (let t = 1; t <= NUM_TAP_TIERS; t++) {
         if (!(m['t' + t] && m['t' + t].length) && !m['t' + t + 'note']) continue;
         r += `<tr><td class="cs-tl">${tapNames[t]}</td><td>${cell(m['t' + t], m['t' + t + 'note'])}</td></tr>`;
       }
