@@ -2305,7 +2305,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:15.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:20.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -15696,12 +15696,29 @@ let _pushBudgetTimer = null;   // poll handle; runs only while the config modal 
 // Anything that changes saveConfigToBoard()'s payload construction has to change
 // here too, or the readout silently drifts from what Save actually sends.
 function _pushBudgetInfo() {
-  // Deliberately does NOT run saveConfigToBoard()'s DOM→config commits
-  // (tapwin/holdms/chrate/peerEvent/profile): those MUTATE config, and a passive
-  // readout that edits the document it measures would fabricate dirty state on
-  // every render. Those fields are a handful of bytes and cannot move a
-  // 80-byte-per-fragment count.
-  let payload = _diffConfigBranches(config, _configBaseline);
+  // saveConfigToBoard() commits pending DOM edits into `config` BEFORE diffing.
+  // A passive readout must not do that — those writes mutate the very object the
+  // unsaved-changes prompt diffs, so polling them would fabricate dirty state and
+  // make closeHwSetup() claim unsaved changes the user never made.
+  //
+  // But it cannot skip them either. The numeric fields (tapWindow/hold/chRate) are
+  // a few bytes and genuinely don't matter — however syncPeerEventFromDom() writes
+  // a whole action tier into peerEvent, and _snapshotLiveIntoSelectedProfile()
+  // writes wcbProfiles, a top-level branch that is NOT stripped over the bridge.
+  // Skipping those can omit an entire branch the real Save would ship.
+  // So: replay the commits against a CLONE. Accurate and side-effect free.
+  const snap = _deepClone(config);
+  if (document.getElementById('rows-peer')) {
+    if (!snap.peerEvent) snap.peerEvent = { alert: true, actions: [] };
+    if (_peerEventDirty) snap.peerEvent.actions = collectTierActions('peer');
+    const cb = document.getElementById('peer-alert');
+    if (cb) snap.peerEvent.alert = cb.checked;
+  }
+  if (_wcbSelectedProfile && Array.isArray(snap.wcbProfiles)) {
+    const p = snap.wcbProfiles.find(pr => pr.name === _wcbSelectedProfile);
+    if (p) Object.assign(p, _wcbProfileParams(snap.wcbNetwork));
+  }
+  let payload = _diffConfigBranches(snap, _configBaseline);
   if (viaWcbActive && payload.wcbNetwork) {
     const { deviceId, macOct2, macOct3, password, quantity, channel, ...rest } = payload.wcbNetwork;
     payload.wcbNetwork = rest;
@@ -15744,7 +15761,11 @@ function _pushBudgetInfo() {
 function updatePushBudget() {
   const el = document.getElementById('push-budget');
   if (!el) return;
-  const connected = !!(port || sharedActive);
+  // The honest connected test — the same one the Connect button uses. A plain
+  // `port || sharedActive` lies after a shared-hub step-down: onSharedState()
+  // calls setConnected(false) but leaves sharedActive/viaWcbActive set, so the
+  // header reads Disconnected while a naive test still reports a live budget.
+  const connected = !!(port || (sharedActive && sharedHub && sharedHub.portOpen));
   if (!connected) { el.className = 'push-budget empty'; el.textContent = ''; return; }
 
   let info;
@@ -15758,14 +15779,19 @@ function updatePushBudget() {
     return;
   }
 
-  const kb = info.bytes >= 1024 ? (info.bytes / 1024).toFixed(1) + ' KB' : info.bytes + ' B';
+  const kb = _fmtBytes(info.bytes);   // the file's byte formatter — match it, don't reinvent
   const branchList = info.branches.join(', ');
 
+  // Route on viaWcbActive ALONE, exactly as sendJSON does — not on sharedActive,
+  // and not on `port` (openPortAndStart falls back to Via WCB when no direct PONG
+  // arrives, leaving a real USB cable subject to the fragment cap).
   if (!viaWcbActive) {
-    // Direct USB — no fragment cap applies. Report size only.
+    // Direct USB — the fragment cap does not apply. Not "unlimited" though: the
+    // firmware's serial accumulator and SET_CONFIG parse doc are both 98304 B.
     el.className = 'push-budget';
     el.textContent = `Save: ${kb}`;
-    el.title = `Direct USB — no size limit.\nBranches: ${branchList}\n` +
+    el.title = `Direct USB — no fragment cap (the board's serial limit is 96 KB, far above any real config).\n` +
+               `Branches: ${branchList}\n` +
                `Over Via WCB this would need ${info.frags} of ${FRAG_MAX_PARTS} fragments.`;
     return;
   }
