@@ -330,8 +330,7 @@ the original, unfragmented over Direct USB); add/select/delete keyframes and tra
 replace-not-stack re-apply; the action-editor popover (open/type-switch/apply/delete) round-tripping through
 `readActionFromFid`; the FULL upload sequence (BEGIN→8×EV→END) with simulated ACKs; NAK-then-retry recovery;
 a rejected EDITBEGIN failing cleanly with edits preserved (`dirty` stays true, nothing lost); an incomplete
-download (declared count vs. received count mismatch) showing a clear error without building a bogus partial
-model. Also regression-checked the existing button/switch/knob action editor through the refactored
+download (declared count vs. received count mismatch) showing a clear error. Also regression-checked the existing button/switch/knob action editor through the refactored
 `readActionFromUI`→`readActionFromFid` path — unaffected. Firmware (`navicore_record.h` + the `?REC,EDIT*`
 CLI in `NaviCore.ino`) compiles clean. **NEXT: bench test** — a real clip loaded, edited (drag a servo curve,
 add an HCR command, apply easing), saved, and replayed to confirm the round-trip actually drives the Maestro
@@ -351,6 +350,7 @@ as edited.
   read at replay start, not a stored `servoHome[]`. §11: cross-board replay mismatch is unmitigated —
   there is no header field and no warning. §8: the per-build `_boot.bin` is never flashed, so only the
   partition half of the build wiring can be reverted by CI.
+- **v3.25 (2026-08-25, config-tool only):** An incomplete download now RENDERS, read-only, instead of showing an error over a blank canvas. Previously `_tlDownloadComplete` nulled `_tlDownload` on a count mismatch and `_tlShowLoadError` wiped the SVG, so every event that DID arrive was destroyed. The model builder never reads `header.count` (it groups by slot/channel and sorts each track by time), so a partial list produces a valid model with no builder change. The only reason to refuse it was the risk of saving it back — a partial model reaching Save would overwrite the intact clip on the droid — so `clip.partial` now hard-blocks `_tlSave` and greys `#tl-save-btn`. The banner warns that motion BETWEEN keyframes is untrustworthy: a dropped keyframe draws as a straight line, not a gap, and there are no indices to mark where. Note the status text has never had a working "Retry" control (`tl-status` is a bare `<span>`); reopening the clip is the only retry.
 - **v3.24 (2026-07-03, config-tool only):** Second adversarial review sweep (27 raised → 10 confirmed → all
   fixed/dispositioned) + **Maestro script export**.
   **Review fixes:** (1) Maestro-channel MIGRATION actually persists now — the localStorage→config fold ran inside

@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.09:17.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.12:25.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6323,14 +6323,23 @@ function _tlDownloadComplete() {
   // unary + always yields a number (NaN, never null/undefined), so `?? -1` never
   // fired — make the -1 sentinel real so a missing/NaN count is caught by >=0.
   const expected = (dl.header && Number.isFinite(+dl.header.count)) ? +dl.header.count : -1;
-  if (!(expected >= 0) || dl.events.length !== expected) {
-    _tlDownload = null;
-    _tlShowLoadError(`Download incomplete — got ${dl ? dl.events.length : 0} of ${dl && dl.header ? dl.header.count : '?'} events.` +
-                      (viaWcbActive ? ' This can happen over the WCB mesh with a large clip — Retry, or switch to Direct USB.' : ' Retry?'));
-    return;
-  }
-  _tlBuildModelFromEvents(dl.name, dl.header, dl.events);
+  // A short download used to be discarded outright and the canvas wiped, which
+  // showed an error over an empty editor and threw away everything that DID
+  // arrive. Render it instead — READ-ONLY. The model builder never reads
+  // header.count (it groups by slot/channel and sorts each track by time), so a
+  // partial event list produces a perfectly valid model; the only reason to
+  // refuse it was the risk of saving it back, and `partial` closes that below.
+  const short_ = (expected >= 0) ? (expected - dl.events.length) : -1;
+  _tlBuildModelFromEvents(dl.name, dl.header, dl.events, short_ !== 0 ? short_ : 0);
   _tlDownload = null;
+  if (short_ !== 0) {
+    // _tlSetStatus, NOT _tlShowLoadError — the latter blanks the SVG we just drew.
+    _tlSetStatus(
+      (short_ > 0 ? `⚠ Incomplete — ${short_} of ${expected} events missing. ` : '⚠ Event count did not match the clip header. ') +
+      'READ-ONLY: saving is disabled so this cannot overwrite the full clip on the droid. ' +
+      'Motion BETWEEN the keyframes shown is not trustworthy — a dropped keyframe draws as a straight line, not a gap. ' +
+      (viaWcbActive ? 'Reopen to retry, or use Direct USB for a reliable copy.' : 'Close and reopen the clip to retry.'));
+  }
 }
 
 // ── Upload marker waiter (?REC,EDITBEGIN / EDITEV / EDITEND replies) ──────────
@@ -6464,12 +6473,16 @@ document.getElementById('tl-modal').addEventListener('click', e => {
 });
 
 // Flat downloaded events → per-channel tracks + action list.
-function _tlBuildModelFromEvents(name, header, events) {
+// `partial` = how many events the download was short (0 = complete). A non-zero
+// value makes the clip READ-ONLY — see _tlSave. It must never be saved back: the
+// upload writes whatever the model holds, so saving a 175-event model over a
+// 204-event clip would destroy the 29 that merely failed to arrive.
+function _tlBuildModelFromEvents(name, header, events, partial = 0) {
   const clip = {
     name, durationMs: +(header.durationMs || 0), mode: +(header.mode || 1),
     maestro: {}, hcr: {}, actions: [],
     selected: null, selectedPair: null, cursorMs: 0,
-    pxPerMs: 0, dirty: false, uploading: false,
+    pxPerMs: 0, dirty: false, uploading: false, partial,
   };
   events.forEach(ev => {
     const t = +ev.t || 0;
@@ -6505,6 +6518,16 @@ function _tlBuildModelFromEvents(name, header, events) {
   }
   clip.pxPerMs = Math.max(0.04, Math.min(0.6, 700 / Math.max(1, clip.durationMs)));
   _tlClip = clip;
+  // Make read-only VISIBLE, not just enforced — a greyed Save explains itself
+  // before the user has invested edits they cannot keep. _tlSave re-checks
+  // `partial` because the save path re-enables this button.
+  { const sb = document.getElementById('tl-save-btn');
+    if (sb) {
+      sb.disabled = !!clip.partial;
+      sb.title = clip.partial
+        ? 'Read-only — this clip downloaded incomplete. Saving would overwrite the full clip on the droid with this partial copy.'
+        : '';
+    } }
   _tlSetStatus(`${events.length} events · ${_fmtDur(clip.durationMs)}`);
   _tlRender();
 }
@@ -6537,6 +6560,17 @@ function _tlFlattenEvents() {
 
 async function _tlSave() {
   if (!_tlClip || _tlClip.uploading) return;
+  // Load-bearing: a partially-downloaded clip is a VIEW, not a document. The
+  // upload replaces the clip on the droid with exactly what this model holds, so
+  // saving one would turn "29 events failed to arrive" into "29 events destroyed".
+  // The button is also disabled on load; this is the guard that actually matters,
+  // because the save path re-enables that button.
+  if (_tlClip.partial) {
+    alert('This clip downloaded incomplete and is open read-only.\n\n' +
+          'Saving would overwrite the full clip on the droid with the partial copy shown here.\n\n' +
+          'Close and reopen it (ideally over Direct USB) to get a complete copy first.');
+    return;
+  }
   // Hold the clip reference for the whole async upload: closeTimelineEditor()
   // nulls the _tlClip global mid-flight, which used to null-deref in the loop
   // (name), the success path (dirty) and the finally (uploading). Operating on
