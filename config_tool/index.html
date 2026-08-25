@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">24.15:41.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.09:17.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3109,6 +3109,14 @@
             <div class="noconn" style="margin-top:4px" id="holdms-hint">Hold a button this long to fire its Long&nbsp;press tier</div>
           </div>
           <div class="sb-section">
+            <h3>Switch Settle</h3>
+            <div class="tapwin-row">
+              <input type="number" id="switchsettle-input" min="0" max="1000" step="10" value="80">
+              <span style="color:var(--muted);font-size:12px">ms</span>
+            </div>
+            <div class="noconn" style="margin-top:4px">A switch must rest this long before its actions fire. Stops a 3‑position switch from firing the <b>middle</b> position on its way from one end to the other. 0 = fire immediately.</div>
+          </div>
+          <div class="sb-section">
             <h3>Telemetry Rate</h3>
             <div class="tapwin-row">
               <input type="range" id="chrate-input" min="1" max="20" step="1" value="5" style="flex:1"
@@ -3669,6 +3677,7 @@ let config = {
   boardType:        0,        // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   tapWindowMs:   500,
   holdMs:        750,        // long-press (tap tier 4) threshold; must exceed tapWindowMs
+  switchSettleMs: 80,        // a switch must rest this long before its tier fires (0 = immediate)
   chRateHz:      5,       // rc_ch live-monitor broadcast rate (Hz, 1–20; 5 = smooth + light mesh load)
   matrixChannel: 7,
   matrixDebounceFrames: 1,
@@ -8854,6 +8863,10 @@ function applyConfig(data) {
     const h = +data.holdMs;                         // same coercion as tapWindowMs
     if (Number.isFinite(h)) config.holdMs = h;
   }
+  if (data.switchSettleMs !== undefined) {
+    const s = +data.switchSettleMs;                  // same coercion as tapWindowMs
+    if (Number.isFinite(s)) config.switchSettleMs = s;
+  }
   if (data.chRateHz !== undefined) {
     const r = +data.chRateHz;                       // rc_ch live-monitor rate (Hz)
     if (Number.isFinite(r)) config.chRateHz = Math.max(1, Math.min(20, r));
@@ -8979,6 +8992,8 @@ function applyConfig(data) {
   document.getElementById('tapwin-input').value = config.tapWindowMs;
   { const h = document.getElementById('holdms-input');
     if (h) { h.value = config.holdMs ?? 750; updateHoldMsHint(); } }
+  { const s = document.getElementById('switchsettle-input');
+    if (s) s.value = config.switchSettleMs ?? 80; }
   { const cr = document.getElementById('chrate-input');
     if (cr) { const hz = Math.max(1, Math.min(20, config.chRateHz ?? 5));
               cr.value = hz;
@@ -15948,6 +15963,11 @@ async function saveConfigToBoard() {
     }
   }
   {
+    const ss = parseInt(document.getElementById('switchsettle-input').value, 10);
+    // 0 is legal and means "fire immediately"; the firmware clamps the same way.
+    if (Number.isFinite(ss)) config.switchSettleMs = Math.max(0, Math.min(1000, ss));
+  }
+  {
     const cr = parseInt(document.getElementById('chrate-input').value, 10);
     // rc_ch live-monitor rate; clamp to the slider's 1–20 Hz (firmware clamps too).
     if (Number.isFinite(cr)) config.chRateHz = Math.max(1, Math.min(20, cr));
@@ -17585,6 +17605,7 @@ function exportConfigCsv() {
   rows.push(csvRow(pad(['config','matrixChannel','','' + (config.matrixChannel || '')])));
   rows.push(csvRow(pad(['config','tapWindowMs','','' + (config.tapWindowMs || '')])));
   rows.push(csvRow(pad(['config','holdMs','','' + (config.holdMs || 750)])));
+  rows.push(csvRow(pad(['config','switchSettleMs','','' + (config.switchSettleMs ?? 80)])));
   rows.push(csvRow(pad(['config','chRateHz','','' + (config.chRateHz || 5)])));
   rows.push(csvRow(pad(['config','matrixDebounceFrames','','' + (config.matrixDebounceFrames || 1)])));
   if (config.funcBindings && config.funcBindings.mode !== undefined) {
@@ -18010,6 +18031,11 @@ function handleConfigImportFile(event) {
             imported.tapWindowMs = Number(value || channel || imported.tapWindowMs);
           } else if (control === 'holdms') {
             imported.holdMs = Number(value || channel || imported.holdMs);
+          } else if (control === 'switchsettlems') {
+            // Not `value || channel` — 0 is a legitimate setting here (fire immediately)
+            // and would otherwise fall through to the default.
+            const sv = Number(value !== '' ? value : channel);
+            if (Number.isFinite(sv)) imported.switchSettleMs = sv;
           } else if (control === 'chratehz') {
             imported.chRateHz = Math.max(1, Math.min(20, parseInt(value || channel, 10) || 5));
           } else if (control === 'matrixdebounceframes') {

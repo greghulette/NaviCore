@@ -59,6 +59,7 @@ Widening a field in `RcAction` costs kilobytes per byte.
 | `boardType` | `uint8_t` | 0 = NaviCore v2 PCB, 1 = WCB HW 3.2 — selects the pin profile |
 | `tapWindowMs` | `int` | Multi-tap detection window |
 | `holdMs` | `int` | Long-press (tier `t4`) threshold, default 750. **Must exceed `tapWindowMs`** — the tap dispatch is deferred by `tapWindowMs` and would fire first. Both sides clamp a too-small value to `tapWindowMs + 250`, and 5000 ms is the ceiling |
+| `switchSettleMs` | `uint16_t` | A switch position must hold this long before its tier fires, default 80, clamped 0–1000. **0 = fire immediately (pre-settle behaviour).** Without it, a 3-position switch swept end-to-end fires the *middle* tier in full on the way past |
 | `chRateHz` | `uint8_t` | `rc_ch` broadcast rate, 1–20 (default 5). High rates flood the mesh |
 | `matrixChannel` | `int` | SBUS channel carrying the button matrix |
 | `matrixDebounceFrames` | `int` | 1–4 consecutive in-band frames to commit a press/re-arm |
@@ -311,6 +312,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-25 | _(uncommitted)_ | Added `switchSettleMs` (default 80, clamped 0–1000, 0 = fire immediately) — the rest period a switch position must hold before its tier dispatches. |
 | 2026-08-24 | `083207c` | Added `holdMs` (long-press threshold, default 750) and a `RC_NUM_TAP_TIERS`/`NUM_TAP_TIERS` invariants row. Button mappings now carry a 4th tier `t4` (long press); `t4` is omitted from the JSON when empty, same as the other tiers, so it costs nothing until used. |
 | 2026-08-18 | _(uncommitted)_ | `hcrDest`/`mp3Dest`/`dfpDest` gained `transport` **2 = disabled** (JSON `"off"`), and all three now default to it — a fresh config has every audio device switched off until the user sets it up. Executors refuse a disabled device's actions; the stored port/target survives so re-enabling restores it. Round-trips through JSON and CSV. |
 | 2026-08-18 | _(uncommitted)_ | §3 gained `serialBcastOut[3]` / `serialBcastIn[3]` (JSON `serialBcast`) — the per-aux-port mesh bridging flags were shipped but undocumented here. Corrected `serialLabels`: **4** slots indexed by firmware port (`RC_SLBL_S3/S4/S5/MAESTRO`, JSON keys `"S3"/"S4"/"S5"/"maestro"`), not 5 indexed by WDP port with an SBUS slot — the page still described the pre-migration layout. Recorded that `rcConfigFromJSON()` memsets the slots before matching, so an old-style (`"1"`–`"5"`) object clears every override rather than misapplying it. |

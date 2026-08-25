@@ -520,6 +520,17 @@ TapState tapState;
 // Last-seen switch positions for change detection
 int switchPrevPos[RC_NUM_SWITCHES];
 
+// ── Switch settle state ──────────────────────────────────────────────────────
+// A 3-position switch swept end-to-end passes THROUGH the middle band for a
+// frame or two. Firing on the raw edge dispatched that middle tier in full on
+// the way past — a sound, a script, an easing change the pilot never chose. So
+// a new position is only a CANDIDATE until it has held for switchSettleMs;
+// only the position the switch comes to rest in dispatches.
+//   switchCandPos   = position currently being timed (-1 = none pending)
+//   switchCandSince = millis() the candidate first appeared
+int           switchCandPos  [RC_NUM_SWITCHES];
+unsigned long switchCandSince[RC_NUM_SWITCHES];
+
 // =============================================================================
 //  Helpers
 // =============================================================================
@@ -1135,6 +1146,99 @@ static void reapplyMaestroEasing(uint8_t id) {
   }
 }
 
+// ── Easing retransmit burst ──────────────────────────────────────────────────
+// Set Speed / Set Acceleration are FIRE-AND-FORGET in every sense that matters:
+// the Pololu protocol has no readback for either (WcbMaestro's reply table is
+// POS/MOV/ERR and nothing else), and maestroWrite() reports success as soon as
+// the bytes are QUEUED — HardwareSerial::write() returns the byte count
+// unconditionally, and a remote slot only buffers into a WCBStream whose actual
+// unacked-broadcast result is discarded. So a lost easing write is invisible AND
+// never retried: the cache records it as applied and the compare skips it forever.
+//
+// Since we cannot verify, we repeat. Two extra sends after each easing change,
+// spaced far enough apart to clear whatever burst was congesting the link.
+// Bounded on purpose — this is a retry, not a heartbeat, so an idle droid puts
+// nothing on the mesh.
+#define EASE_REPEATS      2      // extra sends after the initial one
+#define EASE_REPEAT_MS  500      // spacing
+static uint8_t       g_easeRepeatLeft[RC_NUM_MAESTROS] = {};
+static unsigned long g_easeRepeatAt  [RC_NUM_MAESTROS] = {};
+
+static void scheduleEasingRepeat(uint8_t id) {
+  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  g_easeRepeatLeft[id - 1] = EASE_REPEATS;
+  g_easeRepeatAt  [id - 1] = millis() + EASE_REPEAT_MS;
+}
+
+// Re-send any owed easing repeats. Called from loop() (Core 1, same as every
+// other maestroWrite) — see the Core-0 rule above processSbus().
+static void easingRepeatTick() {
+  // A clip owns the outputs while replaying, and calibration mutes dispatch;
+  // same pair of gates processKnobs() applies before touching hardware.
+  if (calibrationActive || navirec::isReplaying()) return;
+  const unsigned long now = millis();
+  for (uint8_t id = 1; id <= RC_NUM_MAESTROS; id++) {
+    if (!g_easeRepeatLeft[id - 1]) continue;
+    if ((int32_t)(now - g_easeRepeatAt[id - 1]) < 0) continue;   // signed: millis() wrap
+    g_easeRepeatLeft[id - 1]--;
+    g_easeRepeatAt  [id - 1] = now + EASE_REPEAT_MS;
+    // Invalidate FIRST — reapplyMaestroEasing is cache-gated, so without this the
+    // repeat is a no-op against the very cache entry we suspect is lying.
+    maeSmoothInvalidateSlot(id);
+    reapplyMaestroEasing(id);
+  }
+}
+
+// Adopt the ACTIVE EASING a switch tier selects, WITHOUT executing the tier.
+//
+// g_switchEasing is otherwise only ever written by an actually-executed setEasing
+// action, and processSwitches() seeds a switch's position without firing (at boot
+// and after every config apply). So the firmware booted believing "released" no
+// matter where the switch physically sat, `resolveKnobEasing` returned < 0, and
+// the SBUS hot path skipped easing entirely until the pilot happened to flick the
+// switch. This closes that gap at the seed.
+//
+// Executing the tier instead is NOT an option and must not be "simplified" to it:
+// the seed exists precisely so a power-up cannot fire scripts, sounds or servo
+// moves. Easing verbs only — they set a variable and touch nothing else. The three
+// verbs mirrored here are the same set executeMaestroCmd() accepts (setEasing plus
+// the legacy applyProfile / snappy); keep them in sync.
+static void seedSwitchEasingFromTier(const RcTier& tier) {
+  for (int ai = 0; ai < tier.count && ai < RC_ACTIONS_PER_TIER; ai++) {
+    const RcAction& a = tier.a[ai];
+    if (a.type != RA_MAESTRO_REMOTE && a.type != RA_MAESTRO_LOCAL) continue;
+    const int id = (a.type == RA_MAESTRO_LOCAL) ? 1 : atoi(a.target);
+    if (id < 1 || id > RC_NUM_MAESTROS) continue;
+
+    // Parse without strtok: a.cmd is const here, and strtok would also clobber
+    // any tokenizer state a caller further up the stack is relying on.
+    const char* c = a.cmd;
+    const char* arg = strchr(c, ',');
+    arg = arg ? arg + 1 : nullptr;
+    int8_t v;
+    if (!strncmp(c, "setEasing", 9)) {
+      v = EASE_RELEASED;
+      if (arg) {
+        if      (arg[0] == 'p' || arg[0] == 'P') { int p = atoi(arg + 1); if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) v = (int8_t)p; }
+        else if (arg[0] == 'o' || arg[0] == 'O')   v = EASE_OFF;
+      }
+    } else if (!strncmp(c, "applyProfile", 12)) {          // legacy
+      v = EASE_RELEASED;
+      if (arg) {
+        if      (arg[0] == 'p' || arg[0] == 'P') { int p = atoi(arg + 1); if (p >= 0 && p < RC_NUM_SMOOTH_PROFILES) v = (int8_t)p; }
+        else if (arg[0] == 'u' || arg[0] == 'U')   v = EASE_OFF;
+      }
+    } else if (!strncmp(c, "snappy", 6)) {                 // legacy: bare/on → Off (full speed)
+      v = EASE_OFF;
+      if (arg && (((arg[0]=='o'||arg[0]=='O') && (arg[1]=='f'||arg[1]=='F')) || arg[0]=='0')) v = EASE_RELEASED;
+    } else continue;
+
+    g_switchEasing[id - 1] = v;
+    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d active easing seeded from switch position → %s\n", id,
+         v == EASE_RELEASED ? "Release (local-only)" : v == EASE_OFF ? "Off (full speed)" : "profile");
+  }
+}
+
 // Parse and execute a Maestro action command string against slot `id` (1-8).
 // cmd: "setTarget,ch,pos" | "goHome" | "stopScript" | "restartScript,n[,pN][,o]"
 //      | "setSpeed,ch,spd" | "setAccel,ch,acc" | "setSpeedAccel,ch,spd,acc"
@@ -1182,7 +1286,7 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
         // "release" / anything else → EASE_RELEASED (switch imposes nothing)
       }
       g_switchEasing[id - 1] = v;
-      reapplyMaestroEasing(id);
+      reapplyMaestroEasing(id); scheduleEasingRepeat(id);
       dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u active easing → %s\n", id,
            v == EASE_RELEASED ? "Release (local-only)" : v == EASE_OFF ? "Off (full speed)" : "profile");
     }
@@ -1193,7 +1297,7 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
       int8_t v = EASE_RELEASED;
       if (s) { if (s[0]=='p'||s[0]=='P') { int p=atoi(s+1); if (p>=0 && p<RC_NUM_SMOOTH_PROFILES) v=(int8_t)p; }
                else if (s[0]=='u'||s[0]=='U') v = EASE_OFF; }
-      g_switchEasing[id - 1] = v; reapplyMaestroEasing(id);
+      g_switchEasing[id - 1] = v; reapplyMaestroEasing(id); scheduleEasingRepeat(id);
     }
   }
   else if (strcmp(tok, "snappy") == 0) {          // LEGACY snappy toggle → setEasing (on/bare→Off full speed, off→Release)
@@ -1201,7 +1305,7 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     if (id >= 1 && id <= RC_NUM_MAESTROS) {
       int8_t v = EASE_OFF;                                                         // bare / "on" / "1" → full speed
       if (s && ((((s[0]=='o'||s[0]=='O') && (s[1]=='f'||s[1]=='F'))) || s[0]=='0')) v = EASE_RELEASED;  // "off"/"0" → local-only
-      g_switchEasing[id - 1] = v; reapplyMaestroEasing(id);
+      g_switchEasing[id - 1] = v; reapplyMaestroEasing(id); scheduleEasingRepeat(id);
     }
   }
   else if (strcmp(tok, "restartScript") == 0) {
@@ -2209,15 +2313,48 @@ void processSwitches() {
   // from a now-stale switchPrevPos[]. processSbus only reaches here on a valid,
   // non-failsafe frame, so the pending seed lands on the first valid frame after
   // the change. (Matches the matrix debounce, which re-arms on a confirmed neutral.)
+  const unsigned long now = millis();
   for (int i = 0; i < RC_NUM_SWITCHES; i++) {
     RcSwitch& sw = rcConfig.switches[i];
     if (sw.channel < 1 || sw.channel > 24) continue;
     int pos = readSwitchPos(sbusValues[sw.channel - 1], sw.positions);
-    if (g_switchSeedPending) { switchPrevPos[i] = pos; continue; }   // seed only, don't fire
-    if (pos == switchPrevPos[i]) continue;
+    if (g_switchSeedPending) {
+      switchPrevPos[i]  = pos;          // seed only, don't fire
+      switchCandPos[i]  = -1;           // drop any half-timed candidate from before the re-seed
+      // Adopt the easing this position SELECTS, without executing the tier.
+      // g_switchEasing is otherwise only ever written by an executed setEasing
+      // action, so at boot the firmware believed "released" no matter where the
+      // switch physically sat — and the pilot had to flick it to sync. Executing
+      // the tier here instead is not an option: the seed exists precisely so a
+      // power-up cannot fire scripts and sounds (see the comment above).
+      seedSwitchEasingFromTier(sw.t[pos]);
+      continue;
+    }
+    if (pos == switchPrevPos[i]) { switchCandPos[i] = -1; continue; }   // back to rest → cancel
+
+    // New position: start (or continue) timing it.
+    if (switchCandPos[i] != pos) { switchCandPos[i] = pos; switchCandSince[i] = now; }
+    // Signed compare for the millis()-wrap reason documented on checkDeferredTap.
+    if (rcConfig.switchSettleMs &&
+        (int32_t)(now - (switchCandSince[i] + (unsigned long)rcConfig.switchSettleMs)) < 0) continue;
+
     switchPrevPos[i] = pos;
+    switchCandPos[i] = -1;
     RcTier& tier = sw.t[pos];
     for (int ai = 0; ai < tier.count; ai++) rcExecuteAction(tier.a[ai]);
+  }
+  if (g_switchSeedPending) {
+    // The seed just established every switch's easing. Drive it onto the hardware
+    // once, here rather than in setup(): the seed lands on the first valid
+    // non-failsafe SBUS frame, which is also the earliest point the positions are
+    // actually known. Nothing else re-applies easing at boot.
+    for (uint8_t mid = 1; mid <= RC_NUM_MAESTROS; mid++) {
+      reapplyMaestroEasing(mid);
+      // Boot is the WORST case for a lost easing write: the Maestro may still be
+      // coming up (its rail is often switched separately) and would silently miss
+      // a write NaviCore then records as applied. Burst it.
+      scheduleEasingRepeat(mid);
+    }
   }
   g_switchSeedPending = false;
 }
@@ -4365,6 +4502,7 @@ void setup() {
   // Clear state
   memset(pendingActions, 0, sizeof(pendingActions));
   memset(switchPrevPos, -1, sizeof(switchPrevPos));
+  memset(switchCandPos, -1, sizeof(switchCandPos));   // -1 = no settle candidate pending
   serialInputBuf.reserve(256);
 
   setStatusLed(C_BLUE, 10);
@@ -4873,6 +5011,9 @@ void loop() {
   // SBUS
   processSbus();
   checkDeferredTap();
+
+  // Re-send any owed easing repeats (cheap no-op when none are pending).
+  easingRepeatTick();
 
   // Status LED: steady BLUE while receiving SBUS, slow-flash ORANGE when not
   updateStatusLed();

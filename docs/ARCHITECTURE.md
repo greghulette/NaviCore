@@ -305,6 +305,32 @@ neighbouring band cannot fire the wrong button's long press (the threshold test 
 `decoded == holdBtn`). An SBUS failsafe clears the hold — otherwise `holdActive` would park
 the tap dispatch forever and the button would go dead after recovery.
 
+**Switch settle.** A switch position becomes a *candidate* on change and only dispatches
+once it has held for `switchSettleMs` (default 80, `0` = fire immediately). A 3-position
+switch swept end-to-end sits in the middle band for a frame or two, and without the settle
+window that middle tier fired **in full** on the way past — sounds, scripts, easing. Only the
+position the switch comes to rest in fires. Returning to the previous position mid-window
+cancels the candidate.
+
+**Switch easing is seeded, not just edge-driven.** `g_switchEasing[]` is otherwise only
+written by an *executed* `setEasing` action, while `processSwitches()` seeds a switch's
+position **without firing** (at boot and after every config apply). So the firmware booted
+believing `EASE_RELEASED` regardless of where the switch physically sat, `resolveKnobEasing()`
+returned `< 0`, and the hot path skipped easing until the pilot happened to flick the switch.
+`seedSwitchEasingFromTier()` now adopts the easing the resting position selects, and the seed
+ends with one `reapplyMaestroEasing()` per slot. **It must never execute the tier** — the seed
+exists so a power-up cannot fire scripts or servo moves. Easing verbs only.
+
+**Easing writes are retransmitted, because they cannot be verified.** The Pololu protocol has
+**no readback for speed or acceleration** (`WcbMaestro`'s reply table is POS/MOV/ERR), and
+`maestroWrite()` reports success on *queueing*: `HardwareSerial::write()` returns the byte
+count unconditionally, and a remote slot only buffers into a `WCBStream` whose unacked
+broadcast result is discarded. A lost easing write is therefore invisible *and* never retried —
+the cache records it applied and the compare skips it forever. Each easing change schedules
+`EASE_REPEATS` further sends `EASE_REPEAT_MS` apart (`easingRepeatTick()`), each invalidating
+the cache first so the repeat is not a no-op against the entry it is meant to correct. It is a
+bounded retry, not a heartbeat: an idle droid puts nothing extra on the mesh.
+
 **Dispatch.** `rcDispatch(buttonId, tapCount)` → the tier's up-to-5 `RcAction`s →
 `rcExecuteAction()` (schedules if `delayMs`, else `rcExecuteActionNow()`). Delays are
 measured **from the trigger instant and run in parallel**, not cumulatively.
@@ -404,6 +430,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-25 | _(uncommitted)_ | **Switch settle window** (`switchSettleMs`, default 80): a position must rest before its tier fires, so a 3-position switch swept end-to-end no longer fires the middle tier on the way past. **Switch easing is now seeded** from the resting position at boot/apply (`seedSwitchEasingFromTier`) — previously `g_switchEasing` was only ever set by an executed action, so a power-up believed `EASE_RELEASED` wherever the switch physically sat and easing silently did nothing until the pilot flicked it. **Easing writes are retransmitted** (bounded burst) because the Pololu protocol has no speed/accel readback and `maestroWrite()` reports success on queueing, making a lost write invisible and never retried. |
 | 2026-08-24 | `083207c` | **Long press added as tap tier 4.** `RcMapping::t[]` is now `RC_NUM_TAP_TIERS = 4`; holding a matrix button for the new `holdMs` config field (default 750) dispatches `t[3]` at the threshold while still held. Three constraints documented in §Taps: `holdMs` must exceed `tapWindowMs`, `checkDeferredTap()` parks the tap dispatch while the button is down (so press-and-hold now resolves on release, not mid-hold), and tier 4 always dispatches exclusively regardless of the `exclusive` flag. |
 | 2026-08-18 | _(uncommitted)_ | The three global audio destinations (`hcrDest`/`mp3Dest`/`dfpDest`) gained a **disabled** state (`transport` 2, JSON `"off"`) and now default to it. `RA_HCR`/`RA_MP3`/`RA_DFPLAYER` are no-ops while their device is disabled — the gate is in the executor, not at the port. |
 | 2026-08-18 | _(uncommitted)_ | §7/§8 completed: the loop sequence and the Core-0→Core-1 queue table gained `drainMaestroCmd()` / `serialFwdQueue` and `drainSerialFwd()` / `maestroCmdQueue`, with the reason they must be deferred (bit-banged S4/S5 writes block with interrupts off; a Maestro `get*` blocks 25 ms). §8's `navirec` capture row now reads **Core 1** — remote TRIGGERs are deferred through `drainRemoteTriggers()`, so the queue hop is a safeguard rather than a cross-core requirement. §4: the mesh-facing **S1–S3** renumber is shipped, stated as current instead of planned. |

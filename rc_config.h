@@ -643,6 +643,12 @@ struct RcConfig {
   // tapWindowMs, so a holdMs at or below it would let the single-tap tier fire
   // before the hold could ever be recognised. Clamped on load in rcConfigFromJSON().
   int            holdMs;
+  // Settle window (ms) a switch position must hold before its tier fires. A
+  // 3-position switch swept end-to-end passes THROUGH the middle for a frame or
+  // two, and without this the middle tier fires in full on the way past — sounds,
+  // scripts, easing, everything. Only the position the switch actually comes to
+  // rest in should dispatch. 0 = fire immediately (pre-settle behaviour).
+  uint16_t       switchSettleMs;
   uint8_t        chRateHz;      // rc_ch live-monitor broadcast rate in Hz (1–20; default 5). Runtime-tunable from the config tool — higher = smoother monitor, more mesh airtime (20Hz can flood the shared mesh and flap other boards' heartbeats).
   int            matrixChannel;   // SBUS channel carrying the multiplexed button matrix
   // Consecutive in-band SBUS frames a matrix button must hold before a press
@@ -785,6 +791,7 @@ void rcConfigLoadDefaults() {
   rcConfig.boardType        = 0;             // 0 = NaviCore v2 PCB (default pinout); 1 = WCB HW 3.2
   rcConfig.tapWindowMs      = 500;
   rcConfig.holdMs           = 750;          // long-press threshold; must exceed tapWindowMs
+  rcConfig.switchSettleMs   = 80;           // swallow a sweep through a 3-pos switch's middle
   rcConfig.chRateHz         = 5;          // rc_ch live-monitor rate (Hz); 5 = smooth + light mesh load (20Hz floods the shared ESP-NOW channel and flaps other boards)
   rcConfig.matrixChannel    = 7;            // button matrix on CH7
   rcConfig.matrixDebounceFrames = 1;     // digital SBUS source — fastest; bump for analog matrix
@@ -1200,6 +1207,7 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   doc["boardType"]            = rcConfig.boardType;        // hardware pin profile (0=NaviCore v2, 1=WCB 3.2)
   doc["tapWindowMs"]          = rcConfig.tapWindowMs;
   doc["holdMs"]               = rcConfig.holdMs;            // long-press threshold (ms); > tapWindowMs
+  doc["switchSettleMs"]       = rcConfig.switchSettleMs;    // switch must rest this long before its tier fires
   doc["chRateHz"]             = rcConfig.chRateHz;         // rc_ch live-monitor broadcast rate (Hz, 1–20)
   doc["matrixChannel"]        = rcConfig.matrixChannel;
   doc["matrixDebounceFrames"] = rcConfig.matrixDebounceFrames;
@@ -1489,6 +1497,12 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   // Upper clamp keeps a fat-fingered value from making the button feel dead.
   if (rcConfig.holdMs < rcConfig.tapWindowMs + 100) rcConfig.holdMs = rcConfig.tapWindowMs + 250;
   if (rcConfig.holdMs > 5000)                       rcConfig.holdMs = 5000;
+  if (doc.containsKey("switchSettleMs")) {
+    int s = doc["switchSettleMs"] | 80;
+    // 0 is legal and means "fire immediately" (the pre-settle behaviour). Cap at
+    // 1000: beyond that a deliberate switch move feels broken rather than debounced.
+    rcConfig.switchSettleMs = (uint16_t)(s < 0 ? 0 : (s > 1000 ? 1000 : s));
+  }
   if (doc.containsKey("chRateHz")) {
     int hz = doc["chRateHz"] | 5;            // rc_ch live-monitor rate; 0/absent → default 5 Hz
     if (hz < 1)  hz = 5;                      // a zero/negative rate would stall the channel stream entirely
