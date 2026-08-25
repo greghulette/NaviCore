@@ -33,7 +33,15 @@ const RATE_MAX     = 20;             // uploads allowed per IP per window
 const RATE_WINDOW  = 60 * 60;        // rate-limit window: 1 hour
 const KEY_LEN      = 64;             // max path length we'll look up
 
-const CFG_MAX_BYTES = 256 * 1024;    // per config-backup slot cap (encrypted config is ~15-30 KB)
+// Per config-backup slot cap. A config alone is ~15-30 KB encrypted, but a backup
+// may now also carry recorded CLIPS — which live nowhere else, so flash is
+// otherwise the only copy. The tool gzips BEFORE encrypting (ciphertext is
+// incompressible, so the order is not a preference), and refuses client-side
+// above CFG_SLOT_MAX_B64 with a useful message rather than eating a bare 413.
+// KEEP THE TWO IN STEP: this is checked against the base64 body, which is 4/3 of
+// the ciphertext, so the tool's limit must be <= this one.
+// Cloudflare KV tops out at 25 MB per value, so 4 MB stays well inside it.
+const CFG_MAX_BYTES = 4 * 1024 * 1024;
 const CFG_KEY_LEN   = 128;           // max /cfg/<key> length (64-hex base + suffix)
 
 const CORS = {

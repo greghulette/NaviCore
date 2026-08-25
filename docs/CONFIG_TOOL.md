@@ -573,6 +573,7 @@ carries an optional note; "remember on this device" stores the pair in `localSto
 config file from disk straight into a cloud slot) and **📂 Load** (apply a config file into
 the tool, left unsaved for review). It's a convenience copy, not a vault — keep Export files
 too.
+| 2026-08-25 | _(uncommitted)_ | **Cloud backup can include clips** (§5), checkbox default ON. Payload is gzipped BEFORE encryption (ciphertext is incompressible, so the order is not a preference) with transparent decompress on read, so pre-gzip backups still restore. Size is refused client-side before the PUT rather than eating a bare 413, and the manifest write now retries — with clip-sized payloads, a slot that lands while the manifest fails leaves the ring describing the previous backup. Only VERIFIED clips are included; any that will not transfer completely are named and left out. |
 | 2026-08-25 | _(uncommitted)_ | **Clip backup and restore** (§5): ⤓ per clip, ⤓ All + config (bundle), ⤒ Restore, and Import offering bundled clips. Restore defaults to skip-existing because `EDITEND` overwrites silently and `[CLIPITEM]` has no mtime, so nothing can tell which copy is newer. Guards: flash pre-flight via `[CLIPFS]`, per-clip read-back via `listClips` (a real flash re-read), `EDITCANCEL` on failure so the board never wedges in `ST_EDITING`, and skipped clips named rather than silently omitted. |
 
 **WCB credential profiles.** On the WCB Network tab, save the current network credentials
