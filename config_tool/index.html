@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.15:34.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.15:37.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -7131,7 +7131,9 @@ function _tlTrackList() {
 // firmware directly — no conversion on save) but DISPLAYED/EDITED in µs, same
 // UI convention as the knob-passthrough Pos min/max fields, converted only at
 // this render/interaction boundary. HCR volume is a raw 0-99 either way.
-function _tlTrackRange(track) {
+// dataOnly: ignore imported servo endpoints and scale to the RECORDED travel.
+// Used when Normalize is on — see trackLoHi in _tlRender.
+function _tlTrackRange(track, dataOnly) {
   // A drag freezes the grabbed track's range so it can't rescale under the cursor.
   if (_tlFrozenRange && _tlFrozenRange.kind === track.kind && _tlFrozenRange.key === track.key)
     return [_tlFrozenRange.lo, _tlFrozenRange.hi];
@@ -7139,7 +7141,7 @@ function _tlTrackRange(track) {
   // Imported Maestro endpoints → fixed scale (with a little headroom so the
   // min/max guide-lines sit inside the row), so the whole track reads against
   // the servo's real travel rather than auto-scaling to the current data.
-  const cr = _tlChannelRange(track);
+  const cr = dataOnly ? null : _tlChannelRange(track);
   if (cr) { const pad = Math.max(20, (cr.maxUs - cr.minUs) * 0.12); return [Math.max(0, cr.minUs - pad), cr.maxUs + pad]; }
   const kfs = _tlClip.maestro[track.key] || [];
   if (!kfs.length) return [1000, 2000];
@@ -7192,7 +7194,18 @@ function _tlRender() {
   // Overlay + Normalize (default) OR the normal per-lane view → each track by its
   // OWN range (`_tlTrackRange`: imported endpoints if any, else the recorded
   // travel). Overlay + actual-µs → the shared absolute scale so equal µs align.
-  const trackLoHi = track => (overlay && !_tlNormalize) ? (track.kind === 'maestro' ? [uLo, uHi] : [0, 99]) : _tlTrackRange(track);
+  // Normalize means what the label says: EACH TRACK BY ITS OWN TRAVEL. That has
+  // to ignore imported endpoints, or a channel with a configured servo range is
+  // drawn against the servo's WHOLE travel while its neighbours auto-scale to
+  // their data — so a channel parked near one end of its range renders as a flat
+  // line pinned to the edge of its lane, looking like it belongs to the lane next
+  // door. `_tlTrackRange` prefers imported endpoints (correct for editing, where
+  // the scale should reflect real servo travel), so normalizing asks for the data
+  // range explicitly.
+  const trackLoHi = track =>
+    (overlay && !_tlNormalize) ? (track.kind === 'maestro' ? [uLo, uHi] : [0, 99])
+    : _tlNormalize             ? _tlTrackRange(track, /*dataOnly=*/true)
+    :                            _tlTrackRange(track);
 
   // Draw one track's interactive foreground (curve line, control-point dots +
   // hit targets, tangent handles). `color` tints the line/dots — each overlaid
