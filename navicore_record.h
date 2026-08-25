@@ -586,6 +586,7 @@ inline void editStream(Print& out, bool paced = true,
   if (from > _count) from = _count;
   const uint32_t end = (want > _count - from) ? _count : from + want;
   const uint32_t n   = end - from;
+  bool hostGone = false;   // USB host stopped draining — stop waiting on it (see the loop)
 
   if (ranged) {
     // `count` keeps its exact legacy meaning (total events resident) so the
@@ -621,8 +622,16 @@ inline void editStream(Print& out, bool paced = true,
     // drained. This does. Costs one call when the host is keeping up (the common
     // case), and is bounded so an absent host cannot wedge loop() — on timeout we
     // write anyway and let the count check catch it, rather than truncating here.
-    if (!paced) {
-      for (int spin = 0; spin < 250 && out.availableForWrite() < 256; spin++) delay(1);
+    // Wait for USB TX room — but give up on the HOST, not just on this line.
+    // Spinning 250 ms per line is right when the host is merely slow; if it has
+    // gone away entirely, doing that for every remaining event would stall
+    // loop() — and therefore SBUS — for 250 ms x N (about 50 s on a 200-event
+    // clip). One timeout means the host is not reading, so stop waiting for the
+    // rest of this stream and let the tool's count check fail the download.
+    if (!paced && !hostGone) {
+      int spin = 0;
+      while (spin < 250 && out.availableForWrite() < 256) { delay(1); spin++; }
+      if (spin >= 250) hostGone = true;
     }
     const RecEvent& ev = _buf[i];
     // The index goes in the MARKER, not the JSON, for two reasons. (1) A maximal

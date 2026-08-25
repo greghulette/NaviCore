@@ -2164,8 +2164,20 @@ void rcDispatch(int buttonId, uint8_t tapCount) {
   // nothing visible" from "the tier never fired". Same JSON shape as the mesh
   // telemetry so the tool parses one form on either transport. Human-rate, so
   // the added USB traffic is negligible.
-  Serial.printf("{\"sys\":1,\"type\":\"rc_trig\",\"id\":%u,\"mode\":%d,\"btn\":%d,\"tap\":%d}\n",
-                rcConfig.wcbNetwork.deviceId, mode, btn, tapCount);
+  // GATED on TX room and DROPPED if there is none — same discipline as vlogf()
+  // and sendPWMUpdate(). This fires on every button press, and an unguarded
+  // write blocks up to the 50 ms HWCDC tx timeout whenever the host is not
+  // draining (a backgrounded tab, a closed tool, a stalled read loop), stalling
+  // loop() — and therefore SBUS — once per press. The event is a UI nicety (it
+  // flashes the tier that fired); a dropped one costs a flash, nothing more.
+  {
+    char tb[96];
+    const int tn = snprintf(tb, sizeof(tb),
+                            "{\"sys\":1,\"type\":\"rc_trig\",\"id\":%u,\"mode\":%d,\"btn\":%d,\"tap\":%d}\n",
+                            rcConfig.wcbNetwork.deviceId, mode, btn, tapCount);
+    if (tn > 0 && tn < (int)sizeof(tb) && Serial.availableForWrite() >= tn)
+      Serial.write((const uint8_t*)tb, (size_t)tn);
+  }
 
   const RcMapping& mapping = rcConfig.mappings[rcMapIndex(mode, btn)];
   // A long press is a DIFFERENT GESTURE, not a 4th tap, so it is always
