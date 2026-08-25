@@ -3607,7 +3607,13 @@ static void pollAuxSerialRx() {
 }
 
 void handleSerialInput() {
-  while (Serial.available()) {
+  // `> 0`, NOT truthiness. HWCDC::available() returns -1 (not 0) on a null RX
+  // queue — unlike HardwareSerial, which returns 0. A bare truthiness test makes
+  // -1 true, read() also returns -1, and (char)-1 is 0xFF, which is never '\n' or
+  // '\r' — so this loop would spin forever appending 0xFF, silently. There is no
+  // watchdog on the loop task to break out of it, so the board would hang with no
+  // reset and no output at all.
+  while (Serial.available() > 0) {
     char c = (char)Serial.read();
     if (c == '\n' || c == '\r') {
       serialInputBuf.trim();

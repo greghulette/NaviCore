@@ -587,6 +587,7 @@ inline void editStream(Print& out, bool paced = true,
   const uint32_t end = (want > _count - from) ? _count : from + want;
   const uint32_t n   = end - from;
   bool hostGone = false;   // USB host stopped draining — stop waiting on it (see the loop)
+  int  waitedMs = 0;       // TOTAL ms spent waiting on the host across this whole stream
 
   if (ranged) {
     // `count` keeps its exact legacy meaning (total events resident) so the
@@ -628,10 +629,15 @@ inline void editStream(Print& out, bool paced = true,
     // loop() — and therefore SBUS — for 250 ms x N (about 50 s on a 200-event
     // clip). One timeout means the host is not reading, so stop waiting for the
     // rest of this stream and let the tool's count check fail the download.
-    if (!paced && !hostGone) {
-      int spin = 0;
-      while (spin < 250 && out.availableForWrite() < 256) { delay(1); spin++; }
-      if (spin >= 250) hostGone = true;
+    // Bounded across the WHOLE stream, not per line. A per-line budget looks
+    // small but multiplies: 678 events x 250 ms is nearly three minutes of
+    // stalled loop() — SBUS dead, no replies to anything — if the host stops
+    // draining midway. One shared budget means the worst case is that budget,
+    // whatever the clip size, and once it is spent we stop waiting entirely and
+    // let the tool's integrity check fail the download.
+    if (!paced && !hostGone && out.availableForWrite() < 256) {
+      while (waitedMs < 1000 && out.availableForWrite() < 256) { delay(1); waitedMs++; }
+      if (waitedMs >= 1000) hostGone = true;
     }
     const RecEvent& ev = _buf[i];
     // The index goes in the MARKER, not the JSON, for two reasons. (1) A maximal
@@ -661,8 +667,9 @@ inline void editStream(Print& out, bool paced = true,
     if (paced) { if ((i & 3) == 3) delay(1); }
     // (unpaced/USB pacing is the availableForWrite wait at the top of the loop)
   }
-  // Drain before END so the terminator can't be the write that overruns the ring.
-  if (!paced) out.flush();
+  // No flush() here: it is bounded (~50 ms) but adds nothing the per-line room
+  // check has not already covered, and every avoidable blocking call on this
+  // path costs SBUS servicing.
   // fp repeated on END so a clip that changed DURING the stream is caught too —
   // BEGIN's fingerprint alone would not notice a mid-stream buffer swap.
   if (ranged) out.printf("[CLIPDL:END]{\"from\":%lu,\"n\":%lu,\"fp\":\"%08X\"}\n",
