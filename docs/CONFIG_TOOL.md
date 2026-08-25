@@ -183,6 +183,40 @@ Slice size is transport-aware — 48 events over the mesh (the bridge's relay qu
 so a big burst is precisely what gets dropped), 400 over USB where the `availableForWrite`
 gate makes large slices safe.
 
+### Clip backup and restore
+
+| File | Shape | Written by |
+|---|---|---|
+| Single clip | `{navicore:'clip/v1', clip:{name,durationMs,mode,events}}` | ⤓ on a Clips row |
+| Bundle | `{navicore:'config-backup/v1', config, clips:[…]}` | ⤓ All + config |
+
+`clips` is an **optional** member of the existing backup shape, so a bundle restores through
+the ordinary Import and an older tool ignores the extra key. The single-clip object is
+byte-identical to one element of `clips`, so Import accepts either without branching.
+
+**Restore defaults to skip-existing, and that is not timidity.** `EDITEND` overwrites
+silently (`saveClip` truncates with no existence check) and `[CLIPITEM]` carries **no
+mtime** — so nothing in the system can tell whether the backup copy or the on-droid copy is
+newer. A blanket overwrite would let a month-old backup destroy a clip recorded yesterday
+with no undo. Each collision prompts: *skip* (default), *overwrite*, or a new name.
+
+Four guards, each closing a way this could destroy data instead of protecting it:
+
+- **Pre-flight the flash.** `[CLIPFS]` reports total/used; a restore that would not fit is
+  refused up front. A full partition mid-restore destroys the clip being overwritten *and*
+  leaves a truncated `.ncr` that loads silently short.
+- **Read back after each clip.** `listClips` re-opens every `.ncr` and reads its header, so
+  comparing the reported event count after `EDITEND` is a genuine flash read-back rather than
+  an echo of what was sent. The `n` field makes it exact.
+- **`EDITCANCEL` on any failure.** An interrupted restore otherwise leaves the board wedged
+  in `ST_EDITING`, which blocks the retry.
+- **Skipped clips are named, never silently omitted.** A backup that quietly leaves clips out
+  is one you discover is short when you need it.
+
+Backup-all warns with real numbers before starting — clip count, bytes, and a time estimate
+from the measured mesh ceiling (~150 events/s over the bridge). Uploads are ACK-gated per
+event with the index echoed, so a retry after a lost ACK cannot duplicate.
+
 ### Live trigger flash
 
 `flashAssignmentTier(mode, btn, tap)` lights the exact tier row in the assignment cards when
@@ -539,6 +573,7 @@ carries an optional note; "remember on this device" stores the pair in `localSto
 config file from disk straight into a cloud slot) and **📂 Load** (apply a config file into
 the tool, left unsaved for review). It's a convenience copy, not a vault — keep Export files
 too.
+| 2026-08-25 | _(uncommitted)_ | **Clip backup and restore** (§5): ⤓ per clip, ⤓ All + config (bundle), ⤒ Restore, and Import offering bundled clips. Restore defaults to skip-existing because `EDITEND` overwrites silently and `[CLIPITEM]` has no mtime, so nothing can tell which copy is newer. Guards: flash pre-flight via `[CLIPFS]`, per-clip read-back via `listClips` (a real flash re-read), `EDITCANCEL` on failure so the board never wedges in `ST_EDITING`, and skipped clips named rather than silently omitted. |
 
 **WCB credential profiles.** On the WCB Network tab, save the current network credentials
 (MAC octets, password, quantity, device id, channel) as a named profile and radio-toggle
