@@ -3362,19 +3362,54 @@ bool execCliLine(const String& line) {
     // ── Timeline editor transport (config-tool Phase 2) — see navicore_record.h
     //    "Phase 2: timeline editor transport" for the full protocol writeup.
     else if (sub.equalsIgnoreCase("EDITLOAD")) {
-      if (!navirec::loadClip(name.c_str())) { Serial.printf("[REC] clip '%s' not found\n", name.c_str()); return true; }
+      // ?REC,EDITLOAD,<name>[,<from>[,<count>]]
+      // The outer split at the top of this block cuts only at the FIRST comma, so
+      // `name` is the whole remainder — without this second-level split
+      // "?REC,EDITLOAD,clip,0,64" loads a clip literally named "clip,0,64", which
+      // _clipPath sanitises to "clip064": the WRONG clip, silently. Same idiom as
+      // RENAME and indexed EDITEV above. Safe because _clipPath keeps only
+      // alnum/_/- , so a comma can never be part of a real clip's identity.
+      String cname = name;
+      uint32_t from = 0, want = 0xFFFFFFFFu;
+      bool ranged = false;
+      { int c2 = name.indexOf(',');
+        if (c2 > 0) {
+          cname = name.substring(0, c2);
+          String rest = name.substring(c2 + 1); rest.trim();
+          int c3 = rest.indexOf(',');
+          from   = (uint32_t)(c3 > 0 ? rest.substring(0, c3) : rest).toInt();
+          if (c3 > 0) want = (uint32_t)rest.substring(c3 + 1).toInt();
+          ranged = true;
+        } }
+
+      // Reload only when this clip is not already resident. A ranged download
+      // assembles across several requests and the board sits at ST_IDLE between
+      // them, so residency must be RE-VERIFIED (a Record/Play trigger can replace
+      // the buffer underneath) — but a blind reload per range re-reads
+      // _count*140 B from LittleFS, ~420 KB for a 3000-event clip, stalling loop()
+      // far longer than the streaming itself. Fail closed: any buffer mutator
+      // clears _loadedName.
+      if (strcmp(navirec::_loadedName, cname.c_str()) != 0) {
+        if (!navirec::loadClip(cname.c_str())) {
+          // Legacy byte-for-byte on the unranged path — an old tool matches
+          // "[CLIPDL:ERR]" by exact prefix and slices a fixed offset.
+          Serial.printf("[REC] clip '%s' not found\n", cname.c_str());
+          return true;
+        }
+      }
+
       // Via-WCB (capture sink armed): every [CLIPDL:EV] line is an RTERM packet
-      // paced at 2 ms, and editStream runs in loop() — a dense capture would
-      // stall SBUS/WCB servicing for tens of seconds. Refuse big clips on the
-      // relayed path with a marker the config tool surfaces; USB streams at
-      // full speed with only a light yield.
+      // and editStream runs in loop(), so a dense capture streamed whole would
+      // stall SBUS/WCB servicing for tens of seconds. A RANGED request is the
+      // answer to that — the caller asks for a bounded slice — so the size
+      // refusal applies only to the legacy whole-clip form.
       const bool relayed = rcSerial.captureArmed();
-      if (relayed && navirec::eventCount() > 3000) {
-        Serial.printf("[CLIPDL:ERR]clip too large to edit over the WCB bridge (%lu events) — connect over USB\n",
+      if (relayed && !ranged && navirec::eventCount() > 3000) {
+        Serial.printf("[CLIPDL:ERR]clip too large to edit over the WCB bridge (%lu events) — connect over USB, or use a ranged request\n",
                       (unsigned long)navirec::eventCount());
         return true;
       }
-      navirec::editStream(Serial, relayed);
+      navirec::editStream(Serial, relayed, from, want, ranged);
     }
     else if (sub.equalsIgnoreCase("EDITBEGIN")) {
       Serial.println(navirec::editBegin() ? "[CLIPUL:BEGIN,OK]" : "[CLIPUL:BEGIN,ERR,busy]");

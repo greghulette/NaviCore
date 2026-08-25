@@ -201,6 +201,58 @@ report with fewer than 8 fields is dropped whole rather than stored partially.
 |---|---|---|
 | `PWM_UPDATE` | 50 ms while monitoring | 24 channels, decoded mode/button, SBUS health |
 | `rc_trig` | on every dispatch | `id, mode, btn, tap` — **the same JSON shape `rcDispatch()` broadcasts to the mesh**, printed to USB as well |
+| `[CLIPDL:*]` | reply to `?REC,EDITLOAD` | Clip event stream — see **Ranged clip download** below |
+
+### Ranged clip download
+
+```
+?REC,EDITLOAD,<name>                     legacy — whole clip, events UNindexed, byte-identical to before
+?REC,EDITLOAD,<name>,<from>[,<count>]    ranged — events carry their absolute index
+                                           count omitted → to end of clip
+```
+
+```
+[CLIPDL:BEGIN]{"count":N,"durationMs":M,"mode":m,"from":f,"n":k,"fp":"8hex","fc":F}
+[CLIPDL:EV,<absIdx>]{…}  × k     ranged only
+[CLIPDL:EV]{…}           × k     legacy only
+[CLIPDL:END]{"from":f,"n":k,"fp":"8hex"}
+```
+
+**The compatibility rule for this whole family:** anything an old tool can trigger keeps its
+exact bytes. New shapes appear only in replies to a request an old tool cannot make. `BEGIN`
+is the one safe exception — the tool reads only `durationMs`/`mode`/`count` from it, so added
+keys are inert. `[CLIPDL:ERR]` in particular must keep its exact prefix and offset, because
+the tool matches it with `startsWith` and a fixed `slice`.
+
+Four fields carry the integrity guarantee:
+
+- **`count`** keeps its legacy meaning (total events resident), so an old tool's arithmetic
+  still reads correctly.
+- **`from`/`n`** say which slice this is; their *presence* is the capability probe.
+- **`fp`** is FNV-1a over the resident buffer, repeated on `END`. Ranges taken from two
+  different buffer contents must never be spliced, and a count alone cannot catch an edit
+  that preserves the event count. Repeating it on `END` also catches a clip that changed
+  *during* a stream.
+- **`fc`** is the **file header's** count. `loadClip()` truncates silently when
+  `h.count > _cap`, so `count` alone would report a short read as a complete clip.
+  **`fc != count` means the clip must not be banked into a backup.**
+
+**Index goes in the marker, not the JSON.** A maximal action line (~211 B with a full
+`cmd[96]`) already hard-wraps across two RTERM packets at `RTERM_TEXT_SIZE = 160`, so a
+marker-borne index lands on the first fragment and is readable before the JSON reassembles.
+It also avoids the tool's `const {t, k, ...action} = ev` rest-spread swallowing an `"i"` key
+into the `RcAction`.
+
+**Residency.** A ranged download assembles across several requests, and the board sits at
+`ST_IDLE` between them — the same state the Record and Play triggers require. So a pilot
+touching a transmitter button mid-assembly can replace the shared `_buf` underneath.
+`navirec::_loadedName` tracks what is resident and is cleared by **every** buffer mutator, so
+staleness fails closed; a range whose clip is no longer resident reloads. Reloading blindly
+per range instead would re-read `_count × 140 B` (~420 KB for a 3000-event clip) from
+LittleFS each time, stalling `loop()` far longer than the streaming itself.
+
+The relayed-path size refusal now applies only to the **legacy whole-clip** form — a ranged
+request is the answer to that problem, so it is allowed at any clip size.
 
 `rc_trig` goes out on **both** transports because `rcTelemetry::emitTrig()` returns early
 without a ready WCB, so a Direct-USB tool previously saw nothing at all for a local button
@@ -542,6 +594,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-25 | _(uncommitted)_ | **Ranged clip download.** `?REC,EDITLOAD,<name>,<from>[,<count>]` streams a bounded slice with each event carrying its absolute index in the MARKER (`[CLIPDL:EV,<i>]`), so a client can detect exactly which events are missing and re-request only those. `BEGIN`/`END` gained `from`/`n`/`fp` (FNV-1a buffer fingerprint) and `fc` (the FILE header count — `loadClip` truncates silently, so `count` alone would report a short read as complete). Legacy unranged form is byte-identical. `[CLIPITEM]` gained `n` (event count). The relayed 3000-event refusal now applies only to the legacy whole-clip form. |
 | 2026-08-24 | _(uncommitted)_ | `rc_trig` is now emitted on **USB as well as the mesh**. `emitTrig()` returns early without a ready WCB, so a Direct-USB tool saw no dispatch events at all for a local button press. Same JSON shape on both transports; the tool filters the mesh copy by `id` but not the USB copy, which arrives from the one board it is connected to. |
 | 2026-08-24 | `083207c` | `tap` now spans 1–4 on both `TRIGGER` (USB + mesh) and `rc_trig`, where **4 = long press**. No wire-format change — the existing `tap` field carries it, so the WCB bridge and `WcbCmd` are untouched. Three separate bounds enforce it: the USB handler, the mesh clamp in `rcTelemetry::handle()`, and the clamp in `drainRemoteTriggers()`. |
 | 2026-08-18 | _(uncommitted)_ | §4 bulk-transfer frames corrected to the wire as implemented: CHUNK carries **no** `"o"` offset (the receiver derives `q * BULK_CHUNK_RAW` and deliberately never trusts one), DONE/STATUS/FINAL all carry `"r":round`, and the `{"bs":sid,"nb":1}` need-BEGIN reply — previously undocumented, and the only recovery from a droid that reboots mid-transfer — now has a row. |

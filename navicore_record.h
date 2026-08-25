@@ -79,6 +79,34 @@ inline int16_t*     _curveNext = nullptr;   // parallel to _buf; sized to _cap i
 inline uint32_t      _replayStart = 0;
 inline uint32_t      _cursor   = 0;          // replay event cursor
 inline uint32_t      _drops    = 0;          // queue-full drops (diagnostic)
+
+// ── Residency tracking for RANGED download ───────────────────────────────────
+// A ranged download assembles one clip across several ?REC,EDITLOAD requests,
+// but `_buf` is SHARED and the board sits at ST_IDLE between them — which is
+// exactly the state the Record and Play triggers require. So a pilot touching a
+// transmitter button mid-assembly can silently replace `_buf` under the download.
+// Nothing else records WHICH clip is resident (loadClip stored no name;
+// `_recordName` is the record-take name, not this).
+//   _loadedName — clip currently in `_buf`; "" = none/stale. CLEARED by every
+//                 `_buf` mutator, so staleness fails closed.
+//   _loadedFc   — the FILE header's count. loadClip TRUNCATES silently when
+//                 h.count > _cap, so `_count` alone cannot tell a short read from
+//                 a short clip. The tool compares the two and refuses to bank a
+//                 clip whose buffer is smaller than its file says.
+inline char     _loadedName[33] = "";
+inline uint32_t _loadedFc       = 0;
+inline void _residencyClear() { _loadedName[0] = '\0'; _loadedFc = 0; }
+
+// FNV-1a over the resident events — the range-assembly anchor. Ranges taken from
+// two DIFFERENT buffer contents must never be spliced together, and a count alone
+// cannot catch an edit that preserves the event count.
+inline uint32_t _bufFingerprint() {
+  uint32_t h = 2166136261u;
+  const uint8_t* p = (const uint8_t*)_buf;
+  const size_t n = (size_t)_count * sizeof(RecEvent);
+  for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+  return h;
+}
 inline volatile bool _doneFlag = false;      // set when a replay completes (loop drains it)
 inline volatile bool _loop     = false;      // replay repeats on completion (idle-animation mode)
 // Deferred control: a Record/Play trigger can dispatch on Core 0 (remote
@@ -96,7 +124,7 @@ inline EmitHcrVolFn     _cbEmitHcrVol  = nullptr;
 inline ResetChanFn      _cbResetChan   = nullptr;
 
 // ── Init (Core 1, setup() — BEFORE wcb->begin() so the recv callback can't hit
-//    a null queue). RecEvent = 136 B, so cap 24000 ≈ 3.1 MB PSRAM (of ~8 MB;
+//    a null queue). sizeof(RecEvent) = 140 B (RcAction 132 + tMs 4 + kind 1, align 4), so cap 24000 ≈ 3.36 MB PSRAM (of ~8 MB;
 //    ~6.7 MB was free). Hard ceiling = 32767 (the _curveNext replay index is
 //    int16_t); beyond that, widen _curveNext to int32_t. ─────────────────────────
 inline void recBegin(uint32_t cap, DispatchActionFn d, EmitMaestroFn m,
@@ -172,7 +200,7 @@ inline void drain() {
   RecEvent ev;
   while (xQueueReceive(_queue, &ev, 0) == pdTRUE) {
     if (_state != ST_RECORDING) continue;
-    if (_count < _cap) _buf[_count++] = ev;
+    if (_count < _cap) { _buf[_count++] = ev; _residencyClear(); }   // buffer is now a take, not a loaded clip
     else _drops++;   // PSRAM clip buffer full — account the dropped keyframe so info() is truthful
   }
   // NOTE: the runaway-capture backstop lives in checkRecordBackstop() (called
@@ -185,7 +213,7 @@ inline bool startRecord(uint8_t mode) {
   if (_state != ST_IDLE || !_buf) return false;
   _recordName[0] = '\0';    // default (e.g. CLI ?REC,START): no latched name → auto "rec_N" on save.
                             // The trigger path sets _recordName after this returns true.
-  _mode = mode; _count = 0; _drops = 0;
+  _mode = mode; _count = 0; _drops = 0; _residencyClear();
   _recStart = millis();
   _state = ST_RECORDING;
   _capturing = true;                          // arm AFTER recStart so tMs is sane
@@ -197,7 +225,7 @@ inline void stopRecord() {
   drain();                                    // flush in-flight events
   _state = ST_IDLE;
 }
-inline void clearClip() { if (_state == ST_IDLE) _count = 0; }
+inline void clearClip() { if (_state == ST_IDLE) { _count = 0; _residencyClear(); } }
 inline uint32_t clipDurationMs() { return _count ? _buf[_count - 1].tMs : 0; }
 inline uint32_t eventCount()     { return _count; }
 
@@ -466,6 +494,7 @@ inline void _ensureTimeOrdered() {
 
 inline bool loadClip(const char* name) {
   if (!_clipFS || _state != ST_IDLE || !_buf) return false;
+  _residencyClear();                       // fail closed if anything below bails
   char path[48]; if (!_clipPath(path, sizeof(path), name)) return false;
   File f = _clipFS->open(path, "r");
   if (!f) return false;
@@ -476,6 +505,8 @@ inline bool loadClip(const char* name) {
   f.close();
   _count = got / sizeof(RecEvent);
   _mode  = h.mode;
+  strlcpy(_loadedName, name, sizeof(_loadedName));
+  _loadedFc = h.count;                     // the FILE's count, not the truncated _count
   // Force non-decreasing tMs regardless of on-flash order. replayTick()'s
   // event cursor, clipDurationMs() (reads the LAST slot), and the phase-1b
   // curve-chain builder all assume time-ordered events, so a corrupt or
@@ -547,10 +578,34 @@ inline int _cmpEventByTime(const void* a, const void* b) {
 //    HWCDC's 8 KB TX ring. A full ring past the 50 ms write timeout drops the
 //    remainder of a write SILENTLY (see the loop comment), which is how a clip
 //    could arrive short over USB with nothing reporting it.
-inline void editStream(Print& out, bool paced = true) {
-  out.printf("[CLIPDL:BEGIN]{\"count\":%lu,\"durationMs\":%lu,\"mode\":%u}\n",
-             (unsigned long)_count, (unsigned long)clipDurationMs(), (unsigned)_mode);
-  for (uint32_t i = 0; i < _count; i++) {
+// `ranged` selects the NEW indexed protocol; false reproduces the legacy stream
+// BYTE-IDENTICALLY, because an old config tool matches these markers by exact
+// prefix. New shapes appear only in replies to a request an old tool cannot make.
+inline void editStream(Print& out, bool paced = true,
+                       uint32_t from = 0, uint32_t want = 0xFFFFFFFFu, bool ranged = false) {
+  if (from > _count) from = _count;
+  const uint32_t end = (want > _count - from) ? _count : from + want;
+  const uint32_t n   = end - from;
+
+  if (ranged) {
+    // `count` keeps its exact legacy meaning (total events resident) so the
+    // tool's existing arithmetic still reads correctly.
+    //   from/n  — which slice this is; their PRESENCE is the capability probe.
+    //   fp      — FNV-1a over the resident buffer. Ranges from two different
+    //             buffer contents must never be spliced; a count alone cannot
+    //             catch an edit that preserves the event count.
+    //   fc      — the FILE header's count. loadClip() truncates silently when
+    //             h.count > _cap, so `count` alone would report a short read as
+    //             a complete clip. fc != count means DO NOT BANK THIS.
+    out.printf("[CLIPDL:BEGIN]{\"count\":%lu,\"durationMs\":%lu,\"mode\":%u,"
+               "\"from\":%lu,\"n\":%lu,\"fp\":\"%08X\",\"fc\":%lu}\n",
+               (unsigned long)_count, (unsigned long)clipDurationMs(), (unsigned)_mode,
+               (unsigned long)from, (unsigned long)n, _bufFingerprint(), (unsigned long)_loadedFc);
+  } else {
+    out.printf("[CLIPDL:BEGIN]{\"count\":%lu,\"durationMs\":%lu,\"mode\":%u}\n",
+               (unsigned long)_count, (unsigned long)clipDurationMs(), (unsigned)_mode);
+  }
+  for (uint32_t i = from; i < end; i++) {
     // ── USB: WAIT for TX room; do not just nap ──────────────────────────────
     // Serial is HWCDC with an 8 KB TX ring and a 50 ms write timeout (both set
     // in NaviCore.ino setup()). When the ring is full and STAYS full past that
@@ -570,19 +625,28 @@ inline void editStream(Print& out, bool paced = true) {
       for (int spin = 0; spin < 250 && out.availableForWrite() < 256; spin++) delay(1);
     }
     const RecEvent& ev = _buf[i];
+    // The index goes in the MARKER, not the JSON, for two reasons. (1) A maximal
+    // action line (~211 B with a full cmd[96]) already hard-wraps across two
+    // RTERM packets at RTERM_TEXT_SIZE=160, so a marker-borne index lands on the
+    // FIRST fragment and is readable before the JSON is even reassembled.
+    // (2) The tool's model builder does `const {t,k,...action} = ev` — a JSON "i"
+    // key would fall into the rest-spread and be written into the RcAction.
+    char tag[24];
+    if (ranged) snprintf(tag, sizeof(tag), "[CLIPDL:EV,%lu]", (unsigned long)i);
+    else        strlcpy(tag, "[CLIPDL:EV]", sizeof(tag));
     if (ev.kind == REC_ACTION) {
       StaticJsonDocument<384> doc;
       JsonObject obj = doc.to<JsonObject>();
       actionToJson(ev.u.act, obj);           // same serializer the button/knob/switch editors use
       obj["t"] = ev.tMs; obj["k"] = (uint8_t)REC_ACTION;
-      out.print("[CLIPDL:EV]");
+      out.print(tag);
       serializeJson(doc, out);
       out.println();
     } else if (ev.kind == REC_KF_MAESTRO) {
-      out.printf("[CLIPDL:EV]{\"t\":%lu,\"k\":%u,\"slot\":%u,\"ch\":%u,\"pos\":%u}\n",
+      out.printf("%s{\"t\":%lu,\"k\":%u,\"slot\":%u,\"ch\":%u,\"pos\":%u}\n", tag,
                  (unsigned long)ev.tMs, (unsigned)REC_KF_MAESTRO, ev.u.km.slot, ev.u.km.ch, ev.u.km.pos);
     } else if (ev.kind == REC_KF_HCRVOL) {
-      out.printf("[CLIPDL:EV]{\"t\":%lu,\"k\":%u,\"chan\":%u,\"vol\":%u}\n",
+      out.printf("%s{\"t\":%lu,\"k\":%u,\"chan\":%u,\"vol\":%u}\n", tag,
                  (unsigned long)ev.tMs, (unsigned)REC_KF_HCRVOL, ev.u.kv.chan, ev.u.kv.vol);
     }
     if (paced) { if ((i & 3) == 3) delay(1); }
@@ -590,14 +654,18 @@ inline void editStream(Print& out, bool paced = true) {
   }
   // Drain before END so the terminator can't be the write that overruns the ring.
   if (!paced) out.flush();
-  out.println("[CLIPDL:END]");
+  // fp repeated on END so a clip that changed DURING the stream is caught too —
+  // BEGIN's fingerprint alone would not notice a mid-stream buffer swap.
+  if (ranged) out.printf("[CLIPDL:END]{\"from\":%lu,\"n\":%lu,\"fp\":\"%08X\"}\n",
+                         (unsigned long)from, (unsigned long)n, _bufFingerprint());
+  else        out.println("[CLIPDL:END]");
 }
 
 // UPLOAD step 1: stage a fresh edit session. Reuses `_buf`/`_count` (guarded to
 // ST_IDLE, same as every other clip operation) so there's no second buffer.
 inline bool editBegin() {
   if (_state != ST_IDLE || !_buf) return false;
-  _count = 0;
+  _count = 0; _residencyClear();
   _state = ST_EDITING;
   return true;
 }
@@ -681,10 +749,16 @@ inline void listClips(Print& out) {
       String nm = e.name();
       int slash = nm.lastIndexOf('/'); if (slash >= 0) nm = nm.substring(slash + 1);
       if (nm.endsWith(".ncr")) nm = nm.substring(0, nm.length() - 4);
-      uint32_t dur = 0; ClipFileHeader h;
-      if (e.read((uint8_t*)&h, sizeof(h)) == (int)sizeof(h) && memcmp(h.magic, "NCR1", 4) == 0) dur = h.durationMs;
-      out.printf("[CLIPITEM]{\"name\":\"%s\",\"bytes\":%u,\"dur\":%lu}\n",
-                 nm.c_str(), (unsigned)e.size(), (unsigned long)dur);
+      // `n` is the file header's event count. It is free — the whole header is
+      // already read here — and it lets the tool size a ranged download and
+      // estimate backup time WITHOUT deriving a count from `bytes`, which would
+      // bake sizeof(RecEvent) into the tool as a cross-file invariant.
+      uint32_t dur = 0, cnt = 0; ClipFileHeader h;
+      if (e.read((uint8_t*)&h, sizeof(h)) == (int)sizeof(h) && memcmp(h.magic, "NCR1", 4) == 0) {
+        dur = h.durationMs; cnt = h.count;
+      }
+      out.printf("[CLIPITEM]{\"name\":\"%s\",\"bytes\":%u,\"dur\":%lu,\"n\":%lu}\n",
+                 nm.c_str(), (unsigned)e.size(), (unsigned long)dur, (unsigned long)cnt);
     }
   }
   out.println("[CLIPLIST:END]");
