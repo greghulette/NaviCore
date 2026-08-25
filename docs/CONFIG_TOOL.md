@@ -144,6 +144,35 @@ Saving is diff-based, and the guard rails exist because each failure mode actual
 7. The result is reported by a **toast driven by the board's actual ACK**, not by a
    terminal line the user never reads.
 
+### Verified clip download
+
+`clipDownloadVerified(name)` is the path anything that *stores* a clip must use — the ⤓
+button on a Clips row today, backup/restore next. It is separate from the timeline editor's
+downloader on purpose.
+
+The editor accepts whatever arrives and compares counts at the end. **That cannot support
+retry**: a re-requested range that partly arrives twice nets a shortfall of zero while events
+are still missing. So this uses the ranged protocol (see
+[PROTOCOLS.md](PROTOCOLS.md#ranged-clip-download)) — every event carries its absolute index,
+completeness is a **set check over 0..count-1**, and only genuinely missing indices are
+re-requested.
+
+Three things make it refuse rather than return partial data:
+
+- **`fc != count`** — the clip is truncated on the board (`loadClip` silently caps at the
+  buffer size), so `count` alone would call a short read complete.
+- **A changed `fp`** between the probe and any range — the buffer was replaced mid-assembly.
+  A Record or Play trigger on the transmitter will do exactly that, and splicing ranges from
+  two different buffers yields a plausible, *wrong* clip.
+- **An incomplete set after the retry budget** — reported with the missing count.
+
+**It never writes a partial file.** A clip file that is quietly short is worse than no file:
+you would only discover it when you needed the restore.
+
+Slice size is transport-aware — 48 events over the mesh (the bridge's relay queue is 16 deep,
+so a big burst is precisely what gets dropped), 400 over USB where the `availableForWrite`
+gate makes large slices safe.
+
 ### Live trigger flash
 
 `flashAssignmentTier(mode, btn, tap)` lights the exact tier row in the assignment cards when
@@ -544,6 +573,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-25 | _(uncommitted)_ | Added `clipDownloadVerified()` and the **⤓ per-clip download** (§5). Uses the ranged protocol so completeness is a set check over event indices rather than a count compare — a count cannot support retry, since a partly-duplicated re-request nets a shortfall of zero while events are still missing. Refuses on `fc != count` (truncated on the board), on a changed `fp` (buffer replaced mid-assembly by a Record/Play trigger), or on an incomplete set. **Never writes a partial file.** |
 | 2026-08-24 | _(uncommitted)_ | Added the **live trigger flash** (§5) — an `rc_trig` lights the exact tier row that fired in the assignment cards, in the live-activity orange. Mirrors `rcDispatch()`: cumulative lights every tier up to the match, exclusive and long press light only their own. |
 | 2026-08-24 | `8c4584c`+`6d026a3` | Added the **push-budget readout** (§5) — a live fragment count for the next Via-WCB Save, shown in the Config modal footer. `_pushBudgetInfo()` mirrors `saveConfigToBoard()`'s payload construction (branch diff + per-button `mappings` sub-diff, wcbNetwork strip over the bridge, and the `{sys:1,…}` wrapper `sendJSON()` actually chunks); getting any of the three wrong misreports by a large factor. Predicts BOTH bridged refusals — the 192-fragment cap and the per-fragment 187 B escaped-envelope abort (which can fire at 4% of budget). Polls rather than hooking mutations, and is honest that the cap binds only over the mesh. Also added the long-press tier tab and the Long Press (`holdMs`) field in Config → General. |
 | 2026-08-21 | _(uncommitted)_ | The per-action remove (x) is no longer hidden on the LAST row of a tier. Deleting it is how you clear a tier that should fire nothing; hiding it meant the only route to an empty tier was blanking the fields and relying on `readActionFromUI()` dropping the row at save, which is undiscoverable and leaves a populated-looking row on screen. An empty tier is valid (`collectTierActions()` returns []) and "+ Add action" is on the card, so it is always recoverable. Reorder arrows stay gated on 2+ rows. |

@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.13:33.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.13:39.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6103,6 +6103,12 @@ function renderClips(clips) {
     edit.style.padding = '4px 9px';
     edit.onclick = () => openTimelineEditor(name);
 
+    const dl = document.createElement('button');
+    dl.className = 'btn btn-ghost'; dl.type = 'button'; dl.textContent = '⤓';
+    dl.title = 'Download this clip to a file (verified — a clip that will not transfer completely is never written)';
+    dl.style.padding = '4px 9px';
+    dl.onclick = () => clipDownloadToFile(name, dl);
+
     const ren = document.createElement('button');
     ren.className = 'btn btn-ghost'; ren.type = 'button'; ren.textContent = '✎'; ren.title = 'Rename';
     ren.style.padding = '4px 9px';
@@ -6113,7 +6119,7 @@ function renderClips(clips) {
     del.style.padding = '4px 9px';
     del.onclick = () => clipDelete(name);
 
-    row.append(meta, play, edit, ren, del);
+    row.append(meta, play, edit, dl, ren, del);
     list.appendChild(row);
   });
 }
@@ -6284,7 +6290,159 @@ async function clipRecordToggle() {
 // fragments are rejoined until the buffered text parses as valid JSON.
 let _tlDownload = null;   // { name, src, header, events, evBuf } while EDITLOAD is streaming in
 
+// ════════════════════════════════════════════════════════════════════════════
+//  Verified ranged clip download
+// ════════════════════════════════════════════════════════════════════════════
+// The timeline editor's downloader accepts whatever arrives and compares counts
+// at the end. That is not good enough to put a clip in a BACKUP: a count check
+// cannot survive retry, because a re-requested range that partly arrives twice
+// nets a shortfall of zero while events are still missing.
+//
+// This path uses the ranged protocol instead (see docs/PROTOCOLS.md): every
+// event carries its absolute index, so completeness is a SET check over
+// 0..count-1, and only the genuinely missing indices are re-requested. It keeps
+// its own session state rather than sharing _tlDownload, so the editor's path is
+// untouched.
+let _clipRange = null;
+
+function _clipRangeFeed(text) {
+  const s = _clipRange;
+  if (!s) return false;
+
+  if (text.startsWith('[CLIPDL:BEGIN]')) {
+    try { s.hdr = JSON.parse(text.slice(14)); } catch (_) { s.hdr = {}; }
+    s.evBuf = null; s.pendIdx = -1;
+    return true;
+  }
+  if (text.startsWith('[CLIPDL:ERR]')) { s.err = text.slice(12).replace(/^,\d+\]?/, ''); s.finish(); return true; }
+  if (text.startsWith('[CLIPDL:END]')) {
+    try { s.tail = JSON.parse(text.slice(12)); } catch (_) { s.tail = {}; }
+    s.finish();
+    return true;
+  }
+
+  const m = /^\[CLIPDL:EV,(\d+)\]/.exec(text);
+  if (m) { s.pendIdx = +m[1]; s.evBuf = text.slice(m[0].length); }
+  else if (s.evBuf !== null) { s.evBuf += text; }   // continuation of a wrapped line
+  else return false;
+
+  try {
+    const ev = JSON.parse(s.evBuf);
+    if (s.pendIdx >= 0) s.got.set(s.pendIdx, ev);
+    s.evBuf = null; s.pendIdx = -1;
+  } catch (_) {
+    if (s.evBuf.length > 4096) { s.evBuf = null; s.pendIdx = -1; }   // corrupt chain — next EV recovers
+  }
+  return true;
+}
+
+// Download one clip COMPLETELY, or throw. Never returns partial data — that is
+// the whole point. onProgress(got, total) is optional.
+async function clipDownloadVerified(name, onProgress) {
+  // Smaller slices over the mesh: each event line is an RTERM packet and the
+  // bridge's relay queue is only 16 deep, so a big burst is exactly what gets
+  // dropped. Over USB the availableForWrite gate makes large slices safe.
+  const CHUNK = viaWcbActive ? 48 : 400;
+  const MAX_ROUNDS = 40;
+
+  const got = new Map();
+  let total = -1, fp = null, meta = null;
+
+  const runRange = async (from, count) => {
+    await new Promise((resolve) => {
+      _clipRange = { hdr: null, tail: null, err: null, got, evBuf: null, pendIdx: -1,
+                     finish: null, timer: null };
+      const done = () => {
+        clearTimeout(_clipRange.timer);
+        const s = _clipRange; _clipRange = null; resolve(s);
+      };
+      _clipRange.finish = done;
+      _clipRange.timer = setTimeout(done, 15000);   // a silent board must not hang the backup
+      sendRcCli(`?REC,EDITLOAD,${name},${from},${count}`, true);
+    }).then(s => {
+      if (s.err) throw new Error(s.err);
+      if (!s.hdr) throw new Error('no reply from the board');
+      if (s.hdr.from === undefined) throw new Error('this firmware has no ranged download — reflash to back up clips');
+      // fc is the FILE header's count; loadClip truncates silently when a clip
+      // exceeds the buffer cap, so count alone would call a short read complete.
+      if (+s.hdr.fc !== +s.hdr.count)
+        throw new Error(`clip is truncated on the board (file says ${s.hdr.fc} events, buffer holds ${s.hdr.count})`);
+      if (total < 0) {
+        total = +s.hdr.count; fp = s.hdr.fp;
+        // Keep the clip's own duration/mode — a restore must reproduce them, and
+        // they are only reported here.
+        meta = { durationMs: +s.hdr.durationMs || 0, mode: +s.hdr.mode || 1 };
+      }
+      // A changed fingerprint means the buffer was replaced mid-assembly (a
+      // Record/Play trigger on the transmitter will do it). Splicing ranges
+      // across two different buffers would produce a plausible, wrong clip.
+      const seen = [s.hdr.fp, s.tail && s.tail.fp].filter(Boolean);
+      if (seen.some(v => v !== fp)) throw new Error('the clip changed on the board mid-download — start again');
+    });
+  };
+
+  await runRange(0, 0);                      // header-only probe: count, fc, fp
+  if (total === 0) return { name, header: { count: 0, ...meta }, events: [] };
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    if (got.size >= total) break;
+    // Ask only for what is actually missing, coalesced into runs so a clean
+    // first pass is one request per CHUNK rather than one per event.
+    let from = -1;
+    for (let i = 0; i < total; i++) {
+      if (!got.has(i)) { from = i; break; }
+    }
+    if (from < 0) break;
+    let n = 0;
+    while (n < CHUNK && from + n < total && !got.has(from + n)) n++;
+    await runRange(from, n);
+    if (onProgress) onProgress(got.size, total);
+  }
+
+  if (got.size !== total) {
+    const missing = total - got.size;
+    throw new Error(`${missing} of ${total} events would not transfer` +
+                    (viaWcbActive ? ' — the WCB mesh is dropping packets; try Direct USB' : ''));
+  }
+
+  const events = [];
+  for (let i = 0; i < total; i++) events.push(got.get(i));
+  return { name, header: { count: total, ...meta }, events };
+}
+
+// One clip → one file. The single-clip shape is deliberately the same object the
+// bundle carries in its `clips` array, so Import can take either without caring.
+function clipToFileObject(dl) {
+  return { name: dl.name, durationMs: dl.header.durationMs | 0,
+           mode: dl.header.mode | 0 || 1, events: dl.events };
+}
+
+async function clipDownloadToFile(name, btn) {
+  if (!port && !sharedActive) { alert('Connect to the board first.'); return; }
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  const t = showToast(`Downloading "${name}"…`, 'info', 0);
+  try {
+    const dl = await clipDownloadVerified(name, (g, n) => {
+      if (t) t.textContent = `Downloading "${name}"… ${g}/${n} events`;
+    });
+    const out = { navicore: 'clip/v1', savedAt: Date.now(), clip: clipToFileObject(dl) };
+    _cfgDownloadTextFile(`navicore-clip-${name}.json`, JSON.stringify(out, null, 2));
+    _dismissToast(t);
+    showToast(`Saved "${name}" — ${dl.events.length} events`, 'success');
+  } catch (e) {
+    _dismissToast(t);
+    // Deliberately no partial file. A clip file that is quietly short is worse
+    // than no file: you would only discover it when you needed the restore.
+    alert(`Could not download "${name}" completely, so nothing was saved.\n\n${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+}
+
 function _clipDlFeed(src, text) {
+  // A verified ranged download owns the [CLIPDL:*] stream while it runs.
+  if (_clipRange) return _clipRangeFeed(text);
   if (!_tlDownload) return false;
   if (_tlDownload.src !== null && _tlDownload.src !== src && !text.startsWith('[CLIPDL:BEGIN]')) return false;
 
