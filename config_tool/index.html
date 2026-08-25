@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:04.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:09.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4476,6 +4476,18 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
   { const tg = document.getElementById('via-wcb-toggle'); if (tg) tg.checked = false; }
   updateTerminalSplit();   // fresh connect starts single-pane until auto-detect bridges
   await p.open({ baudRate: 115200 });
+  // DEASSERT DTR/RTS IMMEDIATELY. On a NaviCore v2 the ESP32-S3 drives USB
+  // natively (USB Serial/JTAG, no bridge chip) and those two control lines are
+  // what its ROM watches to RESET the chip. Whatever state the browser/OS leaves
+  // them in after open() is what the board sees — and a board that resets here
+  // spends the whole direct-PING window rebooting, which reads as "connection
+  // lost" and then, because nothing answers directly, as a bogus auto-switch to
+  // Via WCB. The board diagnoses it itself: "Reset reason: 11 - USB peripheral
+  // (host toggled DTR/RTS)".
+  // The teardown path (_releaseSerialOnUnload) has always deasserted these for
+  // exactly this reason; open() simply never did. The shared hub already
+  // defaults assertDTR:false, so only this direct path was exposed.
+  try { await p.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (_) {}
   let w;
   try {
     w = p.writable.getWriter();
