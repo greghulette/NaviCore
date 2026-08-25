@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:09.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:30.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2426,6 +2426,11 @@
   <div class="modal" style="max-width:560px;width:92%">
     <div class="modal-header">
       <span class="modal-title">🎬 Clips — record &amp; replay</span>
+      <span style="flex:1"></span>
+      <button class="btn btn-ghost" type="button" onclick="clipsDownloadAllToFile(this)" style="padding:4px 10px"
+              title="Save EVERY clip to one file, with the config. Warns first with the size and a time estimate — this is slow over the WCB mesh.">⤓ All + config</button>
+      <button class="btn btn-ghost" type="button" onclick="clipsImportFromFile()" style="padding:4px 10px"
+              title="Restore clips from a clip or backup file. Existing clips are skipped by default — you are asked per collision.">⤒ Restore</button>
       <button class="btn btn-ghost" onclick="closeClipsModal()" style="padding:4px 10px">✕</button>
     </div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:14px">
@@ -6034,6 +6039,27 @@ function clipsRefresh() {
 let _clipItems = null;   // { src, items } accumulating between BEGIN and END (new format)
 let _clipAsm   = null;   // { src, buf }   rejoining a split single marker (old format)
 let _clipFsFresh = false; // a [CLIPFS] arrived in the current LS reply (cleared at LIST:END)
+// Promise form of ?REC,LS, for callers that need the list as DATA rather than as
+// a rendered panel: the backup enumerator, the pre-restore flash-space check,
+// and the post-restore read-back (listClips re-opens each .ncr, so its reported
+// event count is a genuine flash read-back, not an echo of what we sent).
+let _clipListWaiters = [];
+let _clipFsLast = null;   // last [CLIPFS] {total, used} seen — pre-flight space check
+function clipsListOnce(timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const entry = { resolve, reject };
+    entry.timer = setTimeout(() => {
+      _clipListWaiters = _clipListWaiters.filter(w => w !== entry);
+      reject(new Error('the board did not answer ?REC,LS'));
+    }, timeoutMs);
+    _clipListWaiters.push(entry);
+    sendRcCli('?REC,LS', true);
+  });
+}
+function _clipListResolve(items) {
+  const ws = _clipListWaiters; _clipListWaiters = [];
+  ws.forEach(w => { clearTimeout(w.timer); w.resolve(items); });
+}
 
 // Feed one candidate line to the ingester.  `src` is the relaying WCB id (a
 // string) for [TERM:<src>] lines, or null for a bare Direct-USB line.  Returns
@@ -6042,13 +6068,13 @@ let _clipFsFresh = false; // a [CLIPFS] arrived in the current LS reply (cleared
 function _clipListFeed(src, text) {
   // Clips-partition storage (arrives just before the list on ?REC,LS).
   if (text.startsWith('[CLIPFS]')) {
-    try { _renderClipStorage(JSON.parse(text.slice(8))); _clipFsFresh = true; } catch (_) {}
+    try { const fs = JSON.parse(text.slice(8)); _clipFsLast = fs; _renderClipStorage(fs); _clipFsFresh = true; } catch (_) {}
     return true;
   }
   // ── New per-item format ──
   if (text.startsWith('[CLIPLIST:BEGIN]')) { _clipItems = { src, items: [] }; return true; }
   if (text.startsWith('[CLIPLIST:END]')) {
-    if (_clipItems && _clipItems.src === src) { renderClips(_clipItems.items); _clipItems = null; }
+    if (_clipItems && _clipItems.src === src) { _clipListResolve(_clipItems.items); renderClips(_clipItems.items); _clipItems = null; }
     // A completed list with NO [CLIPFS] in the same reply = firmware that doesn't
     // report storage — hide the bar rather than leave a previous board's numbers.
     if (!_clipFsFresh) { const cs = document.getElementById('clips-storage'); if (cs) cs.style.display = 'none'; }
@@ -6469,6 +6495,163 @@ async function clipDownloadToFile(name, btn) {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = label; }
   }
+}
+
+// Download EVERY clip, verified, for a bundle. Returns {clips, skipped}.
+// A clip that will not transfer completely is SKIPPED and named — never banked
+// half-written, and never silently omitted either.
+async function clipsDownloadAll(onProgress) {
+  const items = await clipsListOnce();
+  if (!items.length) return { clips: [], skipped: [] };
+
+  // Concrete warning, not a vague one: [CLIPITEM] carries bytes and (on current
+  // firmware) the event count, so we can state size and a real time estimate.
+  const totalBytes = items.reduce((s, c) => s + (+c.bytes || 0), 0);
+  const totalEv    = items.reduce((s, c) => s + (+c.n || 0), 0);
+  // Mesh throughput is the binding constraint; ~150 events/s is the measured
+  // ceiling of the bridge's UART drain. USB is limited by nothing that matters.
+  const secs = viaWcbActive ? Math.ceil(totalEv / 150) : Math.ceil(totalEv / 2000);
+  const mins = secs >= 90 ? `${Math.ceil(secs / 60)} minutes` : `${Math.max(1, secs)} seconds`;
+  const msg = `Download all ${items.length} clip(s)?\n\n` +
+              `${_fmtBytes(totalBytes)}${totalEv ? ` · ${totalEv} events` : ''}\n` +
+              `Estimated ${mins} over ${viaWcbActive ? 'the WCB mesh' : 'Direct USB'}.` +
+              (viaWcbActive ? '\n\nThe mesh is much slower than USB for this. Direct USB is worth it for a full backup.' : '');
+  if (!confirm(msg)) return null;
+
+  const clips = [], skipped = [];
+  for (let i = 0; i < items.length; i++) {
+    const nm = items[i].name;
+    if (onProgress) onProgress(i, items.length, nm);
+    try {
+      clips.push(clipToFileObject(await clipDownloadVerified(nm)));
+    } catch (e) {
+      skipped.push({ name: nm, why: e.message });
+    }
+  }
+  return { clips, skipped };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Clip restore (write a clip file back onto the droid)
+// ════════════════════════════════════════════════════════════════════════════
+// Uses the SAME ACK-gated upload the timeline editor uses: EDITBEGIN, then
+// indexed EDITEV whose ACK echoes the index (so the board writes AT that index —
+// a retry after a lost ACK cannot append a duplicate), then EDITEND.
+//
+// EDITEND OVERWRITES silently — saveClip opens the .ncr truncating with no
+// existence check — and [CLIPITEM] carries no mtime, so nothing can tell whether
+// the backup copy or the on-droid copy is newer. Blanket overwrite is therefore
+// unsafe BY CONSTRUCTION: it would let a month-old backup destroy a clip
+// recorded yesterday, unrecoverably. Callers must resolve collisions first;
+// this function just writes what it is told to write.
+async function clipRestoreOne(clip, destName, onProgress) {
+  const events = clip.events || [];
+  if (!events.length) throw new Error('clip has no events');
+
+  const beginP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:BEGIN'));
+  await sendRcCli('?REC,EDITBEGIN', true);
+  const begin = await beginP;
+  if (!begin.includes('OK')) throw new Error('board rejected EDITBEGIN (busy recording or replaying?)');
+
+  for (let i = 0; i < events.length; i++) {
+    const cmdStr = '?REC,EDITEV,' + i + ',' + JSON.stringify(events[i]);
+    // Over the bridge the whole relayed line must fit one ESP-NOW packet.
+    if (viaWcbActive && cmdStr.length > 180)
+      throw new Error(`event ${i + 1}/${events.length} is too large for the WCB bridge (${cmdStr.length} chars) — restore over Direct USB`);
+    const ackMark = '[CLIPUL:ACK,' + i + ']';
+    let ok = false;
+    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+      try {
+        const p = _tlWaitForMarker(t => t.startsWith(ackMark) || t.startsWith('[CLIPUL:NAK'));
+        await sendRcCli(cmdStr, true);
+        ok = (await p).startsWith(ackMark);
+      } catch (_) { /* timeout — retry; the write is idempotent by index */ }
+    }
+    if (!ok) throw new Error(`event ${i + 1}/${events.length} rejected after 3 attempts`);
+    if (onProgress && (i % 10 === 0)) onProgress(i + 1, events.length);
+  }
+
+  const endP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:END'));
+  await sendRcCli('?REC,EDITEND,' + destName, true);
+  const end = await endP;
+  if (!end.includes('OK')) {
+    const m = end.match(/\[CLIPUL:END,ERR,([^\]]*)\]/);
+    throw new Error('board rejected the save' + (m ? ' — ' + m[1] : ''));
+  }
+  return events.length;
+}
+
+// Read back what actually landed on flash. listClips RE-OPENS each .ncr and
+// reads its header, so the reported event count is a genuine flash read-back,
+// not an echo of what we sent. Costs one CLI round trip per restored clip and
+// catches a truncated write (flash full) that EDITEND still reported OK.
+async function clipVerifyOnBoard(destName, expectCount) {
+  try {
+    const items = await clipsListOnce();
+    const hit = items.find(c => c.name === destName);
+    if (!hit) return 'clip is not listed on the board after saving';
+    if (hit.n !== undefined && +hit.n !== +expectCount)
+      return `board holds ${hit.n} events, expected ${expectCount}`;
+    return null;                       // verified
+  } catch (_) {
+    return null;                       // could not check — do not fail the restore on this
+  }
+}
+
+// Restore a set of clips onto the droid. Returns a human summary.
+//
+// DEFAULTS TO SKIP-EXISTING, deliberately. EDITEND overwrites silently and
+// [CLIPITEM] carries no mtime, so nothing here can tell whether the backup copy
+// or the on-droid copy is newer — a blanket overwrite would let a month-old
+// backup destroy a clip recorded yesterday, with no undo. The user is asked per
+// collision instead, and the safe answer is the default.
+async function clipsRestore(clips) {
+  if (!clips || !clips.length) return 'No clips in that file.';
+  if (!port && !sharedActive) throw new Error('Connect to the board first.');
+
+  const existing = await clipsListOnce().catch(() => []);
+  const haveNames = new Set(existing.map(c => c.name));
+
+  // Pre-flight the flash. A full clips partition mid-restore destroys the clip
+  // being overwritten AND leaves a truncated .ncr that loads silently short —
+  // so refuse up front rather than discover it halfway.
+  if (_clipFsLast && _clipFsLast.total) {
+    const free = (+_clipFsLast.total - +_clipFsLast.used);
+    // ~140 B/event on flash, plus header; 30% headroom for LittleFS overhead.
+    const need = clips.reduce((s, c) => s + (c.events || []).length * 140, 0) * 1.3;
+    if (need > free)
+      throw new Error(`Not enough space on the clips partition — need about ${_fmtBytes(need)}, ` +
+                      `${_fmtBytes(free)} free. Delete some clips first.`);
+  }
+
+  let written = 0; const skipped = [], failed = [];
+  for (const clip of clips) {
+    let dest = clip.name;
+    if (haveNames.has(dest)) {
+      const choice = prompt(
+        `"${dest}" already exists on the droid.\n\n` +
+        `The board does not record when a clip was made, so neither of us can tell which copy is newer — ` +
+        `overwriting is not undoable.\n\n` +
+        `Type:  skip  (default) · overwrite · or a NEW NAME to restore alongside it`, 'skip');
+      if (choice === null) break;                       // Cancel = stop the whole restore
+      const c = choice.trim();
+      if (!c || /^skip$/i.test(c)) { skipped.push(dest); continue; }
+      if (!/^overwrite$/i.test(c)) dest = c.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 30);
+      if (!dest) { skipped.push(clip.name); continue; }
+    }
+    try {
+      const n = await clipRestoreOne(clip, dest);
+      const bad = await clipVerifyOnBoard(dest, n);     // genuine flash read-back
+      if (bad) failed.push(`${dest} (${bad})`); else { written++; haveNames.add(dest); }
+    } catch (e) {
+      failed.push(`${clip.name} (${e.message})`);
+      sendRcCli('?REC,EDITCANCEL', true);               // never leave the board wedged in ST_EDITING
+    }
+  }
+  clipsRefresh();
+  return `Restored ${written} clip(s).` +
+         (skipped.length ? `\nSkipped (already on the droid): ${skipped.join(', ')}` : '') +
+         (failed.length  ? `\nFailed: ${failed.join('; ')}` : '');
 }
 
 function _clipDlFeed(src, text) {
@@ -17805,6 +17988,64 @@ function exportConfigJson() {
   _cfgDownloadTextFile(name, JSON.stringify(out, null, 2));
   showToast('Exported full config backup (JSON)', 'success');
 }
+
+// Config + EVERY clip, in one file. `clips` is an OPTIONAL member of the same
+// config-backup/v1 shape, so this file restores through the ordinary Import and
+// an older tool simply ignores the extra key.
+async function clipsDownloadAllToFile(btn) {
+  if (!port && !sharedActive) { alert('Connect to the board first.'); return; }
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; }
+  const t = showToast('Enumerating clips…', 'info', 0);
+  try {
+    const res = await clipsDownloadAll((i, n, nm) => {
+      if (t) t.textContent = `Downloading clip ${i + 1}/${n} — ${nm}…`;
+    });
+    _dismissToast(t);
+    if (res === null) return;                       // user declined the size warning
+    const out = { navicore: 'config-backup/v1', savedAt: Date.now(), note: '', config,
+                  clips: res.clips };
+    _cfgDownloadTextFile('navicore-backup-' + new Date().toISOString().slice(0, 10) + '.json',
+                         JSON.stringify(out, null, 2));
+    // Name what did NOT make it. A backup that quietly omits clips is the kind
+    // you only discover is short when you need it.
+    if (res.skipped.length)
+      alert(`Saved config + ${res.clips.length} clip(s).\n\n` +
+            `These could NOT be downloaded completely and were LEFT OUT:\n` +
+            res.skipped.map(s => `  • ${s.name} — ${s.why}`).join('\n') +
+            `\n\nTry again over Direct USB for those.`);
+    else
+      showToast(`Saved config + ${res.clips.length} clip(s)`, 'success');
+  } catch (e) {
+    _dismissToast(t);
+    alert('Backup failed, nothing was saved.\n\n' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+}
+
+// Restore clips from a clip/v1 file, or from the clips carried by a
+// config-backup/v1 bundle. Config is NOT touched here — use Import for that.
+function clipsImportFromFile() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.json,application/json';
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+    try {
+      const obj = JSON.parse(await f.text());
+      const clips = obj.clip ? [obj.clip] : (Array.isArray(obj.clips) ? obj.clips : null);
+      if (!clips || !clips.length) { alert('That file contains no clips.'); return; }
+      const t = showToast('Restoring…', 'info', 0);
+      try {
+        const summary = await clipsRestore(clips);
+        _dismissToast(t);
+        alert(summary);
+      } catch (e) { _dismissToast(t); alert('Restore failed.\n\n' + e.message); }
+    } catch (e) { alert('Could not read that file — ' + e.message); }
+  };
+  inp.click();
+}
 function exportConfigCsv() {
   // NOTE: the new-peer event (config.peerEvent = { alert, actions[] }) is
   // intentionally NOT in the CSV — its actions[] is a variable-length action
@@ -18084,7 +18325,21 @@ function handleConfigImportFile(event) {
         if (typeof _syncMaestroChFromConfig === 'function') _syncMaestroChFromConfig();
         if (typeof renderMaestroLocations === 'function')   renderMaestroLocations();
         if (typeof renderWledSlots === 'function')          renderWledSlots();
-        alert('Full config imported (JSON). Review it, then Save to write it to the NaviCore.');
+        // A bundle may carry clips. Offer them SEPARATELY and after the config,
+        // because the two commit differently: the config lands in the tool and
+        // waits for Save, while each clip is written to flash immediately and
+        // irreversibly. Rolling them into one silent action would hide that.
+        const bundled = Array.isArray(parsed.clips) ? parsed.clips : [];
+        if (bundled.length && (port || sharedActive) &&
+            confirm(`Config imported.\n\nThis file also contains ${bundled.length} clip(s).\n\n` +
+                    `Restore them to the droid now? Existing clips are skipped by default — ` +
+                    `you will be asked about each collision.\n\n` +
+                    `(Clips write to flash immediately. The config still needs Save.)`)) {
+          clipsRestore(bundled).then(s => alert(s)).catch(e => alert('Clip restore failed.\n\n' + e.message));
+        } else {
+          alert('Full config imported (JSON). Review it, then Save to write it to the NaviCore.' +
+                (bundled.length ? `\n\nThe file also holds ${bundled.length} clip(s) — open Clips → ⤒ Restore to write those.` : ''));
+        }
         input.value = '';
         return;
       }
