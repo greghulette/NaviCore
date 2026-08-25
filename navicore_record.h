@@ -542,12 +542,33 @@ inline int _cmpEventByTime(const void* a, const void* b) {
 //    heavier per-line pacing here would only stall loop() (worst case at the
 //    3000-event relay cap: ~0.75 s vs 6 s with per-line delay(2)). The CLI
 //    layer refuses relayed downloads above that cap (EDITLOAD in NaviCore.ino).
-//  * paced=false (direct USB): full speed, with a brief yield every 16 lines so
-//    the RTOS idle/WiFi tasks stay fed during a large clip.
+//  * paced=false (direct USB): gated on out.availableForWrite() per line, which
+//    both yields to the RTOS and — the actual point — stops the burst outrunning
+//    HWCDC's 8 KB TX ring. A full ring past the 50 ms write timeout drops the
+//    remainder of a write SILENTLY (see the loop comment), which is how a clip
+//    could arrive short over USB with nothing reporting it.
 inline void editStream(Print& out, bool paced = true) {
   out.printf("[CLIPDL:BEGIN]{\"count\":%lu,\"durationMs\":%lu,\"mode\":%u}\n",
              (unsigned long)_count, (unsigned long)clipDurationMs(), (unsigned)_mode);
   for (uint32_t i = 0; i < _count; i++) {
+    // ── USB: WAIT for TX room; do not just nap ──────────────────────────────
+    // Serial is HWCDC with an 8 KB TX ring and a 50 ms write timeout (both set
+    // in NaviCore.ino setup()). When the ring is full and STAYS full past that
+    // timeout, HWCDC::write() silently drops the REMAINDER of the write and
+    // returns a short count that Print::printf/println discard — so events
+    // vanish mid-stream with nothing reporting it, and the tool only notices at
+    // the end via the header count.
+    // The 8 KB sizing was reasoned about for "a full config print", which fits.
+    // A clip does not: at ~60 B/event anything past ~130 events overruns the
+    // ring and starts racing the host's read loop, so a browser busy for one
+    // 50 ms stretch loses a burst of events.
+    // A fixed delay(1) every 16 lines never asked whether the host had actually
+    // drained. This does. Costs one call when the host is keeping up (the common
+    // case), and is bounded so an absent host cannot wedge loop() — on timeout we
+    // write anyway and let the count check catch it, rather than truncating here.
+    if (!paced) {
+      for (int spin = 0; spin < 250 && out.availableForWrite() < 256; spin++) delay(1);
+    }
     const RecEvent& ev = _buf[i];
     if (ev.kind == REC_ACTION) {
       StaticJsonDocument<384> doc;
@@ -565,8 +586,10 @@ inline void editStream(Print& out, bool paced = true) {
                  (unsigned long)ev.tMs, (unsigned)REC_KF_HCRVOL, ev.u.kv.chan, ev.u.kv.vol);
     }
     if (paced) { if ((i & 3) == 3) delay(1); }
-    else if ((i & 15) == 15) delay(1);
+    // (unpaced/USB pacing is the availableForWrite wait at the top of the loop)
   }
+  // Drain before END so the terminator can't be the write that overruns the ring.
+  if (!paced) out.flush();
   out.println("[CLIPDL:END]");
 }
 
