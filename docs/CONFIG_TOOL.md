@@ -44,8 +44,18 @@ Three transports, chosen in the connect modal:
 | **Via WCB** | `connectViaWcbOpt()` | A tethered bridge WCB that relays to NaviCore at slot 20 |
 | **Shared port** | `connectSharedPort()` | A port already owned by another same-origin tab |
 
-Transport is auto-detected at connect: the tool pings, and `_pongSeen` decides whether it
-is talking to a NaviCore directly or needs the bridge wrapper.
+Transport is auto-detected at connect: the tool pings direct first, then — if nothing answers
+— flips to Via WCB and pings again.
+
+**Each probe phase takes an epoch (`_pongEpoch`), and a PONG only satisfies the epoch it
+arrived in.** A bare boolean cannot tell which phase a reply belongs to, so a board that
+answers *late* (stalled `loop()`, a busy USB host) replies after the direct phase gave up,
+that reply lands during the Via-WCB probe, and the tool concludes it is bridged — reporting
+"Connected via WCB" **with no WCB attached**. That is not cosmetic: Save strips WCB Network
+over the bridge, so a misdetected session silently refuses to write those settings.
+
+An auto-switch is also announced now, in a toast and the terminal. Changing transport changes
+behaviour, and if the user did not plug in a bridge it is a misdetection they need to see.
 
 **`WcbSerialHub`** (`serial-hub.js`) exists because a Web Serial port can be open in exactly
 one browsing context. One tab wins a Web Lock and becomes leader, owning the physical port;
@@ -563,6 +573,7 @@ will not reappear on their own.
 7. Push — the Pages workflow deploys `main` to `/config_tool` and any other branch to
    `/dev/<branch>/config_tool` automatically.
 8. Update the wiki if the feature is user-visible.
+| 2026-08-25 | _(uncommitted)_ | **Transport auto-detect no longer misreports a slow direct board as bridged.** Probe phases now take an epoch and a PONG only satisfies its own (§2) — a reply arriving after the direct phase gave up was being credited to the Via-WCB probe, so the tool showed "Connected via WCB" with nothing bridged, and Save then silently stripped WCB Network. An auto-switch is announced rather than silent. |
 
 ---
 
