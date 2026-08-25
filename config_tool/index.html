@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:30.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:36.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6395,7 +6395,11 @@ function _clipRangeFeed(text) {
 
 // Download one clip COMPLETELY, or throw. Never returns partial data — that is
 // the whole point. onProgress(got, total) is optional.
-async function clipDownloadVerified(name, onProgress) {
+// opts.allowPartial: return what arrived (with `missing` set) instead of throwing.
+// Backup callers must NOT set it — a partial clip must never be banked. The
+// timeline editor does, so an unrecoverable clip still opens read-only rather
+// than showing an error over a blank canvas.
+async function clipDownloadVerified(name, onProgress, opts) {
   // Smaller slices over the mesh: each event line is an RTERM packet and the
   // bridge's relay queue is only 16 deep, so a big burst is exactly what gets
   // dropped. Over USB the availableForWrite gate makes large slices safe.
@@ -6456,15 +6460,18 @@ async function clipDownloadVerified(name, onProgress) {
     if (onProgress) onProgress(got.size, total);
   }
 
-  if (got.size !== total) {
-    const missing = total - got.size;
+  const missing = total - got.size;
+  if (missing && !(opts && opts.allowPartial)) {
     throw new Error(`${missing} of ${total} events would not transfer` +
                     (viaWcbActive ? ' — the WCB mesh is dropping packets; try Direct USB' : ''));
   }
 
+  // Indices make the gaps KNOWN, so a partial result is ordered and honest —
+  // unlike the legacy stream, where a dropped line could splice two events into
+  // one that parsed fine and carried a nonsense timestamp.
   const events = [];
-  for (let i = 0; i < total; i++) events.push(got.get(i));
-  return { name, header: { count: total, ...meta }, events };
+  for (let i = 0; i < total; i++) if (got.has(i)) events.push(got.get(i));
+  return { name, header: { count: total, ...meta }, events, missing };
 }
 
 // One clip → one file. The single-clip shape is deliberately the same object the
@@ -6816,8 +6823,28 @@ function openTimelineEditor(name) {
   _tlStopPlay(); _tlLive = false; _tlLiveLast = {}; _tlUpdateLiveBtns();   // fresh session starts disarmed
   const svg = document.getElementById('tl-svg');
   if (svg) svg.innerHTML = '';
-  _tlDownload = { name, src: null, header: null, events: [], evBuf: null };
-  sendRcCli('?REC,EDITLOAD,' + name);
+  // Use the VERIFIED ranged downloader, not the legacy whole-clip stream. The
+  // legacy path has no per-event index, so it cannot retry a dropped event —
+  // and worse, its continuation handling appends to whatever came before with no
+  // ownership check, so a dropped line can fuse two events into one that parses
+  // fine and carries a nonsense timestamp (which is how a 22-second clip ends up
+  // reporting a 2-hour length). Indices make gaps known instead of guessed.
+  // allowPartial keeps the read-only fallback: an unrecoverable clip still opens,
+  // rather than showing an error over a blank canvas.
+  _tlDownload = null;
+  clipDownloadVerified(name, (g, n) => _tlSetStatus(`Loading ${g}/${n} events…`), { allowPartial: true })
+    .then(dl => {
+      _tlBuildModelFromEvents(dl.name, dl.header, dl.events, dl.missing || 0);
+      if (dl.missing) {
+        _tlSetStatus(
+          `⚠ Incomplete — ${dl.missing} of ${dl.header.count} events would not transfer. ` +
+          'READ-ONLY: saving is disabled so this cannot overwrite the full clip on the droid. ' +
+          'Motion BETWEEN the keyframes shown is not trustworthy — a dropped keyframe draws as a ' +
+          'straight line, not a gap. ' +
+          (viaWcbActive ? 'Direct USB is far more reliable for this.' : 'Close and reopen to retry.'));
+      }
+    })
+    .catch(e => _tlShowLoadError('Could not load "' + name + '" — ' + e.message));
 }
 
 function _tlShowLoadError(msg) {
