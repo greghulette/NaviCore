@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.13:57.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:04.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4500,13 +4500,17 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
   // auto-enables with no manual toggle, and if neither answers we revert to
   // direct so no stale Via-WCB flag lingers. (Replaces the old status-text
   // sniff, which a real direct board would set within the first ping.)
+  // Each phase takes its own epoch so a LATE reply from the previous phase can
+  // never satisfy this one — see _pongEpoch. Without that, a slow direct board
+  // is misdetected as a bridged one.
   const pingForPong = async () => {
+    const ep = ++_pongEpoch;
     _pongSeen = false;
-    for (let i = 0; i < 6 && !_pongSeen; i++) {
+    for (let i = 0; i < 6 && _pongSeenEpoch !== ep; i++) {
       await sendJSON({ type: 'PING' });
       await new Promise(r => setTimeout(r, 500));
     }
-    return _pongSeen;
+    return _pongSeenEpoch === ep;
   };
   if (forceViaWcb) onViaWcbToggle(true);      // caller KNOWS it's a WCB — start in Via WCB, skip the direct probe
   let pongOk = await pingForPong();          // try current transport (Direct USB, or forced Via WCB)
@@ -4517,6 +4521,12 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
     if (!pongOk) {
       onViaWcbToggle(false);                  // neither answered — don't leave a stale flag
       document.getElementById('status-text').textContent = 'Waiting for board…';
+    } else {
+      // Say so. Silently switching transport changes real behaviour — Save
+      // strips WCB Network over the bridge — and if the user did not plug in a
+      // WCB, this is a MISDETECTION they need to see rather than discover later.
+      showToast('No direct reply — switched to Via WCB. If nothing is bridged, disconnect and retry.', 'warn', 8000);
+      appendTerminalLine('< [link] no direct PONG — auto-switched to Via WCB', 'rx');
     }
   }
   if (!pongOk) console.warn('PING never received PONG (direct or Via WCB) — proceeding anyway.');
@@ -5272,6 +5282,15 @@ async function sendLine(msg, silent = false) {
 const RC_WCB_DEVICE_ID = 20;
 let viaWcbActive = false;   // false = Direct USB mode; true = bridging via tethered WCB
 let _pongSeen    = false;   // set by the PONG handler — connect uses it to auto-detect the transport
+// Transport auto-detect probes in PHASES (direct first, then Via WCB), and a
+// bare boolean cannot tell which phase a PONG belongs to. A board that answers
+// LATE — stalled loop(), a busy USB host — replies after the direct phase has
+// given up, and that reply then lands during the Via-WCB probe and is credited
+// to it: the tool reports "Connected via WCB" with no WCB attached, and Save
+// silently strips WCB Network because it believes it is bridged.
+// So each probe takes an epoch, and a PONG only satisfies the epoch it arrived in.
+let _pongEpoch     = 0;
+let _pongSeenEpoch = -1;
 let _rcTrigReleaseTimer = null;   // setTimeout handle for rc_trig auto-release
 // Via WCB: SBUS RECEIVER block freshness tracking.  PWM_UPDATE carries
 // the RC's local SBUS metrics inline (Direct USB path).  Over WCB we
@@ -8912,6 +8931,7 @@ function handleBoardMessage(line) {
 
   if (msg.type === 'PONG') {
     _pongSeen = true;
+    _pongSeenEpoch = _pongEpoch;   // stamp WHICH probe phase this reply belongs to
     document.getElementById('status-text').textContent =
       viaWcbActive ? `Connected via WCB → RC #${RC_WCB_DEVICE_ID}` : 'Connected ✓';
     // The board reports its firmware version (FW_VERSION = base_DTG)
