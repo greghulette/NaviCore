@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.14:43.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.15:34.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -19362,10 +19362,39 @@ async function _cfgKey(user, pw) {
     { name: 'PBKDF2', salt: enc.encode(CFG_KEY_SALT), iterations: CFG_PBKDF2_ITERS, hash: 'SHA-256' },
     base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
+// ── gzip, BEFORE encryption ──────────────────────────────────────────────────
+// Order matters and is not a preference: ciphertext is indistinguishable from
+// random, so compressing AFTER encrypting saves nothing. Clip-bearing backups
+// are JSON full of repeated keys and small integers and typically shrink several
+// fold, which is what keeps them inside the Worker's per-slot cap.
+// A gzip payload is tagged so a reader can tell it from a plain one — old
+// backups stay readable, and a browser without CompressionStream just stores
+// uncompressed rather than failing.
+const CFG_GZIP_MAGIC = 0x1f;   // gzip's own first byte, used as the sniff
+async function _cfgMaybeGzip(bytes) {
+  if (typeof CompressionStream === 'undefined') return { bytes, gz: false };
+  try {
+    const cs = new CompressionStream('gzip');
+    const w  = cs.writable.getWriter(); w.write(bytes); w.close();
+    const buf = await new Response(cs.readable).arrayBuffer();
+    return { bytes: new Uint8Array(buf), gz: true };
+  } catch (_) { return { bytes, gz: false }; }
+}
+async function _cfgMaybeGunzip(bytes) {
+  // Sniff the gzip header rather than trusting a flag we might not have written.
+  if (!(bytes.length > 2 && bytes[0] === CFG_GZIP_MAGIC && bytes[1] === 0x8b)) return bytes;
+  if (typeof DecompressionStream === 'undefined')
+    throw new Error('this backup is compressed and this browser cannot decompress it');
+  const ds = new DecompressionStream('gzip');
+  const w  = ds.writable.getWriter(); w.write(bytes); w.close();
+  return new Uint8Array(await new Response(ds.readable).arrayBuffer());
+}
+
 async function _cfgEncrypt(user, pw, plaintext) {
   const key = await _cfgKey(user, pw);
   const iv  = crypto.getRandomValues(new Uint8Array(12));
-  const ct  = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext)));
+  const { bytes: body } = await _cfgMaybeGzip(new TextEncoder().encode(plaintext));
+  const ct  = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, body));
   const out = new Uint8Array(iv.length + ct.length);
   out.set(iv, 0); out.set(ct, iv.length);
   // Chunk the byte→string conversion: fromCharCode.apply over a whole large array
@@ -19380,7 +19409,8 @@ async function _cfgDecrypt(user, pw, b64) {
   const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
   const key = await _cfgKey(user, pw);
   const pt  = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, key, raw.slice(12));
-  return new TextDecoder().decode(pt);
+  // Transparent: pre-gzip backups decode exactly as before (the sniff misses).
+  return new TextDecoder().decode(await _cfgMaybeGunzip(new Uint8Array(pt)));
 }
 // Worker I/O on the /cfg/<key> route.
 async function _cfgPut(key, body) {
@@ -19431,19 +19461,46 @@ function _cfgSecureContextOk() {
   return false;
 }
 // Back up the CURRENT live config under (user, pw), with an optional human note.
-async function cfgBackup(user, pw, note) {
+// The Worker rejects a slot body over CFG_MAX_BYTES, and the check there is on
+// the base64 STRING, which is 4/3 of the ciphertext. Refuse client-side with a
+// useful message rather than eating a bare 413 — and refuse BEFORE the PUT,
+// because a slot write that lands while the manifest write fails leaves the ring
+// describing the wrong contents (see below).
+const CFG_SLOT_MAX_B64 = 4 * 1024 * 1024;   // keep in step with the Worker's CFG_MAX_BYTES
+
+async function cfgBackup(user, pw, note, clips) {
   if (!_cfgSecureContextOk()) return;
   if (!user || !pw) throw new Error('enter a username and password — together they encrypt + address the backup');
   const base     = await _cfgSlotBase(user, pw);
   const manifest = await _cfgLoadManifest(user, pw);
   const idx      = manifest.next % CFG_BACKUP_MAX;
-  const blob     = await _cfgEncrypt(user, pw, JSON.stringify({ v: 1, savedAt: Date.now(), config }));
+  const payload  = { v: 1, savedAt: Date.now(), config };
+  if (clips && clips.length) payload.clips = clips;
+  const blob     = await _cfgEncrypt(user, pw, JSON.stringify(payload));
+  if (blob.length > CFG_SLOT_MAX_B64)
+    throw new Error(`this backup is ${_fmtBytes(blob.length)} after compression — over the ` +
+                    `${_fmtBytes(CFG_SLOT_MAX_B64)} cloud slot limit. Back up without clips, or use the local file export.`);
   await _cfgPut(base + 's' + idx, blob);
   manifest.list = manifest.list.filter(e => e.i !== idx);   // slot reuse overwrites the oldest
-  manifest.list.push({ i: idx, ts: Date.now(), size: blob.length, note: (note || '').slice(0, 80) });
+  manifest.list.push({ i: idx, ts: Date.now(), size: blob.length, note: (note || '').slice(0, 80),
+                      clips: (clips && clips.length) || 0 });
   if (manifest.list.length > CFG_BACKUP_MAX) manifest.list = manifest.list.slice(-CFG_BACKUP_MAX);
   manifest.next = (idx + 1) % CFG_BACKUP_MAX;
-  await _cfgPut(base + 'm', await _cfgEncrypt(user, pw, JSON.stringify(manifest)));   // manifest encrypted too
+  // The slot is already durable at this point. If the manifest PUT fails, the
+  // ring describes the PREVIOUS backup while the slot holds the new one — a
+  // restore would then quietly return different content than the list advertises,
+  // and `next` stays un-advanced so the following backup overwrites this slot.
+  // The window was microscopic with a ~20 KB config; with clip-sized payloads and
+  // a shared hourly rate limit it is not. Retry before giving up, and if it still
+  // fails say plainly which half landed.
+  const mBlob = await _cfgEncrypt(user, pw, JSON.stringify(manifest));
+  let mErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { await _cfgPut(base + 'm', mBlob); mErr = null; break; }
+    catch (e) { mErr = e; await new Promise(r => setTimeout(r, 400 * (attempt + 1))); }
+  }
+  if (mErr) throw new Error('the backup data uploaded, but its index did not (' + mErr.message +
+                            '). Back up again — this slot may be listed with the previous backup\'s details.');
   return manifest;
 }
 // Rename a backup's note in place — rewrites ONLY the (encrypted) manifest, no config
@@ -19474,6 +19531,17 @@ async function cfgRestore(user, pw, i) {
   if (typeof _syncMaestroChFromConfig === 'function') _syncMaestroChFromConfig();
   if (typeof renderMaestroLocations === 'function')   renderMaestroLocations();
   if (typeof renderWledSlots === 'function')          renderWledSlots();
+
+  // Clips are offered SEPARATELY and after the config, because the two commit
+  // very differently: the config lands in the tool and waits for Save, while each
+  // clip is written to the droid's flash immediately and cannot be undone.
+  // Restoring both silently under one click would hide that asymmetry.
+  if (Array.isArray(obj.clips) && obj.clips.length && (port || sharedActive) &&
+      confirm(`Config restored to the tool.\n\nThis backup also holds ${obj.clips.length} clip(s).\n\n` +
+              `Write them to the droid now? Existing clips are skipped by default — you will be ` +
+              `asked about each collision.\n\n(Clips write to flash immediately. The config still needs Save.)`)) {
+    clipsRestore(obj.clips).then(s => alert(s)).catch(e => alert('Clip restore failed.\n\n' + e.message));
+  }
   return obj;
 }
 // Save `text` to the user's disk as a downloaded file (mirrors the config-tool
@@ -19587,6 +19655,9 @@ function cfgOpenCloudModal() {
     + '<input id="cfg-cloud-remember" type="checkbox"' + (saved.p ? ' checked' : '') + '> Remember username + password on this device</label>'
     + '<div style="display:flex;gap:8px;margin-bottom:14px">'
     + '<input id="cfg-cloud-note" type="text" maxlength="80" placeholder="note for this backup (optional) — e.g. Leia dome v3" style="flex:1;min-width:0;' + inputCss + '">'
+    + '<label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap" '
+    + 'title="Download every clip and include it in this backup. Clips are in NO other backup — flash is otherwise the only copy. Slow over the WCB mesh.">'
+    + '<input type="checkbox" id="cfg-cloud-clips" checked> include clips</label>'
     + '<button id="cfg-cloud-backup" class="btn btn-blue" style="padding:7px 14px;white-space:nowrap">⤴ Back up now</button></div>'
     + '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">'
     + '<button id="cfg-cloud-upload" class="btn btn-ghost" style="padding:6px 12px;font-size:12px" title="Encrypt a config .json file from disk and store it as a cloud backup">⤒ Upload a config file → cloud</button>'
@@ -19674,11 +19745,27 @@ function cfgOpenCloudModal() {
     const { user, pw } = creds();
     if (!user || !pw) { setStatus('Enter a username and password first.', true); return; }
     _persistCreds();
-    setStatus('Encrypting + uploading…');
     try {
-      await cfgBackup(user, pw, $('cfg-cloud-note').value);
+      // Clips first: they have to come off the droid before anything can be
+      // encrypted, and that is the slow part. Only VERIFIED clips are included —
+      // clipsDownloadAll skips any that will not transfer completely and names
+      // them, because a backup that quietly holds a truncated clip is worse than
+      // one that says it is missing.
+      let clips = null;
+      const wantClips = $('cfg-cloud-clips') && $('cfg-cloud-clips').checked;
+      if (wantClips) {
+        if (!port && !sharedActive) { setStatus('Connect to the board to include clips (or untick it).', true); return; }
+        const res = await clipsDownloadAll((i, n, nm) => setStatus(`Downloading clip ${i + 1}/${n} — ${nm}…`));
+        if (res === null) { setStatus(''); return; }      // declined the size warning
+        clips = res.clips;
+        if (res.skipped.length)
+          alert(`${res.skipped.length} clip(s) could NOT be downloaded completely and are NOT in this backup:\n` +
+                res.skipped.map(s => `  • ${s.name} — ${s.why}`).join('\n'));
+      }
+      setStatus('Encrypting + uploading…');
+      await cfgBackup(user, pw, $('cfg-cloud-note').value, clips);
       $('cfg-cloud-note').value = '';
-      setStatus('✓ Backed up.');
+      setStatus('✓ Backed up.' + (clips ? ` (${clips.length} clip(s) included)` : ''));
       renderList();
     } catch (e) { setStatus(e.message || 'backup failed', true); }
   });
