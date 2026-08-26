@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.15:37.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.09:15.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9576,6 +9576,87 @@ function _parseMaestroSettings(xmlText) {
 }
 
 // Look up imported range/name for a logical Maestro slot (1-8) + channel (0-31).
+// ── Per-channel endpoint editor ──────────────────────────────────────────────
+// Until now these endpoints could ONLY arrive by importing a Control Center
+// settings file, which leaves you stuck whenever a channel's real travel differs
+// from what that file says — and they are not cosmetic. They set the timeline's
+// vertical scale, they CLAMP every timeline edit (_tlClampUs), and
+// _applyMaestroRangesToKnobs pushes them onto every passthrough knob output
+// targeting the Maestro, so a wrong endpoint is also what your stick maps to.
+//
+// Stored in QUARTER-microseconds (the Pololu wire unit) — this edits in µs and
+// converts, because µs is what every other field in the tool shows.
+function _openMaestroChEditor(slot) {
+  const key = String(slot);
+  const cur = _maestroCh[key] || {};
+  const rows = Object.keys(cur).map(Number).sort((a, b) => a - b);
+
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay open';
+  ov.style.zIndex = 4000;
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  ov.innerHTML =
+    '<div class="modal" style="max-width:520px;width:92%">' +
+      '<div class="modal-header"><span class="modal-title">Maestro ' + slot + ' — channel endpoints</span></div>' +
+      '<div style="padding:14px 16px;max-height:60vh;overflow:auto">' +
+        '<div class="noconn" style="margin-bottom:10px">Values are in <b>µs</b>. These set the timeline scale, <b>clamp timeline edits</b>, ' +
+        'and are pushed onto any passthrough knob output targeting this Maestro — so they should match the servo\'s real travel. ' +
+        'Leave a channel out entirely to let the timeline auto-scale to the recorded data and drop the clamp.</div>' +
+        '<div id="mae-ch-rows"></div>' +
+        '<button type="button" class="btn btn-ghost" id="mae-ch-add" style="font-size:11px;padding:3px 10px;margin-top:8px">+ add channel</button>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+        '<button class="btn btn-ghost" id="mae-ch-cancel">Cancel</button>' +
+        '<button class="btn btn-success" id="mae-ch-ok">Apply</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  const host = ov.querySelector('#mae-ch-rows');
+  const addRow = (ch, name, minUs, maxUs) => {
+    const r = document.createElement('div');
+    r.style.cssText = 'display:grid;grid-template-columns:52px 1fr 74px 74px auto;gap:6px;align-items:center;margin-bottom:5px';
+    r.innerHTML =
+      '<input type="number" min="0" max="31" value="' + (ch ?? '') + '" class="mc-ch" style="font-size:11px;padding:2px 4px" title="Channel 0-31">' +
+      '<input type="text" maxlength="23" value="' + esc(name || '') + '" class="mc-nm" placeholder="name (optional)" style="font-size:11px;padding:2px 4px">' +
+      '<input type="number" min="0" max="3000" value="' + (minUs ?? '') + '" class="mc-min" placeholder="min µs" style="font-size:11px;padding:2px 4px">' +
+      '<input type="number" min="0" max="3000" value="' + (maxUs ?? '') + '" class="mc-max" placeholder="max µs" style="font-size:11px;padding:2px 4px">' +
+      '<button type="button" class="btn btn-ghost mc-del" style="font-size:11px;padding:2px 7px" title="Remove this channel">✕</button>';
+    r.querySelector('.mc-del').addEventListener('click', () => r.remove());
+    host.appendChild(r);
+  };
+  if (rows.length) rows.forEach(ch => addRow(ch, cur[ch].name, Math.round((+cur[ch].min || 0) / 4), Math.round((+cur[ch].max || 0) / 4)));
+  else addRow('', '', '', '');
+  ov.querySelector('#mae-ch-add').addEventListener('click', () => addRow('', '', '', ''));
+
+  const close = () => ov.remove();
+  ov.querySelector('#mae-ch-cancel').addEventListener('click', close);
+  ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  ov.querySelector('#mae-ch-ok').addEventListener('click', () => {
+    const map = {};
+    let bad = null;
+    host.querySelectorAll(':scope > div').forEach(r => {
+      const ch = parseInt(r.querySelector('.mc-ch').value, 10);
+      const mn = parseInt(r.querySelector('.mc-min').value, 10);
+      const mx = parseInt(r.querySelector('.mc-max').value, 10);
+      if (!Number.isFinite(ch)) return;                        // blank row — ignore
+      if (ch < 0 || ch > 31) { bad = 'channel ' + ch + ' is out of range (0-31)'; return; }
+      if (!Number.isFinite(mn) || !Number.isFinite(mx)) { bad = 'channel ' + ch + ' needs both a min and a max'; return; }
+      if (mn >= mx) { bad = 'channel ' + ch + ': min must be below max'; return; }
+      map[String(ch)] = { min: mn * 4, max: mx * 4, name: (r.querySelector('.mc-nm').value || '').slice(0, 23) };
+    });
+    if (bad) { alert(bad); return; }
+    if (Object.keys(map).length) _maestroCh[String(slot)] = map; else delete _maestroCh[String(slot)];
+    // Mirror into the config so it persists with everything else — the config is
+    // authoritative and _syncMaestroChFromConfig rebuilds the mirror from it.
+    if (Array.isArray(config.maestros) && config.maestros[slot - 1])
+      config.maestros[slot - 1].channels = _maestroChSlotToArray(slot);
+    close();
+    renderMaestroLocations();
+    showToast('Maestro ' + slot + ' endpoints updated — Save to write them to the droid', 'success');
+  });
+}
+
 function _maestroChInfo(slot, ch) {
   const s = _maestroCh[String(slot)];
   return (s && s[String(ch)]) || null;
@@ -9849,6 +9930,8 @@ function renderMaestroLocations() {
       <span style="display:flex;gap:4px;justify-content:flex-end">
         <button type="button" class="btn btn-ghost" data-mae-import="${i+1}" style="font-size:11px;padding:2px 8px"
                 title="Import this Maestro's settings file (Control Center → File → Save settings file…) to pull in its per-channel min/max endpoints and names.">📁 Import</button>
+        <button type="button" class="btn btn-ghost" data-mae-edit="${i+1}" style="font-size:11px;padding:2px 6px"
+                title="Edit this Maestro's per-channel endpoints and names by hand — for a channel whose real travel differs from the imported settings file, or to add one without importing at all.">✎</button>
         ${impN?`<button type="button" class="btn btn-ghost" data-mae-clearimp="${i+1}" style="font-size:11px;padding:2px 6px" title="Forget the imported settings for this Maestro.">✕</button>`:''}
       </span>
     `;
@@ -9913,6 +9996,9 @@ function renderMaestroLocations() {
   });
   wrap.querySelectorAll('[data-mae-clearimp]').forEach(btn => {
     btn.addEventListener('click', () => _clearMaestroImport(+btn.dataset.maeClearimp));
+  });
+  wrap.querySelectorAll('[data-mae-edit]').forEach(btn => {
+    btn.addEventListener('click', () => _openMaestroChEditor(+btn.dataset.maeEdit));
   });
   // 2-way read buttons (Local + Remote): fire the query CLI; the reply returns as a
   // [MAE:<slot>] marker handled by _maeReadFeed. GET carries the picked channel.
