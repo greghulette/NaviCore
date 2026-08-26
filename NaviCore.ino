@@ -1179,6 +1179,43 @@ static void scheduleEasingRepeat(uint8_t id) {
 
 // Re-send any owed easing repeats. Called from loop() (Core 1, same as every
 // other maestroWrite) — see the Core-0 rule above processSbus().
+// Re-send ONLY positive easing limits for slot `id`, bypassing the write cache.
+//
+// This is deliberately NOT reapplyMaestroEasing. That function's job includes
+// driving speed/accel to ZERO — it is how "easing Off" resets a channel to full
+// speed — and it is correct at the moment the easing actually changes. But a
+// REPEAT must never do that: the repeat exists because a write may have been
+// lost, and a channel with no profile has no NaviCore-owned value to restore. On
+// such a channel the Maestro's own EEPROM speed/accel limits are the truth, and
+// writing 0 over them silently removes limits the user configured in Control
+// Center. (reapplyMaestroEasing paired with maeSmoothInvalidateSlot did exactly
+// that: invalidation makes the cache 0xFFFF, so the 0 always got written.)
+//
+// So: same predicate as the SBUS hot path — an effective profile, and a channel
+// the profile actually defines — and unconditional writes for those only.
+static void reassertMaestroEasing(uint8_t id) {
+  if (id < 1 || id > RC_NUM_MAESTROS) return;
+  for (int i = 0; i < RC_NUM_KNOBS; i++) {
+    const RcKnob& kn = rcConfig.knobs[i];
+    if (kn.function != KF_MAESTRO_PASSTHROUGH) continue;
+    const int8_t eff = resolveKnobEasing(kn, id);
+    if (eff < 0 || eff >= RC_NUM_SMOOTH_PROFILES) continue;   // nothing to impose — leave the device alone
+    for (int m = 1; m <= 3; m++) {
+      const uint8_t       cnt  = rcKnobOutCount(kn, m);
+      const RcKnobOutput* outs = rcKnobOuts(kn, m);
+      for (uint8_t o = 0; o < cnt && o < RC_KNOB_MAX_OUTPUTS; o++) {
+        if (outs[o].target != id || outs[o].maestroCh >= 32) continue;
+        const uint8_t ch = outs[o].maestroCh;
+        const RcSmoothEntry& e = rcConfig.smoothProfiles[eff].entries[id - 1][ch];
+        if (!(e.speed || e.accel)) continue;                  // 0/0 = unset; not ours to drive
+        maestroSetSpeed(id, ch, e.speed > 16383 ? 16383 : e.speed);
+        maestroSetAccel(id, ch, e.accel);
+      }
+      if (!kn.modeAware) break;
+    }
+  }
+}
+
 static void easingRepeatTick() {
   // A clip owns the outputs while replaying, and calibration mutes dispatch;
   // same pair of gates processKnobs() applies before touching hardware.
@@ -1189,10 +1226,7 @@ static void easingRepeatTick() {
     if ((int32_t)(now - g_easeRepeatAt[id - 1]) < 0) continue;   // signed: millis() wrap
     g_easeRepeatLeft[id - 1]--;
     g_easeRepeatAt  [id - 1] = now + EASE_REPEAT_MS;
-    // Invalidate FIRST — reapplyMaestroEasing is cache-gated, so without this the
-    // repeat is a no-op against the very cache entry we suspect is lying.
-    maeSmoothInvalidateSlot(id);
-    reapplyMaestroEasing(id);
+    reassertMaestroEasing(id);
   }
 }
 
@@ -2261,6 +2295,15 @@ void RCRadio_Matrix_Buttons(int val) {
   tapState.holdFired   = false;
 }
 
+// Does this button's LONG PRESS tier actually have actions? A hold must not
+// consume the gesture on a button that has no long press configured — the tap
+// tier still has to fire on release, exactly as it did before tier 4 existed.
+static bool rcHoldTierConfigured(int buttonId) {
+  const int mode = buttonId / 100, btn = buttonId % 100;
+  if (mode < 1 || mode > 3 || btn < 1 || btn > RC_NUM_THRESHOLDS) return false;
+  return rcConfig.mappings[rcMapIndex(mode, btn)].t[RC_TAP_LONG - 1].count > 0;
+}
+
 // Long-press threshold reached with the button still down — dispatch tier 4 and
 // consume the gesture so the parked tap never fires. Called from processSbus()
 // (Core 1, same as every other matrix dispatch).
@@ -2761,8 +2804,14 @@ void processSbus() {
       // hold either: only a debounced NEUTRAL clears it, matching how the
       // release debounce already refuses to split one press into a phantom double.
       // Signed compare for the same millis()-wrap reason as checkDeferredTap.
+      // ...and ONLY when tier 4 actually has actions. Promoting unconditionally
+      // consumed the gesture even on a button with no long press configured, so
+      // holding it fired NOTHING where it previously fired the single-tap tier on
+      // release — a silent regression on every existing mapping. An unconfigured
+      // long press must leave the tap behaviour exactly as it was.
       if (tapState.holdActive && !tapState.holdFired && decoded == tapState.holdBtn &&
-          (int32_t)(millis() - (tapState.holdStartMs + (unsigned long)rcConfig.holdMs)) >= 0) {
+          (int32_t)(millis() - (tapState.holdStartMs + (unsigned long)rcConfig.holdMs)) >= 0 &&
+          rcHoldTierConfigured(tapState.deferredBtn)) {
         rcMatrixHoldFire();
       }
     }
@@ -3423,10 +3472,22 @@ bool execCliLine(const String& line) {
       // answer to that — the caller asks for a bounded slice — so the size
       // refusal applies only to the legacy whole-clip form.
       const bool relayed = rcSerial.captureArmed();
-      if (relayed && !ranged && navirec::eventCount() > 3000) {
-        Serial.printf("[CLIPDL:ERR]clip too large to edit over the WCB bridge (%lu events) — connect over USB, or use a ranged request\n",
-                      (unsigned long)navirec::eventCount());
-        return true;
+      // BOUND THE SLICE ON THE BOARD, not in the caller. `ranged` is true as soon
+      // as one extra comma is present, and `want` stays 0xFFFFFFFF when no count
+      // is supplied — so "?REC,EDITLOAD,<name>,0" is a ranged request for the
+      // ENTIRE clip. Skipping the size refusal for it (and the old message even
+      // suggested "use a ranged request") handed a hand-typed remote-terminal
+      // line the exact loop() stall the refusal exists to prevent: one ESP-NOW
+      // packet per event plus delay(1) every 4, i.e. ~6 s of blocked SBUS on a
+      // 24000-event clip. Protection must not depend on the client being polite.
+      if (relayed) {
+        const uint32_t MAX_RELAY_SLICE = 512;   // ~128 ms of pacing; the tool asks for 48
+        if (want > MAX_RELAY_SLICE) want = MAX_RELAY_SLICE;
+        if (!ranged && navirec::eventCount() > 3000) {
+          Serial.printf("[CLIPDL:ERR]clip too large to edit over the WCB bridge (%lu events) — connect over USB\n",
+                        (unsigned long)navirec::eventCount());
+          return true;
+        }
       }
       navirec::editStream(Serial, relayed, from, want, ranged);
     }

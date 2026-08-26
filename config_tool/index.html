@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.11:21.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.11:47.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6437,14 +6437,25 @@ async function clipDownloadVerified(name, onProgress, opts) {
 
   const runRange = async (from, count) => {
     await new Promise((resolve) => {
-      _clipRange = { hdr: null, tail: null, err: null, got, evBuf: null, pendIdx: -1,
-                     finish: null, timer: null };
+      // Own the session in a LOCAL, and check ownership before touching the
+      // global. done() previously read _clipRange, so if a second download
+      // started (two ⤓ clicks, or a backup while the editor loads a clip) it
+      // replaced the global and this session's 15 s timer then cleared the OTHER
+      // session's timer, nulled its state and resolved with it — cross-wiring the
+      // two and hanging the first download forever. Also made idempotent, so a
+      // reply arriving just as the timer fires cannot resolve twice.
+      const sess = { hdr: null, tail: null, err: null, got, evBuf: null, pendIdx: -1,
+                     finish: null, timer: null, settled: false };
       const done = () => {
-        clearTimeout(_clipRange.timer);
-        const s = _clipRange; _clipRange = null; resolve(s);
+        if (sess.settled) return;
+        sess.settled = true;
+        clearTimeout(sess.timer);
+        if (_clipRange === sess) _clipRange = null;   // never clear a newer session
+        resolve(sess);
       };
-      _clipRange.finish = done;
-      _clipRange.timer = setTimeout(done, 15000);   // a silent board must not hang the backup
+      sess.finish = done;
+      _clipRange = sess;
+      sess.timer = setTimeout(done, 15000);   // a silent board must not hang the backup
       sendRcCli(`?REC,EDITLOAD,${name},${from},${count}`, true);
     }).then(s => {
       if (s.err) throw new Error(s.err);
@@ -6597,7 +6608,7 @@ async function clipRestoreOne(clip, destName, onProgress) {
   for (let i = 0; i < events.length; i++) {
     const cmdStr = '?REC,EDITEV,' + i + ',' + JSON.stringify(events[i]);
     // Over the bridge the whole relayed line must fit one ESP-NOW packet.
-    if (viaWcbActive && cmdStr.length > 180)
+    if (viaWcbActive && new TextEncoder().encode(cmdStr).length > 180)
       throw new Error(`event ${i + 1}/${events.length} is too large for the WCB bridge (${cmdStr.length} chars) — restore over Direct USB`);
     const ackMark = '[CLIPUL:ACK,' + i + ']';
     let ok = false;
@@ -6650,7 +6661,18 @@ async function clipsRestore(clips) {
   if (!clips || !clips.length) return 'No clips in that file.';
   if (!port && !sharedActive) throw new Error('Connect to the board first.');
 
-  const existing = await clipsListOnce().catch(() => []);
+  // Do NOT swallow an enumeration failure. Falling back to [] makes every clip
+  // look new, which skips the collision prompt entirely and lets EDITEND
+  // overwrite EVERY existing clip silently — the exact blanket overwrite this
+  // whole flow is built to prevent. If we cannot see what is on the droid, we
+  // have no basis to decide anything, so refuse.
+  let existing;
+  try { existing = await clipsListOnce(); }
+  catch (e) {
+    throw new Error('Could not read the clip list from the board (' + e.message + ').\n\n' +
+                    'Refusing to restore: without knowing what is already there, this could ' +
+                    'silently overwrite clips that are newer than the backup.');
+  }
   const haveNames = new Set(existing.map(c => c.name));
 
   // Pre-flight the flash. A full clips partition mid-restore destroys the clip
@@ -6668,18 +6690,29 @@ async function clipsRestore(clips) {
   let written = 0; const skipped = [], failed = [];
   for (const clip of clips) {
     let dest = clip.name;
-    if (haveNames.has(dest)) {
+    let abort = false, skip = false;
+    // LOOP the collision check on the CURRENT dest. Checking once meant a typed
+    // "restore alongside it" name was accepted without ever being tested — so
+    // typing the name of a DIFFERENT existing clip destroyed that one instead,
+    // which is worse than the overwrite the prompt was protecting against.
+    // Sanitising to the firmware's own _clipPath char class first also means the
+    // name we test is the name EDITEND will actually write.
+    while (haveNames.has(dest)) {
       const choice = prompt(
         `"${dest}" already exists on the droid.\n\n` +
         `The board does not record when a clip was made, so neither of us can tell which copy is newer — ` +
         `overwriting is not undoable.\n\n` +
         `Type:  skip  (default) · overwrite · or a NEW NAME to restore alongside it`, 'skip');
-      if (choice === null) break;                       // Cancel = stop the whole restore
+      if (choice === null) { abort = true; break; }     // Cancel = stop the whole restore
       const c = choice.trim();
-      if (!c || /^skip$/i.test(c)) { skipped.push(dest); continue; }
-      if (!/^overwrite$/i.test(c)) dest = c.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 30);
-      if (!dest) { skipped.push(clip.name); continue; }
+      if (!c || /^skip$/i.test(c)) { skip = true; break; }
+      if (/^overwrite$/i.test(c)) break;                // deliberate — leave dest as-is
+      const clean = c.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 30);
+      if (!clean) { skip = true; break; }               // nothing usable left after sanitising
+      dest = clean;                                     // re-tested by the loop condition
     }
+    if (abort) break;
+    if (skip) { skipped.push(clip.name); continue; }
     try {
       const n = await clipRestoreOne(clip, dest);
       const bad = await clipVerifyOnBoard(dest, n);     // genuine flash read-back
@@ -7056,7 +7089,7 @@ async function _tlSave() {
       // Via WCB the whole relayed command must fit one ESP-NOW packet (~187
       // usable bytes with the CRC suffix) — a longer line is silently truncated
       // to malformed JSON and NAKs forever. Fail fast with a useful message.
-      if (viaWcbActive && cmdStr.length > 180) {
+      if (viaWcbActive && new TextEncoder().encode(cmdStr).length > 180) {
         throw new Error(`event ${i + 1}/${events.length} is too large to send over the WCB bridge ` +
                         `(${cmdStr.length} chars) — connect over USB, or shorten that action's command/note`);
       }
@@ -18904,7 +18937,7 @@ function handleConfigImportFile(event) {
           if (!Number.isFinite(buttonId) || buttonId < 1 || buttonId > RC_TOTAL_SLOTS) continue;
           if (buttonId === RC_PHYSICAL_SLOTS) continue;   // slot 21 "Unassigned" sentinel
           if (!Number.isFinite(mode) || mode < 1 || mode > 3) continue;
-          if (!Number.isFinite(tier) || tier < 1 || tier > 3) continue;
+          if (!Number.isFinite(tier) || tier < 1 || tier > NUM_TAP_TIERS) continue;
           let center = null;
           if (indexes.pwmValue >= 0) {
             const v = Number(cellStr(row, indexes.pwmValue));

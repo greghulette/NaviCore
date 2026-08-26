@@ -312,9 +312,9 @@ the flasher's expectations.
 Newest first. Add a row whenever a code change alters what this page describes — same commit
 as the code. Page body stays present-tense; history lives here.
 
-| 2026-08-26 | _(uncommitted)_ | Corrected the mesh-counter note: they are no longer "never reset in-session". `RESET_MESH_STATS` (Mesh Stats → ⌫ Clear) zeroes the library counters plus `g_meshRxCount`/`g_meshRxFrom`, deferred to `loop()`. |
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-26 | _(uncommitted)_ | Corrected the mesh-counter note: they are no longer "never reset in-session". `RESET_MESH_STATS` (Mesh Stats → ⌫ Clear) zeroes the library counters plus `g_meshRxCount`/`g_meshRxFrom`, deferred to `loop()`. |
 | 2026-08-26 | _(uncommitted)_ | Documented that `maestros[].channels` endpoints are in **quarter-µs** and what they actually govern — timeline scale, the timeline edit clamp, and passthrough knob endpoints. They are now editable by hand in the tool (Maestro tab → ✎); previously the only way to set them was importing a Control Center settings file, which left no recourse when a channel's real travel differed from that file. |
 | 2026-08-25 | _(uncommitted)_ | Added `switchSettleMs` (default 80, clamped 0–1000, 0 = fire immediately) — the rest period a switch position must hold before its tier dispatches. |
 | 2026-08-24 | `083207c` | Added `holdMs` (long-press threshold, default 750) and a `RC_NUM_TAP_TIERS`/`NUM_TAP_TIERS` invariants row. Button mappings now carry a 4th tier `t4` (long press); `t4` is omitted from the JSON when empty, same as the other tiers, so it costs nothing until used. |

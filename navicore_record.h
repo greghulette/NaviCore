@@ -517,9 +517,17 @@ inline bool loadClip(const char* name) {
   return _count > 0;
 }
 
+// NOTE both of these clear the ranged-download residency cache. `_loadedName` is
+// a NAME, so a delete or rename makes it a claim about a file that no longer
+// exists under that name — and a later ?REC,EDITLOAD for a REUSED name would then
+// skip the reload and stream the OLD clip's buffer. Every integrity check would
+// still pass: count, fingerprint and file-count all describe the resident buffer,
+// which is internally consistent and simply the wrong clip. Cleared
+// unconditionally, before the FS call, so a partial failure also fails closed.
 inline bool deleteClip(const char* name) {
   if (!_clipFS) return false;
   char path[48]; if (!_clipPath(path, sizeof(path), name)) return false;
+  _residencyClear();
   return _clipFS->remove(path);
 }
 
@@ -528,6 +536,7 @@ inline bool renameClip(const char* from, const char* to) {
   char pf[48], pt[48];
   if (!_clipPath(pf, sizeof(pf), from) || !_clipPath(pt, sizeof(pt), to)) return false;
   if (_clipFS->exists(pt)) return false;              // don't clobber an existing clip
+  _residencyClear();
   return _clipFS->rename(pf, pt);
 }
 
