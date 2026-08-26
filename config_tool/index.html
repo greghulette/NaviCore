@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.09:24.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.11:47.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6425,26 +6425,49 @@ async function clipDownloadVerified(name, onProgress, opts) {
   // bridge's relay queue is only 16 deep, so a big burst is exactly what gets
   // dropped. Over USB the availableForWrite gate makes large slices safe.
   const CHUNK = viaWcbActive ? 48 : 400;
-  const MAX_ROUNDS = 40;
+  // Budget must SCALE with the work, not be a flat number. A clean pass already
+  // needs ceil(total/CHUNK) rounds, so a fixed 40 capped a mesh download at
+  // 40 x 48 = 1920 events — a larger clip could never finish even with zero
+  // packet loss, and the failure would have looked like loss. The x3 leaves room
+  // for re-requesting genuinely dropped events; +12 keeps small clips forgiving.
+  let MAX_ROUNDS = 40;   // raised once `total` is known, below
 
   const got = new Map();
   let total = -1, fp = null, meta = null;
 
   const runRange = async (from, count) => {
     await new Promise((resolve) => {
-      _clipRange = { hdr: null, tail: null, err: null, got, evBuf: null, pendIdx: -1,
-                     finish: null, timer: null };
+      // Own the session in a LOCAL, and check ownership before touching the
+      // global. done() previously read _clipRange, so if a second download
+      // started (two ⤓ clicks, or a backup while the editor loads a clip) it
+      // replaced the global and this session's 15 s timer then cleared the OTHER
+      // session's timer, nulled its state and resolved with it — cross-wiring the
+      // two and hanging the first download forever. Also made idempotent, so a
+      // reply arriving just as the timer fires cannot resolve twice.
+      const sess = { hdr: null, tail: null, err: null, got, evBuf: null, pendIdx: -1,
+                     finish: null, timer: null, settled: false };
       const done = () => {
-        clearTimeout(_clipRange.timer);
-        const s = _clipRange; _clipRange = null; resolve(s);
+        if (sess.settled) return;
+        sess.settled = true;
+        clearTimeout(sess.timer);
+        if (_clipRange === sess) _clipRange = null;   // never clear a newer session
+        resolve(sess);
       };
-      _clipRange.finish = done;
-      _clipRange.timer = setTimeout(done, 15000);   // a silent board must not hang the backup
+      sess.finish = done;
+      _clipRange = sess;
+      sess.timer = setTimeout(done, 15000);   // a silent board must not hang the backup
       sendRcCli(`?REC,EDITLOAD,${name},${from},${count}`, true);
     }).then(s => {
       if (s.err) throw new Error(s.err);
       if (!s.hdr) throw new Error('no reply from the board');
-      if (s.hdr.from === undefined) throw new Error('this firmware has no ranged download — reflash to back up clips');
+      if (s.hdr.from === undefined) {
+        // Flagged, not matched by message text: the timeline falls back to the
+        // legacy stream on this specific case, and a reworded message must not
+        // silently disable that fallback.
+        const err = new Error('this firmware has no ranged download — reflash to back up clips');
+        err.noRanged = true;
+        throw err;
+      }
       // fc is the FILE header's count; loadClip truncates silently when a clip
       // exceeds the buffer cap, so count alone would call a short read complete.
       if (+s.hdr.fc !== +s.hdr.count)
@@ -6465,6 +6488,7 @@ async function clipDownloadVerified(name, onProgress, opts) {
 
   await runRange(0, 0);                      // header-only probe: count, fc, fp
   if (total === 0) return { name, header: { count: 0, ...meta }, events: [] };
+  MAX_ROUNDS = Math.ceil(total / CHUNK) * 3 + 12;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     if (got.size >= total) break;
@@ -6584,7 +6608,7 @@ async function clipRestoreOne(clip, destName, onProgress) {
   for (let i = 0; i < events.length; i++) {
     const cmdStr = '?REC,EDITEV,' + i + ',' + JSON.stringify(events[i]);
     // Over the bridge the whole relayed line must fit one ESP-NOW packet.
-    if (viaWcbActive && cmdStr.length > 180)
+    if (viaWcbActive && new TextEncoder().encode(cmdStr).length > 180)
       throw new Error(`event ${i + 1}/${events.length} is too large for the WCB bridge (${cmdStr.length} chars) — restore over Direct USB`);
     const ackMark = '[CLIPUL:ACK,' + i + ']';
     let ok = false;
@@ -6637,7 +6661,18 @@ async function clipsRestore(clips) {
   if (!clips || !clips.length) return 'No clips in that file.';
   if (!port && !sharedActive) throw new Error('Connect to the board first.');
 
-  const existing = await clipsListOnce().catch(() => []);
+  // Do NOT swallow an enumeration failure. Falling back to [] makes every clip
+  // look new, which skips the collision prompt entirely and lets EDITEND
+  // overwrite EVERY existing clip silently — the exact blanket overwrite this
+  // whole flow is built to prevent. If we cannot see what is on the droid, we
+  // have no basis to decide anything, so refuse.
+  let existing;
+  try { existing = await clipsListOnce(); }
+  catch (e) {
+    throw new Error('Could not read the clip list from the board (' + e.message + ').\n\n' +
+                    'Refusing to restore: without knowing what is already there, this could ' +
+                    'silently overwrite clips that are newer than the backup.');
+  }
   const haveNames = new Set(existing.map(c => c.name));
 
   // Pre-flight the flash. A full clips partition mid-restore destroys the clip
@@ -6655,18 +6690,29 @@ async function clipsRestore(clips) {
   let written = 0; const skipped = [], failed = [];
   for (const clip of clips) {
     let dest = clip.name;
-    if (haveNames.has(dest)) {
+    let abort = false, skip = false;
+    // LOOP the collision check on the CURRENT dest. Checking once meant a typed
+    // "restore alongside it" name was accepted without ever being tested — so
+    // typing the name of a DIFFERENT existing clip destroyed that one instead,
+    // which is worse than the overwrite the prompt was protecting against.
+    // Sanitising to the firmware's own _clipPath char class first also means the
+    // name we test is the name EDITEND will actually write.
+    while (haveNames.has(dest)) {
       const choice = prompt(
         `"${dest}" already exists on the droid.\n\n` +
         `The board does not record when a clip was made, so neither of us can tell which copy is newer — ` +
         `overwriting is not undoable.\n\n` +
         `Type:  skip  (default) · overwrite · or a NEW NAME to restore alongside it`, 'skip');
-      if (choice === null) break;                       // Cancel = stop the whole restore
+      if (choice === null) { abort = true; break; }     // Cancel = stop the whole restore
       const c = choice.trim();
-      if (!c || /^skip$/i.test(c)) { skipped.push(dest); continue; }
-      if (!/^overwrite$/i.test(c)) dest = c.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 30);
-      if (!dest) { skipped.push(clip.name); continue; }
+      if (!c || /^skip$/i.test(c)) { skip = true; break; }
+      if (/^overwrite$/i.test(c)) break;                // deliberate — leave dest as-is
+      const clean = c.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 30);
+      if (!clean) { skip = true; break; }               // nothing usable left after sanitising
+      dest = clean;                                     // re-tested by the loop condition
     }
+    if (abort) break;
+    if (skip) { skipped.push(clip.name); continue; }
     try {
       const n = await clipRestoreOne(clip, dest);
       const bad = await clipVerifyOnBoard(dest, n);     // genuine flash read-back
@@ -6865,7 +6911,21 @@ function openTimelineEditor(name) {
           (viaWcbActive ? 'Direct USB is far more reliable for this.' : 'Close and reopen to retry.'));
       }
     })
-    .catch(e => _tlShowLoadError('Could not load "' + name + '" — ' + e.message));
+    .catch(e => {
+      // Firmware without ranged download must still be able to open the editor.
+      // The tool is published to Pages and users flash FROM it, so a board a
+      // version or two behind is normal — refusing outright would strand them
+      // with no timeline at all. Fall back to the legacy whole-clip stream, which
+      // is exactly what this path used before; it cannot retry a dropped event,
+      // so the integrity story is weaker, but weaker beats unavailable.
+      if (e && e.noRanged) {
+        _tlSetStatus('Loading (older firmware — no retry on a dropped event)…');
+        _tlDownload = { name, src: null, header: null, events: [], evBuf: null };
+        sendRcCli('?REC,EDITLOAD,' + name);
+        return;
+      }
+      _tlShowLoadError('Could not load "' + name + '" — ' + e.message);
+    });
 }
 
 function _tlShowLoadError(msg) {
@@ -7029,7 +7089,7 @@ async function _tlSave() {
       // Via WCB the whole relayed command must fit one ESP-NOW packet (~187
       // usable bytes with the CRC suffix) — a longer line is silently truncated
       // to malformed JSON and NAKs forever. Fail fast with a useful message.
-      if (viaWcbActive && cmdStr.length > 180) {
+      if (viaWcbActive && new TextEncoder().encode(cmdStr).length > 180) {
         throw new Error(`event ${i + 1}/${events.length} is too large to send over the WCB bridge ` +
                         `(${cmdStr.length} chars) — connect over USB, or shorten that action's command/note`);
       }
@@ -18877,7 +18937,7 @@ function handleConfigImportFile(event) {
           if (!Number.isFinite(buttonId) || buttonId < 1 || buttonId > RC_TOTAL_SLOTS) continue;
           if (buttonId === RC_PHYSICAL_SLOTS) continue;   // slot 21 "Unassigned" sentinel
           if (!Number.isFinite(mode) || mode < 1 || mode > 3) continue;
-          if (!Number.isFinite(tier) || tier < 1 || tier > 3) continue;
+          if (!Number.isFinite(tier) || tier < 1 || tier > NUM_TAP_TIERS) continue;
           let center = null;
           if (indexes.pwmValue >= 0) {
             const v = Number(cellStr(row, indexes.pwmValue));
@@ -19703,7 +19763,11 @@ async function cfgDownload(user, pw, i, note, ts) {
   catch (e) { throw new Error('decryption failed — wrong username/password or corrupted backup'); }
   if (!obj || !obj.config) throw new Error('backup contained no config');
   const savedAt = obj.savedAt || ts || 0;
+  // Carry clips through. Rebuilding `out` from config alone would hand back a
+  // file that LOOKS like a complete backup and silently is not — the worst shape
+  // for a backup artifact, since you would only find out at restore.
   const out = { navicore: 'config-backup/v1', savedAt, note: note || '', config: obj.config };
+  if (Array.isArray(obj.clips) && obj.clips.length) out.clips = obj.clips;
   const slug = (note || '').replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24);
   const day  = savedAt ? new Date(savedAt).toISOString().slice(0, 10) : 'export';
   _cfgDownloadTextFile('navicore-config-' + (slug ? slug + '-' : '') + day + '.json',
@@ -19721,10 +19785,18 @@ async function cfgUploadFile(user, pw, file) {
   const base     = await _cfgSlotBase(user, pw);
   const manifest = await _cfgLoadManifest(user, pw);
   const idx      = manifest.next % CFG_BACKUP_MAX;
-  const blob     = await _cfgEncrypt(user, pw, JSON.stringify({ v: 1, savedAt: Date.now(), config: cfg }));
+  // Carry clips from the file into the cloud slot too — uploading a bundle must
+  // not quietly downgrade it to config-only.
+  const upClips  = (parsed && Array.isArray(parsed.clips) && parsed.clips.length) ? parsed.clips : null;
+  const upBody   = { v: 1, savedAt: Date.now(), config: cfg };
+  if (upClips) upBody.clips = upClips;
+  const blob     = await _cfgEncrypt(user, pw, JSON.stringify(upBody));
+  if (blob.length > CFG_SLOT_MAX_B64)
+    throw new Error(`that backup is ${_fmtBytes(blob.length)} after compression — over the ` +
+                    `${_fmtBytes(CFG_SLOT_MAX_B64)} cloud slot limit. Keep it as a local file instead.`);
   await _cfgPut(base + 's' + idx, blob);
   manifest.list = manifest.list.filter(e => e.i !== idx);
-  manifest.list.push({ i: idx, ts: Date.now(), size: blob.length,
+  manifest.list.push({ i: idx, ts: Date.now(), size: blob.length, clips: (upClips ? upClips.length : 0),
                        note: (((parsed && parsed.note) || file.name || '') + ' (uploaded)').slice(0, 80) });
   if (manifest.list.length > CFG_BACKUP_MAX) manifest.list = manifest.list.slice(-CFG_BACKUP_MAX);
   manifest.next = (idx + 1) % CFG_BACKUP_MAX;
