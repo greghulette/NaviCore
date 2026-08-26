@@ -69,7 +69,7 @@ Widening a field in `RcAction` costs kilobytes per byte.
 | `knobs[11]` | `RcKnob` | See below |
 | `funcBindings` | `RcFuncBindings` | `{modeSwitch}` — which switch selects the global mode |
 | `hcrDest` | `RcHcrDest` | **Global** HCR destination |
-| `maestros[8]` | `RcMaestroSlot` | `{type, device, channels[32]}` |
+| `maestros[8]` | `RcMaestroSlot` | `{type, device, channels[32]}`. Per-channel `{ch, name, min, max}` endpoints are in **quarter-µs** (the Pololu wire unit). They are not cosmetic: they set the timeline's vertical scale, **clamp every timeline edit** (`_tlClampUs`), and are pushed onto passthrough knob outputs by `_applyMaestroRangesToKnobs` — so a wrong endpoint is also what a stick maps to. Editable by hand in the tool (Maestro tab → ✎) as well as by importing a Control Center settings file |
 | `wcbNetwork` | `RcWcbNetwork` | ACTIVE mesh credentials (runtime; `wcb_config.h` only seeds defaults) |
 | `wcbProfiles[≤6]` + `wcbProfileCount` | `RcWcbProfile` | Saved mesh identities (`{name[24], macOct2, macOct3, password[40], quantity, deviceId, channel}`) the config tool switches between. **Inert storage** — firmware never acts on them; loading one just writes `wcbNetwork` (tool-side, Direct USB) |
 | `mp3Dest` | `RcMp3Dest` | **Global** MP3 Trigger destination |
@@ -312,6 +312,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-26 | _(uncommitted)_ | Documented that `maestros[].channels` endpoints are in **quarter-µs** and what they actually govern — timeline scale, the timeline edit clamp, and passthrough knob endpoints. They are now editable by hand in the tool (Maestro tab → ✎); previously the only way to set them was importing a Control Center settings file, which left no recourse when a channel's real travel differed from that file. |
 | 2026-08-25 | _(uncommitted)_ | Added `switchSettleMs` (default 80, clamped 0–1000, 0 = fire immediately) — the rest period a switch position must hold before its tier dispatches. |
 | 2026-08-24 | `083207c` | Added `holdMs` (long-press threshold, default 750) and a `RC_NUM_TAP_TIERS`/`NUM_TAP_TIERS` invariants row. Button mappings now carry a 4th tier `t4` (long press); `t4` is omitted from the JSON when empty, same as the other tiers, so it costs nothing until used. |
 | 2026-08-18 | _(uncommitted)_ | `hcrDest`/`mp3Dest`/`dfpDest` gained `transport` **2 = disabled** (JSON `"off"`), and all three now default to it — a fresh config has every audio device switched off until the user sets it up. Executors refuse a disabled device's actions; the stored port/target survives so re-enabling restores it. Round-trips through JSON and CSV. |
