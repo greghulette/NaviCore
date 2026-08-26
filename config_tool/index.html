@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.11:09.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.11:11.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -19730,7 +19730,11 @@ async function cfgDownload(user, pw, i, note, ts) {
   catch (e) { throw new Error('decryption failed — wrong username/password or corrupted backup'); }
   if (!obj || !obj.config) throw new Error('backup contained no config');
   const savedAt = obj.savedAt || ts || 0;
+  // Carry clips through. Rebuilding `out` from config alone would hand back a
+  // file that LOOKS like a complete backup and silently is not — the worst shape
+  // for a backup artifact, since you would only find out at restore.
   const out = { navicore: 'config-backup/v1', savedAt, note: note || '', config: obj.config };
+  if (Array.isArray(obj.clips) && obj.clips.length) out.clips = obj.clips;
   const slug = (note || '').replace(/[^\w-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24);
   const day  = savedAt ? new Date(savedAt).toISOString().slice(0, 10) : 'export';
   _cfgDownloadTextFile('navicore-config-' + (slug ? slug + '-' : '') + day + '.json',
@@ -19748,10 +19752,18 @@ async function cfgUploadFile(user, pw, file) {
   const base     = await _cfgSlotBase(user, pw);
   const manifest = await _cfgLoadManifest(user, pw);
   const idx      = manifest.next % CFG_BACKUP_MAX;
-  const blob     = await _cfgEncrypt(user, pw, JSON.stringify({ v: 1, savedAt: Date.now(), config: cfg }));
+  // Carry clips from the file into the cloud slot too — uploading a bundle must
+  // not quietly downgrade it to config-only.
+  const upClips  = (parsed && Array.isArray(parsed.clips) && parsed.clips.length) ? parsed.clips : null;
+  const upBody   = { v: 1, savedAt: Date.now(), config: cfg };
+  if (upClips) upBody.clips = upClips;
+  const blob     = await _cfgEncrypt(user, pw, JSON.stringify(upBody));
+  if (blob.length > CFG_SLOT_MAX_B64)
+    throw new Error(`that backup is ${_fmtBytes(blob.length)} after compression — over the ` +
+                    `${_fmtBytes(CFG_SLOT_MAX_B64)} cloud slot limit. Keep it as a local file instead.`);
   await _cfgPut(base + 's' + idx, blob);
   manifest.list = manifest.list.filter(e => e.i !== idx);
-  manifest.list.push({ i: idx, ts: Date.now(), size: blob.length,
+  manifest.list.push({ i: idx, ts: Date.now(), size: blob.length, clips: (upClips ? upClips.length : 0),
                        note: (((parsed && parsed.note) || file.name || '') + ' (uploaded)').slice(0, 80) });
   if (manifest.list.length > CFG_BACKUP_MAX) manifest.list = manifest.list.slice(-CFG_BACKUP_MAX);
   manifest.next = (idx + 1) % CFG_BACKUP_MAX;
