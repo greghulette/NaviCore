@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.11:47.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.13:08.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9838,6 +9838,10 @@ function _smoothProfileOptions(sel, includeNone, includeUnlimited) {
 // limit, where LOWER positive = more easing and 0 = off (instant) — the inverse of
 // easing, which is why the slider felt backwards. Biased (quadratic) so the slider's
 // travel spans the useful slow range instead of crowding it at one end.
+// Slider-end captions, keyed by which limit the slider drives. Left end is
+// ease=0 (raw 0 = the Maestro limit OFF = full speed / instant); right end is
+// ease=100 (the tightest limit = slowest / gentlest).
+const _SMOOTH_END_LABELS = { spd: ['faster', 'slower'], acc: ['snappier', 'gentler'] };
 function easeToRaw(ease, rawMax) { return ease <= 0 ? 0 : Math.max(1, Math.round(rawMax * Math.pow(1 - ease / 100, 2))); }
 function rawToEase(raw, rawMax) { return (!raw || raw <= 0) ? 0 : Math.round((1 - Math.sqrt(Math.min(rawMax, raw) / rawMax)) * 100); }
 
@@ -9856,12 +9860,19 @@ function _smoothChanRow(mid, entry) {
     const box = document.createElement('div');
     box.style.cssText = 'display:flex;align-items:center;gap:5px';
     const lab = document.createElement('span'); lab.style.cssText = 'font-size:11px;color:var(--muted);min-width:42px'; lab.textContent = label;
-    const less = document.createElement('span'); less.style.cssText = 'font-size:9px;color:var(--muted)'; less.textContent = 'less';
+    // Label the ends by the RESULTING MOTION, not by the amount of easing.
+    // "less/more" described the easing, but sits next to a field called "Speed" —
+    // so "less" reads as "less speed" (slower) when it actually means less easing
+    // (FASTER). Naming the outcome removes the ambiguity: the slider is only ever
+    // adjusted to make a servo move a certain way.
+    const ends = _SMOOTH_END_LABELS[key] || ['faster', 'slower'];
+    const less = document.createElement('span'); less.style.cssText = 'font-size:9px;color:var(--muted)'; less.textContent = ends[0];
     const s = document.createElement('input'); s.type = 'range'; s.min = 0; s.max = 100; s.step = 1;
     s.dataset.sk = key;   // 'spd'/'acc' — lets the "All channels" master move this slider live
     s.value = rawToEase(entry[key] || 0, rawMax); s.style.width = '110px';
-    s.title = `Right = more ${label.toLowerCase()} easing (slower / gentler). Far left = off (snappy).`;
-    const more = document.createElement('span'); more.style.cssText = 'font-size:9px;color:var(--muted)'; more.textContent = 'more';
+    s.title = `${label}: left = no easing (Maestro limit off, servo moves at full ${key === 'acc' ? 'acceleration' : 'speed'}), ` +
+              `right = maximum easing (${key === 'acc' ? 'gentlest ramp' : 'slowest'}).`;
+    const more = document.createElement('span'); more.style.cssText = 'font-size:9px;color:var(--muted)'; more.textContent = ends[1];
     s.oninput = () => { entry[key] = easeToRaw(+s.value, rawMax); };
     box.appendChild(lab); box.appendChild(less); box.appendChild(s); box.appendChild(more);
     return box;
@@ -9926,7 +9937,7 @@ function renderSmoothingPane() {
       const mkMaster = (label, rawMax, key) => {
         const box = document.createElement('div'); box.style.cssText = 'display:flex;align-items:center;gap:5px';
         box.appendChild(Object.assign(document.createElement('span'), { textContent: label, style: 'font-size:11px;color:var(--muted);min-width:42px' }));
-        box.appendChild(Object.assign(document.createElement('span'), { textContent: 'less', style: 'font-size:9px;color:var(--muted)' }));
+        box.appendChild(Object.assign(document.createElement('span'), { textContent: (_SMOOTH_END_LABELS[key]||['faster','slower'])[0], style: 'font-size:9px;color:var(--muted)' }));
         const s = document.createElement('input'); s.type = 'range'; s.min = 0; s.max = 100; s.step = 1;
         s.value = rawToEase(visible[0][key] || 0, rawMax); s.style.width = '110px';
         s.title = `Set ${label.toLowerCase()} easing on ALL ${visible.length} configured channel(s) at once.`;
@@ -9937,7 +9948,7 @@ function renderSmoothingPane() {
           wrap.querySelectorAll(`input[type=range][data-sk="${key}"]`).forEach(el => { el.value = s.value; });
         };
         box.appendChild(s);
-        box.appendChild(Object.assign(document.createElement('span'), { textContent: 'more', style: 'font-size:9px;color:var(--muted)' }));
+        box.appendChild(Object.assign(document.createElement('span'), { textContent: (_SMOOTH_END_LABELS[key]||['faster','slower'])[1], style: 'font-size:9px;color:var(--muted)' }));
         return box;
       };
       m.appendChild(mkMaster('Speed', 500, 'spd'));
@@ -16994,6 +17005,16 @@ let _fwFlashing = false;
 // invalidated, fall back to any other already-granted port (still no picker).
 // Returns true if the session resumed, false if we gave up (caller tells the
 // user to click Connect).
+// Diagnostic sink for the post-flash / post-OTA reconnect. reopenAfterFlash is a
+// top-level function, so it cannot reach the OTA panel's local `log` closure —
+// and its failure previously surfaced as one line ("reconnect manually") that is
+// identical whether the port never opened or opened and the board never answered.
+// Those need different fixes, so they need different log lines.
+function _otaLog(msg) {
+  try { appendTerminalLine('< [reconnect] ' + msg, 'rx'); } catch (_) {}
+  console.log('[reconnect]', msg);
+}
+
 async function reopenAfterFlash(p) {
   // Let the board fully boot (setup() has a ~1.5 s delay) AND the native-USB
   // device re-enumerate before the first attempt.
@@ -17022,8 +17043,15 @@ async function reopenAfterFlash(p) {
     try {
       const live = await openPortAndStart(p, 600, /*allowViaWcb=*/false);
       if (live) return true;                 // the NaviCore answered — real session
+      // Distinguish the two failure shapes in the log. "opened, no PONG" means the
+      // board is not answering (still booting, or resetting under us); "open()
+      // failed" means the USB device is not present yet. Without this the give-up
+      // message says only "reconnect manually", which is the same text for both
+      // and leaves nothing to diagnose from.
+      _otaLog(`reconnect ${cycle + 1}/12: port opened but no PONG in ~3 s`);
       await disconnect();                    // opened but no PONG yet (still booting) — retry
-    } catch (_) {
+    } catch (e) {
+      _otaLog(`reconnect ${cycle + 1}/12: open() failed — ${(e && e.message) || e}`);
       try { await p.close(); } catch (_) {}  // open() failed (device still down) — retry
     }
     // (b) Only if the handle was truly invalidated AND there is exactly ONE device
