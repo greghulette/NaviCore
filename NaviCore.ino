@@ -113,6 +113,13 @@ uint32_t      g_peerFlashUntil = 0;   // millis(): show the new-peer LED pulse u
 // counters describe this session's link health, not the board's history.
 uint32_t g_meshRxCount = 0;                   // total COMMANDs delivered to onWCBCommand
 uint32_t g_meshRxFrom[WCB_MAX_BOARDS] = {0};  // per-sender breakdown, index = id-1
+// Deferred mesh-stats reset. WCB_Client::resetStats() takes the pending-table
+// lock — it races the RX task's `ackd` increment — so the library requires it be
+// called from loop(), NEVER from inside a receive callback. A bridged request
+// arrives on the Core-0 ESP-NOW callback, so both transports just raise this flag
+// and drainMeshStatsReset() does the work on Core 1. One-shot with no payload, so
+// a volatile bool is the whole queue (last-writer-wins is correct here).
+volatile bool g_meshStatsResetPending = false;
 
 // ── Boot roll call ──────────────────────────────────────────────────────────
 // One shot, ROLL_CALL_MS after wcb->begin(): name every board in the configured
@@ -4025,6 +4032,12 @@ void handleSerialInput() {
           }
           Serial.println("]}");
 
+        } else if (strcmp(type,"RESET_MESH_STATS")==0) {
+          // Deferred to loop() — see g_meshStatsResetPending. ACK now; the reset
+          // itself lands within a loop pass, and the tool re-reads afterwards.
+          g_meshStatsResetPending = true;
+          Serial.println("{\"type\":\"ACK\",\"of\":\"RESET_MESH_STATS\",\"ok\":true}");
+
         } else if (strcmp(type,"GET_MESH_STATS")==0) {
           // ESP-NOW delivery counters for the tool's Mesh Stats panel.
           // OUT: WCB_Client's own per-peer/aggregate counters (what this board
@@ -5067,6 +5080,16 @@ void loop() {
 
   // Re-send any owed easing repeats (cheap no-op when none are pending).
   easingRepeatTick();
+
+  // Mesh-stats reset, deferred here from either transport (the library requires
+  // loop(), not a receive callback). Cheap no-op when idle.
+  if (g_meshStatsResetPending) {
+    g_meshStatsResetPending = false;
+    if (wcb && wcbReady) wcb->resetStats();      // the library's own send-side counters
+    g_meshRxCount = 0;                           // ours: the library doesn't track RX
+    memset(g_meshRxFrom, 0, sizeof(g_meshRxFrom));
+    Serial.println("[WCB] mesh stats cleared");
+  }
 
   // Status LED: steady BLUE while receiving SBUS, slow-flash ORANGE when not
   updateStatusLed();

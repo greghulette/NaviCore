@@ -95,6 +95,7 @@ Newline-delimited JSON. Handled by `handleSerialInput()` in
 | `{"type":"GET_WCB_SEQ","wcb":N}` | `{"type":"WCB_SEQ",…}` **async** | One board's stored-sequence key names, pulled off the mesh. See §4 “Stored sequences” |
 | `{"type":"GET_WCB_SEQVAL","wcb":N,"key":"K"}` | `{"type":"WCB_SEQVAL",…}` **async** | ONE sequence's contents. Same section |
 | `{"type":"GET_MESH_STATS"}` | `{"type":"MESH_STATS",…}` | ESP-NOW delivery counters. See below |
+| `{"type":"RESET_MESH_STATS"}` | `{"type":"ACK","of":"RESET_MESH_STATS","ok":true}` | Zero every counter without a reboot. **Deferred to `loop()`** — `resetStats()` takes the pending-table lock and must not run on the Core-0 receive callback. ACK is immediate; re-read after a beat |
 
 `{"type":"ERROR","msg":"JSON parse failed (…)","rxLen":N}` comes back on a malformed
 line; `rxLen` lets the host detect USB RX truncation.
@@ -593,6 +594,7 @@ Newest first. Add a row whenever a code change alters what this page describes �
 as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
+| 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
 |---|---|---|
 | 2026-08-25 | _(uncommitted)_ | **Ranged clip download.** `?REC,EDITLOAD,<name>,<from>[,<count>]` streams a bounded slice with each event carrying its absolute index in the MARKER (`[CLIPDL:EV,<i>]`), so a client can detect exactly which events are missing and re-request only those. `BEGIN`/`END` gained `from`/`n`/`fp` (FNV-1a buffer fingerprint) and `fc` (the FILE header count — `loadClip` truncates silently, so `count` alone would report a short read as complete). Legacy unranged form is byte-identical. `[CLIPITEM]` gained `n` (event count). The relayed 3000-event refusal now applies only to the legacy whole-clip form. |
 | 2026-08-24 | _(uncommitted)_ | `rc_trig` is now emitted on **USB as well as the mesh**. `emitTrig()` returns early without a ready WCB, so a Direct-USB tool saw no dispatch events at all for a local button press. Same JSON shape on both transports; the tool filters the mesh copy by `id` but not the USB copy, which arrives from the one board it is connected to. |

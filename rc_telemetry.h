@@ -84,6 +84,7 @@ extern bool          wcbReady;           // true only after wcb->begin() succeed
 // own counters are outbound-only. RAM-only; a reboot zeroes them.
 extern uint32_t      g_meshRxCount;
 extern uint32_t      g_meshRxFrom[];
+extern volatile bool g_meshStatsResetPending;   // RESET_MESH_STATS → drained in loop() (resetStats must not run on the Core-0 callback)
 void                rcDispatch(int buttonId, uint8_t tapCount);
 void                queueRemoteTrigger(int mode, int btn, uint8_t tap);   // Core-0 → loop hop for remote TRIGGER (defined in .ino)
 void                queueForgetPeer(uint8_t id);   // Core-0 → loop hop for FORGET_PEER; id 0 = all (defined in .ino)
@@ -2277,6 +2278,15 @@ inline bool handle(uint8_t senderID, const char* command) {
   // ── GET_MESH_STATS — answer it over the WCB bridge too ─────────────────
   // Same reasoning as GET_WCB_STATUS directly above: record the requester only,
   // never build or send from this Core-0 callback. tick() does the work.
+  // ── RESET_MESH_STATS — flag only; loop() does the work ─────────────────
+  // resetStats() takes the pending-table lock and races the RX task, so the
+  // library forbids calling it from a receive callback — which is exactly where
+  // this runs. Raise the flag and let loop() drain it, same discipline as every
+  // other Core-0 arrival here.
+  if (!strcmp(type, "RESET_MESH_STATS")) {
+    g_meshStatsResetPending = true;
+    return true;
+  }
   if (!strcmp(type, "GET_MESH_STATS")) {
     _pendingMeshStatsSender = senderID;
     _meshStatsPage     = 0;    // restart the page walk for this request

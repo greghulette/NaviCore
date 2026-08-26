@@ -86,7 +86,9 @@ Widening a field in `RcAction` costs kilobytes per byte.
 | `modeReport` | `RcModeReport` | `{enabled, wcb, tmpl[48], cmds[3][48]}` — optional: send the mode-select position to one WCB on every change and every 60 s. `{mode}` in `tmpl` → the position; a non-empty `cmds[mode-1]` overrides it |
 | `statsReport` | `RcStatsReport` | `{enabled, wcb}` — `enabled` states that this droid uses mesh stats (drives the tool's default view); `wcb` is an **optional** collector, 0 = collect/display only. See below |
 
-**The counters are never gated by this.** `WCB_Client` accumulates from `begin()`, `g_meshRxCount` counts from boot, and nothing resets them in-session — so they always cover the whole uptime and a tool that starts reading mid-session still sees the full history. `enabled` is a statement of intent (show me these), not a switch on collection; `wcb` = 0 means collect and display without shipping anywhere.
+**The counters are never gated by this.** `WCB_Client` accumulates from `begin()` and `g_meshRxCount` counts from boot, so a tool that starts reading mid-session still sees everything since the last reset. `enabled` is a statement of intent (show me these), not a switch on collection; `wcb` = 0 means collect and display without shipping anywhere.
+
+They can be zeroed **without a reboot** by `{"type":"RESET_MESH_STATS"}` (Mesh Stats → ⌫ Clear), which resets the library's send-side counters plus NaviCore's own `g_meshRxCount`/`g_meshRxFrom`. **The reset is deferred to `loop()` on both transports** — `WCB_Client::resetStats()` takes the pending-table lock and races the RX task's `ackd` increment, so the library forbids calling it from a receive callback, which is exactly where a bridged request arrives.
 
 **`statsReport` — `?` and not `;` is load-bearing.** The report is one command:
 
@@ -310,6 +312,7 @@ the flasher's expectations.
 Newest first. Add a row whenever a code change alters what this page describes — same commit
 as the code. Page body stays present-tense; history lives here.
 
+| 2026-08-26 | _(uncommitted)_ | Corrected the mesh-counter note: they are no longer "never reset in-session". `RESET_MESH_STATS` (Mesh Stats → ⌫ Clear) zeroes the library counters plus `g_meshRxCount`/`g_meshRxFrom`, deferred to `loop()`. |
 | Date | Commit | Change |
 |---|---|---|
 | 2026-08-26 | _(uncommitted)_ | Documented that `maestros[].channels` endpoints are in **quarter-µs** and what they actually govern — timeline scale, the timeline edit clamp, and passthrough knob endpoints. They are now editable by hand in the tool (Maestro tab → ✎); previously the only way to set them was importing a Control Center settings file, which left no recourse when a channel's real travel differed from that file. |
