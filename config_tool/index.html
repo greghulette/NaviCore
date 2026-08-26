@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.13:08.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.13:26.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9841,16 +9841,19 @@ function _smoothProfileOptions(sel, includeNone, includeUnlimited) {
 // Slider-end captions, keyed by which limit the slider drives. Left end is
 // ease=0 (raw 0 = the Maestro limit OFF = full speed / instant); right end is
 // ease=100 (the tightest limit = slowest / gentlest).
-const _SMOOTH_END_LABELS = { spd: ['faster', 'slower'], acc: ['snappier', 'gentler'] };
+// Kept short deliberately: both pairs plus two sliders have to fit ONE row beside
+// the channel picker, and the longer comparatives ("snappier"/"gentler") pushed it
+// to wrap onto a second line.
+const _SMOOTH_END_LABELS = { spd: ['faster', 'slower'], acc: ['snappy', 'gentle'] };
 function easeToRaw(ease, rawMax) { return ease <= 0 ? 0 : Math.max(1, Math.round(rawMax * Math.pow(1 - ease / 100, 2))); }
 function rawToEase(raw, rawMax) { return (!raw || raw <= 0) ? 0 : Math.round((1 - Math.sqrt(Math.min(rawMax, raw) / rawMax)) * 100); }
 
 // One channel row for the Maestro-tab smoothing editor (channel + 2 sliders + remove).
 function _smoothChanRow(mid, entry) {
   const row = document.createElement('div');
-  row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+  row.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap';
   const chSel = document.createElement('select');
-  chSel.style.minWidth = '150px';
+  chSel.style.minWidth = '118px';
   chSel.innerHTML = _maestroChOptions(mid, entry.ch);
   chSel.onchange = () => { entry.ch = +chSel.value; };
   // Slider reads as EASING: right = more easing (slower/gentler), left = snappy/off.
@@ -9859,7 +9862,7 @@ function _smoothChanRow(mid, entry) {
   const mkSlider = (label, rawMax, key) => {
     const box = document.createElement('div');
     box.style.cssText = 'display:flex;align-items:center;gap:5px';
-    const lab = document.createElement('span'); lab.style.cssText = 'font-size:11px;color:var(--muted);min-width:42px'; lab.textContent = label;
+    const lab = document.createElement('span'); lab.style.cssText = 'font-size:11px;color:var(--muted);min-width:34px'; lab.textContent = label;
     // Label the ends by the RESULTING MOTION, not by the amount of easing.
     // "less/more" described the easing, but sits next to a field called "Speed" —
     // so "less" reads as "less speed" (slower) when it actually means less easing
@@ -9869,7 +9872,7 @@ function _smoothChanRow(mid, entry) {
     const less = document.createElement('span'); less.style.cssText = 'font-size:9px;color:var(--muted)'; less.textContent = ends[0];
     const s = document.createElement('input'); s.type = 'range'; s.min = 0; s.max = 100; s.step = 1;
     s.dataset.sk = key;   // 'spd'/'acc' — lets the "All channels" master move this slider live
-    s.value = rawToEase(entry[key] || 0, rawMax); s.style.width = '110px';
+    s.value = rawToEase(entry[key] || 0, rawMax); s.style.width = '90px';
     s.title = `${label}: left = no easing (Maestro limit off, servo moves at full ${key === 'acc' ? 'acceleration' : 'speed'}), ` +
               `right = maximum easing (${key === 'acc' ? 'gentlest ramp' : 'slowest'}).`;
     const more = document.createElement('span'); more.style.cssText = 'font-size:9px;color:var(--muted)'; more.textContent = ends[1];
@@ -9936,10 +9939,10 @@ function renderSmoothingPane() {
       m.appendChild(Object.assign(document.createElement('span'), { textContent: `All channels (${visible.length}):`, style: 'font-size:12px;color:var(--accent2);font-weight:600;min-width:130px' }));
       const mkMaster = (label, rawMax, key) => {
         const box = document.createElement('div'); box.style.cssText = 'display:flex;align-items:center;gap:5px';
-        box.appendChild(Object.assign(document.createElement('span'), { textContent: label, style: 'font-size:11px;color:var(--muted);min-width:42px' }));
+        box.appendChild(Object.assign(document.createElement('span'), { textContent: label, style: 'font-size:11px;color:var(--muted);min-width:34px' }));
         box.appendChild(Object.assign(document.createElement('span'), { textContent: (_SMOOTH_END_LABELS[key]||['faster','slower'])[0], style: 'font-size:9px;color:var(--muted)' }));
         const s = document.createElement('input'); s.type = 'range'; s.min = 0; s.max = 100; s.step = 1;
-        s.value = rawToEase(visible[0][key] || 0, rawMax); s.style.width = '110px';
+        s.value = rawToEase(visible[0][key] || 0, rawMax); s.style.width = '90px';
         s.title = `Set ${label.toLowerCase()} easing on ALL ${visible.length} configured channel(s) at once.`;
         s.oninput = () => {
           const raw = easeToRaw(+s.value, rawMax);
