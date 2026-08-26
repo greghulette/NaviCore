@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.09:24.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.11:07.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6444,7 +6444,14 @@ async function clipDownloadVerified(name, onProgress, opts) {
     }).then(s => {
       if (s.err) throw new Error(s.err);
       if (!s.hdr) throw new Error('no reply from the board');
-      if (s.hdr.from === undefined) throw new Error('this firmware has no ranged download — reflash to back up clips');
+      if (s.hdr.from === undefined) {
+        // Flagged, not matched by message text: the timeline falls back to the
+        // legacy stream on this specific case, and a reworded message must not
+        // silently disable that fallback.
+        const err = new Error('this firmware has no ranged download — reflash to back up clips');
+        err.noRanged = true;
+        throw err;
+      }
       // fc is the FILE header's count; loadClip truncates silently when a clip
       // exceeds the buffer cap, so count alone would call a short read complete.
       if (+s.hdr.fc !== +s.hdr.count)
@@ -6865,7 +6872,21 @@ function openTimelineEditor(name) {
           (viaWcbActive ? 'Direct USB is far more reliable for this.' : 'Close and reopen to retry.'));
       }
     })
-    .catch(e => _tlShowLoadError('Could not load "' + name + '" — ' + e.message));
+    .catch(e => {
+      // Firmware without ranged download must still be able to open the editor.
+      // The tool is published to Pages and users flash FROM it, so a board a
+      // version or two behind is normal — refusing outright would strand them
+      // with no timeline at all. Fall back to the legacy whole-clip stream, which
+      // is exactly what this path used before; it cannot retry a dropped event,
+      // so the integrity story is weaker, but weaker beats unavailable.
+      if (e && e.noRanged) {
+        _tlSetStatus('Loading (older firmware — no retry on a dropped event)…');
+        _tlDownload = { name, src: null, header: null, events: [], evBuf: null };
+        sendRcCli('?REC,EDITLOAD,' + name);
+        return;
+      }
+      _tlShowLoadError('Could not load "' + name + '" — ' + e.message);
+    });
 }
 
 function _tlShowLoadError(msg) {
