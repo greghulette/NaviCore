@@ -84,32 +84,42 @@ jobs:
             git -C "$GHP" remote add origin "$REMOTE"
           fi
 
-          # Replace ONLY this branch's slice; every other path is left as-is.
-          rm -rf "${GHP:?}/$DEST"
-          mkdir -p "$GHP/$DEST"
-          cp -a "$SRC/." "$GHP/$DEST/"
-          touch "$GHP/.nojekyll"          # serve files verbatim (no Jekyll processing)
+          # Lay this branch's slice into the checkout. Factored into a function
+          # because a push race has to RE-APPLY it on top of whatever landed
+          # meanwhile — see the retry loop.
+          apply_slice() {
+            # Replace ONLY this branch's slice; every other path is left as-is.
+            rm -rf "${GHP:?}/$DEST"
+            mkdir -p "$GHP/$DEST"
+            cp -a "$SRC/." "$GHP/$DEST/"
+            touch "$GHP/.nojekyll"          # serve files verbatim (no Jekyll processing)
 
-          # The config tool pulls a couple of logos via ../Images/<file> (a sibling
-          # folder). Deploy ONLY the referenced files as a sibling Images/ — the repo's
-          # full Images/ tree is docs assets the tool never uses. Discovered dynamically
-          # so it adapts if the tool's image set changes.
-          rm -rf "$GHP/$IMGDIR"
-          refs="$(grep -rhoE '\.\./Images/[A-Za-z0-9._-]+' "$SRC" 2>/dev/null | sed 's#\.\./Images/##' | sort -u)"
-          if [ -n "$refs" ]; then
-            mkdir -p "$GHP/$IMGDIR"
-            n=0
-            while IFS= read -r f; do
-              [ -n "$f" ] || continue
-              if [ -f "$GITHUB_WORKSPACE/Images/$f" ]; then
-                cp -a "$GITHUB_WORKSPACE/Images/$f" "$GHP/$IMGDIR/"; n=$((n+1))
-              else
-                echo "::warning::config_tool references Images/$f but it's missing in the repo"
-              fi
-            done <<< "$refs"
-            echo "Deployed $n referenced image(s) -> /$IMGDIR"
-          fi
+            # The config tool pulls a couple of logos via ../Images/<file> (a sibling
+            # folder). Deploy ONLY the referenced files as a sibling Images/ — the repo's
+            # full Images/ tree is docs assets the tool never uses. Discovered dynamically
+            # so it adapts if the tool's image set changes.
+            rm -rf "$GHP/$IMGDIR"
+            # `|| true` is load-bearing under `set -euo pipefail`: grep exits 1 when it
+            # matches NOTHING, pipefail propagates that through the pipe, and the failed
+            # assignment then kills the job. Without it, removing the last ../Images/
+            # reference from the tool would break every deploy with no obvious cause.
+            refs="$(grep -rhoE '\.\./Images/[A-Za-z0-9._-]+' "$SRC" 2>/dev/null | sed 's#\.\./Images/##' | sort -u || true)"
+            if [ -n "$refs" ]; then
+              mkdir -p "$GHP/$IMGDIR"
+              n=0
+              while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                if [ -f "$GITHUB_WORKSPACE/Images/$f" ]; then
+                  cp -a "$GITHUB_WORKSPACE/Images/$f" "$GHP/$IMGDIR/"; n=$((n+1))
+                else
+                  echo "::warning::config_tool references Images/$f but it's missing in the repo"
+                fi
+              done <<< "$refs"
+              echo "Deployed $n referenced image(s) -> /$IMGDIR"
+            fi
+          }
 
+          apply_slice
           cd "$GHP"
           git add -A
           if git diff --cached --quiet; then
@@ -118,11 +128,30 @@ jobs:
           fi
           git commit -q -m "Deploy config_tool ($BRANCH) -> /$DEST [skip ci]"
 
-          # Serialized by concurrency; light retry covers any external race on gh-pages.
+          # Serialized by concurrency; this retry covers an external race on gh-pages
+          # (another branch's deploy, or a manual edit) landing between our clone and
+          # our push.
+          #
+          # RESET + RE-APPLY, never rebase. This run replaces its whole slice, so its
+          # commit touches every file under $DEST — and a rebase onto another run that
+          # did the same thing CONFLICTS on those paths. `git rebase … || true` then
+          # swallows the failure and leaves the tree MID-REBASE, so every remaining push
+          # fails and the loop ends in "Failed to push after 3 attempts" with the real
+          # cause invisible. Taking origin wholesale and re-laying our slice on top is
+          # also exactly the documented contract: last writer wins for ITS OWN slice,
+          # every other path preserved.
           for i in 1 2 3; do
             if git push -q origin gh-pages; then echo "Published /$DEST"; exit 0; fi
-            echo "Push rejected — syncing gh-pages and retrying ($i/3)…"
-            git fetch -q origin gh-pages && git rebase -q origin/gh-pages || true
+            echo "Push rejected — resyncing gh-pages and re-applying our slice ($i/3)…"
+            git fetch -q origin gh-pages
+            git reset -q --hard origin/gh-pages
+            apply_slice
+            git add -A
+            if git diff --cached --quiet; then
+              echo "Our slice already matches the published tree — nothing to do."
+              exit 0
+            fi
+            git commit -q -m "Deploy config_tool ($BRANCH) -> /$DEST [skip ci]"
           done
           echo "::error::Failed to push to gh-pages after 3 attempts."
           exit 1
