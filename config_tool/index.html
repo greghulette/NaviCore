@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.09:15.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.09:24.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2617,6 +2617,9 @@
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
         <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px"
                 onclick="requestMeshStats()">↻ Refresh</button>
+        <button type="button" class="btn btn-ghost" style="padding:4px 10px;font-size:12px"
+                onclick="resetMeshStats()"
+                title="Zero every ESP-NOW counter on the NaviCore, without rebooting. These are session health, not lifetime history — one bad patch otherwise skews the ratios for as long as the board stays up.">⌫ Clear</button>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--muted)">
           <input type="checkbox" id="stats-autopoll" onchange="setMeshStatsAutoPoll(this.checked)">
           <span>auto every 5&nbsp;s</span>
@@ -3980,6 +3983,24 @@ function requestMeshStats() {
   // fragments congests the mesh and can drop one, silently failing the save.
   if (_bridgeUploadInFlight || _bulkActive) return;
   sendJSON({ type: 'GET_MESH_STATS' }, /*silent=*/true).catch(() => {});
+}
+// Zero the board's ESP-NOW counters without a reboot. They are session health,
+// not lifetime history — one bad patch otherwise skews every ratio for as long as
+// the board stays up, which is exactly when you want a clean baseline to judge a
+// change against.
+async function resetMeshStats() {
+  if (!port && !sharedActive) { alert('Connect to the board first.'); return; }
+  if (!confirm('Zero every ESP-NOW counter on the NaviCore?\n\n' +
+               'Sent / ACKed / retries / failed / received, aggregate and per-peer. ' +
+               'This cannot be undone — but they are RAM-only session counters, so nothing ' +
+               'persistent is lost.')) return;
+  try {
+    await sendJSON({ type: 'RESET_MESH_STATS' }, /*silent=*/true);
+    // The board defers the reset to its loop(), so re-read after a beat rather
+    // than immediately — an instant refresh would race it and show stale numbers.
+    setTimeout(requestMeshStats, 350);
+    showToast('Mesh stats cleared', 'success');
+  } catch (e) { showToast('Could not clear stats — ' + (e.message || e), 'error'); }
 }
 function setMeshStatsAutoPoll(on) {
   if (_meshStatsTimer) { clearInterval(_meshStatsTimer); _meshStatsTimer = null; }
