@@ -501,9 +501,27 @@ inline bool loadClip(const char* name) {
   ClipFileHeader h;
   if (f.read((uint8_t*)&h, sizeof(h)) != (int)sizeof(h) || memcmp(h.magic, "NCR1", 4) != 0) { f.close(); return false; }
   uint32_t n = (h.count > _cap) ? _cap : h.count;
-  size_t got = f.read((uint8_t*)_buf, (size_t)n * sizeof(RecEvent));
+  // LOOP the read. File::read(buf, len) is NOT required to return `len` — it may
+  // stop at a filesystem cache/block boundary and return a short count with no
+  // error and no EOF. A single call therefore silently loaded every clip SHORT,
+  // proportionally to its size (~3% here): the tail of every clip was missing
+  // from replay and from the timeline editor, and nothing reported it because
+  // `_count` was then computed from the short read and looked self-consistent.
+  // saveClip already verifies its write against the full length, so the files on
+  // flash are complete — this was purely a read-side loss.
+  const size_t want = (size_t)n * sizeof(RecEvent);
+  size_t got = 0;
+  while (got < want) {
+    const int r = f.read((uint8_t*)_buf + got, want - got);
+    if (r <= 0) break;                     // real EOF or error — keep what we have
+    got += (size_t)r;
+  }
   f.close();
   _count = got / sizeof(RecEvent);
+  if (got < want)
+    Serial.printf("[REC] WARNING: '%s' read short — %u of %u bytes (%lu of %lu events)\n",
+                  name, (unsigned)got, (unsigned)want,
+                  (unsigned long)_count, (unsigned long)n);
   _mode  = h.mode;
   strlcpy(_loadedName, name, sizeof(_loadedName));
   _loadedFc = h.count;                     // the FILE's count, not the truncated _count
