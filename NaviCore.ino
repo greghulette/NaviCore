@@ -4354,7 +4354,13 @@ void setup() {
   // into us at USB-CDC speed. A 4 KB buffer comfortably absorbs the worst case
   // (e.g. a 3-4 KB SET_CONFIG payload arriving in one shot) without dropping
   // bytes that would otherwise corrupt the JSON. Must be set BEFORE begin().
-  Serial.setRxBufferSize(4096);
+  // A relayed OTA raises the worst case again: the sender streams a window of 8
+  // ?OTA,DATA lines of ~284 B (2272 B) back-to-back. That fits 4 KB only if very
+  // little else is in flight, and an overflow here does not merely LOSE a line —
+  // it drops a run of bytes from the MIDDLE of one, which still decodes as valid
+  // base64 and corrupts the image silently (see the crc32 check in navicore_ota.h).
+  // 8 KB keeps a full window plus a config push in flight simultaneously.
+  Serial.setRxBufferSize(8192);
   // TX ring buffer — sized to hold an entire CONFIG response (rcConfigToJSON
   // can produce 2-4 KB depending on how populated the config is) in one
   // print() so the host has a full window to drain it before any byte gets

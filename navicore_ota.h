@@ -281,6 +281,19 @@ inline void processOtaLocalCommand(const String &args) {
   Serial.printf("[OTA] unknown subcommand '%s' (use STATUS|BEGIN|DATA|END|ABORT)\n", sub.c_str());
 }
 
+// CRC-32 (reflected, poly 0xEDB88320) — byte-for-byte the same function as the
+// WCB's calculateCRC32() in WCB.ino and the config tool's _crc32Hex(). All three
+// must agree: the tool computes it, and EITHER relay may be the one verifying.
+inline uint32_t otaCrc32(const String &data) {
+  const uint8_t *b = (const uint8_t *)data.c_str();
+  uint32_t crc = 0xFFFFFFFF;
+  for (size_t i = 0; i < data.length(); i++) {
+    crc ^= b[i];
+    for (int j = 0; j < 8; j++) crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+  }
+  return ~crc;
+}
+
 // ── Transport B: ESP-NOW relay OTA ──────────────────────────────────────────
 // Password + addressed-to-us gate shared by the target-side handlers.
 inline bool otaPktAuth(const char *pw, uint8_t targetWCB) {
@@ -421,9 +434,32 @@ inline void processOtaRelayCommand(const String &args) {
 
   if (sub == "DATA") {
     int p = r3.indexOf(',');
-    if (p < 0) { Serial.println("[OTA] relay DATA: ?OTA,DATA,<t>,<s>,<offset>,<b64>"); return; }
-    uint32_t offset = (uint32_t)r3.substring(0, p).toInt();
+    if (p < 0) { Serial.println("[OTA] relay DATA: ?OTA,DATA,<t>,<s>,<offset>[:<crc32>],<b64>"); return; }
+    String offField = r3.substring(0, p);
     String   b64    = r3.substring(p + 1); b64.trim();
+    // Optional integrity suffix on the OFFSET field: "<offset>:<crc32hex>" over
+    // "<offset>,<b64>" as transmitted. It rides on the offset because toInt() stops
+    // at the ':', so a sender or a relay that predates this still interoperates —
+    // appending a trailing field would have been swept into the base64 instead and
+    // failed every packet. Guards the USB->relay SERIAL hop, which is the one that
+    // can corrupt silently: an RX-ring overflow drops a run of bytes from the MIDDLE
+    // of a line, and if it lands inside the base64 with the newline intact the
+    // remainder is still valid base64 and still decodes, to re-phased garbage that
+    // gets written at a valid offset. Nothing notices until the SHA at 100%. The air
+    // hop needs no cover — 802.11 CRCs every ESP-NOW frame in hardware.
+    int cpos = offField.indexOf(':');
+    String crcHex;
+    if (cpos >= 0) { crcHex = offField.substring(cpos + 1); offField = offField.substring(0, cpos); }
+    uint32_t offset = (uint32_t)offField.toInt();
+    if (crcHex.length()) {
+      const uint32_t want = (uint32_t)strtoul(crcHex.c_str(), nullptr, 16);
+      const uint32_t have = otaCrc32(offField + "," + b64);
+      if (want != have) {
+        Serial.printf("[OTA] relay DATA @%lu DROPPED: crc %08X != %08X (b64 %u chars)\n",
+                      (unsigned long)offset, (unsigned)have, (unsigned)want, (unsigned)b64.length());
+        return;   // drop -> target cursor stalls -> sender rewinds and resends
+      }
+    }
     espnow_struct_ota_data pkt; memset(&pkt, 0, sizeof(pkt));
     strncpy(pkt.structPassword, rcConfig.wcbNetwork.password, sizeof(pkt.structPassword) - 1);
     pkt.packetType = PACKET_TYPE_OTA_DATA; pkt.targetWCB = target;
