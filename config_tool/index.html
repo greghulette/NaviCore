@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.15:20.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.15:27.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6444,7 +6444,7 @@ function _clipRangeFeed(text) {
     try { h = JSON.parse(text.slice(14)); } catch (_) { h = {}; }
     if (!answersUs(h)) return true;          // a previous request's header
     s.hdr = h;
-    s.evBuf = null; s.pendIdx = -1;
+    s.evBuf = null; s.pendIdx = -1; s.pendBatch = false;
     return true;
   }
   if (text.startsWith('[CLIPDL:ERR]')) { s.err = text.slice(12).replace(/^,\d+\]?/, ''); s.finish(); return true; }
@@ -6457,22 +6457,40 @@ function _clipRangeFeed(text) {
     return true;
   }
 
-  const m = /^\[CLIPDL:EV,(\d+)\]/.exec(text);
-  if (m) { s.pendIdx = +m[1]; s.evBuf = text.slice(m[0].length); }
+  // Two event shapes. [CLIPDL:EV,<i>] is one event; [CLIPDL:EVB,<first>] is a run
+  // of CONSECUTIVE keyframes whose indices are positional from <first>. EVB is
+  // tested first rather than relying on "EV," not matching "EVB,".
+  const mb = /^\[CLIPDL:EVB,(\d+)\]/.exec(text);
+  const m  = mb || /^\[CLIPDL:EV,(\d+)\]/.exec(text);
+  if (m) { s.pendIdx = +m[1]; s.pendBatch = !!mb; s.evBuf = text.slice(m[0].length); }
   else if (s.evBuf !== null) { s.evBuf += text; }   // continuation of a wrapped line
   else return false;
 
   try {
-    const ev = JSON.parse(s.evBuf);
+    const parsed = JSON.parse(s.evBuf);
     // Only indices we actually ASKED for. Without this an event from another
     // clip's stream is stored under its own absolute index, and because `got` is
     // shared across every round of this download those foreign entries push
     // got.size past total — which is how a 16-event clip reported "-32 of 16".
-    if (s.pendIdx >= s.reqFrom && s.pendIdx < s.reqFrom + s.reqCount)
-      s.got.set(s.pendIdx, ev);
-    s.evBuf = null; s.pendIdx = -1;
+    if (s.pendBatch) {
+      // {"e":[[t,k,a,b,c],…]} — rebuilt into exactly the per-event object shape the
+      // rest of the tool consumes, so the model builder and the file writer never
+      // need to know a batched form exists.
+      const rows = (parsed && parsed.e) || [];
+      for (let r = 0; r < rows.length; r++) {
+        const idx = s.pendIdx + r;
+        if (idx < s.reqFrom || idx >= s.reqFrom + s.reqCount) continue;
+        const q = rows[r];
+        s.got.set(idx, (+q[1] === 2)
+          ? { t: +q[0], k: 2, chan: +q[2], vol: +q[3] }
+          : { t: +q[0], k: +q[1], slot: +q[2], ch: +q[3], pos: +q[4] });
+      }
+    } else if (s.pendIdx >= s.reqFrom && s.pendIdx < s.reqFrom + s.reqCount) {
+      s.got.set(s.pendIdx, parsed);
+    }
+    s.evBuf = null; s.pendIdx = -1; s.pendBatch = false;
   } catch (_) {
-    if (s.evBuf.length > 4096) { s.evBuf = null; s.pendIdx = -1; }   // corrupt chain — next EV recovers
+    if (s.evBuf.length > 4096) { s.evBuf = null; s.pendIdx = -1; s.pendBatch = false; }   // corrupt chain — next EV recovers
   }
   return true;
 }
@@ -6509,7 +6527,8 @@ async function clipDownloadVerified(name, onProgress, opts) {
       // reply arriving just as the timer fires cannot resolve twice.
       const sess = { hdr: null, tail: null, err: null, got, evBuf: null, pendIdx: -1,
                      finish: null, timer: null, settled: false,
-                     reqFrom: from, reqCount: count, reqName: name, timedOut: false };
+                     reqFrom: from, reqCount: count, reqName: name, timedOut: false,
+                     pendBatch: false };
       const done = () => {
         if (sess.settled) return;
         sess.settled = true;
@@ -6526,7 +6545,11 @@ async function clipDownloadVerified(name, onProgress, opts) {
       const budgetMs = 15000 + count * (viaWcbActive ? 120 : 10);
       sess.budgetMs = budgetMs;
       sess.timer = setTimeout(() => { sess.timedOut = true; done(); }, budgetMs);
-      sendRcCli(`?REC,EDITLOAD,${name},${from},${count}`, true);
+      // ",B" opts into batched keyframe lines. Safe to send unconditionally:
+      // firmware predating it parsed `count` with toInt(), which stops at the comma,
+      // so the flag was invisible — it simply replies in the per-event form, which
+      // the ingestion below still accepts. No version handshake needed.
+      sendRcCli(`?REC,EDITLOAD,${name},${from},${count},B`, true);
     }).then(s => {
       if (s.err) throw new Error(s.err);
       // Distinguish the two: a board that stayed silent, versus one still busy
