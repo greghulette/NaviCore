@@ -2018,8 +2018,17 @@ inline bool handle(uint8_t senderID, const char* command) {
       sess->parts[f - 1]    = String(s);
       sess->received[f - 1] = true;
       sess->got++;
-      sess->expireAt = millis() + FRAG_TIMEOUT_MS;
     }
+    // Refresh the deadline on ANY fragment for this session, duplicates included —
+    // NOT only on new ones. FRAG_TIMEOUT_MS is an IDLE timeout ("the sender has gone
+    // away"), and a duplicate is positive proof the sender is still working. Gating
+    // the refresh on isNewFragment made a live retransmit look like silence: a sender
+    // resending a lost fragment for >5 s would have its session reclaimed by the
+    // expiry sweep in _findOrAllocSession(), which runs BEFORE the sid match — so the
+    // very next fragment silently allocates a FRESH slot, `got` restarts at 1, and
+    // the transfer can never complete. No error is emitted on either side; the save
+    // just never lands. Refreshing here keeps the timeout measuring what it names.
+    sess->expireAt = millis() + FRAG_TIMEOUT_MS;
     // Visibility — log every fragment receive so the user can see in the
     // RC's serial monitor whether a SET_CONFIG / GET_CONFIG handshake is
     // actually arriving over the WCB bridge.  Gated: this runs on Core 0

@@ -447,7 +447,7 @@ struct RcWcbNetwork {
                           // slot 20 so the config tool's "Via WCB" bridge
                           // has a single known target.  Field is left
                           // writable for unusual multi-RC deployments.
-  uint8_t channel;        // ESP-NOW mesh WiFi channel (1-13). The ESP32 has ONE radio,
+  uint8_t channel;        // ESP-NOW mesh WiFi channel (1-11). The ESP32 has ONE radio,
                           // so this MUST match the channel every WCB is on or this RC is
                           // silently unreachable. Passed to wcb->setMeshChannel() before
                           // begin(); a reboot is required to change it. Default 1.
@@ -1723,8 +1723,19 @@ bool rcConfigFromJSON(const JsonObject& doc) {
             sizeof(rcConfig.wcbNetwork.password));
     rcConfig.wcbNetwork.quantity = (uint8_t)(wcbObj["quantity"] | rcConfig.wcbNetwork.quantity);
     rcConfig.wcbNetwork.deviceId = (uint8_t)(wcbObj["deviceId"] | rcConfig.wcbNetwork.deviceId);
-    { int ch = wcbObj["channel"] | (int)rcConfig.wcbNetwork.channel;   // ESP-NOW mesh channel (1-13)
-      rcConfig.wcbNetwork.channel = (uint8_t)(ch < 1 ? 1 : ch > 13 ? 13 : ch); }
+    // ESP-NOW mesh channel. Valid range is 1-11, NOT the 1-13 this once accepted:
+    // WCB_Client::setMeshChannel() range-checks 1-11 and RETURNS WITHOUT SETTING on
+    // anything above it, so a stored 12/13 left the radio on WCB_MESH_CHANNEL while
+    // the config, the tool, and the status readout all claimed 12/13.
+    //
+    // Out-of-range falls back to 1, NOT to 11. 1 is WCB_MESH_CHANNEL (see the default
+    // at rcConfigDefaults), which is the channel the radio has ACTUALLY been using all
+    // along whenever a 12/13 was stored — so a fleet already running on channel 1 with
+    // a bogus 13 in its config keeps working, and the config simply stops lying about
+    // it. Clamping to 11 instead would move this board to a channel nothing else is on
+    // and break a setup that works today.
+    { int ch = wcbObj["channel"] | (int)rcConfig.wcbNetwork.channel;
+      rcConfig.wcbNetwork.channel = (uint8_t)((ch < 1 || ch > 11) ? 1 : ch); }
   }
 
   // Saved WCB-credential profiles. Guarded by containsKey so a diff-save that omits
@@ -1742,7 +1753,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       strlcpy(wp.password, o["password"] | "", sizeof(wp.password));
       wp.quantity = (uint8_t)(o["quantity"] | 4);
       wp.deviceId = (uint8_t)(o["deviceId"] | 20);
-      { int ch = o["channel"] | 1; wp.channel = (uint8_t)(ch < 1 ? 1 : ch > 13 ? 13 : ch); }
+      { int ch = o["channel"] | 1; wp.channel = (uint8_t)((ch < 1 || ch > 11) ? 1 : ch); }   // 1-11, out-of-range → 1: see wcbNetwork.channel above
       n++;
     }
     rcConfig.wcbProfileCount = n;

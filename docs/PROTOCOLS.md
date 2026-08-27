@@ -415,8 +415,23 @@ Payloads over 187 B are split. Envelope, both directions:
 | Upload cap (tool → RC) | **192 fragments ≈ 15 KB** | `FRAG_MAX_PARTS` — the RC's static receive pool |
 | Download cap (RC → tool) | **512 fragments = 40 KB** | `FRAG_SEND_MAX_PARTS` / tool `FRAG_MAX_PARTS_RECV` |
 | Concurrent sessions | 3 | `FRAG_POOL_SIZE` |
-| Reassembly timeout | 5000 ms | `FRAG_TIMEOUT_MS` (both sides) |
-| Inter-fragment pacing | 150 ms | `FRAG_PACING_MS` (both sides) |
+| Reassembly timeout | 5000 ms **idle**, refreshed by any fragment incl. duplicates | `FRAG_TIMEOUT_MS` |
+| Inter-fragment pacing — upload (tool → RC) | `max(line wire time × 2, 100 ms)` | `FRAG_PACE_FLOOR_MS` / `FRAG_PACE_LINK_MULT` |
+| Inter-fragment pacing — download (RC → tool) | 150 ms | `FRAG_PACING_MS` |
+
+**The two directions no longer share a pacing constant.** The upload path crosses the bridge
+WCB's UART, which is a real 115200 link (the WCB builds without `CDCOnBoot=cdc`, so its
+`Serial` is UART0 — unlike NaviCore, where native USB-CDC ignores baud), so the tool derives
+its delay from each line's actual wire time and takes the larger of that and a floor. The
+download path originates on the RC and does not cross that UART, so it keeps a flat
+`FRAG_PACING_MS`. Do not "restore symmetry" by making one match the other.
+
+`FRAG_TIMEOUT_MS` measures **idle**, not total transfer time — the receiver refreshes the
+deadline on any fragment for the session, duplicates included. Gating that refresh on
+*new* fragments only is a trap: a sender retransmitting a lost fragment for >5 s looks
+identical to a sender that vanished, and the expiry sweep in `_findOrAllocSession()` runs
+**before** the sid match, so the next fragment silently claims a fresh slot, `got` restarts,
+and the transfer can never complete — with no error on either side.
 
 Rules baked into the implementation, each for a reason that cost real debugging:
 
@@ -631,6 +646,7 @@ as the code. Page body stays present-tense; history lives here.
 | Date | Commit | Change |
 | 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
 |---|---|---|
+| 2026-08-27 | _(uncommitted)_ | Fragment pacing is no longer one constant shared by both directions. **Upload** (tool → RC) crosses the bridge WCB’s UART — a *real* 115200 link, since the WCB builds without `CDCOnBoot=cdc` and its `Serial` is UART0, unlike NaviCore where native USB-CDC ignores baud — so the tool now paces each line by `max(wire time × FRAG_PACE_LINK_MULT, FRAG_PACE_FLOOR_MS)` (2×, 100 ms) instead of a flat 150 ms, and skips the delay after the final fragment. **Download** (RC → tool) never crosses that UART and keeps `FRAG_PACING_MS` = 150. Do not re-symmetrise them. Also documented that `FRAG_TIMEOUT_MS` is an **idle** timeout: the receiver now refreshes the deadline on *any* fragment including duplicates, because gating it on new-only made a live retransmit indistinguishable from a dead sender — the expiry sweep runs before the sid match, so the session was reclaimed mid-transfer and silently restarted at `got=1`. |
 | 2026-08-27 | _(uncommitted)_ | **Batched keyframe download** — `?REC,EDITLOAD,…,<count>,B` opts into `[CLIPDL:EVB,<firstIdx>]{"e":[[t,k,a,b,c],…]}`, packing consecutive keyframes into one line with positional indices. Actions are never batched and flush the run. 5.0× fewer mesh packets / 2.5× fewer bytes on a 300-event clip, longest line 133 B (inside the 160 B cap, so no new fragmentation). Round-trip verified to reconstruct byte-identically to the per-event form across seven slices including ones straddling actions. Backward compatible both ways — `toInt()` stops at the comma, and the tool accepts both shapes unconditionally. |
 | 2026-08-27 | _(uncommitted)_ | **`?OTA,DATA` carries an optional CRC-32**, as a suffix on the offset field: `?OTA,DATA,<t>,<s>,<offset>:<crc32>,<b64>`, computed over `"<offset>,<b64>"` as transmitted. A relay that fails the check DROPS the line. Placed on the offset field, not appended, because `String::toInt()` stops at the `:` — so a relay predating the check reads the offset unchanged and a sender predating it just omits the suffix; appending a field would have been swept into the base64 and failed every packet. Verified by BOTH relays (`navicore_ota.h` `otaCrc32`, WCB `calculateCRC32`) against the tool's `_crc32Hex` — all three are the same reflected CRC-32 (poly `0xEDB88320`) and were cross-checked. Guards the USB→relay SERIAL hop only; 802.11 already CRCs the ESP-NOW hop in hardware. Also `Serial.setRxBufferSize` 4096 → 8192 and the sender's `PACE_MS` 12 → 25. |
 | 2026-08-27 | _(uncommitted)_ | **`[CLIPDL:BEGIN]`/`[CLIPDL:END]` gained `nm`** — the clip the buffer actually holds. The reply stream was anonymous, so a timed-out range's still-arriving lines were adopted by the next request: a stale `END` finished it early ("no reply from the board"), a stale `BEGIN` replaced its `count`/`fp` ("the clip changed on the board mid-download"), and stale events landed under foreign indices, pushing `got.size` past `total` and reporting a NEGATIVE shortfall ("-32 of 16 events"). One timeout then cascaded through the remaining clips of a backup. `nm` costs ~39 B on two control lines per range and nothing per event; `[CLIPDL:EV]` is unchanged. Request format is unchanged — no new argument — so an older tool is unaffected. |

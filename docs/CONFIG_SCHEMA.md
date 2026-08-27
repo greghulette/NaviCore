@@ -271,7 +271,8 @@ highest-risk category of edit in the repo.
 | `rcTelemetry::FRAG_MAX_PARTS` | `FRAG_MAX_PARTS` | 192 (upload) |
 | `rcTelemetry::FRAG_SEND_MAX_PARTS` | `FRAG_MAX_PARTS_RECV` | 512 (download) |
 | `MAX_ENV_BYTES` | `FRAG_MAX_ENV_BYTES` | 187 |
-| `FRAG_PACING_MS` | fragment `await` delay | 150 ms |
+| `FRAG_PACING_MS` (download only) | — | 150 ms |
+| — | `FRAG_PACE_FLOOR_MS` (upload only) | 100 ms |
 | `FRAG_TIMEOUT_MS` | `FRAG_TIMEOUT_MS` | 5000 ms |
 | `WCB_BULK_CHUNK_RAW` (library) | `BULK_CHUNK_RAW` | 96 |
 | `WCB_BULK_MAX_CHUNKS` (library) | `BULK_MAX_CHUNKS` | 512 |
@@ -314,6 +315,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-27 | _(uncommitted)_ | Split the `FRAG_PACING_MS` invariant row — the firmware constant (150 ms) now governs the **download** direction only, and the tool’s upload pacing is its own `FRAG_PACE_FLOOR_MS` (100 ms). They are deliberately no longer a pair. Mesh `wcbNetwork.channel` valid range corrected to **1–11** (was documented and clamped as 1–13); `WCB_Client::setMeshChannel()` rejects >11 and returns without setting, so out-of-range now falls back to 1 = `WCB_MESH_CHANNEL` — the channel the radio was actually on — rather than clamping to 11, which would move a working board off its fleet. |
 | 2026-08-26 | _(uncommitted)_ | Corrected the mesh-counter note: they are no longer "never reset in-session". `RESET_MESH_STATS` (Mesh Stats → ⌫ Clear) zeroes the library counters plus `g_meshRxCount`/`g_meshRxFrom`, deferred to `loop()`. |
 | 2026-08-26 | _(uncommitted)_ | Documented that `maestros[].channels` endpoints are in **quarter-µs** and what they actually govern — timeline scale, the timeline edit clamp, and passthrough knob endpoints. They are now editable by hand in the tool (Maestro tab → ✎); previously the only way to set them was importing a Control Center settings file, which left no recourse when a channel's real travel differed from that file. |
 | 2026-08-25 | _(uncommitted)_ | Added `switchSettleMs` (default 80, clamped 0–1000, 0 = fire immediately) — the rest period a switch position must hold before its tier dispatches. |
