@@ -729,7 +729,8 @@ inline int _cmpEventByTime(const void* a, const void* b) {
 // BYTE-IDENTICALLY, because an old config tool matches these markers by exact
 // prefix. New shapes appear only in replies to a request an old tool cannot make.
 inline void editStream(Print& out, bool paced = true,
-                       uint32_t from = 0, uint32_t want = 0xFFFFFFFFu, bool ranged = false) {
+                       uint32_t from = 0, uint32_t want = 0xFFFFFFFFu, bool ranged = false,
+                       bool batch = false) {
   if (from > _count) from = _count;
   const uint32_t end = (want > _count - from) ? _count : from + want;
   const uint32_t n   = end - from;
@@ -754,6 +755,29 @@ inline void editStream(Print& out, bool paced = true,
     out.printf("[CLIPDL:BEGIN]{\"count\":%lu,\"durationMs\":%lu,\"mode\":%u}\n",
                (unsigned long)_count, (unsigned long)clipDurationMs(), (unsigned)_mode);
   }
+  // ── Keyframe batching (opt-in: "?REC,EDITLOAD,<name>,<from>,<count>,B") ────
+  // One event per line is ~62 B carrying 8 B of information, and over the mesh
+  // each line costs a whole RTERM packet — so packet COUNT, not the board, is
+  // what makes a mesh download slow (the pacing below allows ~4000 ev/s).
+  // Consecutive KEYFRAMES therefore pack into one line as bare tuples:
+  //   [CLIPDL:EVB,<firstIdx>]{"e":[[t,k,a,b,c],…]}
+  // Indices are implicit and consecutive from firstIdx, which is why an ACTION
+  // (or a full buffer) must FLUSH before it is emitted — a gap in the run would
+  // silently shift every index after it. Fixed arity 5 keeps the parser trivial:
+  //   k=1 REC_KF_MAESTRO -> [t,1,slot,ch,pos]
+  //   k=2 REC_KF_HCRVOL  -> [t,2,chan,vol,0]
+  // Actions are never batched: one can reach ~211 B by itself.
+  // Body budget 120 B keeps tag+wrapper+body inside one 160 B RTERM packet, so
+  // a batch never costs MORE packets than the per-event form it replaces.
+  char     bBody[200];
+  int      bLen   = 0;
+  uint32_t bFirst = 0;
+  const bool batching = ranged && batch;
+  auto flushBatch = [&]() {
+    if (bLen <= 0) return;
+    out.printf("[CLIPDL:EVB,%lu]{\"e\":[%s]}\n", (unsigned long)bFirst, bBody);
+    bLen = 0;
+  };
   for (uint32_t i = from; i < end; i++) {
     // ── USB: WAIT for TX room; do not just nap ──────────────────────────────
     // Serial is HWCDC with an 8 KB TX ring and a 50 ms write timeout (both set
@@ -787,6 +811,27 @@ inline void editStream(Print& out, bool paced = true,
       if (waitedMs >= 1000) hostGone = true;
     }
     const RecEvent& ev = _buf[i];
+    if (batching && ev.kind != REC_ACTION) {
+      // Longest record is "[4294967295,1,255,255,65535]," = 29 B; check BEFORE
+      // appending so a record is never split across two lines.
+      if (bLen && bLen + 30 > 120) flushBatch();
+      if (bLen == 0) bFirst = i;
+      int rn;
+      if (ev.kind == REC_KF_MAESTRO)
+        rn = snprintf(bBody + bLen, sizeof(bBody) - bLen, "%s[%lu,1,%u,%u,%u]",
+                      bLen ? "," : "", (unsigned long)ev.tMs,
+                      (unsigned)ev.u.km.slot, (unsigned)ev.u.km.ch, (unsigned)ev.u.km.pos);
+      else
+        rn = snprintf(bBody + bLen, sizeof(bBody) - bLen, "%s[%lu,2,%u,%u,0]",
+                      bLen ? "," : "", (unsigned long)ev.tMs,
+                      (unsigned)ev.u.kv.chan, (unsigned)ev.u.kv.vol);
+      if (rn > 0) bLen += rn;
+      if (paced) { if ((i & 3) == 3) delay(1); }
+      continue;
+    }
+    // An action must not overtake keyframes already buffered — indices in a
+    // batch are positional, so ordering is the whole contract.
+    if (batching) flushBatch();
     // The index goes in the MARKER, not the JSON, for two reasons. (1) A maximal
     // action line (~211 B with a full cmd[96]) already hard-wraps across two
     // RTERM packets at RTERM_TEXT_SIZE=160, so a marker-borne index lands on the
@@ -814,6 +859,8 @@ inline void editStream(Print& out, bool paced = true,
     if (paced) { if ((i & 3) == 3) delay(1); }
     // (unpaced/USB pacing is the availableForWrite wait at the top of the loop)
   }
+  if (batching) flushBatch();   // tail of the last run, before END closes the range
+
   // No flush() here: it is bounded (~50 ms) but adds nothing the per-line room
   // check has not already covered, and every avoidable blocking call on this
   // path costs SBUS servicing.

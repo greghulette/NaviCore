@@ -210,11 +210,13 @@ report with fewer than 8 fields is dropped whole rather than stored partially.
 ?REC,EDITLOAD,<name>                     legacy — whole clip, events UNindexed, byte-identical to before
 ?REC,EDITLOAD,<name>,<from>[,<count>]    ranged — events carry their absolute index
                                            count omitted → to end of clip
+?REC,EDITLOAD,<name>,<from>,<count>,B    ranged + BATCHED keyframes (see below)
 ```
 
 ```
 [CLIPDL:BEGIN]{"count":N,"durationMs":M,"mode":m,"from":f,"n":k,"fp":"8hex","fc":F,"nm":"<clip>"}
 [CLIPDL:EV,<absIdx>]{…}  × k     ranged only
+[CLIPDL:EVB,<firstIdx>]{"e":[[t,k,a,b,c],…]}   batched, ",B" only
 [CLIPDL:EV]{…}           × k     legacy only
 [CLIPDL:END]{"from":f,"n":k,"fp":"8hex","nm":"<clip>"}
 ```
@@ -237,6 +239,26 @@ lines per range (BEGIN ~95 B → ~134 B, inside the 160 B RTERM cap) and nothing
 A tool that does not know the key ignores it; firmware that does not send it reads as
 "cannot tell", which is exactly the old behaviour, so the tool must also drain the stream to
 silence between requests rather than rely on `nm` alone.
+
+**Batched keyframes (`,B`).** One event per line is ~62 B carrying 8 B of information, and over
+the mesh every line costs a whole RTERM packet — so PACKET COUNT, not the board, is what makes a
+mesh download slow (`editStream`'s pacing allows ~4000 ev/s). With `,B`, consecutive **keyframes**
+pack into one line as bare tuples, indices implicit and consecutive from `<firstIdx>`:
+
+| k | shape | meaning |
+|---|---|---|
+| 1 | `[t,1,slot,ch,pos]` | `REC_KF_MAESTRO` |
+| 2 | `[t,2,chan,vol,0]` | `REC_KF_HCRVOL` (padded to arity 5 so the parser stays trivial) |
+
+Actions are **never** batched — one can reach ~211 B alone — and an action (or a full line) FLUSHES
+the run first, because a gap in a positional run would silently shift every index after it. The
+body budget is 120 B, keeping tag+wrapper+body inside one 160 B packet, so a batch can never cost
+MORE packets than the per-event form. Measured on a realistic 300-event clip: **300 packets →
+60 (5.0×), 17,678 B → 6,996 B (2.5×)**, longest line 133 B.
+
+Compatible in both directions with no handshake: the old parser read `count` with `String::toInt()`,
+which stops at the comma and never saw the flag, so a new tool gets the per-event form back from old
+firmware — and the tool accepts **both** shapes always. An old tool omits `,B` and is unaffected.
 
 Five fields carry the integrity guarantee:
 
@@ -609,6 +631,7 @@ as the code. Page body stays present-tense; history lives here.
 | Date | Commit | Change |
 | 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
 |---|---|---|
+| 2026-08-27 | _(uncommitted)_ | **Batched keyframe download** — `?REC,EDITLOAD,…,<count>,B` opts into `[CLIPDL:EVB,<firstIdx>]{"e":[[t,k,a,b,c],…]}`, packing consecutive keyframes into one line with positional indices. Actions are never batched and flush the run. 5.0× fewer mesh packets / 2.5× fewer bytes on a 300-event clip, longest line 133 B (inside the 160 B cap, so no new fragmentation). Round-trip verified to reconstruct byte-identically to the per-event form across seven slices including ones straddling actions. Backward compatible both ways — `toInt()` stops at the comma, and the tool accepts both shapes unconditionally. |
 | 2026-08-27 | _(uncommitted)_ | **`?OTA,DATA` carries an optional CRC-32**, as a suffix on the offset field: `?OTA,DATA,<t>,<s>,<offset>:<crc32>,<b64>`, computed over `"<offset>,<b64>"` as transmitted. A relay that fails the check DROPS the line. Placed on the offset field, not appended, because `String::toInt()` stops at the `:` — so a relay predating the check reads the offset unchanged and a sender predating it just omits the suffix; appending a field would have been swept into the base64 and failed every packet. Verified by BOTH relays (`navicore_ota.h` `otaCrc32`, WCB `calculateCRC32`) against the tool's `_crc32Hex` — all three are the same reflected CRC-32 (poly `0xEDB88320`) and were cross-checked. Guards the USB→relay SERIAL hop only; 802.11 already CRCs the ESP-NOW hop in hardware. Also `Serial.setRxBufferSize` 4096 → 8192 and the sender's `PACE_MS` 12 → 25. |
 | 2026-08-27 | _(uncommitted)_ | **`[CLIPDL:BEGIN]`/`[CLIPDL:END]` gained `nm`** — the clip the buffer actually holds. The reply stream was anonymous, so a timed-out range's still-arriving lines were adopted by the next request: a stale `END` finished it early ("no reply from the board"), a stale `BEGIN` replaced its `count`/`fp` ("the clip changed on the board mid-download"), and stale events landed under foreign indices, pushing `got.size` past `total` and reporting a NEGATIVE shortfall ("-32 of 16 events"). One timeout then cascaded through the remaining clips of a backup. `nm` costs ~39 B on two control lines per range and nothing per event; `[CLIPDL:EV]` is unchanged. Request format is unchanged — no new argument — so an older tool is unaffected. |
 | 2026-08-25 | _(uncommitted)_ | **Ranged clip download.** `?REC,EDITLOAD,<name>,<from>[,<count>]` streams a bounded slice with each event carrying its absolute index in the MARKER (`[CLIPDL:EV,<i>]`), so a client can detect exactly which events are missing and re-request only those. `BEGIN`/`END` gained `from`/`n`/`fp` (FNV-1a buffer fingerprint) and `fc` (the FILE header count — `loadClip` truncates silently, so `count` alone would report a short read as complete). Legacy unranged form is byte-identical. `[CLIPITEM]` gained `n` (event count). The relayed 3000-event refusal now applies only to the legacy whole-clip form. |

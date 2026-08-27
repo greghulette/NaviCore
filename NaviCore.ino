@@ -3439,14 +3439,29 @@ bool execCliLine(const String& line) {
       // alnum/_/- , so a comma can never be part of a real clip's identity.
       String cname = name;
       uint32_t from = 0, want = 0xFFFFFFFFu;
-      bool ranged = false;
+      bool ranged = false, batch = false;
       { int c2 = name.indexOf(',');
         if (c2 > 0) {
           cname = name.substring(0, c2);
           String rest = name.substring(c2 + 1); rest.trim();
           int c3 = rest.indexOf(',');
           from   = (uint32_t)(c3 > 0 ? rest.substring(0, c3) : rest).toInt();
-          if (c3 > 0) want = (uint32_t)rest.substring(c3 + 1).toInt();
+          if (c3 > 0) {
+            // Optional 4th arg ",B" opts into BATCHED keyframe lines
+            // ([CLIPDL:EVB]). Safe to append: the old parser read `want` with
+            // toInt(), which stops at the comma and never saw the flag — so a new
+            // tool talking to old firmware just gets the per-event form back, and
+            // an old tool omits the flag and is unaffected. The tool handles both
+            // shapes regardless, so neither side needs to know the other version.
+            String cw = rest.substring(c3 + 1);
+            int c4 = cw.indexOf(',');
+            if (c4 >= 0) {
+              String fl = cw.substring(c4 + 1); fl.trim();
+              batch = fl.equalsIgnoreCase("B");
+              cw = cw.substring(0, c4);
+            }
+            want = (uint32_t)cw.toInt();
+          }
           ranged = true;
         } }
 
@@ -3489,7 +3504,7 @@ bool execCliLine(const String& line) {
           return true;
         }
       }
-      navirec::editStream(Serial, relayed, from, want, ranged);
+      navirec::editStream(Serial, relayed, from, want, ranged, batch);
     }
     else if (sub.equalsIgnoreCase("EDITBEGIN")) {
       Serial.println(navirec::editBegin() ? "[CLIPUL:BEGIN,OK]" : "[CLIPUL:BEGIN,ERR,busy]");
