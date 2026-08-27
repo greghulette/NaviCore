@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.15:27.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.15:50.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2856,8 +2856,11 @@
             </div>
             <div class="wcb-send-row">
               <label>WiFi channel:</label>
-              <input type="number" id="wcb-channel" min="1" max="13" style="width:60px"
-                     oninput="config.wcbNetwork.channel = Math.max(1, Math.min(13, +this.value || 1)); updateWcbDirtyBadge()">
+              <!-- 1-11, not 1-13: WCB_Client::setMeshChannel() rejects >11 and returns without
+                   setting, so a saved 12/13 silently leaves the radio on its default channel
+                   while every readout claims 12/13. Paired with the clamp in rc_config.h. -->
+              <input type="number" id="wcb-channel" min="1" max="11" style="width:60px"
+                     oninput="config.wcbNetwork.channel = Math.max(1, Math.min(11, +this.value || 1)); updateWcbDirtyBadge()">
               <small style="color:var(--muted);font-size:10px">1-13 — must match every WCB (?WCBCH)</small>
             </div>
             <div class="btn-row" style="margin-top:8px">
@@ -5452,6 +5455,28 @@ let _wcbKeepaliveTimer = null;
 // rcTelemetry::FRAG_CHUNK_BYTES so reassembly logic stays balanced.
 const FRAG_CHUNK_BYTES = 80;
 const FRAG_MAX_PARTS   = 192;   // SEND cap (SET_CONFIG upload): MUST match the RC's RECEIVE pool (rcTelemetry::FRAG_MAX_PARTS); 192 × 80 = 15 KB
+// ── Fragment pacing (Via-WCB only; Direct USB never fragments) ───────────────
+// The send loop waits max(wireMs × FRAG_PACE_LINK_MULT, FRAG_PACE_FLOOR_MS) between
+// fragments — see the long note at the pacing site in sendJSON() for why there are
+// two floors and which one bit us historically.
+//
+// FRAG_PACE_FLOOR_MS is THE tuning knob, and it is deliberately conservative. The
+// only two data points that exist are 50 ms = documented hard failure ("[SEND CB]
+// MAC-layer FAILED", then 100% failure) and 150 ms = known good; nothing in between
+// has ever been tried on hardware. 100 ms keeps 2x margin over the known-bad value
+// while cutting a 150-fragment SET_CONFIG from ~22 s to ~15 s.
+//
+// To tune: lower this, run a full-size save over the bridge, and watch the RC's
+// serial log. Clean = keep going. "MAC-layer FAILED" or a save that never ACKs =
+// you have found the edge; back off one step. A failure here is visible and
+// non-destructive — reassembly times out cleanly at the RC's 5 s FRAG_TIMEOUT_MS —
+// so this is a safe thing to probe.
+//
+// Below ~26 ms the LINK floor takes over and this knob stops having any effect;
+// that is the point of deriving it per-line rather than using one flat number.
+const FRAG_PACE_FLOOR_MS  = 100;
+const FRAG_PACE_LINK_MULT = 2;    // × the line's raw 115200 wire time — headroom for
+                                  // the bridge to drain its RX ring and hand off to ESP-NOW
 // RECEIVE cap: the RC can SEND a bigger fragmented download (CONFIG / CMDLIB / WCB_META)
 // because its send side is a cheap offset table, not the big receive pool
 // (rcTelemetry::FRAG_SEND_MAX_PARTS). The browser has ample RAM, so accept up to this.
@@ -5582,21 +5607,40 @@ async function sendJSON(obj, silent = false) {
       return;
     }
     await sendLine(prefix + env, silent);
-    // Inter-fragment pacing: must be longer than the bridge's ESP-NOW
-    // MAC-layer + ETM round-trip (send → MAC ACK → app ACK → done).
-    // Empirically 50 ms was NOT enough — WiFi TX queue overflowed mid-
-    // burst on a 38-fragment SET_CONFIG, producing "[SEND CB] MAC-layer
-    // FAILED" interspersed with successful sends, then 100% failure once
-    // the receiver got overwhelmed.  150 ms gives plenty of headroom and
-    // a 38-fragment SET_CONFIG still completes in ~5.7 s — acceptable
-    // for an explicit Save (which is rare and user-initiated).
+    // Inter-fragment pacing. Two independent floors, take the larger:
     //
-    // If this proves still unreliable in the field we may need to:
-    //   1. Implement application-level ACK per fragment (RC sends a
-    //      `{"type":"FRAG_ACK","sid":N,"f":X}` after each, sender waits)
-    //   2. Move bridge-side outbound to a true queue with rate limiting
-    // For now, simple source-side rate limiting is the right tradeoff.
-    await new Promise(r => setTimeout(r, 150));
+    //  1. THE LINK. The bridge WCB builds WITHOUT CDCOnBoot=cdc (its FQBN is
+    //     esp32:esp32:esp32s3:PartitionScheme=min_spiffs), so its `Serial` is UART0
+    //     and 115200 is REAL — unlike NaviCore, where native USB-CDC ignores baud
+    //     entirely. At 8N1 that is 10 bits/byte = 11,520 B/s, so this line occupies
+    //     (bytes / 11.52) ms of wire whether we like it or not. Sending faster than
+    //     that does not go faster; it piles into the WCB's RX ring and drops a run of
+    //     bytes from the MIDDLE of a line — silent corruption, not loss. This is the
+    //     exact failure the OTA relay hit at PACE_MS=12 (see otaUpdateOverWcb).
+    //
+    //  2. THE MESH. Unlike the OTA path — which uses sendRawPacket, no ETM — every
+    //     `;w20,` here goes out ENSURED, so the bridge holds a slot in its 10-deep
+    //     ETM pending table (WCB.ino ETM_PENDING_MAX) until the RC ACKs. Outrun the
+    //     ACK round trip and the table saturates, evicts an outstanding delivery, and
+    //     retries burst into the congestion they were queued behind. THIS is what
+    //     killed the original 50 ms attempt ("[SEND CB] MAC-layer FAILED", then 100%
+    //     failure) — the UART was never the problem at 50 ms.
+    //
+    // Floor (2) is the one that needs a bench run to lower safely: it depends on the
+    // real mesh ACK round trip, which we cannot measure from here. FRAG_PACE_FLOOR_MS
+    // is therefore the single knob — lower it while watching the RC's serial log for
+    // "MAC-layer FAILED", and stop at the first rate that stays clean over a
+    // full-size (150+ fragment) SET_CONFIG.
+    //
+    // Deriving floor (1) per-line rather than using one fixed number is a real gain
+    // on its own: fragments are 49-140 B depending on how much the slice escapes, so
+    // a flat delay overpays for every short fragment and underpays for long ones.
+    if (i < total - 1) {                     // no pacing after the LAST fragment —
+                                             // there is nothing behind it to collide with
+      const lineBytes = prefix.length + envBytes + 1;          // +1 for the newline
+      const wireMs    = Math.ceil(lineBytes / 11.52);          // 115200 8N1 = 11.52 B/ms
+      await new Promise(r => setTimeout(r, Math.max(wireMs * FRAG_PACE_LINK_MULT, FRAG_PACE_FLOOR_MS)));
+    }
   }
   } finally {
     _bridgeUploadInFlight = false;   // resume the background polls
@@ -18958,7 +19002,7 @@ function handleConfigImportFile(event) {
                 else if (field === 'password') wp.password = String(raw);
                 else if (field === 'quantity') wp.quantity = Math.max(1, Math.min(20, Number(raw) || 4));
                 else if (field === 'deviceid') wp.deviceId = Math.max(1, Math.min(20, Number(raw) || 20));
-                else if (field === 'channel')  wp.channel  = Math.max(1, Math.min(13, Number(raw) || 1));
+                else if (field === 'channel')  wp.channel  = Math.max(1, Math.min(11, Number(raw) || 1));   // 1-11: setMeshChannel() rejects >11
               }
             }
           } else if (control === 'mp3transport' || control === 'mp3target' ||
