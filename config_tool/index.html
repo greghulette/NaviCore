@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:49.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.14:40.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6396,19 +6396,63 @@ let _tlDownload = null;   // { name, src, header, events, evBuf } while EDITLOAD
 // its own session state rather than sharing _tlDownload, so the editor's path is
 // untouched.
 let _clipRange = null;
+let _clipDlLastMs = 0;    // Date.now() of the last [CLIPDL:] line from ANY source
+
+// Wait until the board has actually STOPPED streaming [CLIPDL:] lines.
+//
+// A range that times out while the board is still sending leaves that stream to
+// be adopted by the next request, because _clipRange is a single global. A stale
+// END then finishes the new session before its header arrives ("no reply from
+// the board"), a stale BEGIN overwrites its count/fp ("the clip changed on the
+// board mid-download"), and stale events land under a foreign clip's indices
+// ("-32 of 16 events"). Each failure left more undrained stream to poison the
+// next clip, so one timeout took out the rest of the backup. Draining to silence
+// between requests is what breaks that chain; the from/n gating above is the
+// second line of defence for anything that slips through.
+async function _clipDlQuiesce(quietMs = 500, capMs = 8000) {
+  const deadline = Date.now() + capMs;
+  for (;;) {
+    const idle = Date.now() - _clipDlLastMs;
+    if (idle >= quietMs || Date.now() >= deadline) return;
+    await new Promise(r => setTimeout(r, Math.min(quietMs - idle, 150)));
+  }
+}
 
 function _clipRangeFeed(text) {
   const s = _clipRange;
   if (!s) return false;
+  // Does this line answer the request WE sent? The board echoes from/n on both
+  // BEGIN and END, so the stream is already self-identifying — the tool simply
+  // was not checking. Anything that does not match belongs to an earlier request
+  // arriving late: consume it (return true, so it never reaches the terminal) but
+  // never let it touch this session. See _clipDlQuiesce for why late lines exist.
+  // A legacy pre-ranged firmware answers with a BEGIN carrying no `from` at all;
+  // that must still be accepted so the explicit "no ranged download" error below
+  // fires instead of an unexplained timeout.
+  const answersUs = (o) => {
+    if (!o || o.from === undefined) return true;   // legacy: no ranged support at all
+    if (+o.from !== s.reqFrom || +o.n !== s.reqCount) return false;
+    // `nm` is the decisive check — from/n alone cannot separate two clips asked
+    // the same range, and every clip is probed with (0,0). Absent means firmware
+    // older than the name echo, where the drain is the only defence; present and
+    // different is definitely another clip's line.
+    return o.nm === undefined || o.nm === s.reqName;
+  };
 
   if (text.startsWith('[CLIPDL:BEGIN]')) {
-    try { s.hdr = JSON.parse(text.slice(14)); } catch (_) { s.hdr = {}; }
+    let h = {};
+    try { h = JSON.parse(text.slice(14)); } catch (_) { h = {}; }
+    if (!answersUs(h)) return true;          // a previous request's header
+    s.hdr = h;
     s.evBuf = null; s.pendIdx = -1;
     return true;
   }
   if (text.startsWith('[CLIPDL:ERR]')) { s.err = text.slice(12).replace(/^,\d+\]?/, ''); s.finish(); return true; }
   if (text.startsWith('[CLIPDL:END]')) {
-    try { s.tail = JSON.parse(text.slice(12)); } catch (_) { s.tail = {}; }
+    let t = {};
+    try { t = JSON.parse(text.slice(12)); } catch (_) { t = {}; }
+    if (!answersUs(t)) return true;          // a previous request's END must not finish us
+    s.tail = t;
     s.finish();
     return true;
   }
@@ -6420,7 +6464,12 @@ function _clipRangeFeed(text) {
 
   try {
     const ev = JSON.parse(s.evBuf);
-    if (s.pendIdx >= 0) s.got.set(s.pendIdx, ev);
+    // Only indices we actually ASKED for. Without this an event from another
+    // clip's stream is stored under its own absolute index, and because `got` is
+    // shared across every round of this download those foreign entries push
+    // got.size past total — which is how a 16-event clip reported "-32 of 16".
+    if (s.pendIdx >= s.reqFrom && s.pendIdx < s.reqFrom + s.reqCount)
+      s.got.set(s.pendIdx, ev);
     s.evBuf = null; s.pendIdx = -1;
   } catch (_) {
     if (s.evBuf.length > 4096) { s.evBuf = null; s.pendIdx = -1; }   // corrupt chain — next EV recovers
@@ -6459,7 +6508,8 @@ async function clipDownloadVerified(name, onProgress, opts) {
       // two and hanging the first download forever. Also made idempotent, so a
       // reply arriving just as the timer fires cannot resolve twice.
       const sess = { hdr: null, tail: null, err: null, got, evBuf: null, pendIdx: -1,
-                     finish: null, timer: null, settled: false };
+                     finish: null, timer: null, settled: false,
+                     reqFrom: from, reqCount: count, reqName: name, timedOut: false };
       const done = () => {
         if (sess.settled) return;
         sess.settled = true;
@@ -6469,11 +6519,22 @@ async function clipDownloadVerified(name, onProgress, opts) {
       };
       sess.finish = done;
       _clipRange = sess;
-      sess.timer = setTimeout(done, 15000);   // a silent board must not hang the backup
+      // Scale the deadline with the work: a flat 15 s is either too tight for a
+      // big slice over the mesh or needlessly slow to give up on a silent board.
+      // Flagged as a timeout because that is precisely the case where the board
+      // may STILL be streaming — the caller must drain before asking for more.
+      const budgetMs = 15000 + count * (viaWcbActive ? 120 : 10);
+      sess.budgetMs = budgetMs;
+      sess.timer = setTimeout(() => { sess.timedOut = true; done(); }, budgetMs);
       sendRcCli(`?REC,EDITLOAD,${name},${from},${count}`, true);
     }).then(s => {
       if (s.err) throw new Error(s.err);
-      if (!s.hdr) throw new Error('no reply from the board');
+      // Distinguish the two: a board that stayed silent, versus one still busy
+      // streaming when our deadline expired. They need different user actions,
+      // and conflating them is what made a drain problem look like a dead board.
+      if (!s.hdr) throw new Error(s.timedOut
+        ? `timed out after ${Math.round(s.budgetMs / 1000)}s waiting for the board`
+        : 'no reply from the board');
       if (s.hdr.from === undefined) {
         // Flagged, not matched by message text: the timeline falls back to the
         // legacy stream on this specific case, and a reworded message must not
@@ -6500,6 +6561,11 @@ async function clipDownloadVerified(name, onProgress, opts) {
     });
   };
 
+  // Drain first. If a previous clip timed out, the board may still be streaming
+  // it — and its lines would otherwise be adopted by the probe below, which is
+  // the single request most vulnerable to it (every clip probes with the same
+  // (0,0), so from/n gating alone cannot tell two probes apart).
+  await _clipDlQuiesce();
   await runRange(0, 0);                      // header-only probe: count, fc, fp
   if (total === 0) return { name, header: { count: 0, ...meta }, events: [] };
   MAX_ROUNDS = Math.ceil(total / CHUNK) * 3 + 12;
@@ -6743,6 +6809,10 @@ async function clipsRestore(clips) {
 }
 
 function _clipDlFeed(src, text) {
+  // Stamped BEFORE any dispatch and for EVERY [CLIPDL:] line, including ones no
+  // session claims — _clipDlQuiesce() waits on this, and the drain we need to
+  // wait out is exactly the period when no session owns the stream.
+  _clipDlLastMs = Date.now();
   // A verified ranged download owns the [CLIPDL:*] stream while it runs.
   if (_clipRange) return _clipRangeFeed(text);
   if (!_tlDownload) return false;
