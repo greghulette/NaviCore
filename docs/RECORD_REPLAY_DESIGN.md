@@ -55,11 +55,42 @@ The shipped on-disk header is **five fields** (`ClipFileHeader`, `navicore_recor
 
 | Header field | Notes |
 |---|---|
-| `magic[4]` = `"NCR1"` | The **only** thing `loadClip()` validates. Adding a field to this struct therefore does not reject older clips — it silently misreads every clip already on the 12 MB `clips` partition, because the magic still matches while every following field shifts. A layout change needs a new magic or a version gate, never a quiet append. |
-| `version` (1) | Format version. |
+| `magic[4]` = `"NCR1"` | The **only** header field `loadClip()` validates. A layout change therefore does not reject older clips — the magic still matches while every following field shifts. This trap has fired once for real; see **Record stride** below. |
+| `version` (1) | Written as `1` and **never read**. It was not bumped when the record layout changed, so it cannot discriminate formats, and nothing may start trusting it to. |
 | `mode` (1–3) | `FunctionSwState` at record time — clip context. |
 | `count` | `RecEvent` entries following the header. |
 | `durationMs` | Clip length, from `clipDurationMs()` at save. |
+
+### Record stride — the trap that already fired
+
+The body is a **raw struct dump**, so the on-flash record size is `sizeof(RecEvent)` at the moment
+of writing, and **any change to `RcAction` silently changes it**. Adding `RcAction::skipRunning`
+grew `RecEvent` 136 → 140 bytes, and because `magic` still matched, every clip recorded before that
+change was then read at the wrong stride: `loadClip()` walked off the end after
+`floor(count × 136/140)` records and produced a clean-looking, self-consistent, **wrong** clip —
+~3 % of events gone, and every surviving record's `fn`/`chan`/`track` decoded from its neighbour's
+bytes. `skipRunning` was inserted *mid-struct* (between `note[20]` and `fn`), so the tail fields
+shifted and a v1 clip cannot be zero-extended — it has to be remapped field by field.
+
+`loadClip()` now derives the stride from the **file size** (`body == count × stride`) rather than
+from any header field, which is self-validating and needs no cooperation from the writer:
+
+| Stride | Layout | Handling |
+|---|---|---|
+| 140 | current (`skipRunning` present) | read straight into `_buf` |
+| 136 | v1, pre-`skipRunning` | read one record at a time through `_migrateV1Event()` (`RecEventV1`) |
+| anything else | genuinely short or corrupt | falls back to the current stride so the short-read warning names it, instead of returning a confident wrong answer |
+
+Migration is **in-memory only** — loading never writes to flash, so a power cut mid-load cannot cost
+you a good clip. A clip is rewritten in the current format the next time it is actually saved
+(record-stop, `?REC,SAVE`, or a timeline EDITEND), and a backup→restore round-trip upgrades it too.
+
+Three `static_assert`s in `navicore_record.h` keep this honest, and they are **deliberately loud**:
+`sizeof(RecEventV1) == 136`, `sizeof(RecEvent) == 140`, and `offsetof(RcActionV1, fn) ==
+offsetof(RcAction, skipRunning)` (the shared `type`..`note` prefix the migration `memcpy`s). **If you
+grow `RcAction` again the build breaks on purpose** — add the old `sizeof` to the stride table plus a
+matching migration, then update the assert. Note these are the *Xtensa* values: the core builds with
+`-fshort-enums`, so `RcActionType` is 1 byte, not 4.
 
 ### Designed, not built — the baseline-state snapshot
 
@@ -350,6 +381,17 @@ as edited.
   read at replay start, not a stored `servoHome[]`. §11: cross-board replay mismatch is unmitigated —
   there is no header field and no warning. §8: the per-build `_boot.bin` is never flashed, so only the
   partition half of the build wiring can be reverted by CI.
+- **v3.26 (2026-08-27, firmware; reflash required):** **Clips recorded before `RcAction::skipRunning`
+  now load correctly.** Every such clip had been reporting `floor(count × 136/140)` events — the tool
+  showed it as "truncated on the board" — because the `.ncr` body is a raw `RecEvent[]` dump and that
+  field grew the record 136 → 140 bytes while `magic` (the only validated header field) still matched.
+  `loadClip()` now derives the stride from the file size and decodes 136-byte records through
+  `_migrateV1Event()`/`RecEventV1`, remapping the tail fields `skipRunning` shifted (it was inserted
+  between `note[20]` and `fn`, so zero-extending would have been wrong). Migration is in-memory; the
+  file upgrades on its next real save. Three `static_assert`s now break the build if `RecEvent`
+  changes size again. The unlooped-`File::read` fix is unchanged, just hoisted into `_readFull()` and
+  shared by both paths. §2 gains a **Record stride** section, and `version` is documented as
+  written-but-never-read — it was never bumped, so it is not a usable discriminator.
 - **v3.25 (2026-08-25, config-tool only):** An incomplete download now RENDERS, read-only, instead of showing an error over a blank canvas. Previously `_tlDownloadComplete` nulled `_tlDownload` on a count mismatch and `_tlShowLoadError` wiped the SVG, so every event that DID arrive was destroyed. The model builder never reads `header.count` (it groups by slot/channel and sorts each track by time), so a partial list produces a valid model with no builder change. The only reason to refuse it was the risk of saving it back — a partial model reaching Save would overwrite the intact clip on the droid — so `clip.partial` now hard-blocks `_tlSave` and greys `#tl-save-btn`. The banner warns that motion BETWEEN keyframes is untrustworthy: a dropped keyframe draws as a straight line, not a gap, and there are no indices to mark where. Note the status text has never had a working "Retry" control (`tl-status` is a bare `<span>`); reopening the clip is the only retry.
 - **v3.24 (2026-07-03, config-tool only):** Second adversarial review sweep (27 raised → 10 confirmed → all
   fixed/dispositioned) + **Maestro script export**.

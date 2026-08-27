@@ -38,6 +38,79 @@ struct RecEvent {
   } u;
 };
 
+// ── Legacy on-flash record layout (pre-`RcAction::skipRunning`) ───────────────
+// A .ncr file is a RAW STRUCT DUMP of RecEvent[], so ANY change to RcAction
+// changes the on-flash stride. Adding `skipRunning` grew RecEvent 136 -> 140,
+// and because `magic` is the only header field ever validated, every clip
+// recorded before that change was then read at the WRONG stride: loadClip
+// walked off the end after floor(count * 136/140) records and reported a
+// clean-looking, self-consistent, WRONG clip — ~3% of events gone, and every
+// surviving record's fn/chan/track decoded from its neighbour's bytes.
+//
+// `version` cannot be the discriminator: it was never bumped (and is never
+// read), so old and new files both say 1. The stride is derived from the FILE
+// SIZE instead — self-validating, and it needs no cooperation from the writer.
+//
+// `skipRunning` was inserted mid-struct, so the tail fields SHIFTED; a v1 clip
+// cannot simply be zero-extended, it has to be remapped field by field.
+// Migration is in-memory only. A clip is rewritten in the current format the
+// next time it is actually saved (record-stop or a timeline EDITEND) — loading
+// never writes to flash, so a power cut mid-load can't cost you a good clip.
+struct RcActionV1 {
+  RcActionType type;
+  char     target[6];
+  char     cmd[96];
+  uint16_t delayMs;
+  char     note[20];
+  //       (no skipRunning)
+  uint8_t  fn;
+  int8_t   chan;
+  int16_t  track;
+};
+
+struct RecEventV1 {
+  uint32_t tMs;
+  uint8_t  kind;
+  union {
+    RcActionV1 act;
+    struct { uint8_t slot, ch; uint16_t pos; } km;
+    struct { uint8_t chan, vol; } kv;
+  } u;
+};
+
+// The shared prefix (type..note) must stay byte-identical for the memcpy in
+// _migrateV1Event to be valid — i.e. v1's `fn` must sit exactly where the
+// current struct's `skipRunning` does.
+static_assert(offsetof(RcActionV1, fn) == offsetof(RcAction, skipRunning),
+              "RcAction's pre-skipRunning prefix moved — _migrateV1Event's memcpy is no longer valid");
+static_assert(sizeof(RecEventV1) == 136,
+              "RecEventV1 must match the historical on-flash stride exactly (136 bytes)");
+// Deliberately loud: if RecEvent grows again, every existing .ncr silently
+// misreads unless a new stride is added to loadClip's table AND a matching
+// migration is written. Do that, then update this number.
+static_assert(sizeof(RecEvent) == 140,
+              "RecEvent stride changed — existing .ncr clips will misread. Add the old "
+              "sizeof to loadClip's stride table plus a migration, then update this assert");
+
+// Remap one v1 record into the current layout. Only REC_ACTION shifted; the
+// keyframe variants are small PODs at the head of the union and are unchanged.
+inline void _migrateV1Event(const RecEventV1& in, RecEvent& out) {
+  memset(&out, 0, sizeof(out));
+  out.tMs  = in.tMs;
+  out.kind = in.kind;
+  if (in.kind == REC_ACTION) {
+    memcpy(&out.u.act, &in.u.act, offsetof(RcActionV1, fn));   // type..note, byte-identical
+    out.u.act.skipRunning = false;                             // field did not exist in v1
+    out.u.act.fn          = in.u.act.fn;
+    out.u.act.chan        = in.u.act.chan;
+    out.u.act.track       = in.u.act.track;
+  } else if (in.kind == REC_KF_MAESTRO) {
+    out.u.km.slot = in.u.km.slot; out.u.km.ch = in.u.km.ch; out.u.km.pos = in.u.km.pos;
+  } else if (in.kind == REC_KF_HCRVOL) {
+    out.u.kv.chan = in.u.kv.chan; out.u.kv.vol = in.u.kv.vol;
+  }
+}
+
 static const uint16_t LASTPOS_NONE   = 0xFFFF;       // never-commanded sentinel
 static const uint32_t REC_MAX_MS     = 60000;        // 60 s capture cap (backstop); buffer sized to match (see recBegin cap)
 
@@ -492,6 +565,25 @@ inline void _ensureTimeOrdered() {
   }
 }
 
+// Read exactly `want` bytes, or as many as the file will give.
+// File::read(buf,len) is NOT required to return `len` — it may stop at a
+// filesystem cache/block boundary and return a short count with no error and no
+// EOF. A single unlooped call silently loaded every clip SHORT, proportionally
+// to its size (~3%): the tail was missing from replay and from the timeline
+// editor, and nothing reported it because _count was then computed from the
+// short read and looked self-consistent. saveClip verifies its write against
+// the full length, so the files on flash are complete — that loss was purely
+// read-side.
+inline size_t _readFull(File& f, uint8_t* dst, size_t want) {
+  size_t got = 0;
+  while (got < want) {
+    const int r = f.read(dst + got, want - got);
+    if (r <= 0) break;                     // real EOF or error — keep what we have
+    got += (size_t)r;
+  }
+  return got;
+}
+
 inline bool loadClip(const char* name) {
   if (!_clipFS || _state != ST_IDLE || !_buf) return false;
   _residencyClear();                       // fail closed if anything below bails
@@ -501,27 +593,48 @@ inline bool loadClip(const char* name) {
   ClipFileHeader h;
   if (f.read((uint8_t*)&h, sizeof(h)) != (int)sizeof(h) || memcmp(h.magic, "NCR1", 4) != 0) { f.close(); return false; }
   uint32_t n = (h.count > _cap) ? _cap : h.count;
-  // LOOP the read. File::read(buf, len) is NOT required to return `len` — it may
-  // stop at a filesystem cache/block boundary and return a short count with no
-  // error and no EOF. A single call therefore silently loaded every clip SHORT,
-  // proportionally to its size (~3% here): the tail of every clip was missing
-  // from replay and from the timeline editor, and nothing reported it because
-  // `_count` was then computed from the short read and looked self-consistent.
-  // saveClip already verifies its write against the full length, so the files on
-  // flash are complete — this was purely a read-side loss.
-  const size_t want = (size_t)n * sizeof(RecEvent);
-  size_t got = 0;
-  while (got < want) {
-    const int r = f.read((uint8_t*)_buf + got, want - got);
-    if (r <= 0) break;                     // real EOF or error — keep what we have
-    got += (size_t)r;
+  // Derive the on-flash record stride from the FILE SIZE. The header carries no
+  // usable format signal (see RecEventV1) — `version` reads 1 for both layouts —
+  // but the body length does: it is exactly count * stride. Match it against the
+  // strides we know how to decode; anything else means a genuinely short or
+  // corrupt file, which falls through to the current stride so the short-read
+  // warning below names it rather than this returning a confident wrong answer.
+  const size_t body   = ((size_t)f.size() >= sizeof(h)) ? (size_t)f.size() - sizeof(h) : 0;
+  size_t       stride = 0;
+  if (h.count > 0) {
+    if      (body == (size_t)h.count * sizeof(RecEvent))   stride = sizeof(RecEvent);
+    else if (body == (size_t)h.count * sizeof(RecEventV1)) stride = sizeof(RecEventV1);
+  }
+  if (!stride) stride = sizeof(RecEvent);
+
+  uint32_t loaded = 0;
+  if (stride == sizeof(RecEvent)) {
+    const size_t want = (size_t)n * sizeof(RecEvent);
+    const size_t got  = _readFull(f, (uint8_t*)_buf, want);
+    loaded = got / sizeof(RecEvent);
+    if (got < want)
+      Serial.printf("[REC] WARNING: '%s' read short — %u of %u bytes (%lu of %lu events)\n",
+                    name, (unsigned)got, (unsigned)want,
+                    (unsigned long)loaded, (unsigned long)n);
+  } else {
+    // v1 clip: one record at a time through the remapper. LittleFS serves these
+    // from its block cache, so the per-record calls cost little, and a partial
+    // trailing record is dropped rather than half-decoded.
+    RecEventV1 ev;
+    while (loaded < n) {
+      if (_readFull(f, (uint8_t*)&ev, sizeof(ev)) != sizeof(ev)) break;
+      _migrateV1Event(ev, _buf[loaded]);
+      loaded++;
+    }
+    if (loaded < n)
+      Serial.printf("[REC] WARNING: '%s' read short — %lu of %lu v1 events\n",
+                    name, (unsigned long)loaded, (unsigned long)n);
+    else
+      Serial.printf("[REC] '%s': migrated %lu events from the pre-skipRunning clip format\n",
+                    name, (unsigned long)loaded);
   }
   f.close();
-  _count = got / sizeof(RecEvent);
-  if (got < want)
-    Serial.printf("[REC] WARNING: '%s' read short — %u of %u bytes (%lu of %lu events)\n",
-                  name, (unsigned)got, (unsigned)want,
-                  (unsigned long)_count, (unsigned long)n);
+  _count = loaded;
   _mode  = h.mode;
   strlcpy(_loadedName, name, sizeof(_loadedName));
   _loadedFc = h.count;                     // the FILE's count, not the truncated _count
