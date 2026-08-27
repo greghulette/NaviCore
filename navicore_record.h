@@ -248,21 +248,28 @@ inline void shadowInvalidate(uint8_t slot, uint8_t ch) {
 // ── Capture taps (noinline + small POD: keep the event off the Core-0 ESP-NOW
 //    callback frame, exactly the queueRemoteCli lesson). Non-blocking, drop-if-
 //    full — a dropped keyframe just thins one frame; a stall would brick. ───────
+//    Each tap VALUE-INITIALISES its event (`RecEvent ev{}`) on purpose. Only
+//    tMs/kind and ONE union member are assigned, and saveClip() writes the
+//    struct verbatim — so without the braces ~130 bytes of stack garbage per
+//    keyframe land on flash and ride along into cloud clip backups, and two
+//    identical takes never produce identical .ncr files. Cost is a 140-byte
+//    zero-fill per event (~56 KB/s at a dense 400 kf/s) — not the constraint.
+//    drain() below needs none: xQueueReceive overwrites the whole struct. ─────
 inline void __attribute__((noinline)) captureAction(const RcAction& a) {
   if (!_capturing) return;
   if (a.type == RA_RECORD || a.type == RA_PLAY || a.type == RA_STOP) return;   // meta — never record the record/play/stop triggers
-  RecEvent ev; ev.tMs = millis() - _recStart; ev.kind = REC_ACTION; ev.u.act = a;
+  RecEvent ev{}; ev.tMs = millis() - _recStart; ev.kind = REC_ACTION; ev.u.act = a;
   if (xQueueSend(_queue, &ev, 0) != pdTRUE) _drops++;
 }
 inline void __attribute__((noinline)) captureMaestroKf(uint8_t slot, uint8_t ch, uint16_t pos) {
   if (!_capturing) return;
-  RecEvent ev; ev.tMs = millis() - _recStart; ev.kind = REC_KF_MAESTRO;
+  RecEvent ev{}; ev.tMs = millis() - _recStart; ev.kind = REC_KF_MAESTRO;
   ev.u.km.slot = slot; ev.u.km.ch = ch; ev.u.km.pos = pos;
   if (xQueueSend(_queue, &ev, 0) != pdTRUE) _drops++;
 }
 inline void __attribute__((noinline)) captureHcrVolKf(uint8_t chan, uint8_t vol) {
   if (!_capturing) return;
-  RecEvent ev; ev.tMs = millis() - _recStart; ev.kind = REC_KF_HCRVOL;
+  RecEvent ev{}; ev.tMs = millis() - _recStart; ev.kind = REC_KF_HCRVOL;
   ev.u.kv.chan = chan; ev.u.kv.vol = vol;
   if (xQueueSend(_queue, &ev, 0) != pdTRUE) _drops++;
 }

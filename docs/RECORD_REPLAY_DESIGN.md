@@ -52,6 +52,9 @@ bug that crashed the board during the OTA work.
 
 The shipped on-disk header is **five fields** (`ClipFileHeader`, `navicore_record.h`), written by
 `saveClip()`; the body is a raw `RecEvent[count]` array immediately after it, and nothing else.
+The capture taps value-initialise every event, so a record's unused union bytes are zeros rather
+than stack garbage — two identical takes produce byte-identical files, and nothing uninitialised
+reaches flash or a cloud clip backup.
 
 | Header field | Notes |
 |---|---|
@@ -381,6 +384,14 @@ as edited.
   read at replay start, not a stored `servoHome[]`. §11: cross-board replay mismatch is unmitigated —
   there is no header field and no warning. §8: the per-build `_boot.bin` is never flashed, so only the
   partition half of the build wiring can be reverted by CI.
+- **v3.27 (2026-08-27, firmware; reflash required):** **Capture taps value-initialise the event**
+  (`RecEvent ev{}` in `captureAction`/`captureMaestroKf`/`captureHcrVolKf`). Each tap assigns only
+  `tMs`/`kind` and ONE union member, and `saveClip()` writes the struct verbatim, so ~130 bytes of
+  stack garbage per keyframe were landing on flash — and riding along into cloud clip backups. Clip
+  files are now byte-reproducible for an identical take. `drain()` is deliberately left
+  uninitialised: `xQueueReceive` overwrites the whole struct. Costs 48 bytes of flash and a 140-byte
+  zero-fill per event (~56 KB/s at a dense 400 kf/s). This garbage is also what made the v3.26
+  stride misread decode as noise rather than as zeros.
 - **v3.26 (2026-08-27, firmware; reflash required):** **Clips recorded before `RcAction::skipRunning`
   now load correctly.** Every such clip had been reporting `floor(count × 136/140)` events — the tool
   showed it as "truncated on the board" — because the `.ncr` body is a raw `RecEvent[]` dump and that
