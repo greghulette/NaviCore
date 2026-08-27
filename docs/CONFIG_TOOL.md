@@ -57,6 +57,13 @@ over the bridge, so a misdetected session silently refuses to write those settin
 An auto-switch is also announced now, in a toast and the terminal. Changing transport changes
 behaviour, and if the user did not plug in a bridge it is a misdetection they need to see.
 
+Transport is **UI state as well as protocol state**. `viaWcbActive` gates which of the four
+firmware buttons are enabled — flash, wipe and USB OTA need a direct link; relay OTA needs the
+bridge — so **every site that assigns the flag must call `_updateFirmwareBtnState()`**. There are
+three: `openPortAndStart()`, the disconnect path, and `onViaWcbToggle()`. Only the last used to,
+and a *successful* direct-USB auto-detect never calls the toggle at all, so a USB reconnect after
+a Via-WCB session kept the dead session's buttons: "Update over WCB" as the only enabled option.
+
 **`WcbSerialHub`** (`serial-hub.js`) exists because a Web Serial port can be open in exactly
 one browsing context. One tab wins a Web Lock and becomes leader, owning the physical port;
 followers proxy raw bytes over a `BroadcastChannel` and the leader mirrors reads back.
@@ -609,7 +616,6 @@ will not reappear on their own.
 7. Push — the Pages workflow deploys `main` to `/config_tool` and any other branch to
    `/dev/<branch>/config_tool` automatically.
 8. Update the wiki if the feature is user-visible.
-| 2026-08-25 | _(uncommitted)_ | **Transport auto-detect no longer misreports a slow direct board as bridged.** Probe phases now take an epoch and a PONG only satisfies its own (§2) — a reply arriving after the direct phase gave up was being credited to the Via-WCB probe, so the tool showed "Connected via WCB" with nothing bridged, and Save then silently stripped WCB Network. An auto-switch is announced rather than silent. |
 
 ---
 
@@ -620,6 +626,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-27 | _(uncommitted)_ | **The firmware buttons now follow a reconnect.** `viaWcbActive` is assigned directly by `openPortAndStart()` and the disconnect path, both bypassing `_updateFirmwareBtnState()` — and a successful direct-USB auto-detect never calls `onViaWcbToggle()`, the only other caller. So disconnecting a Via-WCB session and reconnecting over USB left all four buttons on the previous transport: flash/wipe/USB-OTA greyed, "Update over WCB" the only option. Both sites now re-sync, and §2 records the invariant. Also corrected two comments claiming the flag is restored from `localStorage` — it is deliberately not persisted. |
+| 2026-08-25 | _(uncommitted)_ | **Transport auto-detect no longer misreports a slow direct board as bridged.** Probe phases now take an epoch and a PONG only satisfies its own (§2) — a reply arriving after the direct phase gave up was being credited to the Via-WCB probe, so the tool showed "Connected via WCB" with nothing bridged, and Save then silently stripped WCB Network. An auto-switch is announced rather than silent. |
 | 2026-08-25 | _(uncommitted)_ | Added `clipDownloadVerified()` and the **⤓ per-clip download** (§5). Uses the ranged protocol so completeness is a set check over event indices rather than a count compare — a count cannot support retry, since a partly-duplicated re-request nets a shortfall of zero while events are still missing. Refuses on `fc != count` (truncated on the board), on a changed `fp` (buffer replaced mid-assembly by a Record/Play trigger), or on an incomplete set. **Never writes a partial file.** |
 | 2026-08-24 | _(uncommitted)_ | Added the **live trigger flash** (§5) — an `rc_trig` lights the exact tier row that fired in the assignment cards, in the live-activity orange. Mirrors `rcDispatch()`: cumulative lights every tier up to the match, exclusive and long press light only their own. |
 | 2026-08-24 | `8c4584c`+`6d026a3` | Added the **push-budget readout** (§5) — a live fragment count for the next Via-WCB Save, shown in the Config modal footer. `_pushBudgetInfo()` mirrors `saveConfigToBoard()`'s payload construction (branch diff + per-button `mappings` sub-diff, wcbNetwork strip over the bridge, and the `{sys:1,…}` wrapper `sendJSON()` actually chunks); getting any of the three wrong misreports by a large factor. Predicts BOTH bridged refusals — the 192-fragment cap and the per-fragment 187 B escaped-envelope abort (which can fire at 4% of budget). Polls rather than hooking mutations, and is honest that the cap binds only over the mesh. Also added the long-press tier tab and the Long Press (`holdMs`) field in Config → General. |

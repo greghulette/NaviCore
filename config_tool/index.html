@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:39.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.10:49.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4500,6 +4500,13 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
   // session if they're actually bridging through a tethered WCB.
   viaWcbActive = false;
   { const tg = document.getElementById('via-wcb-toggle'); if (tg) tg.checked = false; }
+  // Re-sync the firmware buttons to the NEW transport. This assignment bypasses
+  // onViaWcbToggle(), which is the only other place that calls this — and on a
+  // SUCCESSFUL direct-USB auto-detect the toggle is never called at all, so
+  // without this the four fw buttons keep the PREVIOUS session's Via-WCB state:
+  // reconnecting over USB after a WCB session left "Update over WCB" as the only
+  // enabled option. Every site that assigns viaWcbActive must call this.
+  _updateFirmwareBtnState();
   updateTerminalSplit();   // fresh connect starts single-pane until auto-detect bridges
   await p.open({ baudRate: 115200 });
   // DEASSERT DTR/RTS IMMEDIATELY. On a NaviCore v2 the ESP32-S3 drives USB
@@ -4799,6 +4806,13 @@ async function disconnect() {
     // Network edits from Save (see saveConfigToBoard).
     viaWcbActive = false;
     { const tg = document.getElementById('via-wcb-toggle'); if (tg) tg.checked = false; }
+    // Re-sync the firmware buttons to the NEW transport. This assignment bypasses
+    // onViaWcbToggle(), which is the only other place that calls this — and on a
+    // SUCCESSFUL direct-USB auto-detect the toggle is never called at all, so
+    // without this the four fw buttons keep the PREVIOUS session's Via-WCB state:
+    // reconnecting over USB after a WCB session left "Update over WCB" as the only
+    // enabled option. Every site that assigns viaWcbActive must call this.
+    _updateFirmwareBtnState();
     updateTerminalSplit();   // collapse back to single-pane on disconnect
     // Stop the SBUS-staleness watchdog.  If we don't, the timer keeps
     // running across reconnects with stale _rcLastChMs values, and the
@@ -17573,8 +17587,12 @@ async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
 // can't reset the target chip into download mode — attempting flash via
 // Via WCB would fail mid-write and likely brick the RC.  We disable the
 // buttons (greyed out + tooltip) whenever viaWcbActive is true, and
-// re-enable when it's cleared.  Also called once after DOM is ready to
-// pick up the localStorage-restored viaWcbActive state on page load.
+// re-enable when it's cleared.
+// INVARIANT: every site that assigns viaWcbActive must call this. There are
+// three (openPortAndStart, the disconnect path, onViaWcbToggle) and only the
+// last used to — so the buttons kept a dead session's transport. Note the flag
+// is deliberately NOT persisted (see onViaWcbToggle); the microtask call below
+// just sets the initial Direct-USB state before anything is connected.
 function _updateFirmwareBtnState() {
   const btnFlash = document.getElementById('btn-fw-flash');
   const btnWipe  = document.getElementById('btn-fw-wipe');
@@ -17618,7 +17636,8 @@ function _updateFirmwareBtnState() {
   }
 }
 // Run once after the listeners below are bound, so the initial state
-// (which may have viaWcbActive=true from localStorage restore) is reflected.
+// (Direct USB, nothing connected yet) is reflected. The flag is NOT persisted,
+// so this is always the Direct-USB state — see onViaWcbToggle.
 // Done with a microtask so it runs after DOMContentLoaded handlers settle.
 queueMicrotask(_updateFirmwareBtnState);
 
