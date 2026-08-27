@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.14:40.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.15:20.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -17328,6 +17328,29 @@ async function otaUpdateOverUsb() {
 // device (the relay WCB) does NOT reboot — so there's no USB reconnect; the
 // target re-joins the mesh on its own. Chunks are 192 B (the ESP-NOW OTA payload),
 // ACK-paced on the relay's [OTA:ACK,<src>,<session>,<offset>,<status>] markers.
+// CRC-32 (reflected, poly 0xEDB88320, init/final 0xFFFFFFFF) — byte-for-byte the
+// same function as calculateCRC32() in the WCB's WCB.ino, which is what verifies
+// the value. Used to protect each ?OTA,DATA line across the USB->WCB serial hop:
+// that hop is where an RX-ring overflow can drop a run of bytes out of the MIDDLE
+// of a line, leaving text that is still valid base64 and still decodes cleanly —
+// silent corruption that nothing catches until the target's SHA-256 at 100%. The
+// ESP-NOW hop needs no cover: 802.11 already CRCs its frames in hardware.
+let _crc32Tab = null;
+function _crc32Hex(str) {
+  if (!_crc32Tab) {
+    _crc32Tab = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      _crc32Tab[n] = c >>> 0;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < str.length; i++)
+    crc = (_crc32Tab[(crc ^ str.charCodeAt(i)) & 0xFF] ^ (crc >>> 8)) >>> 0;
+  return ((crc ^ 0xFFFFFFFF) >>> 0).toString(16).toUpperCase().padStart(8, '0');
+}
+
 async function otaUpdateOverWcb() {
   if (_otaInProgress || _fwFlashing) return;
   if (!viaWcbActive) {
@@ -17419,7 +17442,15 @@ async function otaUpdateOverWcb() {
     setStatus('OTA-WCB: streaming…');
     otaStartMs = Date.now();   // start the elapsed clock at the first DATA packet
     const WINDOW  = 8;      // packets in flight (< the target's 12-deep RX queue)
-    const PACE_MS = 12;     // small gap between sends so a burst can't flood the relay/USB
+    // Pace to the LINK, not faster than it. One DATA line is ~284 B (192 firmware
+    // bytes -> 256 base64 chars + header), and 284 B at 115200 8N1 is ~24.7 ms of
+    // wire time. At the old 12 ms this emitted ~2x what the link could carry, so a
+    // full window (8 x 284 = 2272 B) piled into the WCB's RX ring — which was 2 KB,
+    // i.e. the window could not fit even if the WCB drained nothing. The overflow
+    // dropped a run of bytes from the middle of a line, which is silent corruption,
+    // not loss (see the relay's crc32 check). 25 ms costs nothing real: the serial
+    // link is the bottleneck for a ~1.2 MB image either way.
+    const PACE_MS = 25;
     let confirmed = 0;      // target's ACK'd write cursor (bytes)
     let nextSend  = 0;      // next offset to transmit (bytes)
     let noAdvance = 0;      // consecutive cursor-stuck ACKs → the packet at `confirmed` is lost
@@ -17428,7 +17459,15 @@ async function otaUpdateOverWcb() {
       // Fill the window (send-ahead, don't wait per packet).
       while (nextSend < size && (nextSend - confirmed) < WINDOW * CHUNK) {
         const slice = bytes.subarray(nextSend, Math.min(nextSend + CHUNK, size));
-        await sendLine(`?OTA,DATA,${target},${session},${nextSend},${toB64(slice)}`, true);
+        const b64 = toB64(slice);
+        // "<offset>:<crc32>" — the suffix rides on the OFFSET field, not as a new
+        // trailing field, because the relay parses the offset with String::toInt(),
+        // which stops at the ':'. A WCB that predates the check therefore reads the
+        // offset exactly as before and ignores the suffix; appending a field instead
+        // would have been swept into the base64 and failed every packet on old
+        // firmware. Covers offset AND payload, so a mangled offset is caught too.
+        const crc = _crc32Hex(`${nextSend},${b64}`);
+        await sendLine(`?OTA,DATA,${target},${session},${nextSend}:${crc},${b64}`, true);
         nextSend += CHUNK;
         if (PACE_MS) await new Promise(r => setTimeout(r, PACE_MS));
       }
