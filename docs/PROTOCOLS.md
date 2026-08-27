@@ -213,10 +213,10 @@ report with fewer than 8 fields is dropped whole rather than stored partially.
 ```
 
 ```
-[CLIPDL:BEGIN]{"count":N,"durationMs":M,"mode":m,"from":f,"n":k,"fp":"8hex","fc":F}
+[CLIPDL:BEGIN]{"count":N,"durationMs":M,"mode":m,"from":f,"n":k,"fp":"8hex","fc":F,"nm":"<clip>"}
 [CLIPDL:EV,<absIdx>]{…}  × k     ranged only
 [CLIPDL:EV]{…}           × k     legacy only
-[CLIPDL:END]{"from":f,"n":k,"fp":"8hex"}
+[CLIPDL:END]{"from":f,"n":k,"fp":"8hex","nm":"<clip>"}
 ```
 
 **The compatibility rule for this whole family:** anything an old tool can trigger keeps its
@@ -225,7 +225,20 @@ is the one safe exception — the tool reads only `durationMs`/`mode`/`count` fr
 keys are inert. `[CLIPDL:ERR]` in particular must keep its exact prefix and offset, because
 the tool matches it with `startsWith` and a fixed `slice`.
 
-Four fields carry the integrity guarantee:
+**`nm` makes the stream self-identifying, and that is not optional.** The reply carries no
+request id, and `_clipRange` in the tool is a single global, so a range that times out while
+the board is still sending leaves that stream to be adopted by the NEXT request. `from`/`n`
+alone cannot separate two clips asked the same range — and a backup probes **every** clip with
+`(0,0)`, so the probe is the most exposed request of all. Without `nm` a stale `END` finishes the
+new session before its header arrives, a stale `BEGIN` overwrites its `count`/`fp`, and stale
+`[CLIPDL:EV,i]` land under a foreign clip's indices — which produced a **negative** shortfall
+("-32 of 16 events") and cascaded through the rest of the backup. `nm` costs ~39 B on two control
+lines per range (BEGIN ~95 B → ~134 B, inside the 160 B RTERM cap) and nothing per event.
+A tool that does not know the key ignores it; firmware that does not send it reads as
+"cannot tell", which is exactly the old behaviour, so the tool must also drain the stream to
+silence between requests rather than rely on `nm` alone.
+
+Five fields carry the integrity guarantee:
 
 - **`count`** keeps its legacy meaning (total events resident), so an old tool's arithmetic
   still reads correctly.
@@ -596,6 +609,7 @@ as the code. Page body stays present-tense; history lives here.
 | Date | Commit | Change |
 | 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
 |---|---|---|
+| 2026-08-27 | _(uncommitted)_ | **`[CLIPDL:BEGIN]`/`[CLIPDL:END]` gained `nm`** — the clip the buffer actually holds. The reply stream was anonymous, so a timed-out range's still-arriving lines were adopted by the next request: a stale `END` finished it early ("no reply from the board"), a stale `BEGIN` replaced its `count`/`fp` ("the clip changed on the board mid-download"), and stale events landed under foreign indices, pushing `got.size` past `total` and reporting a NEGATIVE shortfall ("-32 of 16 events"). One timeout then cascaded through the remaining clips of a backup. `nm` costs ~39 B on two control lines per range and nothing per event; `[CLIPDL:EV]` is unchanged. Request format is unchanged — no new argument — so an older tool is unaffected. |
 | 2026-08-25 | _(uncommitted)_ | **Ranged clip download.** `?REC,EDITLOAD,<name>,<from>[,<count>]` streams a bounded slice with each event carrying its absolute index in the MARKER (`[CLIPDL:EV,<i>]`), so a client can detect exactly which events are missing and re-request only those. `BEGIN`/`END` gained `from`/`n`/`fp` (FNV-1a buffer fingerprint) and `fc` (the FILE header count — `loadClip` truncates silently, so `count` alone would report a short read as complete). Legacy unranged form is byte-identical. `[CLIPITEM]` gained `n` (event count). The relayed 3000-event refusal now applies only to the legacy whole-clip form. |
 | 2026-08-24 | _(uncommitted)_ | `rc_trig` is now emitted on **USB as well as the mesh**. `emitTrig()` returns early without a ready WCB, so a Direct-USB tool saw no dispatch events at all for a local button press. Same JSON shape on both transports; the tool filters the mesh copy by `id` but not the USB copy, which arrives from the one board it is connected to. |
 | 2026-08-24 | `083207c` | `tap` now spans 1–4 on both `TRIGGER` (USB + mesh) and `rc_trig`, where **4 = long press**. No wire-format change — the existing `tap` field carries it, so the WCB bridge and `WcbCmd` are untouched. Three separate bounds enforce it: the USB handler, the mesh clamp in `rcTelemetry::handle()`, and the clamp in `drainRemoteTriggers()`. |

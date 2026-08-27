@@ -747,9 +747,9 @@ inline void editStream(Print& out, bool paced = true,
     //             h.count > _cap, so `count` alone would report a short read as
     //             a complete clip. fc != count means DO NOT BANK THIS.
     out.printf("[CLIPDL:BEGIN]{\"count\":%lu,\"durationMs\":%lu,\"mode\":%u,"
-               "\"from\":%lu,\"n\":%lu,\"fp\":\"%08X\",\"fc\":%lu}\n",
+               "\"from\":%lu,\"n\":%lu,\"fp\":\"%08X\",\"fc\":%lu,\"nm\":\"%s\"}\n",
                (unsigned long)_count, (unsigned long)clipDurationMs(), (unsigned)_mode,
-               (unsigned long)from, (unsigned long)n, _bufFingerprint(), (unsigned long)_loadedFc);
+               (unsigned long)from, (unsigned long)n, _bufFingerprint(), (unsigned long)_loadedFc, _loadedName);
   } else {
     out.printf("[CLIPDL:BEGIN]{\"count\":%lu,\"durationMs\":%lu,\"mode\":%u}\n",
                (unsigned long)_count, (unsigned long)clipDurationMs(), (unsigned)_mode);
@@ -819,8 +819,15 @@ inline void editStream(Print& out, bool paced = true,
   // path costs SBUS servicing.
   // fp repeated on END so a clip that changed DURING the stream is caught too —
   // BEGIN's fingerprint alone would not notice a mid-stream buffer swap.
-  if (ranged) out.printf("[CLIPDL:END]{\"from\":%lu,\"n\":%lu,\"fp\":\"%08X\"}\n",
-                         (unsigned long)from, (unsigned long)n, _bufFingerprint());
+  // `nm` is the clip the buffer actually holds. The reply stream is otherwise
+  // anonymous — from/n alone cannot tell two clips apart when both are asked the
+  // same range, and EVERY clip is probed with (0,0), so a backup that moves clip
+  // to clip had no way to reject a previous clip's late lines. Costs ~39 B on two
+  // control lines per range (BEGIN ~95 B -> ~134 B, under the 160 B RTERM cap) and
+  // nothing per event. Older tools ignore the extra key; older firmware omits it
+  // and the tool treats "absent" as "cannot tell", exactly as before.
+  if (ranged) out.printf("[CLIPDL:END]{\"from\":%lu,\"n\":%lu,\"fp\":\"%08X\",\"nm\":\"%s\"}\n",
+                         (unsigned long)from, (unsigned long)n, _bufFingerprint(), _loadedName);
   else        out.println("[CLIPDL:END]");
 }
 
