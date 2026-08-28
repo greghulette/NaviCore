@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.11:49.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.11:57.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -5515,6 +5515,60 @@ function _utf8Chunks(str, maxBytes) {
     if (curBytes + chBytes > maxBytes && cur) { chunks.push(cur); cur = ''; curBytes = 0; }
     cur += ch; curBytes += chBytes;
   }
+
+// Split for the bridge by MEASURED envelope size rather than a fixed byte count.
+//
+// FRAG_CHUNK_BYTES (80) is a WORST-CASE figure: 80 bytes that were all quotes
+// would escape to ~160 and, wrapped, still clear the 187 B cap. Real config JSON
+// is ~22% quote characters, so a fixed-80 fragment carries an envelope of ~138 B
+// against a 187 B budget — about 60% full, on every fragment. That matters twice
+// over the bridge: each fragment costs a fixed pacing delay regardless of payload
+// (so under-filling is wasted WALL-CLOCK), and the RC's receive pool is capped at
+// FRAG_MAX_PARTS — a fully-populated config lands near it, and the cap CANNOT
+// simply be raised (the RC crash-looped at 384; see rcTelemetry.h).
+//
+// So grow each chunk while the envelope it will produce still fits. Cost per
+// codepoint mirrors JSON's escaper — 2 bytes for a quote or backslash, 2 for the
+// five short control escapes, 6 for any other control char, otherwise its UTF-8
+// length — and `for..of` keeps surrogate pairs whole, so concatenating the slices
+// still reproduces the input exactly, which the RC's join()-based reassembly
+// requires. Every finished chunk is then verified against the REAL serialized
+// envelope and shrunk if it somehow exceeded, so the estimate can never ship an
+// oversized fragment.
+const FRAG_ENV_TARGET_BYTES = 180;   // aim here; FRAG_MAX_ENV_BYTES (187) is the hard cap
+// {"f":999,"of":999,"sid":99999,"s":"…"} — fixed punctuation plus worst-case digits.
+const FRAG_ENV_OVERHEAD     = 37;
+function _fragEscBytes(ch) {
+  const c = ch.codePointAt(0);
+  if (c === 0x22 || c === 0x5C) return 2;                       // " and backslash
+  if (c === 8 || c === 9 || c === 10 || c === 12 || c === 13) return 2;
+  if (c < 0x20) return 6;                                       // \u00XX
+  return c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;    // UTF-8 length
+}
+function _fragChunks(str) {
+  const budget = FRAG_ENV_TARGET_BYTES - FRAG_ENV_OVERHEAD;
+  const enc = new TextEncoder();
+  const chunks = [];
+  let cur = '', esc = 0;
+  const flush = () => {
+    if (!cur) return;
+    // Exact check against the real envelope, with worst-case header values.
+    while (cur && enc.encode(JSON.stringify({ f: 999, of: 999, sid: 99999, s: cur })).length
+                  > FRAG_MAX_ENV_BYTES) {
+      const cps = Array.from(cur);
+      cps.pop();
+      cur = cps.join('');
+    }
+    chunks.push(cur); cur = ''; esc = 0;
+  };
+  for (const ch of str) {
+    const cost = _fragEscBytes(ch);
+    if (esc + cost > budget && cur) flush();
+    cur += ch; esc += cost;
+  }
+  flush();
+  return chunks;
+}
   if (cur) chunks.push(cur);
   return chunks;
 }
@@ -5584,7 +5638,7 @@ async function sendJSON(obj, silent = false) {
   // Chunk on UTF-8 byte budget + codepoint boundaries (not code-unit substring),
   // so a multi-byte character is never split across two fragments — the RC joins
   // the `s` slices, so the reassembled JSON must stay valid UTF-8.
-  const chunks = _utf8Chunks(inner, FRAG_CHUNK_BYTES);
+  const chunks = _fragChunks(inner);
   const total  = chunks.length;
   if (total > FRAG_MAX_PARTS) {
     const msg = `Send aborted — payload needs ${total} fragments (max ${FRAG_MAX_PARTS}). Use Direct USB for a config this large.`;
@@ -16635,7 +16689,7 @@ function _pushBudgetInfo() {
   // fragmenter at all, so it consumes none of the 192-slot pool.
   if (bytes <= FRAG_MAX_ENV_BYTES) return { branches, bytes, frags: 1, empty: false, single: true };
 
-  const chunks = _utf8Chunks(inner, FRAG_CHUNK_BYTES);
+  const chunks = _fragChunks(inner);
   // sendJSON has a SECOND abort the fragment count alone cannot predict: it
   // re-checks EACH fragment's escaped envelope against FRAG_MAX_ENV_BYTES and
   // bails mid-send if one is over. A chunk of 80 quote/backslash-heavy bytes can
