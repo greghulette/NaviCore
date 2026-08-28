@@ -62,6 +62,7 @@
 #include "navicore_ota.h"   // firmware OTA — ?OTALOCAL (direct USB) + ?OTA (ESP-NOW relay)
 #include "navicore_rterm.h" // remote terminal — mirror CLI output back over the WCB bridge (RTERM)
 #include "navicore_record.h" // record/replay — capture dispatched droid actions to a clip + replay
+#include "navicore_wsserver.h" // optional WebSocket command endpoint over the SoftAP (rcConfig.wifiEnabled)
 
 // USB-CDC tee instance backing the `#define Serial rcSerial` in rc_serial.h.
 // Defined once here; setup()'s Serial.begin()/setRxBufferSize() drive it.
@@ -4600,6 +4601,10 @@ void setup() {
         Serial.printf("[WIFI] SoftAP \"%s\" up on channel %d — %s\n",
                       ssid, ch, WiFi.softAPIP().toString().c_str());
         Serial.println("[WIFI] ESP-NOW will share this channel (WIFI_AP_STA).");
+        // Only now, with an AP actually up and an IP to print. begin() is
+        // self-contained: if it fails it says so and leaves everything inert, so a
+        // WebSocket that will not start can never take the droid down with it.
+        naviws::begin();
       } else {
         // Not fatal to the droid — the mesh and serial both still work.
         Serial.printf("[WIFI] SoftAP \"%s\" FAILED to start on channel %d.\n", ssid, ch);
@@ -5170,6 +5175,12 @@ void loop() {
   // Serial output tee'd back to the bridge as RTERM packets. Cheap no-op when
   // nothing is pending.
   drainRemoteCli();
+
+  // Same job for a WebSocket client on the optional SoftAP: the httpd handler runs
+  // on Core 0 and only enqueues, so the command itself is executed HERE, where
+  // flash, NVS and droid hardware are safe to touch. No-op unless wifiEnabled
+  // brought the endpoint up.
+  naviws::drain();
 
   // Surface any mesh-relayed Maestro read reply (:MQR) as a [MAE:] marker for the
   // config tool's Read-live readout — deferred here from the Core-0 consumer.

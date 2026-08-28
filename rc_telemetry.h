@@ -489,6 +489,38 @@ inline int      _meshStatsPage     = 0;
 inline int      _meshStatsNextPeer = 1;
 inline uint32_t _meshStatsNextMs   = 0;   // pacing gate between pages
 
+// ── Adaptive fragment fill ───────────────────────────────────────────────────
+// FRAG_CHUNK_BYTES is a WORST-CASE size: 80 source bytes can escape+wrap to
+// ~130, which stays clear of the 187 cap even if the slice were all quotes.
+// Real config JSON is nowhere near that dense, so every fragment was running
+// ~60% full — and since a fragment costs a fixed FRAG_PACING_MS regardless of
+// how much it carries, that wasted fill is wasted WALL-CLOCK. A 171-fragment
+// config takes 171 x 150 ms = 25.6 s whether the fragments are full or not.
+//
+// So instead of assuming the worst case, MEASURE it: grow the slice while the
+// envelope it will produce still fits. _sendFragment already serialises and
+// checks the real length (aborting over 187), so this only has to agree with
+// ArduinoJson's escaping rules to stay under it — and the check there remains
+// as the backstop if it ever disagrees.
+//
+// Cost of one byte inside the envelope's "s" string, per ArduinoJson's escaper.
+inline size_t _jsonEscCost(unsigned char c) {
+    if (c == '"' || c == '\')                                     return 2;
+    if (c == '\b' || c == '\f' || c == '\n' || c == '\r' || c == '\t') return 2;
+    if (c < 0x20)                                                  return 6;   // \u00XX
+    return 1;
+}
+// Envelope is {"f":N,"of":M,"sid":S,"s":"…"} — 26 fixed chars plus the digits.
+// f and of are both <= FRAG_SEND_MAX_PARTS (512, 3 digits) and sid is a uint16
+// (5 digits), all taken at their maximum so the budget can never be optimistic.
+constexpr size_t FRAG_ENV_TARGET   = 180;   // aim here; the hard cap is 187
+constexpr size_t FRAG_ENV_OVERHEAD = 26 + 3 + 3 + 5;
+constexpr size_t FRAG_ESC_BUDGET   = FRAG_ENV_TARGET - FRAG_ENV_OVERHEAD;   // escaped bytes per slice
+// Ceiling on the raw slice regardless of how compressible the escaping is, so a
+// run of plain ASCII cannot produce a slice longer than the receiver's own
+// per-part expectations.
+constexpr size_t FRAG_CHUNK_MAX_BYTES = 160;
+
 // Inter-fragment pacing.  40 ms saturated the ESP-NOW MAC layer in testing
 // (queue-overflow drops on the receiving WCB); 150 ms gives the MAC + ETM
 // ACK round-trip comfortable headroom.  Matches the config tool's outbound
@@ -594,12 +626,19 @@ inline bool _startFragSend(uint8_t target, const String& wrapped, const char* wh
     size_t i = 0; const size_t N = wrapped.length();
     _outSend.chunkOff[0] = 0;
     while (i < N && total < FRAG_SEND_MAX_PARTS) {
-      size_t take = 0;
+      // Fill to the MEASURED escaped size, not to a worst-case byte count. Each
+      // codepoint is admitted whole (never split across fragments) and only if
+      // its escaped cost still leaves the envelope inside FRAG_ENV_TARGET.
+      size_t take = 0, esc = 0;
       while (i + take < N) {
         unsigned char c = (unsigned char)wrapped[i + take];
         size_t cp = (c < 0x80) ? 1 : ((c >> 5) == 0x6) ? 2 : ((c >> 4) == 0xE) ? 3 : ((c >> 3) == 0x1E) ? 4 : 1;
-        if (take + cp > FRAG_CHUNK_BYTES) break;
-        take += cp;
+        if (i + take + cp > N) cp = 1;                  // truncated tail — advance one byte
+        size_t cost = 0;
+        for (size_t k = 0; k < cp; k++) cost += _jsonEscCost((unsigned char)wrapped[i + take + k]);
+        if (esc + cost > FRAG_ESC_BUDGET)     break;    // envelope would pass the target
+        if (take + cp > FRAG_CHUNK_MAX_BYTES) break;    // raw ceiling
+        take += cp; esc += cost;
       }
       if (take == 0) take = 1;                        // pathological lone continuation byte — make progress
       i += take; total++;

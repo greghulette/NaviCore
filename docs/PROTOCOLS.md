@@ -16,6 +16,13 @@ Related: [ARCHITECTURE.md](ARCHITECTURE.md) · [CONFIG_SCHEMA.md](CONFIG_SCHEMA.
 | **Direct USB** | USB-CDC 115200 | newline-delimited UTF-8 | none (chunked at 512 B by the tool, 4 KB RX buffer on the board) |
 | **Via WCB** | Web Serial → bridge WCB → ESP-NOW → NaviCore | `;w20,<payload>` lines to the bridge | **187 bytes per payload** — larger must be fragmented |
 | **Shared port** | Same as either, but the port is owned by another browser tab | BroadcastChannel proxy | as above |
+| **WebSocket** | client → NaviCore's own SoftAP → `ws://<softAPIP>/ws` | one text frame per line | 98 KB per frame — the dispatcher's own ceiling, not a transport one |
+
+**The WebSocket path is optional and off by default** (`wifiEnabled`, see
+[CONFIG_SCHEMA.md](CONFIG_SCHEMA.md)). It carries the **same newline-delimited JSON** as
+Direct USB, because it feeds the same `processInputLine()`; there is no second command
+surface to keep in step. Unlike Via WCB it has no 187-byte cap and no fragmentation — it is
+a direct link, so a large `SET_CONFIG` crosses in one frame.
 
 **The 187-byte number.** ESP-NOW carries 250 B. `WCB_Client::_sendPacket()` copies the
 command into a 200-byte `structCommand[]` and appends `"|CRC%08X"` (12 B). A payload over
@@ -75,6 +82,15 @@ WCB Wizard can mute the tool's chatter when both share a port.
 **`processInputLine(const String&)` is the transport-agnostic dispatcher** and is where every
 message above is actually handled. Anything else that can produce a complete line calls
 `processInputLine()` directly rather than duplicating the dispatch.
+
+`naviws::drain()` is the second caller (the WebSocket endpoint,
+[`navicore_wsserver.h`](../navicore_wsserver.h)). Its shape is the constraint worth
+understanding before adding a third: **the httpd handler runs on Core 0**, alongside the
+ESP-NOW receive callback, so it may only copy the frame, enqueue it, and return — exactly
+what `drainRemoteCli()` does for mesh-relayed CLI lines, and for the same reason.
+`processInputLine()` writes flash and NVS and drives bit-banged serial; none of that may
+happen on Core 0. The reply goes back via `httpd_ws_send_frame_async()`, the API documented
+for sends "out of the scope of current request", because by then the request is long over.
 
 Its `bool` return means *"yield to `loop()` before handling more input"* and is not cosmetic:
 the `?` CLI branch and a JSON parse failure both need the caller to stop draining so
@@ -687,6 +703,7 @@ Newest first. Add a row whenever a code change alters what this page describes �
 as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
+| 2026-08-28 | _(uncommitted)_ | **Added a WebSocket command transport** (`navicore_wsserver.h`, `ws://<softAPIP>/ws`), optional and off by default behind `wifiEnabled`. It carries the same newline-delimited JSON as Direct USB because it feeds the same `processInputLine()` — no second command surface. No 187-byte cap and no fragmentation: it is a direct link, so a large SET_CONFIG crosses in one frame. The load-bearing constraint is the split: the httpd handler runs on **Core 0** beside the ESP-NOW callback and may only copy-enqueue-return, with the command executed from `loop()` on Core 1, because `processInputLine()` writes flash and NVS and drives bit-banged serial. Reply via `httpd_ws_send_frame_async()` (the documented out-of-request API). A line up to 98 KB is queued by POINTER from PSRAM, not by value like `RemoteCliMsg` — ownership transfers with the pointer, and the handler frees it if the queue send fails. Costs +33.5 KB flash / +1.4 KB static RAM; app slot 59.1%. |
 | 2026-08-28 | _(uncommitted)_ | **Split framing from dispatch in the serial input path.** `handleSerialInput()` now only reads bytes and assembles lines; the ~430-line dispatch moved verbatim into `processInputLine(const String&)`, which any transport can call. Pure refactor — verified by normalising both bodies and diffing: 274 executable lines, byte-identical. Two contracts are load-bearing and are now stated at the function: the `bool` return means "yield to `loop()` now" (the `?` branch and a parse failure both need the caller to stop draining, so heartbeats survive ACK-paced OTA chunks), and the caller owns the buffer — the line is `const&` and cleared by the caller, because copying a ~98 KB `SET_CONFIG` per line is real cost. |
 | 2026-08-28 | _(uncommitted)_ | Documented that the `MESH_STATS` aggregate and its per-peer rows are sampled a moment apart and can disagree by one — `agg` from the library counters, `peers[]` walked afterwards, so an ACK in between leaves the aggregate behind the rows it contains. Seen in the field as the derived "not currently listed" remainder rendering `Ack -1` against `Sent 0`. Recorded as NOT a firmware bug, with the two tempting wrong fixes named (making one side authoritative, or recomputing the aggregate from the rows — the aggregate covers all 20 library slots including unlisted boards, which is why the remainder row exists at all). The tool now clamps the remainder at zero: a real remainder still shows, a skew of -1 does not. |
 | 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
