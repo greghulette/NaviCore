@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.15:39.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.15:44.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -17486,27 +17486,38 @@ async function otaUpdateOverUsb() {
         nextSend += CHUNK;
       }
       // Consume one cursor marker (buffered ones return immediately).
-      wait = _otaAwaitMarker(10000);
-      m = await wait;
-      const ack = /^\[OTA:ACK,(\d+)\]/.exec(m);
-      const nak = /^\[OTA:NAK,(\d+)\]/.exec(m);
-      if (!ack && !nak) throw new Error('unexpected response — ' + m);
-      const cursor = parseInt((ack || nak)[1], 10);
+      //
+      // ACK and NAK are treated IDENTICALLY: both simply report the board's write
+      // cursor. It is tempting to rewind the instant a NAK arrives — it names the
+      // resume point, after all — but that is wrong and expensive. Once a chunk is
+      // lost, EVERY chunk already in flight behind it is NAK'd with the same
+      // cursor, and those NAKs keep arriving after we have already rewound. Acting
+      // on each one throws away the progress just made and the transfer collapses:
+      // simulated at 28,088 sends for a 64-chunk image, a 440x amplification, from
+      // ONE lost chunk. Count them instead and rewind once per window.
+      let m2;
+      try {
+        m2 = await _otaAwaitMarker(10000);
+      } catch (_) {
+        // No marker at all. The tail of the window was lost, so nothing is coming
+        // and nothing further would be sent — a genuine deadlock without this.
+        // Rewind to the cursor and refill.
+        if (++stalls > 20) throw new Error(`OTA stalled at ${confirmed} — board not responding`);
+        nextSend = confirmed; noAdvance = 0;
+        continue;
+      }
+      const cur = /^\[OTA:(?:ACK|NAK),(\d+)\]/.exec(m2);
+      if (!cur) throw new Error('unexpected response — ' + m2);
+      const cursor = parseInt(cur[1], 10);
 
       if (cursor > confirmed) {                  // progress
         confirmed = cursor; noAdvance = 0; stalls = 0;
-      } else if (nak) {
-        // Explicit gap: the board tells us exactly where to resume. Rewind at once
-        // rather than burning the rest of the window on chunks it will reject.
-        confirmed = cursor; nextSend = cursor; noAdvance = 0;
-        log(`Resyncing to cursor ${cursor}…`);
-      } else {
-        // An ACK that did not advance means an ahead-of-cursor chunk was dropped.
-        // One whole window of those and the chunk AT the cursor is genuinely lost,
-        // so rewind and resend from there. A mere reorder advances first and resets
-        // this, so it will not trigger on healthy traffic.
+      } else if (nextSend > confirmed) {
+        // Not advancing while chunks are outstanding. After a whole window of that,
+        // the chunk AT the cursor is genuinely lost rather than merely reordered —
+        // a reorder advances first and resets the counter.
         if (++noAdvance >= WINDOW) { nextSend = confirmed; noAdvance = 0; }
-        if (++stalls > 120) throw new Error(`OTA stalled at ${confirmed} — board not advancing`);
+        if (++stalls > 200) throw new Error(`OTA stalled at ${confirmed} — board not advancing`);
       }
       setProgress(confirmed, size);
     }
