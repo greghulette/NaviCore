@@ -121,6 +121,7 @@ Newest first. Add a row whenever a code change alters what this page describes �
 as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
+| 2026-08-28 | _(uncommitted)_ | `REBOOT` now deauthenticates SoftAP clients before restarting (`WiFi.softAPdisconnect(false)`, gated on `wifiEnabled`). A bare `ESP.restart()` drops the AP without telling anyone, so an associated client keeps talking to an AP that is gone and only discovers it by timing out — measured with ping across a reboot: **11 s of "Request timed out" while the board was serving again after 2.4 s**. That gap belongs to the client and no reconnect logic on the far end can shorten it. `false` keeps the radio up for ESP-NOW until the restart. |
 | 2026-08-28 | _(uncommitted)_ | Added a row for "WiFi enabled but no network appears", keyed on the `[WIFI]` boot lines — REFUSED (short/empty password, fails closed), FAILED (`softAP()` returned false), or no line at all (flag was false at boot; it is read once in `setup()`, so a Save without a reboot does nothing). |
 |---|---|---|
 | 2026-08-27 | _(uncommitted)_ | Mesh-channel row: recorded that the valid range is 1–11, that `setMeshChannel()` silently ignores 12/13 (leaving the radio on `WCB_MESH_CHANNEL` while every readout claims otherwise), and that out-of-range now falls back to 1 rather than 11. Bridged-save row: pointed at `FRAG_PACE_FLOOR_MS` as the thing to raise first, and named "[SEND CB] MAC-layer FAILED" as the signature of pacing set too low (50 ms is a known hard failure). |
