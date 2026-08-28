@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.10:33.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.11:19.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4071,10 +4071,21 @@ function renderMeshStats() {
   // two failures belonging to nobody. Show the remainder as its own row instead
   // of leaving the reader to notice the columns don't add up.
   const sum = (idx) => (msg.peers || []).reduce((t, p) => t + (+p[idx] || 0), 0);
-  const rem = { sent: (+a.sent || 0) - sum(1), ackd: (+a.ackd || 0) - sum(2),
-                rty:  (+a.rty  || 0) - sum(3), fail: (+a.fail || 0) - sum(4),
-                ung:  (+a.ung  || 0) - sum(5), recv: (+a.recv || 0) - sum(6) };
-  if (Object.values(rem).some(v => v !== 0)) {
+  // A component can come out NEGATIVE, and it does not mean anything went wrong.
+  // The aggregate is read from the library's own counters and the rows from the peer
+  // table a moment later, so an ACK landing between the two reads leaves the aggregate
+  // one BEHIND the rows it is supposed to contain. Observed in the field: Sent 0 with
+  // Ack -1, i.e. peers summing to one more ack than the total they belong to.
+  //
+  // A count of -1 is not a quantity, it is two snapshots disagreeing by one, so clamp
+  // it away rather than rendering it. Gate on `> 0` (not `!== 0`) so a purely negative
+  // skew hides the row entirely instead of printing a line of zeroes — the row exists
+  // to explain a genuine remainder, and there isn't one here.
+  const clamp0 = v => (v > 0 ? v : 0);
+  const rem = { sent: clamp0((+a.sent || 0) - sum(1)), ackd: clamp0((+a.ackd || 0) - sum(2)),
+                rty:  clamp0((+a.rty  || 0) - sum(3)), fail: clamp0((+a.fail || 0) - sum(4)),
+                ung:  clamp0((+a.ung  || 0) - sum(5)), recv: clamp0((+a.recv || 0) - sum(6)) };
+  if (Object.values(rem).some(v => v > 0)) {
     html += `<tr style="color:var(--muted)"><td style="padding:2px 6px" `
           + `title="Counters the library holds for boards the status roster no longer lists — `
           + `usually a peer that has since dropped off the mesh. Shown so the columns add up.">`
