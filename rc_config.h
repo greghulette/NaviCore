@@ -636,6 +636,10 @@ struct RcConfig {
   // without 3-axis hardware just leaves J5/J6/slot-19/slot-20 at channel=0.
   bool           threeAxisGimbals;
   bool           sbusOutEnabled;        // re-emit SBUS frames on SBUS_OUT_PIN; off saves the per-byte passthrough tee
+  bool           wifiEnabled;           // raise a SoftAP + comms server for the desktop app. DEFAULT OFF, and off
+                                        // means the bring-up code never runs at all — not "runs and idles". The
+                                        // radio is shared with ESP-NOW, so this is the one setting that can take
+                                        // the droid off its own mesh; see the AP-channel note in setup().
   uint8_t        boardType;             // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   int            tapWindowMs;
   // Continuous hold (ms) on a matrix button that promotes the gesture to a LONG
@@ -787,6 +791,7 @@ void rcConfigLoadDefaults() {
   rcConfig.txModel          = TX_MODEL_X18;  // GUI default; user picks via Config → Transmitter
   rcConfig.threeAxisGimbals = false;         // X20 hardware option, off by default
   rcConfig.sbusOutEnabled   = false;         // SBUS-OUT passthrough off by default (saves CPU when unused)
+  rcConfig.wifiEnabled      = false;         // WiFi/SoftAP OFF by default — opt-in only, never on for an existing droid
   rcConfig.maeGateMs        = 250;           // remote skip-if-running fail-open window (ms)
   rcConfig.boardType        = 0;             // 0 = NaviCore v2 PCB (default pinout); 1 = WCB HW 3.2
   rcConfig.tapWindowMs      = 500;
@@ -1203,6 +1208,7 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   doc["txModel"]              = rcConfig.txModel;          // RcTxModel — GUI uses this to swap SVG / labels
   doc["threeAxisGimbals"]     = rcConfig.threeAxisGimbals; // X20 hardware option (shows/hides J5/J6 + stick-click matrix slots)
   doc["sbusOutEnabled"]       = rcConfig.sbusOutEnabled;   // SBUS-OUT passthrough enable
+  doc["wifiEnabled"]          = rcConfig.wifiEnabled;      // SoftAP + comms server enable (off by default)
   doc["maeGateMs"]            = rcConfig.maeGateMs;         // remote skip-if-running fail-open window (ms)
   doc["boardType"]            = rcConfig.boardType;        // hardware pin profile (0=NaviCore v2, 1=WCB 3.2)
   doc["tapWindowMs"]          = rcConfig.tapWindowMs;
@@ -1482,6 +1488,10 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   if (doc.containsKey("txModel"))       rcConfig.txModel       = (uint8_t)(doc["txModel"] | (int)TX_MODEL_X18);
   if (doc.containsKey("threeAxisGimbals")) rcConfig.threeAxisGimbals = doc["threeAxisGimbals"] | false;
   if (doc.containsKey("sbusOutEnabled"))   rcConfig.sbusOutEnabled   = doc["sbusOutEnabled"]   | false;
+  // `| false` is load-bearing, not stylistic: it is what guarantees a config or backup written
+  // before this field existed can never turn the radio on. A missing key reads false, and the
+  // containsKey guard means a diff-save that omits the key leaves the current value alone.
+  if (doc.containsKey("wifiEnabled"))      rcConfig.wifiEnabled      = doc["wifiEnabled"]      | false;
   if (doc.containsKey("maeGateMs"))        rcConfig.maeGateMs        = doc["maeGateMs"]         | 250;
   if (doc.containsKey("boardType"))        rcConfig.boardType        = (uint8_t)(doc["boardType"] | 0);
   if (doc.containsKey("tapWindowMs"))   rcConfig.tapWindowMs   = doc["tapWindowMs"];
@@ -2172,6 +2182,7 @@ bool rcConfigSaveNVS() {
   prefs.putUChar("tx",     rcConfig.txModel);   // transmitter model (RcTxModel)
   prefs.putBool("3xg",     rcConfig.threeAxisGimbals);   // X20 3-axis hw option
   prefs.putBool("sbusout", rcConfig.sbusOutEnabled);     // SBUS-OUT passthrough enable
+  prefs.putBool("wifien",  rcConfig.wifiEnabled);        // SoftAP + comms server enable
   prefs.putUChar("board",  rcConfig.boardType);          // hardware pin profile (0=NaviCore v2, 1=WCB 3.2)
   prefs.putInt("cfg",      rcConfig.tapWindowMs);
   prefs.putInt("matrixCh", rcConfig.matrixChannel);
@@ -2356,6 +2367,7 @@ void rcConfigLoadNVS() {
   if (prefs.isKey("tx"))       rcConfig.txModel          = prefs.getUChar("tx", rcConfig.txModel);
   if (prefs.isKey("3xg"))      rcConfig.threeAxisGimbals = prefs.getBool("3xg", rcConfig.threeAxisGimbals);
   if (prefs.isKey("sbusout"))  rcConfig.sbusOutEnabled   = prefs.getBool("sbusout", rcConfig.sbusOutEnabled);
+  if (prefs.isKey("wifien"))   rcConfig.wifiEnabled      = prefs.getBool("wifien",  rcConfig.wifiEnabled);
   if (prefs.isKey("board"))    rcConfig.boardType        = prefs.getUChar("board", rcConfig.boardType);
   if (prefs.isKey("cfg"))      rcConfig.tapWindowMs   = prefs.getInt("cfg",      rcConfig.tapWindowMs);
   if (rcConfig.tapWindowMs < 100) rcConfig.tapWindowMs = 500;   // guard a stale/zero NVS value that would disable multi-tap

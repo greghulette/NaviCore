@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.09:28.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.09:41.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3684,6 +3684,7 @@ let config = {
   txModel:          0,        // TX_MODEL_X18 default
   threeAxisGimbals: false,    // X20 hardware option (off by default)
   sbusOutEnabled:   false,    // SBUS-OUT passthrough (off by default — saves CPU when unused)
+  wifiEnabled:      false,    // SoftAP + comms server for the desktop app (off by default; hidden toggle — see cfgOpenCloudModal)
   maeGateMs:        250,      // remote/via-WCB skip-if-running fail-open window (ms)
   boardType:        0,        // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   tapWindowMs:   500,
@@ -9560,6 +9561,7 @@ function applyConfig(data) {
     applyTxModel(config.txModel, false);
   }
   if (data.sbusOutEnabled !== undefined) config.sbusOutEnabled = !!data.sbusOutEnabled;
+  if (data.wifiEnabled    !== undefined) config.wifiEnabled    = !!data.wifiEnabled;
   if (data.maeGateMs      !== undefined) config.maeGateMs = Math.max(50, Math.min(5000, +data.maeGateMs || 250));
   if (data.boardType      !== undefined) config.boardType      = +data.boardType | 0;
   if (data.tapWindowMs   !== undefined) {
@@ -20132,13 +20134,42 @@ function cfgOpenCloudModal() {
     + '<button id="cfg-cloud-loadfile" class="btn btn-ghost" style="padding:6px 12px;font-size:12px" title="Load a config .json file from disk straight into the tool (no cloud)">📂 Load a config file → tool</button>'
     + '<input id="cfg-cloud-file" type="file" accept=".json,application/json" style="display:none"></div>'
     + '<div id="cfg-cloud-status" style="font-size:12.5px;color:var(--muted,#9a9aa2);min-height:16px;margin-bottom:8px"></div>'
-    + '<div id="cfg-cloud-list-wrap"></div></div>';
+    + '<div id="cfg-cloud-list-wrap"></div>'
+    // ── Droid WiFi (hidden) ──────────────────────────────────────────────────
+    // Deliberately parked inside the cloud-backup modal rather than given a tab or
+    // a section of its own. That modal is already behind the 4x-wordmark gesture, so
+    // this inherits an existing hiding place instead of inventing a second secret —
+    // one obscure entry point is easier to reason about than two. Nothing about this
+    // is security: the tool is public and readable. The real gate is the firmware's
+    // wifiEnabled defaulting false, with the bring-up code unreachable while it is.
+    + '<div style="border-top:1px solid var(--border,#3a3a44);margin:18px 0 12px"></div>'
+    + '<label style="display:flex;align-items:flex-start;gap:8px;font-size:12.5px;cursor:pointer">'
+    + '<input id="cfg-wifi-enable" type="checkbox"' + (config.wifiEnabled ? ' checked' : '') + ' style="margin-top:3px;flex:none">'
+    + '<span><b>Enable droid WiFi</b> <span style="color:var(--muted,#9a9aa2)">— experimental, off by default</span><br>'
+    + '<span style="color:var(--muted,#9a9aa2);line-height:1.5">Raises a SoftAP on the droid so the desktop app can reach it without a cable. '
+    + 'Takes effect after <b>Save</b> and a <b>reboot</b> — the AP has to be up before the mesh starts. '
+    + 'The AP is created on your mesh channel (<b>' + ((config.wcbNetwork && config.wcbNetwork.channel) || 1) + '</b>): the ESP32 has one radio, '
+    + 'so any other channel would take this droid off its own mesh. Leave off unless you are using the app.</span></span></label>'
+    + '<div id="cfg-wifi-note" style="font-size:12px;color:var(--accent-bright,#5cb0ff);min-height:15px;margin:6px 0 0 24px"></div>'
+    + '</div>';
   document.body.appendChild(ov);
   const $  = id => document.getElementById(id);
   const setStatus = (t, err) => { const s = $('cfg-cloud-status'); s.textContent = t; s.style.color = err ? '#e5737b' : 'var(--muted,#9a9aa2)'; };
   const close = () => ov.remove();
   ov.addEventListener('click', e => { if (e.target === ov) close(); });
   $('cfg-cloud-close').addEventListener('click', close);
+  // Droid WiFi toggle. Writes straight to `config` like every other config control
+  // (the dirty badge is derived by polling/diffing against the baseline, so there is
+  // nothing to notify) — it does NOT send anything on its own. Save writes it, and
+  // the board only acts on it at boot, so say both out loud: a silent toggle here
+  // would look applied while the radio stayed exactly as it was.
+  $('cfg-wifi-enable').addEventListener('change', e => {
+    config.wifiEnabled = e.target.checked;
+    const note = $('cfg-wifi-note');
+    if (note) note.textContent = e.target.checked
+      ? 'WiFi will be ON after you Save and reboot the board.'
+      : 'WiFi will be OFF after you Save and reboot the board.';
+  });
   // 👁 show/hide the password field.
   $('cfg-cloud-pw-eye').addEventListener('click', () => {
     const p = $('cfg-cloud-pw'), eye = $('cfg-cloud-pw-eye');

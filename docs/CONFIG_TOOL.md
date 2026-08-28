@@ -589,6 +589,21 @@ carries an optional note; "remember on this device" stores the pair in `localSto
 config file from disk straight into a cloud slot) and **📂 Load** (apply a config file into
 the tool, left unsaved for review). It's a convenience copy, not a vault — keep Export files
 too.
+
+**The droid-WiFi toggle lives at the bottom of this same modal** (`cfg-wifi-enable`), and that
+placement is deliberate: the cloud modal is already behind the 4×-wordmark gesture, so the
+toggle inherits an existing hiding place rather than adding a second secret. It writes
+`config.wifiEnabled` and nothing else — no message is sent, so it needs a **Save** and then a
+**reboot** (the firmware reads the flag only at boot), which the inline note states because a
+silent toggle would otherwise look applied while the radio was untouched.
+
+Be clear about what the hiding buys: nothing against anyone who opens DevTools or reads this
+public repo. It stops ordinary users stumbling onto a radio they did not ask for. The real gate
+is the firmware's `wifiEnabled` defaulting false with the bring-up code unreachable while it is.
+The corollary is that a droid *reporting* WiFi on should say so in visible chrome even for a user
+who cannot see the switch — hide the control, never the state. Deliberately **not** in the CSV
+cheat-sheet export, which is a user-facing artifact; it does round-trip through config JSON and
+cloud backups, because enabling it has to survive a restore.
 | 2026-08-25 | _(uncommitted)_ | **Cloud backup can include clips** (§5), checkbox default ON. Payload is gzipped BEFORE encryption (ciphertext is incompressible, so the order is not a preference) with transparent decompress on read, so pre-gzip backups still restore. Size is refused client-side before the PUT rather than eating a bare 413, and the manifest write now retries — with clip-sized payloads, a slot that lands while the manifest fails leaves the ring describing the previous backup. Only VERIFIED clips are included; any that will not transfer completely are named and left out. |
 | 2026-08-25 | _(uncommitted)_ | **Clip backup and restore** (§5): ⤓ per clip, ⤓ All + config (bundle), ⤒ Restore, and Import offering bundled clips. Restore defaults to skip-existing because `EDITEND` overwrites silently and `[CLIPITEM]` has no mtime, so nothing can tell which copy is newer. Guards: flash pre-flight via `[CLIPFS]`, per-clip read-back via `listClips` (a real flash re-read), `EDITCANCEL` on failure so the board never wedges in `ST_EDITING`, and skipped clips named rather than silently omitted. |
 
@@ -634,6 +649,7 @@ Newest first. Add a row whenever a code change alters what this page describes �
 as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
+| 2026-08-28 | _(uncommitted)_ | Added the hidden **droid-WiFi toggle** (`cfg-wifi-enable`) at the foot of the cloud-backup modal, reusing that modal's existing 4x-wordmark gesture rather than inventing a second secret entry point. It writes `config.wifiEnabled` only — no message is sent — so the inline note states that a Save and a reboot are both required; without it the toggle would read as applied while the radio was untouched. Recorded what the hiding does and does not buy (obscurity, not security — the firmware default is the real gate) and the corollary that a droid reporting WiFi on should show that in visible chrome even to a user who cannot see the switch. Deliberately excluded from the CSV cheat-sheet export; it does round-trip through config JSON and cloud backups so enabling survives a restore. |
 |---|---|---|
 | 2026-08-27 | _(uncommitted)_ | **A mgmt relay now shows in the WCB Status panel over the bridge.** `WCB_STATUS` gained a sparse `rows[]` form (`[[id,online,client,temporary],…]`), expanded tool-side into the same positional arrays the renderer already uses. The positional form cost a slot per id rather than per board, so a relay at id 19 pushed a three-board reply to 280 B against the 185 B one-packet budget, and the fit-loop trimmed from the TOP — dropping that relay first, and only over the bridge (Direct USB has no budget, which is why it appeared there and nowhere else). Sparse is 121 B for the same mesh. It also carries `temporary`, which the bridged builder never emitted, so a temp peer finally gets its `· temp` tag and loses the ✕ Forget button it could never honour. |
 | 2026-08-27 | _(uncommitted)_ | Cloud-backup upload failures now name their cause and the fix instead of throwing a bare `upload failed (<status>)`. The Worker is deployed by pasting the source into the Cloudflare dashboard (no wrangler config), so the deployed copy can lag the repo silently and the tool cannot read its version — which made a stale Worker read as "cloud backup is broken". `413` is called out specifically: `cfgBackup` refuses anything over `CFG_SLOT_MAX_B64` *before* the PUT, so a `413` can only mean the deployed Worker has an older, smaller `CFG_MAX_BYTES`. `404`/`405` means it predates the `/cfg/` route; `403` names the token pair; `429` names the shared hourly cap. |
