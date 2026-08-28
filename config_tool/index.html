@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.10:25.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.10:30.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3684,7 +3684,7 @@ let config = {
   txModel:          0,        // TX_MODEL_X18 default
   threeAxisGimbals: false,    // X20 hardware option (off by default)
   sbusOutEnabled:   false,    // SBUS-OUT passthrough (off by default — saves CPU when unused)
-  wifiEnabled:      false,    // SoftAP + comms server for the desktop app (off by default; hidden toggle — see cfgOpenCloudModal)
+  wifiEnabled:      false,    // SoftAP + comms endpoint (off by default; hidden toggle — see cfgOpenCloudModal)
   wifiSsid:         '',       // SoftAP SSID ('' = firmware derives NaviCore-<deviceId>)
   wifiPassword:     '',       // SoftAP WPA2 passphrase ('' = firmware refuses to raise the AP — never an open network)
   maeGateMs:        250,      // remote/via-WCB skip-if-running fail-open window (ms)
@@ -20150,7 +20150,7 @@ function cfgOpenCloudModal() {
     + '<label style="display:flex;align-items:flex-start;gap:8px;font-size:12.5px;cursor:pointer">'
     + '<input id="cfg-wifi-enable" type="checkbox"' + (config.wifiEnabled ? ' checked' : '') + ' style="margin-top:3px;flex:none">'
     + '<span><b>Enable droid WiFi</b> <span style="color:var(--muted,#9a9aa2)">— experimental, off by default</span><br>'
-    + '<span style="color:var(--muted,#9a9aa2);line-height:1.5">Raises a SoftAP on the droid so the desktop app can reach it without a cable. '
+    + '<span style="color:var(--muted,#9a9aa2);line-height:1.5">Raises a SoftAP on the droid for wireless access. '
     + 'Takes effect after <b>Save</b> and a <b>reboot</b> — the AP has to be up before the mesh starts. '
     + 'The AP is created on your mesh channel (<b>' + ((config.wcbNetwork && config.wcbNetwork.channel) || 1) + '</b>): the ESP32 has one radio, '
     + 'so any other channel would take this droid off its own mesh. Leave off unless you are using the app.</span></span></label>'
