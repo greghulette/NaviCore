@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.11:57.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.12:07.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -5552,14 +5552,29 @@ function _fragChunks(str) {
   let cur = '', esc = 0;
   const flush = () => {
     if (!cur) return;
-    // Exact check against the real envelope, with worst-case header values.
+    // Exact check against the real envelope, with worst-case header values. The
+    // estimate above should already keep us inside FRAG_ENV_TARGET_BYTES, so this
+    // is belt-and-braces — but anything it trims must be CARRIED INTO THE NEXT
+    // chunk, never dropped. Popping and discarding would silently truncate the
+    // payload, the RC would reassemble invalid JSON, and the save would fail with
+    // no ACK and no error. (Reachable via a lone surrogate, which JSON escapes to
+    // 6 bytes while _fragEscBytes counts 3.)
+    let carry = '';
     while (cur && enc.encode(JSON.stringify({ f: 999, of: 999, sid: 99999, s: cur })).length
                   > FRAG_MAX_ENV_BYTES) {
       const cps = Array.from(cur);
-      cps.pop();
+      carry = cps.pop() + carry;
       cur = cps.join('');
     }
-    chunks.push(cur); cur = ''; esc = 0;
+    if (cur) chunks.push(cur);
+    else if (carry) {            // one codepoint alone over the cap — impossible in
+      const cps = Array.from(carry);   // practice (max 6 escaped + 37 overhead), but
+      chunks.push(cps.shift());        // never spin: take one and let the send-loop
+      carry = cps.join('');            // guard report it.
+    }
+    cur = carry;
+    esc = 0;
+    for (const ch of cur) esc += _fragEscBytes(ch);
   };
   for (const ch of str) {
     const cost = _fragEscBytes(ch);
