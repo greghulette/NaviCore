@@ -558,6 +558,15 @@ reads as "every other board is idle" and a totals-only table as "no peer has any
 Cloudflare Worker relay (source in [`tools/cheatsheet-relay-worker.js`](../tools/cheatsheet-relay-worker.js))
 and shows a QR code for it.
 
+**The Worker is deployed by hand.** There is no `wrangler.toml` — the source is pasted into the
+Cloudflare dashboard editor — so the deployed copy **can silently lag the repo**, and nothing in the
+tool can read its version. That is why `_cfgPut` translates every failure into an instruction: a
+`413` in particular does **not** mean the payload is too big, because `cfgBackup` already refused
+anything over `CFG_SLOT_MAX_B64` before the PUT — it means the deployed Worker is still enforcing an
+older, smaller `CFG_MAX_BYTES` and needs redeploying. `404`/`405` likewise means the deployed copy
+predates the `/cfg/` route entirely. Cloud backup **with clips** needs the current Worker; the local
+Export path does not touch it.
+
 **Export / Import.** The **Export** button (`exportConfigJson`) downloads the **complete**
 config as JSON (`{navicore, savedAt, note, config}`) — every branch, including knob/servo
 passthrough outputs. This is the real backup; the file interchanges with the cloud modal's
@@ -626,6 +635,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-27 | _(uncommitted)_ | Cloud-backup upload failures now name their cause and the fix instead of throwing a bare `upload failed (<status>)`. The Worker is deployed by pasting the source into the Cloudflare dashboard (no wrangler config), so the deployed copy can lag the repo silently and the tool cannot read its version — which made a stale Worker read as "cloud backup is broken". `413` is called out specifically: `cfgBackup` refuses anything over `CFG_SLOT_MAX_B64` *before* the PUT, so a `413` can only mean the deployed Worker has an older, smaller `CFG_MAX_BYTES`. `404`/`405` means it predates the `/cfg/` route; `403` names the token pair; `429` names the shared hourly cap. |
 | 2026-08-27 | _(uncommitted)_ | Bridged-save timing figures updated for the new upload pacing (a 37-fragment save is ~3.7 s at the 100 ms floor, was ~5.7 s at 150 ms). `wcb-channel` input and the profile-editor `channel` field now cap at 11 rather than 13. |
 | 2026-08-27 | _(uncommitted)_ | **Clip downloads ask for batched keyframes** (`,B`) and ingest `[CLIPDL:EVB,<firstIdx>]`, expanding each run back into the exact per-event object shape so the model builder and file writer are untouched. 5.0× fewer mesh packets. Sent unconditionally — old firmware's `toInt()` never saw the flag and replies in the per-event form, which the same code path still accepts, so there is no version handshake. Also: the OTA-over-WCB sender now appends a CRC-32 to each `?OTA,DATA` line (`<offset>:<crc32>`) and paces at 25 ms instead of 12 ms to stop outrunning the relay's serial ring — that ring overflow was corrupting the image silently and failing verification at 100%. |
 | 2026-08-27 | _(uncommitted)_ | **Download All no longer cascades.** The `[CLIPDL:*]` reply stream was anonymous and `_clipRange` is a single global, so a range that timed out while the board was still streaming had its lines adopted by the NEXT clip: a stale `END` finished that session before its header arrived (*"no reply from the board"*), a stale `BEGIN` replaced its `count`/`fp` (*"the clip changed on the board mid-download"*), and stale events were stored under foreign absolute indices — pushing `got.size` past `total` and reporting a NEGATIVE shortfall (*"-32 of 16 events"*), while `if (got.size >= total) break` then skipped fetching the real events entirely. Each failure left more undrained stream to poison the next clip, so one timeout took out the rest of the backup. Three defences now: `_clipRangeFeed` accepts a `BEGIN`/`END` only if its `from`/`n`/`nm` answer the request actually sent, events only if the index is inside the requested range, and `_clipDlQuiesce()` drains the stream to silence before every clip (the probe is `(0,0)` for every clip, so identity alone cannot separate two probes). The range deadline now scales with the slice instead of a flat 15 s, and a timeout says so rather than claiming the board was silent. Needs the matching firmware for `nm`; the drain and range gating work without it. |

@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.15:50.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.22:40.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -19824,7 +19824,29 @@ async function _cfgPut(key, body) {
     method: 'PUT',
     headers: { 'Content-Type': 'application/octet-stream', 'X-CS-Token': CS_QR_TOKEN },
     body });
-  if (!r.ok) throw new Error('upload failed (' + r.status + ')');
+  if (!r.ok) {
+    // Name the cause. The Worker is deployed by PASTING
+    // tools/cheatsheet-relay-worker.js into the Cloudflare dashboard — there is no
+    // wrangler config — so the deployed copy can silently lag the repo, and the tool
+    // has no way to read its version. Every failure here therefore has to say what to
+    // DO, or a stale Worker simply reads as "cloud backup is broken".
+    //
+    // 413 is the one that matters: cfgBackup already refused anything over
+    // CFG_SLOT_MAX_B64 BEFORE the PUT, so a 413 does NOT mean the payload is too big.
+    // It means the deployed Worker is still enforcing an older, smaller CFG_MAX_BYTES.
+    const redeploy = " Redeploy tools/cheatsheet-relay-worker.js from the Cloudflare dashboard.";
+    const hint =
+      r.status === 413 ? " — this passed the tool's own " + _fmtBytes(CFG_SLOT_MAX_B64) +
+                         " check, so the deployed Worker has an OLDER, smaller limit." + redeploy :
+      r.status === 404 || r.status === 405
+                       ? " — the deployed Worker has no /cfg/ route." + redeploy :
+      r.status === 403 ? " — the Worker rejected the upload token; its UPLOAD_TOKEN secret and" +
+                         " this tool's CS_QR_TOKEN must match." :
+      r.status === 429 ? " — the Worker's hourly upload cap (shared with the cheat-sheet relay)" +
+                         " is reached. Try again later." :
+      r.status >= 500  ? " — the Worker errored; check its KV binding CS in the dashboard." : "";
+    throw new Error("cloud upload failed (" + r.status + ")" + hint);
+  }
 }
 async function _cfgFetch(key) {
   const r = await fetch(CS_QR_ENDPOINT + '/cfg/' + key, { headers: { 'X-CS-Token': CS_QR_TOKEN } });
