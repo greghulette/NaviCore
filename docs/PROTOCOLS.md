@@ -134,6 +134,17 @@ ratio only means something against the uptime that produced it.
 `sent - (ackd + fail + ung)` is **in flight**. The library guarantees it is never negative;
 a negative value is a library bug (a pending slot settled twice), not a lost packet.
 
+**The aggregate and the per-peer rows are sampled a moment apart, so they can disagree by
+one.** `agg` comes from the library's own counters; `peers[]` is walked from the peer table
+afterwards. An ACK landing between the two reads leaves the aggregate *behind* the rows it is
+supposed to contain — observed in the field as the tool's derived "not currently listed"
+remainder showing `Ack -1` against `Sent 0`. **This is not a counter bug and there is nothing
+to fix in the firmware.** Do not "correct" it by making one side authoritative or by
+recomputing the aggregate from the rows: the aggregate legitimately covers all 20 library peer
+slots, including boards the roster no longer lists, which is the whole reason a remainder row
+exists. The tool clamps the remainder at zero for display (`renderMeshStats`); a genuine
+remainder is still shown, a −1 of skew is not.
+
 #### Paging — how the full roster crosses the bridge
 
 The relay's `WCB_Client` cannot reassemble fragments, so a bridged reply must fit **185 B**.
@@ -664,6 +675,7 @@ Newest first. Add a row whenever a code change alters what this page describes �
 as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
+| 2026-08-28 | _(uncommitted)_ | Documented that the `MESH_STATS` aggregate and its per-peer rows are sampled a moment apart and can disagree by one — `agg` from the library counters, `peers[]` walked afterwards, so an ACK in between leaves the aggregate behind the rows it contains. Seen in the field as the derived "not currently listed" remainder rendering `Ack -1` against `Sent 0`. Recorded as NOT a firmware bug, with the two tempting wrong fixes named (making one side authoritative, or recomputing the aggregate from the rows — the aggregate covers all 20 library slots including unlisted boards, which is why the remainder row exists at all). The tool now clamps the remainder at zero: a real remainder still shows, a skew of -1 does not. |
 | 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
 |---|---|---|
 | 2026-08-27 | _(uncommitted)_ | Fragment pacing is no longer one constant shared by both directions. **Upload** (tool → RC) crosses the bridge WCB’s UART — a *real* 115200 link, since the WCB builds without `CDCOnBoot=cdc` and its `Serial` is UART0, unlike NaviCore where native USB-CDC ignores baud — so the tool now paces each line by `max(wire time × FRAG_PACE_LINK_MULT, FRAG_PACE_FLOOR_MS)` (2×, 100 ms) instead of a flat 150 ms, and skips the delay after the final fragment. **Download** (RC → tool) never crosses that UART and keeps `FRAG_PACING_MS` = 150. Do not re-symmetrise them. Also documented that `FRAG_TIMEOUT_MS` is an **idle** timeout: the receiver now refreshes the deadline on *any* fragment including duplicates, because gating it on new-only made a live retransmit indistinguishable from a dead sender — the expiry sweep runs before the sid match, so the session was reclaimed mid-transfer and silently restarted at `got=1`. |
