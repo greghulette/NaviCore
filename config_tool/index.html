@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.15:27.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.15:39.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -17452,27 +17452,74 @@ async function otaUpdateOverUsb() {
     }
     if (!/^\[OTA:BEGIN,OK/.test(m)) throw new Error('board rejected BEGIN — ' + m);
 
-    // DATA — ACK-paced; advance the local offset to the board's contiguous cursor.
+    // DATA — WINDOWED (pipelined) Go-Back-N over the board's write cursor, the same
+    // shape otaUpdateOverWcb() uses for the relay path.
+    //
+    // WHY THIS IS NOT send-one-wait-one any more. The old loop paid a full round
+    // trip per 1 KB chunk. Over direct USB that is ~5 ms and invisible; over a
+    // WebSocket to the droid's SoftAP it is ~70 ms measured, and 1136 chunks × 70 ms
+    // is ~78 s for a 1.1 MB image — slower than USB by an order of magnitude for
+    // reasons that have nothing to do with link bandwidth.
+    //
+    // The firmware already supports this and always did: otaWrite() rejects
+    // anything that is not exactly at its cursor ("gap/dup -> caller rewinds"), and
+    // both [OTA:ACK,n] and [OTA:NAK,n] carry that cursor. So we can send ahead and
+    // let the cursor pull us along; a gap simply rewinds. Sender-only change —
+    // works against firmware already in the field.
+    //
+    // WINDOW is bounded by what the RECEIVER can hold, not by what we would like.
+    // Each in-flight DATA line is ~1.4 KB of text; 8 of them is ~11 KB, which the
+    // board's 4 KB serial RX buffer cannot hold at once — but it does not have to,
+    // because the sender still paces and the board drains continuously. Keep it
+    // modest for that reason rather than raising it until something breaks.
     setStatus('OTA: streaming…');
-    let offset = 0, stalls = 0;
-    while (offset < size) {
-      const slice = bytes.subarray(offset, Math.min(offset + CHUNK, size));
+    const WINDOW = 8;                  // chunks in flight
+    let confirmed = 0;                 // board's ACK'd write cursor
+    let nextSend  = 0;                 // next offset to transmit
+    let noAdvance = 0;                 // consecutive cursor-stuck ACKs
+    let stalls    = 0;
+    while (confirmed < size) {
+      // Fill the window — send ahead without waiting per chunk.
+      while (nextSend < size && (nextSend - confirmed) < WINDOW * CHUNK) {
+        const slice = bytes.subarray(nextSend, Math.min(nextSend + CHUNK, size));
+        await sendLine(`?OTALOCAL,DATA,${nextSend},${toB64(slice)}`, true);
+        nextSend += CHUNK;
+      }
+      // Consume one cursor marker (buffered ones return immediately).
       wait = _otaAwaitMarker(10000);
-      await sendLine(`?OTALOCAL,DATA,${offset},${toB64(slice)}`, true);
       m = await wait;
       const ack = /^\[OTA:ACK,(\d+)\]/.exec(m);
       const nak = /^\[OTA:NAK,(\d+)\]/.exec(m);
-      const before = offset;
-      if (ack)      offset = parseInt(ack[1], 10);
-      else if (nak) { offset = parseInt(nak[1], 10); log(`Resyncing to cursor ${offset}…`); }
-      else          throw new Error('unexpected response — ' + m);
-      // Bound non-advancing ACK/NAKs: each _otaAwaitMarker re-arms its own
-      // timeout, so a board that keeps re-ACKing the same offset (< size) would
-      // otherwise spin forever without ever timing out.
-      if (offset === before) { if (++stalls > 60) throw new Error(`OTA stalled at ${offset} — board not advancing`); }
-      else stalls = 0;
-      setProgress(offset, size);
+      if (!ack && !nak) throw new Error('unexpected response — ' + m);
+      const cursor = parseInt((ack || nak)[1], 10);
+
+      if (cursor > confirmed) {                  // progress
+        confirmed = cursor; noAdvance = 0; stalls = 0;
+      } else if (nak) {
+        // Explicit gap: the board tells us exactly where to resume. Rewind at once
+        // rather than burning the rest of the window on chunks it will reject.
+        confirmed = cursor; nextSend = cursor; noAdvance = 0;
+        log(`Resyncing to cursor ${cursor}…`);
+      } else {
+        // An ACK that did not advance means an ahead-of-cursor chunk was dropped.
+        // One whole window of those and the chunk AT the cursor is genuinely lost,
+        // so rewind and resend from there. A mere reorder advances first and resets
+        // this, so it will not trigger on healthy traffic.
+        if (++noAdvance >= WINDOW) { nextSend = confirmed; noAdvance = 0; }
+        if (++stalls > 120) throw new Error(`OTA stalled at ${confirmed} — board not advancing`);
+      }
+      setProgress(confirmed, size);
     }
+
+    // Drop any DATA-phase markers still buffered. The windowed loop above emits
+    // more ACKs than it consumes (the in-flight tail, plus any dups or resends),
+    // and _otaAwaitMarker returns a buffered marker IMMEDIATELY. Leave them and
+    // END's wait resolves against a stale [OTA:ACK,n] instead of [OTA:END,OK],
+    // which reads as "verify/finalize failed" on a perfectly good image. Safe to
+    // clear here: END has not been sent yet, so no genuine END marker can exist.
+    // (otaUpdateOverWcb does the same thing after its windowed loop, for the same
+    // reason — worth keeping the two paths symmetrical.)
+    _otaPendingMarkers = [];
 
     // END — verify (SHA) + switch boot slot + reboot into the new image.
     setStatus('OTA: verifying…');
