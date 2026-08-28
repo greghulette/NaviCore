@@ -69,14 +69,35 @@ inline httpd_handle_t wsServer = nullptr;
 // Serial is ALSO shipped to the WebSocket client. Same trick navicore_rterm.h
 // uses for the mesh terminal — the command handlers stay transport-unaware and
 // keep printing to Serial exactly as they always have.
+// The capture stays ARMED for as long as a client is connected, not just around a
+// command. It has to: PWM_UPDATE (the live monitor, ~20 Hz), WCB_STATUS pushes and
+// every terminal line are emitted from loop(), OUTSIDE any command. Arming only
+// around processInputLine() gives working request/response and a completely dead
+// monitor — no SBUS, no button presses, no stick movement — which is most of what
+// the tool is for.
+//
+// BUFFER, THEN SEND FROM pump(). Never send inside write(). write() runs in the
+// middle of arbitrary Serial.printf calls on the loop task, and a TCP send there
+// would put network I/O between two halves of a print — on the core that has to
+// service SBUS at ~111 fps. Buffering here and flushing at one known point in
+// loop() keeps the blocking where it can be reasoned about.
+//
+// OVERFLOW DROPS WHOLE LINES. Truncating mid-line would hand the tool half a JSON
+// object, which fails at JSON.parse and (per the tool's own notes) silently
+// freezes a panel. Dropping to the next newline loses a sample instead, which for
+// 20 Hz telemetry is invisible.
 class WsSink : public Print {
  public:
-  void begin(int fd) { _fd = fd; _len = 0; _dead = false; }
+  void begin(int fd) { _fd = fd; _len = 0; _dropping = false; }
+  void end()         { _fd = -1; _len = 0; _dropping = false; }
+  bool live() const  { return _fd >= 0; }
+  int  fd()   const  { return _fd; }
 
   size_t write(uint8_t c) override {
-    if (_dead) return 1;                       // client gone: swallow, don't stall the command
+    if (_fd < 0) return 1;
+    if (_dropping) { if (c == '\n') _dropping = false; return 1; }
+    if (_len >= sizeof(_buf)) { _dropping = true; return 1; }   // drop the rest of THIS line
     _buf[_len++] = (char)c;
-    if (_len >= WS_TX_CHUNK) flush();
     return 1;
   }
   size_t write(const uint8_t* b, size_t n) override {
@@ -85,35 +106,40 @@ class WsSink : public Print {
   }
   using Print::write;
 
-  // Push whatever is buffered. Called at chunk boundaries and once at the end.
-  void flush() {
-    if (_dead || !_len || !wsServer) { _len = 0; return; }
+  // Called from loop() only. Returns false once the client has gone.
+  bool pump() {
+    if (_fd < 0 || !_len || !wsServer) return _fd >= 0;
     httpd_ws_frame_t f = {};
-    f.final = true;
-    f.type  = HTTPD_WS_TYPE_TEXT;
+    f.final   = true;
+    f.type    = HTTPD_WS_TYPE_TEXT;
     f.payload = (uint8_t*)_buf;
     f.len     = _len;
-    // A failure here means the client vanished mid-command. Latch it: the command
-    // is still running on Core 1 and must be allowed to finish and clean up, so we
-    // keep accepting writes and drop them rather than aborting midway through a
-    // config save.
-    if (httpd_ws_send_frame_async(wsServer, _fd, &f) != ESP_OK) _dead = true;
+    esp_err_t e = httpd_ws_send_frame_async(wsServer, _fd, &f);
     _len = 0;
+    if (e != ESP_OK) { end(); return false; }   // client vanished
+    return true;
   }
 
  private:
-  int    _fd   = -1;
-  size_t _len  = 0;
-  bool   _dead = false;
-  char   _buf[WS_TX_CHUNK];
+  int    _fd       = -1;
+  size_t _len      = 0;
+  bool   _dropping = false;
+  // One PWM_UPDATE is ~640 B and they arrive at ~20 Hz; loop() pumps far faster
+  // than that, so this only has to absorb one busy pass, not a backlog.
+  char   _buf[2048];
 };
 
 inline WsSink wsSink;
 
 // ── Handler — RUNS ON THE HTTPD TASK (Core 0). Enqueue only. ────────────────
 inline esp_err_t wsHandler(httpd_req_t* req) {
-  // GET is the opening handshake; esp_http_server completes it for us.
-  if (req->method == HTTP_GET) return ESP_OK;
+  // GET is the opening handshake; esp_http_server completes it for us. Remember the
+  // socket: from here on the sink mirrors Serial to it continuously, which is what
+  // makes the live monitor work rather than only command replies.
+  if (req->method == HTTP_GET) {
+    wsSink.begin(httpd_req_to_sockfd(req));
+    return ESP_OK;
+  }
 
   // Two-step receive: length first (len = 0), then the payload.
   httpd_ws_frame_t frame = {};
@@ -181,19 +207,39 @@ inline bool begin() {
 // One command per call, mirroring drainRemoteCli(): loop() keeps SBUS, the mesh
 // heartbeat and the aux-serial pump alive between commands.
 inline void drain() {
+  // ── Keep the tee armed, and flush ─────────────────────────────────────────
+  // Runs every loop() pass, not just when a command is pending. Two jobs:
+  //
+  // 1. RE-ARM. rcSerial's capture is a SINGLE slot, and drainRemoteCli() takes it
+  //    for mesh-relayed CLI lines then disarms unconditionally. Without re-arming
+  //    here, one relayed command silently ends the WebSocket's live monitor for
+  //    good. Re-arming is cheap (two stores) and idempotent.
+  // 2. FLUSH. The sink buffers during arbitrary Serial.printf calls; this is the
+  //    one place the bytes actually go out, so network I/O stays at a known point
+  //    on the core that must also service SBUS.
+  if (wsSink.live()) {
+    rcSerial.armCapture(&wsSink);
+    if (!wsSink.pump()) rcSerial.disarmCapture();   // client gone — stop teeing
+  }
+
   if (!wsQueue) return;
   WsCmd m;
   if (xQueueReceive(wsQueue, &m, 0) != pdTRUE) return;
 
-  wsSink.begin(m.fd);
-  rcSerial.armCapture(&wsSink);      // tee this command's Serial output to the client
+  // Deliberately NOT re-begin()ing the sink and NOT disarming afterwards. The tee
+  // is a standing arrangement for the whole session now: begin() would clear
+  // whatever loop() has already buffered this pass, and disarming at the end of a
+  // command is precisely the bug that left the live monitor dead.
+  //
   // The String copy is safe even for a ~98 KB SET_CONFIG: the toolchain sets
   // CONFIG_SPIRAM_USE_MALLOC=y with CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096, so any
   // allocation over 4 KB is served from PSRAM, not the ~256 KB of internal SRAM.
   // Worth knowing before "optimising" this copy away — it is not on the scarce heap.
   processInputLine(String(m.line));  // the SAME dispatcher the USB path uses
-  rcSerial.disarmCapture();
-  wsSink.flush();                    // trailing partial line (a prompt, a bare value)
+
+  // Push the reply now rather than waiting for the next pass, so a command feels
+  // immediate instead of picking up one loop() of latency.
+  if (wsSink.live() && !wsSink.pump()) rcSerial.disarmCapture();
 
   free(m.line);                      // ownership ends here
 

@@ -24,6 +24,23 @@ Direct USB, because it feeds the same `processInputLine()`; there is no second c
 surface to keep in step. Unlike Via WCB it has no 187-byte cap and no fragmentation — it is
 a direct link, so a large `SET_CONFIG` crosses in one frame.
 
+**It is a console mirror, not a request/response channel.** While a client is connected the
+`rcSerial` capture tee stays armed for the whole session, so everything printed on the loop
+task reaches it — replies, `PWM_UPDATE` at ~20 Hz, `WCB_STATUS` pushes, terminal output —
+exactly as a USB console would see. Arming only around `processInputLine()` looks correct
+and gives perfectly good request/response, but leaves the **live monitor completely dead**:
+SBUS, button presses and stick movement are all emitted from `loop()`, outside any command.
+Two consequences for anyone touching `navicore_wsserver.h`:
+
+- `drain()` must **re-arm every pass**. The capture is a single slot, and `drainRemoteCli()`
+  takes it for mesh-relayed CLI lines then disarms unconditionally — without re-arming, one
+  relayed command silently ends the monitor for the rest of the session.
+- Bytes are buffered by the sink and sent **only from `pump()` in `loop()`**, never inside
+  `write()`. A TCP send inside `write()` lands between two halves of an arbitrary
+  `Serial.printf`, on the core that must also service SBUS at ~111 fps. On overflow whole
+  **lines** are dropped, never truncated — half a JSON object fails at the tool's
+  `JSON.parse` and silently freezes a panel, whereas a lost 20 Hz sample is invisible.
+
 **The 187-byte number.** ESP-NOW carries 250 B. `WCB_Client::_sendPacket()` copies the
 command into a 200-byte `structCommand[]` and appends `"|CRC%08X"` (12 B). A payload over
 187 B truncates the CRC and the receiver silently drops the packet as "Missing CRC". Both
@@ -719,6 +736,7 @@ Newest first. Add a row whenever a code change alters what this page describes �
 as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
+| 2026-08-28 | _(uncommitted)_ | **The WebSocket endpoint is now a console mirror, not request/response.** The `rcSerial` tee stays armed for the whole client session instead of only around `processInputLine()`. Symptom of the old behaviour: replies, `WCB_STATUS` and `MESH_STATS` all worked while the **live monitor was completely dead** — no SBUS, no button presses, no stick movement — because `PWM_UPDATE` is emitted from `loop()`, outside any command. Two rules recorded with it: `drain()` must re-arm every pass (the capture is one slot and `drainRemoteCli()` disarms unconditionally, so a single relayed CLI line would otherwise end the monitor permanently), and the sink buffers and sends only from `pump()` in `loop()` — never inside `write()`, which would put a TCP send between two halves of a `Serial.printf` on the core servicing SBUS. Overflow drops whole lines, never truncates: half a JSON object freezes a tool panel, a lost 20 Hz sample is invisible. |
 | 2026-08-28 | _(uncommitted)_ | **Added a WebSocket command transport** (`navicore_wsserver.h`, `ws://<softAPIP>/ws`), optional and off by default behind `wifiEnabled`. It carries the same newline-delimited JSON as Direct USB because it feeds the same `processInputLine()` — no second command surface. No 187-byte cap and no fragmentation: it is a direct link, so a large SET_CONFIG crosses in one frame. The load-bearing constraint is the split: the httpd handler runs on **Core 0** beside the ESP-NOW callback and may only copy-enqueue-return, with the command executed from `loop()` on Core 1, because `processInputLine()` writes flash and NVS and drives bit-banged serial. Reply via `httpd_ws_send_frame_async()` (the documented out-of-request API). A line up to 98 KB is queued by POINTER from PSRAM, not by value like `RemoteCliMsg` — ownership transfers with the pointer, and the handler frees it if the queue send fails. Costs +33.5 KB flash / +1.4 KB static RAM; app slot 59.1%. |
 | 2026-08-28 | _(uncommitted)_ | **Split framing from dispatch in the serial input path.** `handleSerialInput()` now only reads bytes and assembles lines; the ~430-line dispatch moved verbatim into `processInputLine(const String&)`, which any transport can call. Pure refactor — verified by normalising both bodies and diffing: 274 executable lines, byte-identical. Two contracts are load-bearing and are now stated at the function: the `bool` return means "yield to `loop()` now" (the `?` branch and a parse failure both need the caller to stop draining, so heartbeats survive ACK-paced OTA chunks), and the caller owns the buffer — the line is `const&` and cleared by the caller, because copying a ~98 KB `SET_CONFIG` per line is real cost. |
 | 2026-08-28 | _(uncommitted)_ | Documented that the `MESH_STATS` aggregate and its per-peer rows are sampled a moment apart and can disagree by one — `agg` from the library counters, `peers[]` walked afterwards, so an ACK in between leaves the aggregate behind the rows it contains. Seen in the field as the derived "not currently listed" remainder rendering `Ack -1` against `Sent 0`. Recorded as NOT a firmware bug, with the two tempting wrong fixes named (making one side authoritative, or recomputing the aggregate from the rows — the aggregate covers all 20 library slots including unlisted boards, which is why the remainder row exists at all). The tool now clamps the remainder at zero: a real remainder still shows, a skew of -1 does not. |
