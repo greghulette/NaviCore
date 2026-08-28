@@ -20,7 +20,6 @@ someone using NaviCore today. These pages are the other audience: us, mid-change
 | **[CONFIG_TOOL.md](CONFIG_TOOL.md)** | Editing `config_tool/index.html` — connect paths, save flow, function map, command library, timeline editor |
 | **[BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md)** | Building, verifying, versioning, flashing, and the library-source rule that decides whether a change actually ships |
 | **[ROADMAP.md](ROADMAP.md)** | Picking up queued work — decisions already made, questions still open, and the list of deliberate non-fixes |
-| **[DESKTOP_APP_WIP.md](DESKTOP_APP_WIP.md)** | **In-flight work on `main` instead of a branch** — the WiFi/SoftAP + desktop-app effort. Commit list, symbol-level inventory, and how to rip it all out cleanly |
 
 ## Diagnosing a failure
 

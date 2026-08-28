@@ -636,7 +636,7 @@ struct RcConfig {
   // without 3-axis hardware just leaves J5/J6/slot-19/slot-20 at channel=0.
   bool           threeAxisGimbals;
   bool           sbusOutEnabled;        // re-emit SBUS frames on SBUS_OUT_PIN; off saves the per-byte passthrough tee
-  bool           wifiEnabled;           // raise a SoftAP + comms server for the desktop app. DEFAULT OFF, and off
+  bool           wifiEnabled;           // raise a SoftAP + comms endpoint. DEFAULT OFF, and off
                                         // means the bring-up code never runs at all — not "runs and idles". The
                                         // radio is shared with ESP-NOW, so this is the one setting that can take
                                         // the droid off its own mesh; see the AP-channel note in setup().

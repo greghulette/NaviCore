@@ -36,3 +36,6 @@ PCB/NaviCore_V1/.history/
 # transmitter model files below belong in the repo.
 model/Ethos Simulator/
 *.wasm
+
+# Local working notes — never published
+.local/

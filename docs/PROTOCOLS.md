@@ -478,11 +478,14 @@ without handling it a sender simply stalls, because the RC will never accept ano
 
 ### Bridged status and metadata
 
-`WCB_STATUS` must fit **one** ESP-NOW packet, because the relay may itself be a `WCB_Client`
-host (a MgmtRelay) and the library has no general receive-side reassembly — `send()` refuses
-anything over `_maxSingleCommandLen()` rather than splitting it. The builder shrinks the reply
-in order until it fits ~185 B: drop board aliases → drop the relay's friendly name → **switch to
-the sparse roster** → and only then trim.
+`WCB_STATUS` must fit **one** ESP-NOW packet whenever the relay might predate `WCB_Client`
+**1.16.0**. Before that release the library could *send* an oversized command (`send()` falls
+through to `_sendFragmented`) but never *reassemble* one — only the WCB firmware could — so a
+relay that is itself a `WCB_Client` host, such as a MgmtRelay, would have received a split reply
+and dropped it. 1.16.0 adds inbound reassembly and closes that, but NaviCore cannot tell which
+version is relaying for it, so the reply is still built to fit. The builder shrinks it in order
+until it fits ~185 B: drop board aliases → drop the relay's friendly name → **switch to the
+sparse roster** → and only then trim.
 
 ```json
 {"sys":1,"type":"WCB_STATUS","quantity":N,"self":20,"relay":R,"relayName":"…",
@@ -664,6 +667,7 @@ as the code. Page body stays present-tense; history lives here.
 | 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
 |---|---|---|
 | 2026-08-27 | _(uncommitted)_ | Fragment pacing is no longer one constant shared by both directions. **Upload** (tool → RC) crosses the bridge WCB’s UART — a *real* 115200 link, since the WCB builds without `CDCOnBoot=cdc` and its `Serial` is UART0, unlike NaviCore where native USB-CDC ignores baud — so the tool now paces each line by `max(wire time × FRAG_PACE_LINK_MULT, FRAG_PACE_FLOOR_MS)` (2×, 100 ms) instead of a flat 150 ms, and skips the delay after the final fragment. **Download** (RC → tool) never crosses that UART and keeps `FRAG_PACING_MS` = 150. Do not re-symmetrise them. Also documented that `FRAG_TIMEOUT_MS` is an **idle** timeout: the receiver now refreshes the deadline on *any* fragment including duplicates, because gating it on new-only made a live retransmit indistinguishable from a dead sender — the expiry sweep runs before the sid match, so the session was reclaimed mid-transfer and silently restarted at `got=1`. |
+| 2026-08-28 | _(uncommitted)_ | ** 1.16.0 reassembles inbound fragments**, so  is symmetric between any two peers — previously it auto-fragmented on transmit but only the WCB *firmware* could rebuild, making client→client oversized traffic transmit perfectly and deliver nothing. The one-packet  budget is kept regardless, because NaviCore cannot tell whether the relay answering for it predates 1.16.0. |
 | 2026-08-27 | _(uncommitted)_ | **Bridged `WCB_STATUS` gained a sparse `rows[]` form** — `[[id,online,client,temporary],…]`, chosen when the positional arrays will not fit one ESP-NOW packet, BEFORE the roster trim rather than after. The positional form costs a slot per id, not per board, so a mgmt relay at id 19 made a three-board mesh 280 B against a 185 B budget; the trim then dropped the highest id first, i.e. the relay being bridged through, and only on this path (Direct USB has no budget and showed it). Sparse is 121 B for the same mesh, and is also the only bridged form that carries `temporary` — the positional builder never emitted the key. `known` is implied by presence; the tool expands rows into the existing positional arrays; an older tool falls back to `1..quantity`. |
 | 2026-08-27 | _(uncommitted)_ | **Batched keyframe download** — `?REC,EDITLOAD,…,<count>,B` opts into `[CLIPDL:EVB,<firstIdx>]{"e":[[t,k,a,b,c],…]}`, packing consecutive keyframes into one line with positional indices. Actions are never batched and flush the run. 5.0× fewer mesh packets / 2.5× fewer bytes on a 300-event clip, longest line 133 B (inside the 160 B cap, so no new fragmentation). Round-trip verified to reconstruct byte-identically to the per-event form across seven slices including ones straddling actions. Backward compatible both ways — `toInt()` stops at the comma, and the tool accepts both shapes unconditionally. |
 | 2026-08-27 | _(uncommitted)_ | **`?OTA,DATA` carries an optional CRC-32**, as a suffix on the offset field: `?OTA,DATA,<t>,<s>,<offset>:<crc32>,<b64>`, computed over `"<offset>,<b64>"` as transmitted. A relay that fails the check DROPS the line. Placed on the offset field, not appended, because `String::toInt()` stops at the `:` — so a relay predating the check reads the offset unchanged and a sender predating it just omits the suffix; appending a field would have been swept into the base64 and failed every packet. Verified by BOTH relays (`navicore_ota.h` `otaCrc32`, WCB `calculateCRC32`) against the tool's `_crc32Hex` — all three are the same reflected CRC-32 (poly `0xEDB88320`) and were cross-checked. Guards the USB→relay SERIAL hop only; 802.11 already CRCs the ESP-NOW hop in hardware. Also `Serial.setRxBufferSize` 4096 → 8192 and the sender's `PACE_MS` 12 → 25. |
