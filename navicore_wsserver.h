@@ -225,12 +225,48 @@ inline esp_err_t wsHandler(httpd_req_t* req) {
   if (e != ESP_OK) { free(buf); return e; }
   buf[frame.len] = '\0';
 
-  WsCmd m = { httpd_req_to_sockfd(req), buf };
-  if (!wsQueue || xQueueSend(wsQueue, &m, 0) != pdTRUE) {
-    // Nobody took ownership, so it is still ours to release. Dropping under load
-    // is the same policy queueRemoteCli uses; the client sees no reply and can retry.
-    free(buf);
+  // A MESSAGE BOUNDARY IS NOT A LINE BOUNDARY.
+  //
+  // The protocol is newline-delimited; WebSocket is message-framed. A client that
+  // writes in fixed-size chunks (which the config tool does — it splits anything
+  // over 512 B) delivers one line as several frames, and treating each frame as a
+  // command turns a 1391 B OTA DATA line into three fragments. Observed exactly
+  // that: "[OTA] DATA base64 error -44", the decoder handed a fragment.
+  //
+  // So frame here, as handleSerialInput() does for the serial byte stream: append
+  // and dispatch only on a newline. Cheap (a memcpy on Core 0) and it makes the
+  // endpoint robust against ANY client's chunking rather than relying on ours.
+  static char*  acc     = nullptr;   // PSRAM, grown on demand
+  static size_t accLen  = 0, accCap = 0;
+
+  if (accLen + frame.len + 1 > accCap) {
+    size_t want = accLen + frame.len + 1024;
+    if (want > 98304 + 2048) { accLen = 0; free(buf); return ESP_FAIL; }   // runaway
+    char* grown = (char*)ps_realloc(acc, want);
+    if (!grown) { free(buf); return ESP_ERR_NO_MEM; }
+    acc = grown; accCap = want;
   }
+  memcpy(acc + accLen, buf, frame.len);
+  accLen += frame.len;
+  free(buf);                       // the accumulator owns the bytes now
+
+  // Dispatch every COMPLETE line in what we have; keep any tail for the next frame.
+  size_t start = 0;
+  for (size_t i = 0; i < accLen; i++) {
+    if (acc[i] != '\n' && acc[i] != '\r') continue;
+    size_t len = i - start;
+    if (len > 0) {
+      char* line = (char*)ps_malloc(len + 1);
+      if (line) {
+        memcpy(line, acc + start, len);
+        line[len] = '\0';
+        WsCmd m = { httpd_req_to_sockfd(req), line };
+        if (!wsQueue || xQueueSend(wsQueue, &m, 0) != pdTRUE) free(line);
+      }
+    }
+    start = i + 1;
+  }
+  if (start) { memmove(acc, acc + start, accLen - start); accLen -= start; }
   return ESP_OK;
 }
 
