@@ -131,6 +131,28 @@ class WsSink : public Print {
 
 inline WsSink wsSink;
 
+// Deliver a line to a connected WebSocket client WITHOUT going through Serial.
+//
+// For the hot-path emitters that are gated on Serial.availableForWrite(): PWM_UPDATE,
+// wcbStreamLog(), vlogf(). That guard is right and must stay — an unguarded USB write
+// blocks up to HWCDC's 50 ms tx timeout and starves the SBUS decode in loop(). But it
+// asks "can USB take this?" when the real question is "can the DESTINATION take this?",
+// and with no USB host attached (every WiFi session) availableForWrite() is 0, so the
+// line is dropped before it can even reach the capture tee.
+//
+// That is why command replies worked over the WebSocket while the live monitor was
+// completely dead: replies are unguarded Serial.println, PWM_UPDATE is not.
+//
+// Non-blocking by construction — the sink only appends to its buffer, and drops whole
+// lines rather than truncating when full, so this can never stall loop().
+inline void printlnDirect(const char* s) {
+  if (!wsSink.live()) return;
+  wsSink.write((const uint8_t*)s, strlen(s));
+  wsSink.write((uint8_t)'\n');
+}
+
+inline bool clientConnected() { return wsSink.live(); }
+
 // ── Handler — RUNS ON THE HTTPD TASK (Core 0). Enqueue only. ────────────────
 inline esp_err_t wsHandler(httpd_req_t* req) {
   // GET is the opening handshake; esp_http_server completes it for us. Remember the

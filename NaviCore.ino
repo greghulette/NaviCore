@@ -3110,7 +3110,17 @@ void sendPWMUpdate() {
   // isn't draining fast enough — or the tab/USB closed without a STOP_MONITOR, leaving this
   // flag stuck on — DROP this frame; the next is 50 ms out. Mirrors wcbStreamLog()/vlogf().
   const size_t _pwmLen = strlen(buf);              // +2 for println's CRLF
-  if (Serial.availableForWrite() >= (int)(_pwmLen + 2)) Serial.println(buf);
+  if (Serial.availableForWrite() >= (int)(_pwmLen + 2)) {
+    Serial.println(buf);          // tees to a WebSocket client too, when one is armed
+  } else {
+    // USB cannot take it — but that does NOT mean nobody can. With no USB host
+    // attached (every WiFi session) availableForWrite() is permanently 0, so this
+    // guard silently dropped EVERY monitor frame and the live panel was dead over
+    // the WebSocket while command replies worked fine. Replies are unguarded
+    // Serial.println; this one is not, and that difference was the whole bug.
+    // Deliver straight to the socket, which has its own non-blocking backpressure.
+    naviws::printlnDirect(buf);
+  }
 }
 
 // =============================================================================
