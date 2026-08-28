@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.09:41.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.09:50.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3685,6 +3685,8 @@ let config = {
   threeAxisGimbals: false,    // X20 hardware option (off by default)
   sbusOutEnabled:   false,    // SBUS-OUT passthrough (off by default — saves CPU when unused)
   wifiEnabled:      false,    // SoftAP + comms server for the desktop app (off by default; hidden toggle — see cfgOpenCloudModal)
+  wifiSsid:         '',       // SoftAP SSID ('' = firmware derives NaviCore-<deviceId>)
+  wifiPassword:     '',       // SoftAP WPA2 passphrase ('' = firmware refuses to raise the AP — never an open network)
   maeGateMs:        250,      // remote/via-WCB skip-if-running fail-open window (ms)
   boardType:        0,        // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   tapWindowMs:   500,
@@ -9562,6 +9564,8 @@ function applyConfig(data) {
   }
   if (data.sbusOutEnabled !== undefined) config.sbusOutEnabled = !!data.sbusOutEnabled;
   if (data.wifiEnabled    !== undefined) config.wifiEnabled    = !!data.wifiEnabled;
+  if (data.wifiSsid       !== undefined) config.wifiSsid       = String(data.wifiSsid || '').slice(0, 32);
+  if (data.wifiPassword   !== undefined) config.wifiPassword   = String(data.wifiPassword || '').slice(0, 63);
   if (data.maeGateMs      !== undefined) config.maeGateMs = Math.max(50, Math.min(5000, +data.maeGateMs || 250));
   if (data.boardType      !== undefined) config.boardType      = +data.boardType | 0;
   if (data.tapWindowMs   !== undefined) {
@@ -20150,6 +20154,12 @@ function cfgOpenCloudModal() {
     + 'Takes effect after <b>Save</b> and a <b>reboot</b> — the AP has to be up before the mesh starts. '
     + 'The AP is created on your mesh channel (<b>' + ((config.wcbNetwork && config.wcbNetwork.channel) || 1) + '</b>): the ESP32 has one radio, '
     + 'so any other channel would take this droid off its own mesh. Leave off unless you are using the app.</span></span></label>'
+    + '<div style="display:flex;gap:8px;margin:10px 0 0 24px">'
+    + '<input id="cfg-wifi-ssid" type="text" maxlength="32" placeholder="AP name (blank = NaviCore-' + ((config.wcbNetwork && config.wcbNetwork.deviceId) || 20) + ')" '
+    + 'value="' + esc(config.wifiSsid) + '" style="flex:1;min-width:0;' + inputCss + '">'
+    + '<input id="cfg-wifi-pw" type="password" maxlength="63" placeholder="AP password (8+ chars)" '
+    + 'value="' + esc(config.wifiPassword) + '" style="flex:1;min-width:0;' + inputCss + '">'
+    + '<button id="cfg-wifi-pw-eye" type="button" title="Show / hide password" aria-label="Show AP password" style="padding:7px 10px;cursor:pointer;' + inputCss + '">👁</button></div>'
     + '<div id="cfg-wifi-note" style="font-size:12px;color:var(--accent-bright,#5cb0ff);min-height:15px;margin:6px 0 0 24px"></div>'
     + '</div>';
   document.body.appendChild(ov);
@@ -20163,13 +20173,39 @@ function cfgOpenCloudModal() {
   // nothing to notify) — it does NOT send anything on its own. Save writes it, and
   // the board only acts on it at boot, so say both out loud: a silent toggle here
   // would look applied while the radio stayed exactly as it was.
-  $('cfg-wifi-enable').addEventListener('change', e => {
-    config.wifiEnabled = e.target.checked;
+  // Restate the pending state after every edit. The firmware FAILS CLOSED on a
+  // password under 8 chars (WPA2's minimum) — it refuses to raise the AP rather
+  // than falling back to an open network — so a too-short password must be called
+  // out HERE. Otherwise the user saves, reboots, finds no AP, and has nothing to
+  // go on but a serial line they are not watching.
+  const _wifiNote = () => {
     const note = $('cfg-wifi-note');
-    if (note) note.textContent = e.target.checked
-      ? 'WiFi will be ON after you Save and reboot the board.'
-      : 'WiFi will be OFF after you Save and reboot the board.';
+    if (!note) return;
+    const on = $('cfg-wifi-enable').checked;
+    const pw = $('cfg-wifi-pw').value || '';
+    if (!on) { note.style.color = 'var(--muted,#9a9aa2)'; note.textContent = 'WiFi will be OFF after you Save and reboot.'; return; }
+    if (pw.length < 8) {
+      note.style.color = '#e5737b';
+      note.textContent = pw.length
+        ? 'Password is ' + pw.length + ' characters — WPA2 needs 8. The board will refuse to start the AP.'
+        : 'Set a password (8+ characters). The board will not start an open AP.';
+      return;
+    }
+    note.style.color = 'var(--accent-bright,#5cb0ff)';
+    note.textContent = 'WiFi will be ON after you Save and reboot. Join "'
+      + (($('cfg-wifi-ssid').value || '').trim() || ('NaviCore-' + ((config.wcbNetwork && config.wcbNetwork.deviceId) || 20)))
+      + '" from the app.';
+  };
+  $('cfg-wifi-enable').addEventListener('change', e => { config.wifiEnabled = e.target.checked; _wifiNote(); });
+  $('cfg-wifi-ssid').addEventListener('input', e => { config.wifiSsid     = e.target.value.slice(0, 32); _wifiNote(); });
+  $('cfg-wifi-pw').addEventListener('input',   e => { config.wifiPassword = e.target.value.slice(0, 63); _wifiNote(); });
+  $('cfg-wifi-pw-eye').addEventListener('click', () => {
+    const p = $('cfg-wifi-pw'), eye = $('cfg-wifi-pw-eye');
+    const show = p.type === 'password';
+    p.type = show ? 'text' : 'password';
+    eye.textContent = show ? '🙈' : '👁';
   });
+  _wifiNote();
   // 👁 show/hide the password field.
   $('cfg-cloud-pw-eye').addEventListener('click', () => {
     const p = $('cfg-cloud-pw'), eye = $('cfg-cloud-pw-eye');

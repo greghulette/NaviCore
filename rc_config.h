@@ -640,6 +640,17 @@ struct RcConfig {
                                         // means the bring-up code never runs at all — not "runs and idles". The
                                         // radio is shared with ESP-NOW, so this is the one setting that can take
                                         // the droid off its own mesh; see the AP-channel note in setup().
+  char           wifiSsid[33];          // SoftAP SSID. 32 bytes is the 802.11 maximum, +1 for the NUL. EMPTY means
+                                        // "derive one at bring-up" (NaviCore-<deviceId>) so a droid always has a
+                                        // distinguishable name without the user having to invent one.
+  char           wifiPassword[64];      // SoftAP WPA2 passphrase. 8-63 chars per WPA2, +1 for the NUL.
+                                        // EMPTY OR SHORTER THAN 8 MUST REFUSE TO RAISE THE AP — fail closed, never
+                                        // fall back to an open network. WiFi.softAP() accepts an empty password by
+                                        // creating an OPEN ap, and on a droid at a convention that is an unauthenticated
+                                        // command channel to the whole mesh: this surface has no per-command auth
+                                        // (RESET_DEFAULTS and REBOOT dispatch on a bare type string). Never reuse
+                                        // wcbNetwork.password here — that one rides in cleartext in every ESP-NOW
+                                        // packet the droid emits, so it is public by construction.
   uint8_t        boardType;             // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   int            tapWindowMs;
   // Continuous hold (ms) on a matrix button that promotes the gesture to a LONG
@@ -792,6 +803,8 @@ void rcConfigLoadDefaults() {
   rcConfig.threeAxisGimbals = false;         // X20 hardware option, off by default
   rcConfig.sbusOutEnabled   = false;         // SBUS-OUT passthrough off by default (saves CPU when unused)
   rcConfig.wifiEnabled      = false;         // WiFi/SoftAP OFF by default — opt-in only, never on for an existing droid
+  rcConfig.wifiSsid[0]      = '\0';          // empty → derived at bring-up (NaviCore-<deviceId>)
+  rcConfig.wifiPassword[0]  = '\0';          // empty → AP refuses to start; there is deliberately no default password
   rcConfig.maeGateMs        = 250;           // remote skip-if-running fail-open window (ms)
   rcConfig.boardType        = 0;             // 0 = NaviCore v2 PCB (default pinout); 1 = WCB HW 3.2
   rcConfig.tapWindowMs      = 500;
@@ -1209,6 +1222,8 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   doc["threeAxisGimbals"]     = rcConfig.threeAxisGimbals; // X20 hardware option (shows/hides J5/J6 + stick-click matrix slots)
   doc["sbusOutEnabled"]       = rcConfig.sbusOutEnabled;   // SBUS-OUT passthrough enable
   doc["wifiEnabled"]          = rcConfig.wifiEnabled;      // SoftAP + comms server enable (off by default)
+  doc["wifiSsid"]             = rcConfig.wifiSsid;         // SoftAP SSID ("" = derive NaviCore-<deviceId>)
+  doc["wifiPassword"]         = rcConfig.wifiPassword;     // SoftAP WPA2 passphrase ("" = AP refuses to start)
   doc["maeGateMs"]            = rcConfig.maeGateMs;         // remote skip-if-running fail-open window (ms)
   doc["boardType"]            = rcConfig.boardType;        // hardware pin profile (0=NaviCore v2, 1=WCB 3.2)
   doc["tapWindowMs"]          = rcConfig.tapWindowMs;
@@ -1492,6 +1507,10 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   // before this field existed can never turn the radio on. A missing key reads false, and the
   // containsKey guard means a diff-save that omits the key leaves the current value alone.
   if (doc.containsKey("wifiEnabled"))      rcConfig.wifiEnabled      = doc["wifiEnabled"]      | false;
+  if (doc.containsKey("wifiSsid"))
+    strlcpy(rcConfig.wifiSsid,     doc["wifiSsid"]     | rcConfig.wifiSsid,     sizeof(rcConfig.wifiSsid));
+  if (doc.containsKey("wifiPassword"))
+    strlcpy(rcConfig.wifiPassword, doc["wifiPassword"] | rcConfig.wifiPassword, sizeof(rcConfig.wifiPassword));
   if (doc.containsKey("maeGateMs"))        rcConfig.maeGateMs        = doc["maeGateMs"]         | 250;
   if (doc.containsKey("boardType"))        rcConfig.boardType        = (uint8_t)(doc["boardType"] | 0);
   if (doc.containsKey("tapWindowMs"))   rcConfig.tapWindowMs   = doc["tapWindowMs"];
@@ -2330,6 +2349,18 @@ bool rcConfigSaveNVS() {
     ok &= _nvsPutJson(prefs, "wcb", doc);
   }
 
+  // SoftAP credentials. Separate NVS key from "wcb" on purpose: these are NOT mesh
+  // credentials and must never be confused with them (wcbNetwork.password is public —
+  // it rides in cleartext in every ESP-NOW packet). The enable flag stays a plain
+  // putBool("wifien") alongside the other top-level bools.
+  {
+    DynamicJsonDocument doc(192);
+    JsonObject root = doc.to<JsonObject>();
+    root["ssid"] = rcConfig.wifiSsid;
+    root["pw"]   = rcConfig.wifiPassword;
+    ok &= _nvsPutJson(prefs, "wifi", doc);
+  }
+
   // MP3 Trigger destination (transport + target)
   {
     DynamicJsonDocument doc(128);
@@ -2543,6 +2574,16 @@ void rcConfigLoadNVS() {
               sizeof(rcConfig.wcbNetwork.password));
       rcConfig.wcbNetwork.quantity = (uint8_t)(root["quantity"] | rcConfig.wcbNetwork.quantity);
       rcConfig.wcbNetwork.deviceId = (uint8_t)(root["deviceId"] | rcConfig.wcbNetwork.deviceId);
+    }
+  }
+
+  if (prefs.isKey("wifi")) {
+    String s = prefs.getString("wifi", "");
+    DynamicJsonDocument doc(192);
+    if (deserializeJson(doc, s) == DeserializationError::Ok) {
+      JsonObject root = doc.as<JsonObject>();
+      strlcpy(rcConfig.wifiSsid,     root["ssid"] | rcConfig.wifiSsid,     sizeof(rcConfig.wifiSsid));
+      strlcpy(rcConfig.wifiPassword, root["pw"]   | rcConfig.wifiPassword, sizeof(rcConfig.wifiPassword));
     }
   }
 
