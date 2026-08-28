@@ -4541,8 +4541,52 @@ void setup() {
   // servos moving continuously (~400 keyframes/s worst case). ~6.7 MB PSRAM was free.
   navirec::recBegin(24000, recCbDispatch, recCbEmitMaestro, recCbEmitHcrVol, recCbResetChan);
 
-  // WCB Client — sets STA mode + custom MAC + inits ESP-NOW.
-  // No WiFi AP or web server — ESP-NOW only.  Credentials come from NVS
+  // ── Optional SoftAP (rcConfig.wifiEnabled) ────────────────────────────────
+  // ORDER IS LOAD-BEARING: this must run BEFORE wcb->begin(). WCB_Client checks
+  // WiFi.getMode() at entry and, finding an AP already up, selects WIFI_AP_STA and
+  // KEEPS it instead of forcing WIFI_STA and tearing the AP down (WCB_Client.cpp
+  // ≈89-110). Raise the AP after begin() and the AP survives, but ESP-NOW has
+  // already pinned the radio — the two then fight over the channel.
+  //
+  // CHANNEL: softAP()'s 3rd parameter defaults to 1. It MUST be passed
+  // rcConfig.wcbNetwork.channel explicitly. Once an AP owns the radio WCB_Client
+  // stops calling esp_wifi_set_channel and only WARNS on a mismatch (≈121-130), so
+  // a defaulted channel 1 against a mesh on any other channel is a silent, total
+  // blackout — every packet dropped, no fault LED, one line in a log nobody reads.
+  //
+  // PASSWORD: fail CLOSED. softAP() with an empty/short passphrase happily creates
+  // an OPEN network, and this command surface has no per-command auth at all —
+  // RESET_DEFAULTS and REBOOT dispatch on a bare "type" string — so an open AP is an
+  // unauthenticated command channel to the whole mesh. Refuse and say why.
+  if (rcConfig.wifiEnabled) {
+    const size_t pwLen = strlen(rcConfig.wifiPassword);
+    if (pwLen > 0 && pwLen < 8) {
+      Serial.printf("[WIFI] REFUSED: password is %u character(s); WPA2 requires 8.\n", (unsigned)pwLen);
+      Serial.println("[WIFI] Not starting an open AP — set a longer password and reboot.");
+    } else if (pwLen == 0) {
+      Serial.println("[WIFI] REFUSED: no AP password set. Refusing to start an OPEN access point —");
+      Serial.println("[WIFI] this board accepts REBOOT / RESET_DEFAULTS / SET_CONFIG with no credential.");
+    } else {
+      // Empty SSID → derive one, so a droid always has a distinguishable name.
+      char ssid[33];
+      if (rcConfig.wifiSsid[0]) strlcpy(ssid, rcConfig.wifiSsid, sizeof(ssid));
+      else snprintf(ssid, sizeof(ssid), "NaviCore-%u", (unsigned)rcConfig.wcbNetwork.deviceId);
+      const int ch = rcConfig.wcbNetwork.channel;
+      // max_connection 4 (the default): this is a config channel, not a hotspot.
+      if (WiFi.softAP(ssid, rcConfig.wifiPassword, ch, /*hidden=*/0, /*max_conn=*/4)) {
+        Serial.printf("[WIFI] SoftAP \"%s\" up on channel %d — %s\n",
+                      ssid, ch, WiFi.softAPIP().toString().c_str());
+        Serial.println("[WIFI] ESP-NOW will share this channel (WIFI_AP_STA).");
+      } else {
+        // Not fatal to the droid — the mesh and serial both still work.
+        Serial.printf("[WIFI] SoftAP \"%s\" FAILED to start on channel %d.\n", ssid, ch);
+      }
+    }
+  }
+
+  // WCB Client — sets STA mode + custom MAC + inits ESP-NOW. With the SoftAP above
+  // enabled it runs WIFI_AP_STA and shares that AP's channel; with it off (the
+  // default) this is ESP-NOW only, exactly as before. Credentials come from NVS
   // (editable via the GUI's "WCB Network" sidebar); a reboot is required
   // for credential changes to take effect.
   wcb = new WCB_Client(rcConfig.wcbNetwork.macOct2,
