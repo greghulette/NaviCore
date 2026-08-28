@@ -55,6 +55,10 @@ static const uint8_t  WS_QUEUE_DEPTH = 3;
 // frame per output line would be hundreds of TCP writes, and buffering the whole
 // thing would need another 98 KB of PSRAM for no benefit.
 static const size_t   WS_TX_CHUNK    = 1400;
+// Keep in step with httpd_config_t::max_open_sockets in begin(). More clients than
+// the server will accept is just dead slots; fewer means a connected client the sink
+// never writes to, which is the silent-deafness bug this array exists to prevent.
+static const uint8_t  WS_MAX_CLIENTS = 3;
 
 struct WsCmd {
   int   fd;      // client socket, for the async reply
@@ -88,13 +92,30 @@ inline httpd_handle_t wsServer = nullptr;
 // 20 Hz telemetry is invisible.
 class WsSink : public Print {
  public:
-  void begin(int fd) { _fd = fd; _len = 0; _dropping = false; }
-  void end()         { _fd = -1; _len = 0; _dropping = false; }
-  bool live() const  { return _fd >= 0; }
-  int  fd()   const  { return _fd; }
+  // MULTIPLE CLIENTS, not one.
+  //
+  // A single fd meant every new connection silently STOLE the stream from the
+  // existing one: the old client's TCP socket stayed open and healthy while it went
+  // permanently deaf, so it showed "connected" and waited forever. Any second
+  // window, any diagnostic probe, any reconnect racing its own predecessor would do
+  // it — and the victim had no way to tell.
+  //
+  // Sized to httpd's max_open_sockets so we can never track more clients than the
+  // server will hold.
+  void begin(int fd) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] == fd) return;   // already known
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] < 0) { _fds[i] = fd; return; }
+    _fds[0] = fd;   // full: evict the oldest rather than refuse the newcomer
+  }
+  void drop(int fd) { for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] == fd) _fds[i] = -1; }
+  void end() { for (int i = 0; i < WS_MAX_CLIENTS; i++) _fds[i] = -1; _len = 0; _dropping = false; }
+  bool live() const {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] >= 0) return true;
+    return false;
+  }
 
   size_t write(uint8_t c) override {
-    if (_fd < 0) return 1;
+    if (!live()) return 1;
     if (_dropping) { if (c == '\n') _dropping = false; return 1; }
     if (_len >= sizeof(_buf)) {
       // FULL — flush right here rather than dropping. A single CONFIG reply is one
@@ -118,22 +139,26 @@ class WsSink : public Print {
   }
   using Print::write;
 
-  // Called from loop() only. Returns false once the client has gone.
+  // Called from loop() (and from write() when the buffer fills). Broadcasts to
+  // every connected client; one that has gone away is dropped individually rather
+  // than taking the others down with it. Returns false only when nobody is left.
   bool pump() {
-    if (_fd < 0 || !_len || !wsServer) return _fd >= 0;
+    if (!_len || !wsServer) return live();
     httpd_ws_frame_t f = {};
     f.final   = true;
     f.type    = HTTPD_WS_TYPE_TEXT;
     f.payload = (uint8_t*)_buf;
     f.len     = _len;
-    esp_err_t e = httpd_ws_send_frame_async(wsServer, _fd, &f);
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+      if (_fds[i] < 0) continue;
+      if (httpd_ws_send_frame_async(wsServer, _fds[i], &f) != ESP_OK) _fds[i] = -1;
+    }
     _len = 0;
-    if (e != ESP_OK) { end(); return false; }   // client vanished
-    return true;
+    return live();
   }
 
  private:
-  int    _fd       = -1;
+  int    _fds[WS_MAX_CLIENTS] = { -1, -1, -1 };
   size_t _len      = 0;
   bool   _dropping = false;
   // One PWM_UPDATE is ~640 B and they arrive at ~20 Hz; loop() pumps far faster
