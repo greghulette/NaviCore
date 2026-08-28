@@ -96,7 +96,19 @@ class WsSink : public Print {
   size_t write(uint8_t c) override {
     if (_fd < 0) return 1;
     if (_dropping) { if (c == '\n') _dropping = false; return 1; }
-    if (_len >= sizeof(_buf)) { _dropping = true; return 1; }   // drop the rest of THIS line
+    if (_len >= sizeof(_buf)) {
+      // FULL — flush right here rather than dropping. A single CONFIG reply is one
+      // ~14 KB line, so a drop-on-full policy discarded the whole thing and the tool
+      // sat there with no config at all ("Configure WCB Network..."), while the
+      // ~640 B PWM_UPDATE fitted and made the monitor look healthy.
+      //
+      // Yes, this puts a TCP send inside a Serial.printf on the SBUS core — the very
+      // thing pump() exists to avoid. It is the lesser evil and it is RARE: only a
+      // line longer than the buffer reaches here, i.e. a config or cmdlib dump, not
+      // the 20 Hz telemetry that motivated the buffering. Losing the config is a
+      // hard failure; a few ms of jitter on an explicit user action is not.
+      if (!pump()) { _dropping = true; return 1; }   // send failed: client is gone
+    }
     _buf[_len++] = (char)c;
     return 1;
   }
