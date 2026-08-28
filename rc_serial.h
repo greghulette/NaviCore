@@ -42,7 +42,18 @@ class RcSerial : public Stream {
   int  available() override { return HWCDCSerial.available(); }
   int  read()      override { return HWCDCSerial.read(); }
   int  peek()      override { return HWCDCSerial.peek(); }
-  void flush()     override { HWCDCSerial.flush(); }
+  // flush() must reach the CAPTURE too, not just USB.
+  //
+  // Callers use it to force bytes out before something blocks the CPU for seconds
+  // — the OTA erase is the live example, and its comment names the failure it
+  // prevents ("the classic 'fails first, works second' OTA timeout"). A capture
+  // sink that buffers and relies on loop() to drain never gets that chance, because
+  // loop() is exactly what is about to stall. So the marker sat unsent, the host
+  // waited, and OTA timed out on every attempt over a non-USB transport.
+  void flush() override {
+    if (_capFlush) _capFlush();
+    HWCDCSerial.flush();
+  }
   // CRITICAL: must forward to HWCDC. Print's default returns 0, which would
   // make vlogf()'s `availableForWrite() >= n` guard ALWAYS false and silently
   // drop every hot-path log line.
@@ -65,14 +76,19 @@ class RcSerial : public Stream {
   operator bool() { return (bool)HWCDCSerial; }
 
   // ── Capture control (driven by the remote-CLI drain in loop()) ───────────
-  void armCapture(Print* sink) { _capCore = xPortGetCoreID(); _cap = sink; }
-  void disarmCapture()         { _cap = nullptr; }
+  // `flushFn` is optional and only meaningful for a sink that buffers (the
+  // WebSocket one does; the RTERM one sends per line and passes nullptr).
+  void armCapture(Print* sink, void (*flushFn)() = nullptr) {
+    _capCore = xPortGetCoreID(); _cap = sink; _capFlush = flushFn;
+  }
+  void disarmCapture()         { _cap = nullptr; _capFlush = nullptr; }
   // True while a remote (WCB-relayed) command is running — lets long CLI output
   // (e.g. ?REC,EDITLOAD) pick RTERM pacing vs full-speed USB.
   bool captureArmed() const    { return _cap != nullptr; }
 
  private:
-  Print* _cap     = nullptr;
+  Print* _cap      = nullptr;
+  void (*_capFlush)() = nullptr;   // push a buffering sink before the CPU stalls
   int    _capCore = -1;
 };
 

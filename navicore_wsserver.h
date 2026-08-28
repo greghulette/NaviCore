@@ -190,6 +190,12 @@ inline void printlnDirect(const char* s) {
 
 inline bool clientConnected() { return wsSink.live(); }
 
+// Registered with rcSerial.armCapture() so Serial.flush() reaches this sink.
+// Callers flush before something stalls the CPU for seconds (the OTA slot erase),
+// and a sink that waits for loop() to drain would never get that chance — loop()
+// is precisely what is about to stop running.
+inline void flushHook() { wsSink.pump(); }
+
 // ── Handler — RUNS ON THE HTTPD TASK (Core 0). Enqueue only. ────────────────
 inline esp_err_t wsHandler(httpd_req_t* req) {
   // GET is the opening handshake; esp_http_server completes it for us. Remember the
@@ -277,7 +283,7 @@ inline void drain() {
   //    one place the bytes actually go out, so network I/O stays at a known point
   //    on the core that must also service SBUS.
   if (wsSink.live()) {
-    rcSerial.armCapture(&wsSink);
+    rcSerial.armCapture(&wsSink, flushHook);
     if (!wsSink.pump()) rcSerial.disarmCapture();   // client gone — stop teeing
   }
 
