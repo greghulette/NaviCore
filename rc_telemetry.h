@@ -1200,7 +1200,7 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
 // Forward decl — defined further down; tick() builds the deferred WCB_STATUS
 // reply on Core 1 and calls this BEFORE the definition, so the default args live
 // HERE (where those call sites can see them) and are omitted on the definition.
-inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi = 0, bool includeRelayName = true);
+inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi = 0, bool includeRelayName = true, bool sparse = false);
 inline String buildWcbMeta();   // per-board aliases + serial-port labels, fragmented (GET_WCB_META)
 // Roster helpers — defined further down (≈1349/1360) but used by buildMeshStats
 // above them, so forward-declare here for the same reason buildWcbStatus does.
@@ -1561,8 +1561,19 @@ inline void tick() {
     // reported, so the tool renders placeholders for the trimmed tail). cap stays
     // >= 1 because maxHi == 0 is the "no cap" sentinel -- a cap of 0 would UN-trim
     // back to the full roster instead of shrinking toward empty.
+    // Switch to the SPARSE roster BEFORE trimming anything. The trim drops the
+    // HIGHEST id first, which is exactly the auto-discovered board a user most
+    // needs to see — a mgmt relay sits at id 19, so it was always the first to
+    // go. And because it only happens on the bridged path, it reads as "the
+    // board is gone" rather than "the reply did not fit": the same poll over
+    // Direct USB has no packet budget, no trim, and shows it correctly.
+    // Sparse costs a row per REAL board instead of a slot per id, so a 3-board
+    // mesh with a high id fits with room to spare and nothing is dropped. It
+    // also carries `temporary`, which the positional form never emitted at all.
+    if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, 0, true,  true);
+    if (l > kFit) l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, 0, false, true);
     for (int cap = WCB_MAX_BOARDS - 1; l > kFit && cap >= 1; cap--)
-      l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, cap, false);
+      l = buildWcbStatus(wbuf, sizeof(wbuf), to, false, cap, false, true);
     // Never transmit a still-oversized (snprintf-truncated -> invalid JSON) reply;
     // with cap>=1 this is unreachable in practice, but a truncated packet is
     // unparseable anyway, so drop it and let the config tool re-poll.
@@ -1826,7 +1837,7 @@ inline int wcbHighestKnownExcl(int floor, int excl) {
   return hi;
 }
 
-inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi, bool includeRelayName) {
+inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeAliases, int maxHi, bool includeRelayName, bool sparse) {
   if (!buf || n == 0) return 0;
   int q = rcConfig.wcbNetwork.quantity;   // pre-registered floor (still reported as "quantity")
   if (q < 0) q = 0;
@@ -1849,6 +1860,35 @@ inline size_t buildWcbStatus(char* buf, size_t n, uint8_t relayId, bool includeA
   if (relayId >= 1 && includeRelayName && len < n) {
     const char* rn = wcbAlias((int)relayId);
     if (rn && rn[0]) len += snprintf(buf + len, n - len, ",\"relayName\":\"%s\"", rn);
+  }
+  // ── Sparse roster ───────────────────────────────────────────────────────────
+  // The positional arrays below cost a slot for every id up to `hi`, whether or
+  // not a board is there. That is what broke a Via-WCB roster: a MgmtRelay sits
+  // at id 19, so hi = 19 and four 19-entry arrays blow the 185 B one-packet
+  // budget — and the caller's only remedy was to TRIM from the top, which drops
+  // the highest id FIRST. The relay you are bridging through is therefore the
+  // one board guaranteed to vanish, while the same poll over Direct USB (no
+  // packet budget, no trim) shows it fine.
+  //
+  // Sparse costs a row per REAL board instead of per slot: 3 boards at ids
+  // 1/2/19 is ~40 B rather than ~200 B. Each row is [id, online, client,
+  // temporary] and `known` is implied by presence, which is also how `temporary`
+  // finally reaches the bridge at all — the positional form never carried it.
+  if (sparse) {
+    if (len < n) len += snprintf(buf + len, n - len, ",\"rows\":[");
+    bool first = true;
+    for (int i = 1; i <= hi && len < n; i++) {
+      if (!wcbBoardKnown(i, q)) continue;
+      const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+      const bool client = nb ? nb->isClient : wcbIsClient(i);
+      const bool up = (i == selfId) ? true
+                    : (client ? (nb != nullptr) : (wcb && wcb->isOnline(i)));
+      len += snprintf(buf + len, n - len, "%s[%d,%d,%d,%d]", first ? "" : ",",
+                      i, up ? 1 : 0, client ? 1 : 0, (nb && nb->temporary) ? 1 : 0);
+      first = false;
+    }
+    if (len < n) len += snprintf(buf + len, n - len, "]}");
+    return len;
   }
   if (len < n) len += snprintf(buf + len, n - len, ",\"online\":[");
   for (int i = 1; i <= hi && len < n; i++) {

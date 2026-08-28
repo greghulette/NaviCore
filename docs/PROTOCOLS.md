@@ -478,14 +478,31 @@ without handling it a sender simply stalls, because the RC will never accept ano
 
 ### Bridged status and metadata
 
-`WCB_STATUS` must fit **one** ESP-NOW packet (the relay cannot reassemble). The builder
-shrinks the reply in order — drop board aliases, then the relay's friendly name, then trim
-the roster — until it fits ~185 B.
+`WCB_STATUS` must fit **one** ESP-NOW packet, because the relay may itself be a `WCB_Client`
+host (a MgmtRelay) and the library has no general receive-side reassembly — `send()` refuses
+anything over `_maxSingleCommandLen()` rather than splitting it. The builder shrinks the reply
+in order until it fits ~185 B: drop board aliases → drop the relay's friendly name → **switch to
+the sparse roster** → and only then trim.
 
 ```json
 {"sys":1,"type":"WCB_STATUS","quantity":N,"self":20,"relay":R,"relayName":"…",
- "online":[…],"known":[…],"clients":[…],"aliases":[…]}
+ "online":[…],"known":[…],"clients":[…],"aliases":[…]}          ← positional (preferred)
+
+{"sys":1,"type":"WCB_STATUS","quantity":N,"self":20,"relay":R,"relayName":"…",
+ "rows":[[id,online,client,temporary],…]}                       ← sparse (overflow)
 ```
+
+**Why sparse exists.** The positional arrays cost a slot for every id up to the highest known,
+not per real board. A management relay sits at **id 19**, so a three-board mesh produced a
+19-slot reply — measured at **280 B** against the 185 B budget — and the only remedy was a trim
+that drops the **highest id first**. That is the relay you are bridging *through*, so it was
+always the first thing to vanish, and only ever on this path: the same poll over Direct USB has
+no packet budget and showed it correctly. The failure therefore read as "the board is gone"
+rather than "the reply did not fit". The sparse form costs one row per REAL board — the same
+mesh measures **121 B** — so nothing is dropped, and it is the **only** bridged form that
+carries `temporary` at all (the positional form never emitted the key). `known` is implied by a
+row's presence. The tool expands `rows[]` into the same positional arrays the renderer already
+consumes, and an older tool falls back to `1..quantity` rather than breaking.
 
 The data that does not fit comes from `GET_WCB_META` → a **fragmented** `WCB_META` with
 `aliases[]`, `portLabels[][5]` and `seqHash[]`, which the tool caches. The relay itself is
@@ -647,6 +664,7 @@ as the code. Page body stays present-tense; history lives here.
 | 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
 |---|---|---|
 | 2026-08-27 | _(uncommitted)_ | Fragment pacing is no longer one constant shared by both directions. **Upload** (tool → RC) crosses the bridge WCB’s UART — a *real* 115200 link, since the WCB builds without `CDCOnBoot=cdc` and its `Serial` is UART0, unlike NaviCore where native USB-CDC ignores baud — so the tool now paces each line by `max(wire time × FRAG_PACE_LINK_MULT, FRAG_PACE_FLOOR_MS)` (2×, 100 ms) instead of a flat 150 ms, and skips the delay after the final fragment. **Download** (RC → tool) never crosses that UART and keeps `FRAG_PACING_MS` = 150. Do not re-symmetrise them. Also documented that `FRAG_TIMEOUT_MS` is an **idle** timeout: the receiver now refreshes the deadline on *any* fragment including duplicates, because gating it on new-only made a live retransmit indistinguishable from a dead sender — the expiry sweep runs before the sid match, so the session was reclaimed mid-transfer and silently restarted at `got=1`. |
+| 2026-08-27 | _(uncommitted)_ | **Bridged `WCB_STATUS` gained a sparse `rows[]` form** — `[[id,online,client,temporary],…]`, chosen when the positional arrays will not fit one ESP-NOW packet, BEFORE the roster trim rather than after. The positional form costs a slot per id, not per board, so a mgmt relay at id 19 made a three-board mesh 280 B against a 185 B budget; the trim then dropped the highest id first, i.e. the relay being bridged through, and only on this path (Direct USB has no budget and showed it). Sparse is 121 B for the same mesh, and is also the only bridged form that carries `temporary` — the positional builder never emitted the key. `known` is implied by presence; the tool expands rows into the existing positional arrays; an older tool falls back to `1..quantity`. |
 | 2026-08-27 | _(uncommitted)_ | **Batched keyframe download** — `?REC,EDITLOAD,…,<count>,B` opts into `[CLIPDL:EVB,<firstIdx>]{"e":[[t,k,a,b,c],…]}`, packing consecutive keyframes into one line with positional indices. Actions are never batched and flush the run. 5.0× fewer mesh packets / 2.5× fewer bytes on a 300-event clip, longest line 133 B (inside the 160 B cap, so no new fragmentation). Round-trip verified to reconstruct byte-identically to the per-event form across seven slices including ones straddling actions. Backward compatible both ways — `toInt()` stops at the comma, and the tool accepts both shapes unconditionally. |
 | 2026-08-27 | _(uncommitted)_ | **`?OTA,DATA` carries an optional CRC-32**, as a suffix on the offset field: `?OTA,DATA,<t>,<s>,<offset>:<crc32>,<b64>`, computed over `"<offset>,<b64>"` as transmitted. A relay that fails the check DROPS the line. Placed on the offset field, not appended, because `String::toInt()` stops at the `:` — so a relay predating the check reads the offset unchanged and a sender predating it just omits the suffix; appending a field would have been swept into the base64 and failed every packet. Verified by BOTH relays (`navicore_ota.h` `otaCrc32`, WCB `calculateCRC32`) against the tool's `_crc32Hex` — all three are the same reflected CRC-32 (poly `0xEDB88320`) and were cross-checked. Guards the USB→relay SERIAL hop only; 802.11 already CRCs the ESP-NOW hop in hardware. Also `Serial.setRxBufferSize` 4096 → 8192 and the sender's `PACE_MS` 12 → 25. |
 | 2026-08-27 | _(uncommitted)_ | **`[CLIPDL:BEGIN]`/`[CLIPDL:END]` gained `nm`** — the clip the buffer actually holds. The reply stream was anonymous, so a timed-out range's still-arriving lines were adopted by the next request: a stale `END` finished it early ("no reply from the board"), a stale `BEGIN` replaced its `count`/`fp` ("the clip changed on the board mid-download"), and stale events landed under foreign indices, pushing `got.size` past `total` and reporting a NEGATIVE shortfall ("-32 of 16 events"). One timeout then cascaded through the remaining clips of a backup. `nm` costs ~39 B on two control lines per range and nothing per event; `[CLIPDL:EV]` is unchanged. Request format is unchanged — no new argument — so an older tool is unaffected. |
