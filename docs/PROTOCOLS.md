@@ -459,16 +459,17 @@ Payloads over 187 B are split. Envelope, both directions:
 | Inter-fragment pacing — upload (tool → RC) | `max(line wire time × 2, 100 ms)` | `FRAG_PACE_FLOOR_MS` / `FRAG_PACE_LINK_MULT` |
 | Inter-fragment pacing — download (RC → tool) | 150 ms | `FRAG_PACING_MS` |
 
-**Why the download slice is adaptive.** A fragment costs a fixed  no matter how
+**Why the download slice is adaptive.** A fragment costs a fixed `FRAG_PACING_MS` no matter how
 much it carries, so an under-filled fragment is wasted *wall-clock*, not just wasted bytes. The
 fixed 80 was sized for the worst case — 80 bytes that were all quotes would escape to ~187 — but
 real config JSON is ~22% quote characters, so fragments ran ~60% full and the worst envelope
 observed was 138 B against a 187 B cap. The sender now grows each slice while the *measured*
-escaped envelope stays within  (180 B), counting each byte at its true escaped
-cost (: 2 for a quote or backslash, 6 for a control char, 1 otherwise) and admitting
-each UTF-8 codepoint whole. Measured on a 24 KB config: **301 → 206 fragments (1.46x)**, worst
-envelope exactly 180 B, none over the cap.  still serialises and rejects anything
-over 187, so that check remains the backstop if the estimate ever disagrees with ArduinoJson.
+escaped envelope stays within `FRAG_ENV_TARGET` (180 B), counting each byte at its true escaped
+cost (`_jsonEscCost`: 2 for a quote or backslash, 2 for the five short control escapes, 6 for any
+other control char, 1 otherwise) and admitting each UTF-8 codepoint whole. Measured on a 24 KB
+config: **301 → 206 fragments (1.46×)**, worst envelope exactly 180 B, none over the cap.
+`_sendFragment` still serialises and rejects anything over 187, so that check remains the backstop
+if the estimate ever disagrees with ArduinoJson's escaper.
 
 The **upload** path keeps the fixed 80 — a full config already lands near the 192-fragment receive
 cap, and adaptive fill there would be the cheapest way to buy headroom if it starts refusing.
@@ -740,4 +741,4 @@ as the code. Page body stays present-tense; history lives here.
 | 2026-08-12 | _(uncommitted)_ | §1: documented the **ensured-send degradation contract** (`_findFreePending` never evicts an outstanding ensured slot; `_sendPacket` degrades to best-effort and returns `false`, which `rcExecuteActionNow` deliberately discards) and the **one-hop cap** — which gates *implicit* routing only (`;A`/`;D`/`;H`, `;M`, `;L`, `;C`/`;SEQ`, and any re-broadcast). Explicit `;w<n>` is not capped: self-target runs local (`WCB.ino` ≈5586), remote re-forwards by unicast (≈5604), and `sendESPNowMessage` caps `target == 0` only (≈2145). So a unicast `^`-chain loses a part only when it is an implicitly-routed verb whose device is hosted off-target. |
 | 2026-08-05 | _(uncommitted)_ | Added the `;D` DFPlayer verb to the device-command table (10-byte binary frame on the wire; `;D` text only travels between boards) and `DBG_DFP` = bit 6 to the debug bitmask. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |
-| 2026-08-28 | _(uncommitted)_ | **Download fragments are filled adaptively** instead of at a fixed 80 B. A fragment costs a fixed 150 ms regardless of payload, so under-filling wasted wall-clock: a 171-fragment config took 25.6 s with a worst-case envelope of only 138 B against a 187 B cap. The sender now grows each slice while the measured escaped envelope stays inside 180 B, per-codepoint and per-byte-escape-cost exact. 301 → 206 fragments (1.46x) on a 24 KB config, worst envelope exactly 180, none over cap. Upload and CMDLIB file sends still use the fixed 80. |
+| 2026-08-28 | _(uncommitted)_ | **Download fragments are filled adaptively** instead of at a fixed 80 B. A fragment costs a fixed  (150 ms) regardless of payload, so under-filling wasted wall-clock: a 171-fragment config took 25.6 s while the worst envelope produced was only 138 B against the 187 B cap. The sender now grows each slice while the *measured* escaped envelope stays inside  (180 B), exact per byte-escape-cost and per UTF-8 codepoint. 301 → 206 fragments (1.46×) on a 24 KB config, worst envelope exactly 180, none over cap.  keeps its >187 rejection as the backstop. Upload and CMDLIB file sends still use the fixed . |
