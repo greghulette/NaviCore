@@ -3689,6 +3689,481 @@ static void pollAuxSerialRx() {
   auxRxPollPort(s5, 2, b5, l5, m5, c5);
 }
 
+// Execute ONE complete, already-framed input line — the shared entry point for
+// every transport. handleSerialInput() reads bytes off Serial and does the framing;
+// anything else that can produce a line (a WebSocket, a relayed CLI command) calls
+// straight in here instead of duplicating this dispatch.
+//
+// Returns TRUE if the caller should yield to loop() before handling more input.
+// That is not cosmetic: the '?' branch and a JSON parse failure both used to
+// `return` out of handleSerialInput() mid-drain so heartbeats keep running between
+// the host's ACK-paced OTA chunks. A caller that ignores this and keeps draining
+// reintroduces the stall that early return was added to prevent.
+//
+// The caller owns the buffer. `line` is a const reference and is NOT cleared here —
+// a SET_CONFIG payload can approach 98 KB and copying it per line would be real cost
+// on a board whose config already lives in PSRAM for the same reason.
+bool processInputLine(const String& line) {
+
+  // ── "?..." CLI commands ───────────────────────────────────────────────
+  // ?OTALOCAL,* / ?OTA,* (firmware OTA) and ?REC,* (record/replay) all route
+  // through execCliLine (shared with the remote terminal). One command per
+  // call (early return) so loop() keeps heartbeats alive between the host's
+  // ACK-paced OTA chunks. Unrecognised "?" commands report back rather than
+  // being silently dropped.
+  if (line[0] == '?') {
+    if (!execCliLine(line))
+      Serial.printf("Unknown command: %s\n", line.c_str());
+        return true;    // yield to loop() — see the header comment
+  }
+
+  if (line[0] == '{') {
+    // ── JSON WebSerial protocol ──────────────────────────────────────────
+    // The header doc has to use a Filter — without one, deserializing
+    // a SET_CONFIG payload (tens of KB once mappings/knobs/maestros
+    // are populated) into the small hdr buffer returns NoMemory and
+    // breaks SET_CONFIG. The filter is a WHITELIST in ArduinoJson v6:
+    // every field used by a non-SET_CONFIG handler must be listed
+    // explicitly, otherwise it's stripped and hdr["x"] returns the
+    // default. SET_CONFIG does its own un-filtered deserialize below.
+    StaticJsonDocument<256> filter;
+    filter["type"]   = true;
+    filter["target"] = true;   // WCB_SEND
+    filter["cmd"]    = true;   // WCB_SEND
+    filter["on"]     = true;   // CALIB
+    filter["flags"]  = true;   // SET_DEBUG_FLAGS
+    filter["mode"]   = true;   // TRIGGER
+    filter["btn"]    = true;   // TRIGGER
+    filter["tap"]    = true;   // TRIGGER
+    filter["id"]     = true;   // FORGET_PEER (without this the id is stripped → parsed as 0 → "out of range")
+    filter["all"]    = true;   // FORGET_PEER
+    filter["wcb"]    = true;   // GET_WCB_SEQ (stripped here → parsed as 0 → "wcb out of range")
+    filter["key"]    = true;   // GET_WCB_SEQVAL (stripped → empty → "key required")
+    DynamicJsonDocument hdr(256);
+    DeserializationError perr = deserializeJson(
+        hdr, line,
+        DeserializationOption::Filter(filter));
+    if (perr != DeserializationError::Ok) {
+      // Include the received-buffer length so the host can spot truncation
+      // (host-sent length vs. received length mismatch → USB RX overflow).
+      Serial.printf("{\"type\":\"ERROR\",\"msg\":\"JSON parse failed (%s)\",\"rxLen\":%u}\n",
+                    perr.c_str(), (unsigned)line.length());
+          return true;    // yield to loop() — see the header comment
+    }
+    const char* type = hdr["type"] | "";
+
+    if (strcmp(type,"PING")==0 || strcmp(type,"ping")==0) {
+      // A fresh page connect pings first — clear any stale calibration
+      // mute left behind by a previously crashed/closed calibration page.
+      calibrationActive = false;
+      // Report firmware version so the GUI can display it (footer +
+      // Firmware tab "currently on board").
+      Serial.print("{\"type\":\"PONG\",\"version\":\"");
+      Serial.print(FW_VERSION);
+      Serial.println("\"}");
+
+    } else if (strcmp(type,"GET_CONFIG")==0) {
+      // rcConfigToJSON() returns an ERROR envelope, NOT a config, when the document
+      // overflowed — that guard exists precisely so a truncated config never reaches
+      // the tool. Splicing it into "data" defeats it: the tool would apply an envelope
+      // with no config fields, keep its built-in defaults, latch them as the baseline,
+      // and the next Save would ship those defaults over the good on-board config.
+      // Pass the error through at the TOP level so it can never read as a config.
+      String cfg = rcConfigToJSON();
+      if (cfg.startsWith("{\"type\":\"ERROR\"")) {
+        Serial.println(cfg);
+      } else {
+        Serial.print("{\"type\":\"CONFIG\",\"data\":");
+        Serial.print(cfg);
+        Serial.println("}");
+      }
+
+    } else if (strcmp(type,"GET_CMDLIB")==0) {
+      // Stream back the config tool's private command library stored on this
+      // droid (opaque to the firmware). Empty library if nothing saved yet.
+      // Carry size + signature so the tool can cache + skip re-pulls.
+      String lib;
+      if (!rcCmdlibLoadLFS(lib) || lib.length() == 0) lib = "{\"boards\":[],\"enums\":{}}";
+      Serial.printf("{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
+                    (unsigned)lib.length(), (unsigned)rcCmdlibHash(lib));
+      Serial.print(lib);
+      Serial.println("}");
+
+    } else if (strcmp(type,"GET_CMDLIB_META")==0) {
+      // Cheap signature (size + hash) so a connect can skip re-pulling an
+      // unchanged library. 0/0 when nothing is stored.
+      String lib; unsigned sz = 0, h = 0;
+      if (rcCmdlibLoadLFS(lib) && lib.length()) { sz = lib.length(); h = rcCmdlibHash(lib); }
+      Serial.printf("{\"type\":\"CMDLIB_META\",\"size\":%u,\"hash\":%u}\n", sz, h);
+
+    } else if (strcmp(type,"SET_CMDLIB")==0) {
+      // Persist the library OPAQUELY. Pull the raw "data" value by substring
+      // (it can be many KB — avoid a second big parse), but find its END by
+      // matching brackets, NOT by taking the message's last '}'. `data` is not
+      // guaranteed to be the last field — the config tool's sendJSON() stamps
+      // its "sys":1 marker after spreading the caller's object — and the naive
+      // lastIndexOf('}') swallowed the trailing `,"sys":1` into the stored
+      // library, so /cmdlib.json wasn't valid JSON on its own and its
+      // size/hash covered bytes that were not library content (which then
+      // read as "different library" against a mesh-saved copy).
+      bool ok = false; unsigned h = 0, sz = 0;
+      int k = line.indexOf("\"data\":");
+      if (k >= 0) {
+        int s = k + 7, blen = (int)line.length();
+        while (s < blen && isspace((unsigned char)line[s])) s++;
+        int end = -1;
+        if (s < blen && (line[s] == '{' || line[s] == '[')) {
+          const char open  = line[s];
+          const char close = (open == '{') ? '}' : ']';
+          int depth = 0; bool inStr = false, esc = false;
+          for (int i = s; i < blen; i++) {
+            char c = line[i];
+            if (esc)      { esc = false;  continue; }
+            if (inStr)    { if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
+            if (c == '"') { inStr = true; continue; }
+            if (c == open)  { depth++; continue; }
+            if (c == close) { if (--depth == 0) { end = i + 1; break; } }
+          }
+        }
+        if (end > s) {
+          String lib = line.substring(s, end);
+          lib.trim();
+          if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
+        }
+      }
+      Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}\n",
+                    ok ? "true" : "false", sz, h);
+
+    } else if (strcmp(type,"SET_CONFIG")==0) {
+      DynamicJsonDocument bigDoc(98304);
+      if (deserializeJson(bigDoc, line) != DeserializationError::Ok) {
+        // No saveId echoed here — the parse failed, so we genuinely don't know
+        // which save this was. The tool treats a missing saveId as "old
+        // firmware" and still rolls the baseline back, which is what we want.
+        Serial.println("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"parse failed\"}");
+      } else if (!bigDoc.containsKey("data")) {
+        Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"missing data\",\"saveId\":%ld}\n",
+                      (long)(bigDoc["saveId"] | 0));
+      } else {
+        // Echo the tool's per-save correlation id on every reply, exactly as the
+        // Via-WCB path does (rc_telemetry.h). Without it the tool's stale-ACK gate
+        // permanently takes its "undefined saveId = old firmware" fallback on USB,
+        // so a late ACK from a timed-out save is attributed to a newer one.
+        // bigDoc is parsed UN-filtered, so no filter-whitelist entry is needed.
+        const long saveId = (long)(bigDoc["saveId"] | 0);
+        bool ok = rcConfigFromJSON(bigDoc["data"].as<JsonObject>());
+        if (ok) {
+          bool saved = rcConfigSaveLFS();
+          rcAdvertiseSerialLabels();   // a changed port label / HCR/MP3/WLED dest → re-advertise over WDP
+          // Live re-apply of baud / SBUS-OUT / easing / auto-release. Shared with the
+          // Via-WCB save path — see applyConfigSideEffects().
+          if (!applyConfigSideEffects())
+            Serial.println("{\"type\":\"INFO\",\"msg\":\"boardType changed — reboot to apply the new pin profile\"}");
+          // rcConfigSaveLFS() (flash write) + applySerialBauds()
+          // block loop() for 100+ ms, during which processSbus() can't
+          // run.  If the operator was holding a matrix button across
+          // that gap, the frozen debounce state could produce a phantom
+          // edge when loop() resumes.  Reset the matrix state machine to
+          // a clean "must see a confirmed neutral, then a fresh press"
+          // condition so the save can't manufacture a button event.
+          matrixArmed        = false;
+          matrixCandidate    = 0;
+          matrixCandCount    = 0;
+          matrixNeutralCount = 0;
+          if (saved) Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":true,\"saveId\":%ld}\n", saveId);
+          else       Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"applied to RAM but could not be saved to flash (LittleFS write error)\",\"saveId\":%ld}\n", saveId);
+        } else {
+          Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"config apply failed\",\"saveId\":%ld}\n", saveId);
+        }
+      }
+
+    } else if (strcmp(type,"START_MONITOR")==0) {
+      wsMonitorActive   = true;
+      wsMonitorLastSent = 0;
+      Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+
+    } else if (strcmp(type,"STOP_MONITOR")==0) {
+      wsMonitorActive = false;
+      // Calibration always runs with the monitor on; stopping it is a
+      // reliable "calibration is over" signal even if CALIB-off is lost.
+      calibrationActive = false;
+      Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+
+    } else if (strcmp(type,"CALIB")==0) {
+      const bool calibOn = hdr["on"] | false;
+      // A take must never straddle a calibration session. Dispatch and passthrough are
+      // both muted while the wizard runs, so a recording left running would capture a
+      // silent gap — and once calibrationActive is set the operator can no longer stop
+      // it (the Record trigger is muted too), so the 60 s backstop becomes the only
+      // exit and it SAVES, overwriting the take's named clip with the dead stretch.
+      // Drop the capture instead: stopRecord() flushes and goes idle without saving.
+      if (calibOn && !calibrationActive && navirec::_state == navirec::ST_RECORDING) {
+        navirec::stopRecord();
+        Serial.println("[REC] recording dropped — calibration started (not saved)");
+      }
+      calibrationActive = calibOn;
+      Serial.printf("[CALIB] action dispatch %s\n",
+                    calibrationActive ? "SUPPRESSED (calibrating)" : "resumed");
+      Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+
+    } else if (strcmp(type,"RESET_DEFAULTS")==0) {
+      rcConfigLoadDefaults();
+      resetMaestroReleaseState();   // clear stale auto-release state so defaults take effect live
+      Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+
+    } else if (strcmp(type,"TEST_ACTION")==0) {
+      // Config tool's per-action Test button — fire one action live, no save.
+      // hdr is a filtered parse (no nested "action"), so re-parse the raw
+      // buffer into a small doc. We're in loop() (Core 1), so dispatch is safe.
+      StaticJsonDocument<640> tdoc;
+      if (deserializeJson(tdoc, line) != DeserializationError::Ok) {
+        Serial.println("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"parse failed\"}");
+      } else {
+        bool ok = rcTestAction(tdoc["action"].as<JsonObject>());
+        Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}\n", ok ? "true" : "false");
+      }
+
+    } else if (strcmp(type,"REBOOT")==0) {
+      // ACK first so the GUI hears the reply, then restart after a brief
+      // delay so the USB TX buffer drains before the reset kills it.
+      Serial.println("{\"type\":\"ACK\",\"ok\":true,\"msg\":\"rebooting\"}");
+      Serial.flush();
+      delay(250);
+      ESP.restart();
+
+    } else if (strcmp(type,"TRIGGER")==0) {
+      int mode = hdr["mode"] | 1;
+      int btn  = hdr["btn"]  | 0;
+      int tap  = hdr["tap"]  | 1;
+      if (btn < 1 || btn > RC_NUM_THRESHOLDS || mode < 1 || mode > 3 || tap < 1 || tap > RC_NUM_TAP_TIERS) {
+        Serial.println("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"bad mode/btn/tap\"}");
+      } else {
+        Serial.printf("[TRIGGER] mode=%d btn=%d tap=%d\n", mode, btn, tap);
+        rcDispatch(mode * 100 + btn, (uint8_t)tap);
+        Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+      }
+
+    } else if (strcmp(type,"WCB_SEND")==0) {
+      int target     = hdr["target"] | 0;
+      const char* cmd = hdr["cmd"]   | "";
+      if (!wcb || !wcbReady) {
+        Serial.println("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"WCB not ready (init failed)\"}");
+      } else {
+        if (target == 0) {
+          wcb->broadcast(cmd);
+          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+        } else if (target >= 1 && target <= WCB_MAX_BOARDS) {
+          wcb->send((uint8_t)target, cmd);
+          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+        } else {
+          Serial.printf("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"target %d out of range (0=broadcast, 1-%d=unicast)\"}\n",
+                        target, WCB_MAX_BOARDS);
+        }
+      }
+
+    } else if (strcmp(type,"FORGET_PEER")==0) {
+      // Drop a learned (auto-joined) peer from the ESP-NOW peer table + NVS.
+      //   {"id":N}      forget learned WCB N
+      //   {"all":true}  forget ALL learned peers
+      // USB path is Core 1, so call the worker directly. The panel re-polls
+      // GET_WCB_STATUS to refresh after this.
+      bool all = hdr["all"] | false;
+      int  id  = hdr["id"]  | 0;
+      if (!wcb || !wcbReady) {
+        Serial.println("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":false,\"msg\":\"WCB not ready\"}");
+      } else if (all) {
+        doForgetPeer(0);
+        Serial.println("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":true,\"all\":true}");
+      } else if (id >= 1 && id <= WCB_MAX_BOARDS) {
+        doForgetPeer((uint8_t)id);
+        Serial.printf("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":true,\"id\":%d}\n", id);
+      } else {
+        Serial.printf("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":false,\"msg\":\"id %d out of range (1-%d) or set all:true\"}\n",
+                      id, WCB_MAX_BOARDS);
+      }
+
+    } else if (strcmp(type,"SET_DEBUG_FLAGS")==0) {
+      // GUI debug chips drive this — bitmask of DBG_* categories to
+      // enable. Default 0 silences every [DISPATCH] line.
+      g_dbgFlags = (uint32_t)(hdr["flags"] | 0);
+      Serial.printf("[DBG] flags=0x%02X\n", (unsigned)g_dbgFlags);
+      Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+
+    } else if (strcmp(type,"GET_WCB_SEQ")==0) {
+      // Stored-sequence key list for ONE board, for the config tool's command
+      // library — so a "Run Sequence" action offers the sequences that board
+      // actually holds instead of a free-text key box. NAMES ONLY: the library
+      // can fetch a sequence body too, but one at a time and with no ceiling on
+      // the set, which is the failure mode the WCB's own config pull already has.
+      // The reply is ASYNC (a WCB_SEQ line when the board answers, or an ok:false
+      // one on timeout) — this path is Core 1, so the pull is issued directly.
+      const int seqB = hdr["wcb"] | 0;   // clamp: a wild value must reject, not wrap into a real board
+      rcTelemetry::startSeqPull((seqB >= 1 && seqB <= 255) ? (uint8_t)seqB : 0, 0,
+                                rcTelemetry::SEQ_PULL_NAMES);   // sender 0 = answer on USB
+
+    } else if (strcmp(type,"GET_WCB_SEQVAL")==0) {
+      // ONE stored sequence's contents, by key — what the command library shows
+      // under a chosen sequence. Deliberately one key at a time: a single value
+      // is bounded (~1800 chars) but the whole set is not, and pulling every body
+      // is the failure mode the WCB's own config pull already has.
+      // Reply is ASYNC (a WCB_SEQVAL line, or an ok:false one on timeout).
+      const int seqVB = hdr["wcb"] | 0;
+      rcTelemetry::startSeqPull((seqVB >= 1 && seqVB <= 255) ? (uint8_t)seqVB : 0, 0,
+                                rcTelemetry::SEQ_PULL_VALUE, hdr["key"] | "");
+
+    } else if (strcmp(type,"GET_WCB_STATUS")==0) {
+      // Lightweight liveness poll for the GUI's sidebar WCB Status panel.
+      // Reads wcb->isOnline(i) for the floor (1..quantity) PLUS any auto-
+      // discovered boards above it (up to the highest known); known[] marks
+      // which slots the tool should actually render.
+      int q = rcConfig.wcbNetwork.quantity;
+      if (q < 0) q = 0;
+      if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
+      // Self is by definition online — wcb->isOnline() tracks REMOTE
+      // peer heartbeats via ETM and never returns true for our own
+      // deviceId, so we force "1" for the local board.
+      int selfId = rcConfig.wcbNetwork.deviceId;
+      int hi = rcTelemetry::wcbHighestKnown(q);
+      Serial.printf("{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"online\":[",
+                    q, selfId);
+      for (int i = 1; i <= hi; i++) {
+        const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+        const bool client = nb ? nb->isClient : rcTelemetry::wcbIsClient(i);
+        // "live now": heartbeat for a WCB, a fresh WDP advert for a CLIENT.
+        bool up = (i == selfId) ? true
+                : (client ? (nb != nullptr) : (wcb && wcb->isOnline(i)));
+        Serial.printf("%s%s", (i > 1) ? "," : "", up ? "1" : "0");
+        // Lazily learn each online board's friendly alias via the SHARED
+        // bounded fallback: a board advertising its name over WDP is already
+        // cached (onWcbNeighbor) and never queried; a nameless one is asked
+        // only ALIAS_MAX_TRIES times per online session, not every poll. This
+        // is the same cap the bridged status build uses — previously the
+        // direct-USB poll was uncapped and pestered an un-aliased board (~3s).
+        if (i != selfId) rcTelemetry::maybeQueryAlias(i, up, client);
+      }
+      Serial.print("],\"known\":[");
+      for (int i = 1; i <= hi; i++)
+        Serial.printf("%s%s", (i > 1) ? "," : "", rcTelemetry::wcbBoardKnown(i, q) ? "1" : "0");
+      // clients[] — 1 = client device (mesh monitor / other controller), not a
+      // WCB board. Live neighbor if present, else the cache (so a learned client
+      // still tags after its advert ages out).
+      Serial.print("],\"clients\":[");
+      for (int i = 1; i <= hi; i++) {
+        const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+        bool client = nb ? nb->isClient : rcTelemetry::wcbIsClient(i);
+        Serial.printf("%s%s", (i > 1) ? "," : "", client ? "1" : "0");
+      }
+      // temporary[] — 1 = this board advertised the WDP "temporary" flag (a mgmt
+      // relay etc.). LIVE-neighbor-only, NO cache fallback (unlike clients[]): a temp
+      // peer is never learned/persisted, so once its advert ages out getNeighbor()
+      // returns null, this reads 0, and the board stops being "known" and drops off.
+      // Lets the tool tag it "· temp" and hide the ✕ Forget button (nothing to forget).
+      Serial.print("],\"temporary\":[");
+      for (int i = 1; i <= hi; i++) {
+        const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+        Serial.printf("%s%s", (i > 1) ? "," : "", (nb && nb->temporary) ? "1" : "0");
+      }
+      // Friendly names (from the ?WHOAMI replies); "" until a board answers
+      // (a board must have ?SPECIAL,ON to unicast its reply back to us).
+      Serial.print("],\"aliases\":[");
+      for (int i = 1; i <= hi; i++)
+        Serial.printf("%s\"%s\"", (i > 1) ? "," : "",
+                      (i == selfId) ? "" : rcTelemetry::wcbAlias(i));
+      // Per-serial-port device labels each board advertises over WDP (the
+      // WCB_Client library decodes them into WCBNeighbor.portLabels[5], filled
+      // from a device's own @WDP1 announce or a user-set label). One 5-element
+      // array (ports 1-5) per board; "" = unlabeled. USB path only — the
+      // Via-WCB bridge's 252-byte frame can't carry this, so the tool falls
+      // back to plain "Serial <n>" when bridged.
+      Serial.print("],\"portLabels\":[");
+      for (int i = 1; i <= hi; i++) {
+        const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+        Serial.printf("%s[", (i > 1) ? "," : "");
+        for (int p = 0; p < 5; p++) {
+          // Port labels are EXTERNAL input — a device's own @WDP1 announce, copied
+          // verbatim into portLabels[] by WCB_Client with no filtering. Sanitize the
+          // same JSON-hostile chars setWcbAlias() strips for aliases; otherwise a '"'
+          // or '\' would break this hand-built JSON and drop the whole WCB_STATUS
+          // line at the tool's JSON.parse (silently freezing the status panel).
+          const char* lbl = (nb && !nb->isClient) ? nb->portLabels[p] : "";
+          char safe[25]; size_t j = 0;
+          for (int k = 0; k < 24 && lbl[k]; k++) {
+            char c = lbl[k];
+            if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;   // JSON-hostile
+            safe[j++] = c;
+          }
+          safe[j] = '\0';
+          Serial.printf("%s\"%s\"", p ? "," : "", safe);
+        }
+        Serial.print("]");
+      }
+      // Per-board stored-sequence fingerprint (WDP SEQHASH, WCBNeighbor::seqHash)
+      // — covers sequence NAMES and CONTENTS, so it moves on any save, rename,
+      // edit or erase. The tool caches a board's key list (GET_WCB_SEQ) against
+      // this and re-pulls only when it changes. USB path only, mirroring
+      // portLabels above; the bridge gets it in the fragmented WCB_META instead.
+      // 0 = not yet known — NOT "no sequences" (an empty inventory hashes non-zero).
+      Serial.print("],\"seqHash\":[");
+      for (int i = 1; i <= hi; i++) {
+        const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
+        Serial.printf("%s%u", (i > 1) ? "," : "",
+                      (unsigned)((nb && !nb->isClient) ? nb->seqHash : 0));
+      }
+      Serial.println("]}");
+
+    } else if (strcmp(type,"RESET_MESH_STATS")==0) {
+      // Deferred to loop() — see g_meshStatsResetPending. ACK now; the reset
+      // itself lands within a loop pass, and the tool re-reads afterwards.
+      g_meshStatsResetPending = true;
+      Serial.println("{\"type\":\"ACK\",\"of\":\"RESET_MESH_STATS\",\"ok\":true}");
+
+    } else if (strcmp(type,"GET_MESH_STATS")==0) {
+      // ESP-NOW delivery counters for the tool's Mesh Stats panel.
+      // OUT: WCB_Client's own per-peer/aggregate counters (what this board
+      //      SENT and what came back). IN: g_meshRxFrom/g_meshRxCount, which
+      //      the library does not track — see onWCBCommand.
+      // All RAM-only: a reboot zeroes them, deliberately (session health, not
+      // lifetime history), so there is nothing to load or persist here.
+      //
+      // Built by rcTelemetry::buildMeshStatsPage — the SAME builder the
+      // bridged reply uses, so the two payload shapes cannot drift. USB has
+      // no packet budget, so a full roster normally arrives in one line; but
+      // the builder still pages if the roster plus its counters overrun the
+      // buffer, and a page it had to cut carries NO "last":1 — which the
+      // tool's merge refuses to promote, silently freezing the panel. So
+      // drain the pages the way tick() does instead of assuming one. Each
+      // continuation writes at least one row, so nextPeer always advances;
+      // the page cap is a backstop, not an expected exit.
+      //
+      // No "sys":1 here: that marker exists so the WCB Wizard can mute tool
+      // chatter when it shares the BRIDGE board's port, and a direct-USB
+      // reply has no Wizard to mute it for — matching WCB_STATUS above.
+      //
+      // 20 boards x up to 71 B (the builder's own row buffer) + the aggregate
+      // can exceed 900 once the counters reach 5-6 digits; static so a buffer
+      // this size never lands on the loop task's stack.
+      static char msbuf[900];
+      int msNext = 0, msPage = 0, msStart = 1;
+      do {
+        rcTelemetry::buildMeshStatsPage(msbuf, sizeof(msbuf), sizeof(msbuf) - 1,
+                                        msPage++, msStart, &msNext,
+                                        /*includeSys=*/false);
+        Serial.println(msbuf);
+        msStart = msNext;
+      } while (msNext && msPage <= WCB_MAX_BOARDS);
+
+    } else {
+      Serial.println("{\"type\":\"ERROR\",\"msg\":\"unknown type\"}");
+    }
+
+  } else if (line[0] == '#') {
+    // ── CLI commands ─────────────────────────────────────────────────────
+    // Dispatched through execCliLine (shared with the remote terminal).
+    execCliLine(line);
+  }
+  return false;   // handled without needing a yield — caller may keep draining
+}
+
 void handleSerialInput() {
   // `> 0`, NOT truthiness. HWCDC::available() returns -1 (not 0) on a null RX
   // queue — unlike HardwareSerial, which returns 0. A bare truthiness test makes
@@ -3701,464 +4176,12 @@ void handleSerialInput() {
     if (c == '\n' || c == '\r') {
       serialInputBuf.trim();
       if (serialInputBuf.length() == 0) { serialInputBuf = ""; return; }
-
-      // ── "?..." CLI commands ───────────────────────────────────────────────
-      // ?OTALOCAL,* / ?OTA,* (firmware OTA) and ?REC,* (record/replay) all route
-      // through execCliLine (shared with the remote terminal). One command per
-      // call (early return) so loop() keeps heartbeats alive between the host's
-      // ACK-paced OTA chunks. Unrecognised "?" commands report back rather than
-      // being silently dropped.
-      if (serialInputBuf[0] == '?') {
-        if (!execCliLine(serialInputBuf))
-          Serial.printf("Unknown command: %s\n", serialInputBuf.c_str());
-        serialInputBuf = ""; return;
-      }
-
-      if (serialInputBuf[0] == '{') {
-        // ── JSON WebSerial protocol ──────────────────────────────────────────
-        // The header doc has to use a Filter — without one, deserializing
-        // a SET_CONFIG payload (tens of KB once mappings/knobs/maestros
-        // are populated) into the small hdr buffer returns NoMemory and
-        // breaks SET_CONFIG. The filter is a WHITELIST in ArduinoJson v6:
-        // every field used by a non-SET_CONFIG handler must be listed
-        // explicitly, otherwise it's stripped and hdr["x"] returns the
-        // default. SET_CONFIG does its own un-filtered deserialize below.
-        StaticJsonDocument<256> filter;
-        filter["type"]   = true;
-        filter["target"] = true;   // WCB_SEND
-        filter["cmd"]    = true;   // WCB_SEND
-        filter["on"]     = true;   // CALIB
-        filter["flags"]  = true;   // SET_DEBUG_FLAGS
-        filter["mode"]   = true;   // TRIGGER
-        filter["btn"]    = true;   // TRIGGER
-        filter["tap"]    = true;   // TRIGGER
-        filter["id"]     = true;   // FORGET_PEER (without this the id is stripped → parsed as 0 → "out of range")
-        filter["all"]    = true;   // FORGET_PEER
-        filter["wcb"]    = true;   // GET_WCB_SEQ (stripped here → parsed as 0 → "wcb out of range")
-        filter["key"]    = true;   // GET_WCB_SEQVAL (stripped → empty → "key required")
-        DynamicJsonDocument hdr(256);
-        DeserializationError perr = deserializeJson(
-            hdr, serialInputBuf,
-            DeserializationOption::Filter(filter));
-        if (perr != DeserializationError::Ok) {
-          // Include the received-buffer length so the host can spot truncation
-          // (host-sent length vs. received length mismatch → USB RX overflow).
-          Serial.printf("{\"type\":\"ERROR\",\"msg\":\"JSON parse failed (%s)\",\"rxLen\":%u}\n",
-                        perr.c_str(), (unsigned)serialInputBuf.length());
-          serialInputBuf = ""; return;
-        }
-        const char* type = hdr["type"] | "";
-
-        if (strcmp(type,"PING")==0 || strcmp(type,"ping")==0) {
-          // A fresh page connect pings first — clear any stale calibration
-          // mute left behind by a previously crashed/closed calibration page.
-          calibrationActive = false;
-          // Report firmware version so the GUI can display it (footer +
-          // Firmware tab "currently on board").
-          Serial.print("{\"type\":\"PONG\",\"version\":\"");
-          Serial.print(FW_VERSION);
-          Serial.println("\"}");
-
-        } else if (strcmp(type,"GET_CONFIG")==0) {
-          // rcConfigToJSON() returns an ERROR envelope, NOT a config, when the document
-          // overflowed — that guard exists precisely so a truncated config never reaches
-          // the tool. Splicing it into "data" defeats it: the tool would apply an envelope
-          // with no config fields, keep its built-in defaults, latch them as the baseline,
-          // and the next Save would ship those defaults over the good on-board config.
-          // Pass the error through at the TOP level so it can never read as a config.
-          String cfg = rcConfigToJSON();
-          if (cfg.startsWith("{\"type\":\"ERROR\"")) {
-            Serial.println(cfg);
-          } else {
-            Serial.print("{\"type\":\"CONFIG\",\"data\":");
-            Serial.print(cfg);
-            Serial.println("}");
-          }
-
-        } else if (strcmp(type,"GET_CMDLIB")==0) {
-          // Stream back the config tool's private command library stored on this
-          // droid (opaque to the firmware). Empty library if nothing saved yet.
-          // Carry size + signature so the tool can cache + skip re-pulls.
-          String lib;
-          if (!rcCmdlibLoadLFS(lib) || lib.length() == 0) lib = "{\"boards\":[],\"enums\":{}}";
-          Serial.printf("{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
-                        (unsigned)lib.length(), (unsigned)rcCmdlibHash(lib));
-          Serial.print(lib);
-          Serial.println("}");
-
-        } else if (strcmp(type,"GET_CMDLIB_META")==0) {
-          // Cheap signature (size + hash) so a connect can skip re-pulling an
-          // unchanged library. 0/0 when nothing is stored.
-          String lib; unsigned sz = 0, h = 0;
-          if (rcCmdlibLoadLFS(lib) && lib.length()) { sz = lib.length(); h = rcCmdlibHash(lib); }
-          Serial.printf("{\"type\":\"CMDLIB_META\",\"size\":%u,\"hash\":%u}\n", sz, h);
-
-        } else if (strcmp(type,"SET_CMDLIB")==0) {
-          // Persist the library OPAQUELY. Pull the raw "data" value by substring
-          // (it can be many KB — avoid a second big parse), but find its END by
-          // matching brackets, NOT by taking the message's last '}'. `data` is not
-          // guaranteed to be the last field — the config tool's sendJSON() stamps
-          // its "sys":1 marker after spreading the caller's object — and the naive
-          // lastIndexOf('}') swallowed the trailing `,"sys":1` into the stored
-          // library, so /cmdlib.json wasn't valid JSON on its own and its
-          // size/hash covered bytes that were not library content (which then
-          // read as "different library" against a mesh-saved copy).
-          bool ok = false; unsigned h = 0, sz = 0;
-          int k = serialInputBuf.indexOf("\"data\":");
-          if (k >= 0) {
-            int s = k + 7, blen = (int)serialInputBuf.length();
-            while (s < blen && isspace((unsigned char)serialInputBuf[s])) s++;
-            int end = -1;
-            if (s < blen && (serialInputBuf[s] == '{' || serialInputBuf[s] == '[')) {
-              const char open  = serialInputBuf[s];
-              const char close = (open == '{') ? '}' : ']';
-              int depth = 0; bool inStr = false, esc = false;
-              for (int i = s; i < blen; i++) {
-                char c = serialInputBuf[i];
-                if (esc)      { esc = false;  continue; }
-                if (inStr)    { if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
-                if (c == '"') { inStr = true; continue; }
-                if (c == open)  { depth++; continue; }
-                if (c == close) { if (--depth == 0) { end = i + 1; break; } }
-              }
-            }
-            if (end > s) {
-              String lib = serialInputBuf.substring(s, end);
-              lib.trim();
-              if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
-            }
-          }
-          Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}\n",
-                        ok ? "true" : "false", sz, h);
-
-        } else if (strcmp(type,"SET_CONFIG")==0) {
-          DynamicJsonDocument bigDoc(98304);
-          if (deserializeJson(bigDoc, serialInputBuf) != DeserializationError::Ok) {
-            // No saveId echoed here — the parse failed, so we genuinely don't know
-            // which save this was. The tool treats a missing saveId as "old
-            // firmware" and still rolls the baseline back, which is what we want.
-            Serial.println("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"parse failed\"}");
-          } else if (!bigDoc.containsKey("data")) {
-            Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"missing data\",\"saveId\":%ld}\n",
-                          (long)(bigDoc["saveId"] | 0));
-          } else {
-            // Echo the tool's per-save correlation id on every reply, exactly as the
-            // Via-WCB path does (rc_telemetry.h). Without it the tool's stale-ACK gate
-            // permanently takes its "undefined saveId = old firmware" fallback on USB,
-            // so a late ACK from a timed-out save is attributed to a newer one.
-            // bigDoc is parsed UN-filtered, so no filter-whitelist entry is needed.
-            const long saveId = (long)(bigDoc["saveId"] | 0);
-            bool ok = rcConfigFromJSON(bigDoc["data"].as<JsonObject>());
-            if (ok) {
-              bool saved = rcConfigSaveLFS();
-              rcAdvertiseSerialLabels();   // a changed port label / HCR/MP3/WLED dest → re-advertise over WDP
-              // Live re-apply of baud / SBUS-OUT / easing / auto-release. Shared with the
-              // Via-WCB save path — see applyConfigSideEffects().
-              if (!applyConfigSideEffects())
-                Serial.println("{\"type\":\"INFO\",\"msg\":\"boardType changed — reboot to apply the new pin profile\"}");
-              // rcConfigSaveLFS() (flash write) + applySerialBauds()
-              // block loop() for 100+ ms, during which processSbus() can't
-              // run.  If the operator was holding a matrix button across
-              // that gap, the frozen debounce state could produce a phantom
-              // edge when loop() resumes.  Reset the matrix state machine to
-              // a clean "must see a confirmed neutral, then a fresh press"
-              // condition so the save can't manufacture a button event.
-              matrixArmed        = false;
-              matrixCandidate    = 0;
-              matrixCandCount    = 0;
-              matrixNeutralCount = 0;
-              if (saved) Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":true,\"saveId\":%ld}\n", saveId);
-              else       Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"applied to RAM but could not be saved to flash (LittleFS write error)\",\"saveId\":%ld}\n", saveId);
-            } else {
-              Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"config apply failed\",\"saveId\":%ld}\n", saveId);
-            }
-          }
-
-        } else if (strcmp(type,"START_MONITOR")==0) {
-          wsMonitorActive   = true;
-          wsMonitorLastSent = 0;
-          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
-
-        } else if (strcmp(type,"STOP_MONITOR")==0) {
-          wsMonitorActive = false;
-          // Calibration always runs with the monitor on; stopping it is a
-          // reliable "calibration is over" signal even if CALIB-off is lost.
-          calibrationActive = false;
-          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
-
-        } else if (strcmp(type,"CALIB")==0) {
-          const bool calibOn = hdr["on"] | false;
-          // A take must never straddle a calibration session. Dispatch and passthrough are
-          // both muted while the wizard runs, so a recording left running would capture a
-          // silent gap — and once calibrationActive is set the operator can no longer stop
-          // it (the Record trigger is muted too), so the 60 s backstop becomes the only
-          // exit and it SAVES, overwriting the take's named clip with the dead stretch.
-          // Drop the capture instead: stopRecord() flushes and goes idle without saving.
-          if (calibOn && !calibrationActive && navirec::_state == navirec::ST_RECORDING) {
-            navirec::stopRecord();
-            Serial.println("[REC] recording dropped — calibration started (not saved)");
-          }
-          calibrationActive = calibOn;
-          Serial.printf("[CALIB] action dispatch %s\n",
-                        calibrationActive ? "SUPPRESSED (calibrating)" : "resumed");
-          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
-
-        } else if (strcmp(type,"RESET_DEFAULTS")==0) {
-          rcConfigLoadDefaults();
-          resetMaestroReleaseState();   // clear stale auto-release state so defaults take effect live
-          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
-
-        } else if (strcmp(type,"TEST_ACTION")==0) {
-          // Config tool's per-action Test button — fire one action live, no save.
-          // hdr is a filtered parse (no nested "action"), so re-parse the raw
-          // buffer into a small doc. We're in loop() (Core 1), so dispatch is safe.
-          StaticJsonDocument<640> tdoc;
-          if (deserializeJson(tdoc, serialInputBuf) != DeserializationError::Ok) {
-            Serial.println("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"parse failed\"}");
-          } else {
-            bool ok = rcTestAction(tdoc["action"].as<JsonObject>());
-            Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}\n", ok ? "true" : "false");
-          }
-
-        } else if (strcmp(type,"REBOOT")==0) {
-          // ACK first so the GUI hears the reply, then restart after a brief
-          // delay so the USB TX buffer drains before the reset kills it.
-          Serial.println("{\"type\":\"ACK\",\"ok\":true,\"msg\":\"rebooting\"}");
-          Serial.flush();
-          delay(250);
-          ESP.restart();
-
-        } else if (strcmp(type,"TRIGGER")==0) {
-          int mode = hdr["mode"] | 1;
-          int btn  = hdr["btn"]  | 0;
-          int tap  = hdr["tap"]  | 1;
-          if (btn < 1 || btn > RC_NUM_THRESHOLDS || mode < 1 || mode > 3 || tap < 1 || tap > RC_NUM_TAP_TIERS) {
-            Serial.println("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"bad mode/btn/tap\"}");
-          } else {
-            Serial.printf("[TRIGGER] mode=%d btn=%d tap=%d\n", mode, btn, tap);
-            rcDispatch(mode * 100 + btn, (uint8_t)tap);
-            Serial.println("{\"type\":\"ACK\",\"ok\":true}");
-          }
-
-        } else if (strcmp(type,"WCB_SEND")==0) {
-          int target     = hdr["target"] | 0;
-          const char* cmd = hdr["cmd"]   | "";
-          if (!wcb || !wcbReady) {
-            Serial.println("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"WCB not ready (init failed)\"}");
-          } else {
-            if (target == 0) {
-              wcb->broadcast(cmd);
-              Serial.println("{\"type\":\"ACK\",\"ok\":true}");
-            } else if (target >= 1 && target <= WCB_MAX_BOARDS) {
-              wcb->send((uint8_t)target, cmd);
-              Serial.println("{\"type\":\"ACK\",\"ok\":true}");
-            } else {
-              Serial.printf("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"target %d out of range (0=broadcast, 1-%d=unicast)\"}\n",
-                            target, WCB_MAX_BOARDS);
-            }
-          }
-
-        } else if (strcmp(type,"FORGET_PEER")==0) {
-          // Drop a learned (auto-joined) peer from the ESP-NOW peer table + NVS.
-          //   {"id":N}      forget learned WCB N
-          //   {"all":true}  forget ALL learned peers
-          // USB path is Core 1, so call the worker directly. The panel re-polls
-          // GET_WCB_STATUS to refresh after this.
-          bool all = hdr["all"] | false;
-          int  id  = hdr["id"]  | 0;
-          if (!wcb || !wcbReady) {
-            Serial.println("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":false,\"msg\":\"WCB not ready\"}");
-          } else if (all) {
-            doForgetPeer(0);
-            Serial.println("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":true,\"all\":true}");
-          } else if (id >= 1 && id <= WCB_MAX_BOARDS) {
-            doForgetPeer((uint8_t)id);
-            Serial.printf("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":true,\"id\":%d}\n", id);
-          } else {
-            Serial.printf("{\"type\":\"ACK\",\"of\":\"FORGET_PEER\",\"ok\":false,\"msg\":\"id %d out of range (1-%d) or set all:true\"}\n",
-                          id, WCB_MAX_BOARDS);
-          }
-
-        } else if (strcmp(type,"SET_DEBUG_FLAGS")==0) {
-          // GUI debug chips drive this — bitmask of DBG_* categories to
-          // enable. Default 0 silences every [DISPATCH] line.
-          g_dbgFlags = (uint32_t)(hdr["flags"] | 0);
-          Serial.printf("[DBG] flags=0x%02X\n", (unsigned)g_dbgFlags);
-          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
-
-        } else if (strcmp(type,"GET_WCB_SEQ")==0) {
-          // Stored-sequence key list for ONE board, for the config tool's command
-          // library — so a "Run Sequence" action offers the sequences that board
-          // actually holds instead of a free-text key box. NAMES ONLY: the library
-          // can fetch a sequence body too, but one at a time and with no ceiling on
-          // the set, which is the failure mode the WCB's own config pull already has.
-          // The reply is ASYNC (a WCB_SEQ line when the board answers, or an ok:false
-          // one on timeout) — this path is Core 1, so the pull is issued directly.
-          const int seqB = hdr["wcb"] | 0;   // clamp: a wild value must reject, not wrap into a real board
-          rcTelemetry::startSeqPull((seqB >= 1 && seqB <= 255) ? (uint8_t)seqB : 0, 0,
-                                    rcTelemetry::SEQ_PULL_NAMES);   // sender 0 = answer on USB
-
-        } else if (strcmp(type,"GET_WCB_SEQVAL")==0) {
-          // ONE stored sequence's contents, by key — what the command library shows
-          // under a chosen sequence. Deliberately one key at a time: a single value
-          // is bounded (~1800 chars) but the whole set is not, and pulling every body
-          // is the failure mode the WCB's own config pull already has.
-          // Reply is ASYNC (a WCB_SEQVAL line, or an ok:false one on timeout).
-          const int seqVB = hdr["wcb"] | 0;
-          rcTelemetry::startSeqPull((seqVB >= 1 && seqVB <= 255) ? (uint8_t)seqVB : 0, 0,
-                                    rcTelemetry::SEQ_PULL_VALUE, hdr["key"] | "");
-
-        } else if (strcmp(type,"GET_WCB_STATUS")==0) {
-          // Lightweight liveness poll for the GUI's sidebar WCB Status panel.
-          // Reads wcb->isOnline(i) for the floor (1..quantity) PLUS any auto-
-          // discovered boards above it (up to the highest known); known[] marks
-          // which slots the tool should actually render.
-          int q = rcConfig.wcbNetwork.quantity;
-          if (q < 0) q = 0;
-          if (q > WCB_MAX_BOARDS) q = WCB_MAX_BOARDS;
-          // Self is by definition online — wcb->isOnline() tracks REMOTE
-          // peer heartbeats via ETM and never returns true for our own
-          // deviceId, so we force "1" for the local board.
-          int selfId = rcConfig.wcbNetwork.deviceId;
-          int hi = rcTelemetry::wcbHighestKnown(q);
-          Serial.printf("{\"type\":\"WCB_STATUS\",\"quantity\":%d,\"self\":%d,\"online\":[",
-                        q, selfId);
-          for (int i = 1; i <= hi; i++) {
-            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
-            const bool client = nb ? nb->isClient : rcTelemetry::wcbIsClient(i);
-            // "live now": heartbeat for a WCB, a fresh WDP advert for a CLIENT.
-            bool up = (i == selfId) ? true
-                    : (client ? (nb != nullptr) : (wcb && wcb->isOnline(i)));
-            Serial.printf("%s%s", (i > 1) ? "," : "", up ? "1" : "0");
-            // Lazily learn each online board's friendly alias via the SHARED
-            // bounded fallback: a board advertising its name over WDP is already
-            // cached (onWcbNeighbor) and never queried; a nameless one is asked
-            // only ALIAS_MAX_TRIES times per online session, not every poll. This
-            // is the same cap the bridged status build uses — previously the
-            // direct-USB poll was uncapped and pestered an un-aliased board (~3s).
-            if (i != selfId) rcTelemetry::maybeQueryAlias(i, up, client);
-          }
-          Serial.print("],\"known\":[");
-          for (int i = 1; i <= hi; i++)
-            Serial.printf("%s%s", (i > 1) ? "," : "", rcTelemetry::wcbBoardKnown(i, q) ? "1" : "0");
-          // clients[] — 1 = client device (mesh monitor / other controller), not a
-          // WCB board. Live neighbor if present, else the cache (so a learned client
-          // still tags after its advert ages out).
-          Serial.print("],\"clients\":[");
-          for (int i = 1; i <= hi; i++) {
-            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
-            bool client = nb ? nb->isClient : rcTelemetry::wcbIsClient(i);
-            Serial.printf("%s%s", (i > 1) ? "," : "", client ? "1" : "0");
-          }
-          // temporary[] — 1 = this board advertised the WDP "temporary" flag (a mgmt
-          // relay etc.). LIVE-neighbor-only, NO cache fallback (unlike clients[]): a temp
-          // peer is never learned/persisted, so once its advert ages out getNeighbor()
-          // returns null, this reads 0, and the board stops being "known" and drops off.
-          // Lets the tool tag it "· temp" and hide the ✕ Forget button (nothing to forget).
-          Serial.print("],\"temporary\":[");
-          for (int i = 1; i <= hi; i++) {
-            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
-            Serial.printf("%s%s", (i > 1) ? "," : "", (nb && nb->temporary) ? "1" : "0");
-          }
-          // Friendly names (from the ?WHOAMI replies); "" until a board answers
-          // (a board must have ?SPECIAL,ON to unicast its reply back to us).
-          Serial.print("],\"aliases\":[");
-          for (int i = 1; i <= hi; i++)
-            Serial.printf("%s\"%s\"", (i > 1) ? "," : "",
-                          (i == selfId) ? "" : rcTelemetry::wcbAlias(i));
-          // Per-serial-port device labels each board advertises over WDP (the
-          // WCB_Client library decodes them into WCBNeighbor.portLabels[5], filled
-          // from a device's own @WDP1 announce or a user-set label). One 5-element
-          // array (ports 1-5) per board; "" = unlabeled. USB path only — the
-          // Via-WCB bridge's 252-byte frame can't carry this, so the tool falls
-          // back to plain "Serial <n>" when bridged.
-          Serial.print("],\"portLabels\":[");
-          for (int i = 1; i <= hi; i++) {
-            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
-            Serial.printf("%s[", (i > 1) ? "," : "");
-            for (int p = 0; p < 5; p++) {
-              // Port labels are EXTERNAL input — a device's own @WDP1 announce, copied
-              // verbatim into portLabels[] by WCB_Client with no filtering. Sanitize the
-              // same JSON-hostile chars setWcbAlias() strips for aliases; otherwise a '"'
-              // or '\' would break this hand-built JSON and drop the whole WCB_STATUS
-              // line at the tool's JSON.parse (silently freezing the status panel).
-              const char* lbl = (nb && !nb->isClient) ? nb->portLabels[p] : "";
-              char safe[25]; size_t j = 0;
-              for (int k = 0; k < 24 && lbl[k]; k++) {
-                char c = lbl[k];
-                if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;   // JSON-hostile
-                safe[j++] = c;
-              }
-              safe[j] = '\0';
-              Serial.printf("%s\"%s\"", p ? "," : "", safe);
-            }
-            Serial.print("]");
-          }
-          // Per-board stored-sequence fingerprint (WDP SEQHASH, WCBNeighbor::seqHash)
-          // — covers sequence NAMES and CONTENTS, so it moves on any save, rename,
-          // edit or erase. The tool caches a board's key list (GET_WCB_SEQ) against
-          // this and re-pulls only when it changes. USB path only, mirroring
-          // portLabels above; the bridge gets it in the fragmented WCB_META instead.
-          // 0 = not yet known — NOT "no sequences" (an empty inventory hashes non-zero).
-          Serial.print("],\"seqHash\":[");
-          for (int i = 1; i <= hi; i++) {
-            const WCBNeighbor* nb = wcb ? wcb->getNeighbor(i) : nullptr;
-            Serial.printf("%s%u", (i > 1) ? "," : "",
-                          (unsigned)((nb && !nb->isClient) ? nb->seqHash : 0));
-          }
-          Serial.println("]}");
-
-        } else if (strcmp(type,"RESET_MESH_STATS")==0) {
-          // Deferred to loop() — see g_meshStatsResetPending. ACK now; the reset
-          // itself lands within a loop pass, and the tool re-reads afterwards.
-          g_meshStatsResetPending = true;
-          Serial.println("{\"type\":\"ACK\",\"of\":\"RESET_MESH_STATS\",\"ok\":true}");
-
-        } else if (strcmp(type,"GET_MESH_STATS")==0) {
-          // ESP-NOW delivery counters for the tool's Mesh Stats panel.
-          // OUT: WCB_Client's own per-peer/aggregate counters (what this board
-          //      SENT and what came back). IN: g_meshRxFrom/g_meshRxCount, which
-          //      the library does not track — see onWCBCommand.
-          // All RAM-only: a reboot zeroes them, deliberately (session health, not
-          // lifetime history), so there is nothing to load or persist here.
-          //
-          // Built by rcTelemetry::buildMeshStatsPage — the SAME builder the
-          // bridged reply uses, so the two payload shapes cannot drift. USB has
-          // no packet budget, so a full roster normally arrives in one line; but
-          // the builder still pages if the roster plus its counters overrun the
-          // buffer, and a page it had to cut carries NO "last":1 — which the
-          // tool's merge refuses to promote, silently freezing the panel. So
-          // drain the pages the way tick() does instead of assuming one. Each
-          // continuation writes at least one row, so nextPeer always advances;
-          // the page cap is a backstop, not an expected exit.
-          //
-          // No "sys":1 here: that marker exists so the WCB Wizard can mute tool
-          // chatter when it shares the BRIDGE board's port, and a direct-USB
-          // reply has no Wizard to mute it for — matching WCB_STATUS above.
-          //
-          // 20 boards x up to 71 B (the builder's own row buffer) + the aggregate
-          // can exceed 900 once the counters reach 5-6 digits; static so a buffer
-          // this size never lands on the loop task's stack.
-          static char msbuf[900];
-          int msNext = 0, msPage = 0, msStart = 1;
-          do {
-            rcTelemetry::buildMeshStatsPage(msbuf, sizeof(msbuf), sizeof(msbuf) - 1,
-                                            msPage++, msStart, &msNext,
-                                            /*includeSys=*/false);
-            Serial.println(msbuf);
-            msStart = msNext;
-          } while (msNext && msPage <= WCB_MAX_BOARDS);
-
-        } else {
-          Serial.println("{\"type\":\"ERROR\",\"msg\":\"unknown type\"}");
-        }
-
-      } else if (serialInputBuf[0] == '#') {
-        // ── CLI commands ─────────────────────────────────────────────────────
-        // Dispatched through execCliLine (shared with the remote terminal).
-        execCliLine(serialInputBuf);
-      }
+      // Framing is this function's job; the dispatch is processInputLine's. Pass the
+      // buffer by reference and clear it AFTER — copying it would cost a ~98 KB
+      // duplicate on a large SET_CONFIG.
+      const bool yieldNow = processInputLine(serialInputBuf);
       serialInputBuf = "";
+      if (yieldNow) return;
     } else {
       // Must be able to hold a full SET_CONFIG payload. A config with
       // double/triple-tap mappings is tens of KB; the old 8 KB cap silently

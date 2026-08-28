@@ -67,9 +67,21 @@ chains in firmware; the config tool warns at authoring time, keyed on that verb 
 
 ## 2. USB serial JSON protocol
 
-Newline-delimited JSON. Handled by `handleSerialInput()` in
-[`NaviCore.ino`](../NaviCore.ino). Every tool-originated message carries an additive
-`"sys":1` so the WCB Wizard can mute the tool's chatter when both share a port.
+Newline-delimited JSON. Every tool-originated message carries an additive `"sys":1` so the
+WCB Wizard can mute the tool's chatter when both share a port.
+
+**Framing and dispatch are separate**, both in [`NaviCore.ino`](../NaviCore.ino):
+`handleSerialInput()` reads bytes off `Serial` and assembles lines;
+**`processInputLine(const String&)` is the transport-agnostic dispatcher** and is where every
+message above is actually handled. Anything else that can produce a complete line calls
+`processInputLine()` directly rather than duplicating the dispatch.
+
+Its `bool` return means *"yield to `loop()` before handling more input"* and is not cosmetic:
+the `?` CLI branch and a JSON parse failure both need the caller to stop draining so
+heartbeats keep running between the host's ACK-paced OTA chunks. A caller that ignores it and
+keeps draining reintroduces the stall the early return exists to prevent. The caller also owns
+the buffer — the line is passed by `const&` and cleared by the caller, because a `SET_CONFIG`
+payload approaches 98 KB and copying it per line is real cost.
 
 ### Requests (tool → board)
 
@@ -675,6 +687,7 @@ Newest first. Add a row whenever a code change alters what this page describes �
 as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
+| 2026-08-28 | _(uncommitted)_ | **Split framing from dispatch in the serial input path.** `handleSerialInput()` now only reads bytes and assembles lines; the ~430-line dispatch moved verbatim into `processInputLine(const String&)`, which any transport can call. Pure refactor — verified by normalising both bodies and diffing: 274 executable lines, byte-identical. Two contracts are load-bearing and are now stated at the function: the `bool` return means "yield to `loop()` now" (the `?` branch and a parse failure both need the caller to stop draining, so heartbeats survive ACK-paced OTA chunks), and the caller owns the buffer — the line is `const&` and cleared by the caller, because copying a ~98 KB `SET_CONFIG` per line is real cost. |
 | 2026-08-28 | _(uncommitted)_ | Documented that the `MESH_STATS` aggregate and its per-peer rows are sampled a moment apart and can disagree by one — `agg` from the library counters, `peers[]` walked afterwards, so an ACK in between leaves the aggregate behind the rows it contains. Seen in the field as the derived "not currently listed" remainder rendering `Ack -1` against `Sent 0`. Recorded as NOT a firmware bug, with the two tempting wrong fixes named (making one side authoritative, or recomputing the aggregate from the rows — the aggregate covers all 20 library slots including unlisted boards, which is why the remainder row exists at all). The tool now clamps the remainder at zero: a real remainder still shows, a skew of -1 does not. |
 | 2026-08-26 | _(uncommitted)_ | Added `RESET_MESH_STATS` (both transports) — zero the ESP-NOW counters without rebooting. Deferred to `loop()` on both paths because `WCB_Client::resetStats()` takes the pending-table lock and races the RX task, so the library forbids calling it from a receive callback. |
 |---|---|---|
