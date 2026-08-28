@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">27.22:40.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.09:28.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9325,6 +9325,34 @@ function handleBoardMessage(line) {
     // temporary[] = slots advertising the WDP "temporary" flag (live-only, never persisted);
     // absent on older firmware → none.
     wcbTemporary = Array.isArray(msg.temporary) ? msg.temporary : [];
+    // rows[] = the SPARSE roster the bridged reply falls back to when the
+    // positional arrays will not fit one ESP-NOW packet: one [id, online,
+    // client, temporary] per REAL board, with `known` implied by presence.
+    // Expanded here into the very same positional arrays the renderer already
+    // consumes, so nothing downstream has to know which form arrived.
+    //
+    // Why it exists: the positional form costs a slot for every id up to the
+    // highest, so a mgmt relay at id 19 made the reply overflow, and the old
+    // remedy trimmed from the TOP — dropping that relay first, and only over the
+    // bridge. Direct USB has no packet budget and always showed it, which is what
+    // made the bug look like "the board is gone" instead of "the reply did not
+    // fit". rows[] is also the ONLY bridged form that carries `temporary`.
+    if (Array.isArray(msg.rows)) {
+      let hiId = 0;
+      for (const r of msg.rows) hiId = Math.max(hiId, +r[0] || 0);
+      const on = new Array(hiId).fill(0), kn = new Array(hiId).fill(0);
+      const cl = new Array(hiId).fill(0), tp = new Array(hiId).fill(0);
+      for (const r of msg.rows) {
+        const id = +r[0];
+        if (!(id >= 1 && id <= hiId)) continue;   // ignore a malformed row rather than index off the end
+        on[id - 1] = +r[1] ? 1 : 0;
+        kn[id - 1] = 1;                           // presence in rows[] IS "known"
+        cl[id - 1] = +r[2] ? 1 : 0;
+        tp[id - 1] = +r[3] ? 1 : 0;
+      }
+      msg.online = on;                            // feed the same fields the dense path sets
+      wcbKnown = kn; wcbClients = cl; wcbTemporary = tp;
+    }
     // Forget de-flicker: this reply may be one the RC BUILT before it processed a
     // FORGET_PEER (or a bridge-reordered one), still carrying known[id]=1. While an
     // id is inside its post-forget window, blank it in the mask so a stale/reordered
