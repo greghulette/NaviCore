@@ -505,7 +505,7 @@ inline uint32_t _meshStatsNextMs   = 0;   // pacing gate between pages
 //
 // Cost of one byte inside the envelope's "s" string, per ArduinoJson's escaper.
 inline size_t _jsonEscCost(unsigned char c) {
-    if (c == '"' || c == '\')                                     return 2;
+    if (c == 0x22 || c == 0x5C)                                        return 2;   // quote, backslash
     if (c == '\b' || c == '\f' || c == '\n' || c == '\r' || c == '\t') return 2;
     if (c < 0x20)                                                  return 6;   // \u00XX
     return 1;
