@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.12:21.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.12:37.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -5266,11 +5266,16 @@ function renderWcbStatus(online) {
     // Prefer the reply's relayName; fall back to the cached WCB_META alias so the
     // relay shows its name over the bridge too (relayName can be shed by the fit-loop).
     const rn = String(wcbRelayName || (wcbAliases && wcbAliases[wcbRelay - 1]) || '').trim();
+    // Same stats line the roster chips get. The relay is the busiest link on the
+    // mesh — everything to and from the RC crosses it — so omitting it hid exactly
+    // the numbers most worth seeing. _meshStatsChipLine takes any peer id and the
+    // MESH_STATS reply already carries the relay row (the detail modal shows it),
+    // so this was only ever a missing call, not missing data.
     html += `<div class="wcb-chip">
       <span class="wcb-chip-dot online"></span>
       <span class="wcb-chip-name">WCB ${wcbRelay}${rn ? ' · ' + escH(rn) : ''} <small title="Relay — this WCB is bridging the config tool to the RC over ESP-NOW; it carries the mesh, not a droid board" style="color:var(--accent);font-weight:400">· relay 📡</small></span>
       <span class="wcb-chip-state online">Online</span>
-    </div>`;
+    </div>`+ _meshStatsChipLine(wcbRelay);
     shown++;
   }
   if (!shown) html = '<div class="noconn">No WCBs configured (set quantity in Config → WCB Network)</div>';
