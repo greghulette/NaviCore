@@ -3951,11 +3951,8 @@ bool processInputLine(const String& line) {
       // softAPdisconnect() deauthenticates the stations first, so the client learns
       // immediately and can re-associate the moment the AP returns. Costs one call
       // and a few ms on a path that is about to reboot anyway.
-      if (rcConfig.wifiEnabled) {
-        WiFi.softAPdisconnect(false);   // false: deauth clients, leave the radio up
-                                        // for the ESP-NOW mesh until the restart
-        delay(50);                      // let the deauth frames actually go out
-      }
+      naviota::otaFarewellAP();   // shared with both OTA restart paths — one
+                                  // implementation, so a fix reaches every reboot
       delay(250);
       ESP.restart();
 

@@ -176,6 +176,25 @@ inline bool otaWrite(uint16_t sessionId, uint32_t offset, const uint8_t *data, u
   return true;
 }
 
+// Tell any SoftAP client we are going, before we go.
+//
+// THIS IS THE REBOOT THAT MATTERS. Config changes needing a restart are rare;
+// firmware updates are the common case, and every one of them ends in a restart.
+// A bare ESP.restart() drops the AP silently, so the client keeps talking to an AP
+// that is not there and only works it out by timing out — measured with ping at
+// ~11 s of dead air while the board itself was serving again after 2.4 s.
+//
+// Deauthenticating first means the client learns immediately and can re-associate
+// as soon as the AP returns. Costs one call and 50 ms on a path that is already
+// waiting 2 s to let the log drain.
+//
+// `false` keeps the radio up: the relay OTA path still has ESP-NOW ACKs to send.
+inline void otaFarewellAP() {
+  if (!rcConfig.wifiEnabled) return;      // no AP up; nothing to say goodbye to
+  WiFi.softAPdisconnect(false);
+  delay(50);                              // let the deauth frames actually go out
+}
+
 inline bool otaEnd(uint16_t sessionId) {
   if (!ota.active || sessionId != ota.sessionId) { Serial.println("[OTA] END: no matching active session"); return false; }
   if (ota.written != ota.imageSize) {
@@ -269,6 +288,7 @@ inline void processOtaLocalCommand(const String &args) {
       Serial.println("[OTA:END,OK]");
       Serial.println("[OTA] rebooting into new firmware in 2s...");
       delay(2000);
+      otaFarewellAP();
       ESP.restart();
     } else {
       Serial.println("[OTA:END,ERR]");
@@ -376,6 +396,7 @@ inline void handleOtaEndPacket(const uint8_t *raw) {
     // radio drops at restart. (Runs in loop()/Core 1 where OTA packets are drained.)
     for (int r = 0; r < 3; r++) { delay(80); sendOtaAck(pkt.sourceWCB, pkt.sessionId, OTA_ST_OK, otaWrittenOffset()); }
     delay(150);   // let the last ACK actually transmit before the radio drops
+    otaFarewellAP();
     ESP.restart();
   }
 }
