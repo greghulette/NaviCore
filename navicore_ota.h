@@ -176,23 +176,26 @@ inline bool otaWrite(uint16_t sessionId, uint32_t offset, const uint8_t *data, u
   return true;
 }
 
-// Tell any SoftAP client we are going, before we go.
+// Restart WITHOUT deauthenticating SoftAP clients. Deliberately.
 //
-// THIS IS THE REBOOT THAT MATTERS. Config changes needing a restart are rare;
-// firmware updates are the common case, and every one of them ends in a restart.
-// A bare ESP.restart() drops the AP silently, so the client keeps talking to an AP
-// that is not there and only works it out by timing out — measured with ping at
-// ~11 s of dead air while the board itself was serving again after 2.4 s.
+// The obvious idea is to call WiFi.softAPdisconnect() first: a bare ESP.restart()
+// drops the AP silently, so the client keeps talking to an AP that is gone and
+// only works it out by timing out — ~11 s of dead air measured with ping while
+// the board itself is serving again after 2.4 s. Telling it seems strictly better.
 //
-// Deauthenticating first means the client learns immediately and can re-associate
-// as soon as the AP returns. Costs one call and 50 ms on a path that is already
-// waiting 2 s to let the log drain.
+// IT IS NOT. Measured on Windows across three reboots with the deauth in place:
+// 16 s, 17 s, 16 s of dead air, against ~11 s without it. Consistently ~5 s WORSE.
 //
-// `false` keeps the radio up: the relay OTA path still has ESP-NOW ACKs to send.
+// The reason appears to be that a deauth makes Windows tear the association down
+// completely and run a full scan-and-reassociate cycle, whereas a silently absent
+// AP leaves the association in place and it re-attaches to the known BSSID faster.
+// Being polite costs more than being rude here.
+//
+// Left as a no-op rather than deleted so the measurement stays next to the
+// temptation. If you are about to add softAPdisconnect() here, this is the result
+// you would get.
 inline void otaFarewellAP() {
-  if (!rcConfig.wifiEnabled) return;      // no AP up; nothing to say goodbye to
-  WiFi.softAPdisconnect(false);
-  delay(50);                              // let the deauth frames actually go out
+  // intentionally empty — see above
 }
 
 inline bool otaEnd(uint16_t sessionId) {
