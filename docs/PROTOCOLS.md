@@ -16,7 +16,7 @@ Related: [ARCHITECTURE.md](ARCHITECTURE.md) · [CONFIG_SCHEMA.md](CONFIG_SCHEMA.
 | **Direct USB** | USB-CDC 115200 | newline-delimited UTF-8 | none (chunked at 512 B by the tool, 4 KB RX buffer on the board) |
 | **Via WCB** | Web Serial → bridge WCB → ESP-NOW → NaviCore | `;w20,<payload>` lines to the bridge | **187 bytes per payload** — larger must be fragmented |
 | **Shared port** | Same as either, but the port is owned by another browser tab | BroadcastChannel proxy | as above |
-| **WebSocket** | client → NaviCore's own SoftAP → `ws://<softAPIP>/ws` | one text frame per line | 98 KB per frame — the dispatcher's own ceiling, not a transport one |
+| **WebSocket** | client → NaviCore's own SoftAP → `ws://<softAPIP>/ws` | newline-delimited UTF-8, reassembled **per socket** — a line may span several frames | 98 KB per line — the dispatcher's own ceiling, not a transport one |
 
 **The WebSocket path is optional and off by default** (`wifiEnabled`, see
 [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md)). It carries the **same newline-delimited JSON** as
@@ -40,6 +40,18 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   `Serial.printf`, on the core that must also service SBUS at ~111 fps. On overflow whole
   **lines** are dropped, never truncated — half a JSON object fails at the tool's
   `JSON.parse` and silently freezes a panel, whereas a lost 20 Hz sample is invisible.
+
+- The line accumulator is **per socket** — one `WsAcc` slot per client (`accFor()`) — and a
+  session-close hook (`cfg.close_fn = wsClose`) releases the slot the moment a client goes.
+  A **message boundary is not a line boundary**: the tool splits anything over 512 B, so every
+  OTA `DATA` line arrives as several frames and sits half-accumulated for milliseconds at a
+  time. With one accumulator shared across clients, whatever a *second* client sent in that
+  window fused into the middle of the first one's line and **both** were destroyed — measured
+  on hardware as two valid `PING`s yielding zero `PONG`s. One discovery probe or a second
+  window during an OTA is enough to corrupt a `DATA` chunk, surfacing as
+  `[OTA] DATA base64 error -44`: the same symptom as unframed messages, from a different
+  cause. A client that closed *mid-line* was worse — nothing owned the tail, so it waited in
+  the buffer and ate the first command of whoever connected next.
 
 **The 187-byte number.** ESP-NOW carries 250 B. `WCB_Client::_sendPacket()` copies the
 command into a 200-byte `structCommand[]` and appends `"|CRC%08X"` (12 B). A payload over
@@ -736,6 +748,8 @@ Newest first. Add a row whenever a code change alters what this page describes �
 as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
+|---|---|---|
+| 2026-08-30 | _(uncommitted)_ | **The WebSocket line accumulator is now per socket, and sessions have a close hook.** It was a single function-level `static` shared by every client, so any interleaving fused two clients' bytes into one garbage line. Not a rare race: the tool splits every line over 512 B, so an OTA `DATA` line is half-accumulated most of the time, and one discovery `PING` landing in that window corrupts the chunk — reproduced on hardware, where two valid `PING`s returned **zero** `PONG`s because both lines were destroyed. A client that disconnected mid-line left an unowned tail that ate the first command of the next client to connect, including a brand new one. Fixed with one `WsAcc` slot per fd (`accFor()`), eviction policy deliberately identical to `WsSink::begin()` so the two cannot drift, and `cfg.close_fn = wsClose` to release the accumulator and the sink slot at session end — which also gave `WsSink::drop()` its first caller; until now nothing called it and a departed client held its sink slot until some later send happened to fail on it. |
 | 2026-08-28 | _(uncommitted)_ | **Fixed the live monitor over WebSocket — the cause was not the capture tee.** `sendPWMUpdate()` is gated on `Serial.availableForWrite()`, and with no USB host attached (i.e. every WiFi session) that is permanently 0, so every monitor frame was dropped BEFORE it could reach the tee. Command replies worked throughout because they are unguarded `Serial.println`; `PWM_UPDATE` is not, and that difference was the entire bug. The guard itself is correct and stays — an unguarded USB write blocks up to HWCDC 50 ms and starves the SBUS decode in `loop()` — but it asks "can USB take this?" when the question is "can the DESTINATION take this?". When USB cannot, the frame now goes straight to the socket via `naviws::printlnDirect()`, which only appends to the sink buffer and so can never stall `loop()`. **The same guard applies to `wcbStreamLog()` and `vlogf()`**, which are still USB-only over a WebSocket session — deliberate for now, since they are debug chatter rather than the panel. |
 | 2026-08-28 | _(uncommitted)_ | **The WebSocket endpoint is now a console mirror, not request/response.** The `rcSerial` tee stays armed for the whole client session instead of only around `processInputLine()`. Symptom of the old behaviour: replies, `WCB_STATUS` and `MESH_STATS` all worked while the **live monitor was completely dead** — no SBUS, no button presses, no stick movement — because `PWM_UPDATE` is emitted from `loop()`, outside any command. Two rules recorded with it: `drain()` must re-arm every pass (the capture is one slot and `drainRemoteCli()` disarms unconditionally, so a single relayed CLI line would otherwise end the monitor permanently), and the sink buffers and sends only from `pump()` in `loop()` — never inside `write()`, which would put a TCP send between two halves of a `Serial.printf` on the core servicing SBUS. Overflow drops whole lines, never truncates: half a JSON object freezes a tool panel, a lost 20 Hz sample is invisible. |
 | 2026-08-28 | _(uncommitted)_ | **Added a WebSocket command transport** (`navicore_wsserver.h`, `ws://<softAPIP>/ws`), optional and off by default behind `wifiEnabled`. It carries the same newline-delimited JSON as Direct USB because it feeds the same `processInputLine()` — no second command surface. No 187-byte cap and no fragmentation: it is a direct link, so a large SET_CONFIG crosses in one frame. The load-bearing constraint is the split: the httpd handler runs on **Core 0** beside the ESP-NOW callback and may only copy-enqueue-return, with the command executed from `loop()` on Core 1, because `processInputLine()` writes flash and NVS and drives bit-banged serial. Reply via `httpd_ws_send_frame_async()` (the documented out-of-request API). A line up to 98 KB is queued by POINTER from PSRAM, not by value like `RemoteCliMsg` — ownership transfers with the pointer, and the handler frees it if the queue send fails. Costs +33.5 KB flash / +1.4 KB static RAM; app slot 59.1%. |

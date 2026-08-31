@@ -38,6 +38,7 @@
 
 #include <esp_http_server.h>
 #include <WiFi.h>
+#include <lwip/sockets.h>   // close() - the session-close hook must close the socket itself
 #include "rc_serial.h"   // rcSerial — the capture tee this borrows
 
 // Defined in NaviCore.ino. Declared here because this header is included near the
@@ -196,6 +197,61 @@ inline bool clientConnected() { return wsSink.live(); }
 // is precisely what is about to stop running.
 inline void flushHook() { wsSink.pump(); }
 
+// -- Per-client line accumulators --------------------------------------------
+// ONE PER SOCKET. A single shared accumulator lets any client corrupt any other's
+// command, and the interleaving is not rare - the config tool splits every line
+// over 512 B into several frames, so an OTA DATA line sits half-accumulated for
+// milliseconds at a time. A discovery PING landing in that window fuses into the
+// middle of the base64 payload. Measured on hardware: BOTH lines were destroyed,
+// which is "[OTA] DATA base64 error -44" arriving by a second route.
+//
+// A client that closed mid-line was worse still: nothing owned the tail, so it sat
+// in the buffer and ate the FIRST command of whoever connected next - including a
+// brand new client that had done nothing wrong.
+//
+// buf/cap are deliberately KEPT when a slot is released. The next client in that
+// slot reuses the allocation instead of churning PSRAM; len = 0 is what guarantees
+// none of the previous client's bytes can ever be read.
+struct WsAcc {
+  int    fd  = -1;
+  char*  buf = nullptr;
+  size_t len = 0, cap = 0;
+};
+inline WsAcc wsAcc[WS_MAX_CLIENTS];
+
+// The slot for `fd`, claiming a free one if this socket is new. The eviction policy
+// is deliberately identical to WsSink::begin() - if the two ever disagree, a client
+// ends up holding a sink slot with no accumulator, or the reverse.
+inline WsAcc* accFor(int fd) {
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsAcc[i].fd == fd) return &wsAcc[i];
+  for (int i = 0; i < WS_MAX_CLIENTS; i++)
+    if (wsAcc[i].fd < 0) { wsAcc[i].fd = fd; wsAcc[i].len = 0; return &wsAcc[i]; }
+  wsAcc[0].fd = fd; wsAcc[0].len = 0; return &wsAcc[0];   // full: evict, as begin() does
+}
+
+inline void accRelease(int fd) {
+  for (int i = 0; i < WS_MAX_CLIENTS; i++)
+    if (wsAcc[i].fd == fd) { wsAcc[i].fd = -1; wsAcc[i].len = 0; }
+}
+
+// Session teardown - httpd calls this when a client closes AND when lru_purge
+// evicts one. Before it existed WsSink::drop() had no caller at all: a departed
+// client kept its sink slot until some later send happened to fail on it, and its
+// half-line kept poisoning the accumulator indefinitely.
+//
+// Runs on the httpd task (Core 0). Writing _fds[i] = -1 races pump() on Core 1 the
+// same way begin() already does; it is a single aligned int store, and the only
+// consequence of losing the race is one send to a closed fd, which fails harmlessly
+// and clears the slot anyway.
+//
+// MANDATORY: httpd hands the socket over entirely here, so this must close it.
+inline void wsClose(httpd_handle_t hd, int sockfd) {
+  (void)hd;
+  accRelease(sockfd);
+  wsSink.drop(sockfd);
+  close(sockfd);
+}
+
 // ── Handler — RUNS ON THE HTTPD TASK (Core 0). Enqueue only. ────────────────
 inline esp_err_t wsHandler(httpd_req_t* req) {
   // GET is the opening handshake; esp_http_server completes it for us. Remember the
@@ -236,37 +292,40 @@ inline esp_err_t wsHandler(httpd_req_t* req) {
   // So frame here, as handleSerialInput() does for the serial byte stream: append
   // and dispatch only on a newline. Cheap (a memcpy on Core 0) and it makes the
   // endpoint robust against ANY client's chunking rather than relying on ours.
-  static char*  acc     = nullptr;   // PSRAM, grown on demand
-  static size_t accLen  = 0, accCap = 0;
+  //
+  // PER SOCKET - see WsAcc. One accumulator shared across every client was measured
+  // on hardware to destroy BOTH sides of any interleave.
+  const int sockfd = httpd_req_to_sockfd(req);
+  WsAcc* ac = accFor(sockfd);
 
-  if (accLen + frame.len + 1 > accCap) {
-    size_t want = accLen + frame.len + 1024;
-    if (want > 98304 + 2048) { accLen = 0; free(buf); return ESP_FAIL; }   // runaway
-    char* grown = (char*)ps_realloc(acc, want);
+  if (ac->len + frame.len + 1 > ac->cap) {
+    size_t want = ac->len + frame.len + 1024;
+    if (want > 98304 + 2048) { ac->len = 0; free(buf); return ESP_FAIL; }   // runaway
+    char* grown = (char*)ps_realloc(ac->buf, want);
     if (!grown) { free(buf); return ESP_ERR_NO_MEM; }
-    acc = grown; accCap = want;
+    ac->buf = grown; ac->cap = want;
   }
-  memcpy(acc + accLen, buf, frame.len);
-  accLen += frame.len;
+  memcpy(ac->buf + ac->len, buf, frame.len);
+  ac->len += frame.len;
   free(buf);                       // the accumulator owns the bytes now
 
   // Dispatch every COMPLETE line in what we have; keep any tail for the next frame.
   size_t start = 0;
-  for (size_t i = 0; i < accLen; i++) {
-    if (acc[i] != '\n' && acc[i] != '\r') continue;
+  for (size_t i = 0; i < ac->len; i++) {
+    if (ac->buf[i] != '\n' && ac->buf[i] != '\r') continue;
     size_t len = i - start;
     if (len > 0) {
       char* line = (char*)ps_malloc(len + 1);
       if (line) {
-        memcpy(line, acc + start, len);
+        memcpy(line, ac->buf + start, len);
         line[len] = '\0';
-        WsCmd m = { httpd_req_to_sockfd(req), line };
+        WsCmd m = { sockfd, line };
         if (!wsQueue || xQueueSend(wsQueue, &m, 0) != pdTRUE) free(line);
       }
     }
     start = i + 1;
   }
-  if (start) { memmove(acc, acc + start, accLen - start); accLen -= start; }
+  if (start) { memmove(ac->buf, ac->buf + start, ac->len - start); ac->len -= start; }
   return ESP_OK;
 }
 
@@ -285,6 +344,9 @@ inline bool begin() {
   // the idle task on Core 0 is watched by the task WDT.
   cfg.max_open_sockets = 3;    // a config channel, not a hotspot
   cfg.lru_purge_enable = true; // a stale client must not permanently consume a slot
+  // Release the sink slot and the line accumulator the moment a session ends,
+  // rather than leaving both to be noticed later, or never. See wsClose().
+  cfg.close_fn         = wsClose;
 
   if (httpd_start(&wsServer, &cfg) != ESP_OK) {
     Serial.println("[WS] httpd_start failed — endpoint disabled");
