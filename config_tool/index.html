@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">30.21:38.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">30.21:56.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -17533,11 +17533,27 @@ async function otaUpdateOverUsb() {
     _otaPendingMarkers = [];
 
     // END — verify (SHA) + switch boot slot + reboot into the new image.
+    //
+    // SKIP LATE DATA-PHASE MARKERS. Clearing _otaPendingMarkers above only drops
+    // markers that have ALREADY ARRIVED; chunk ACKs still in flight land during this
+    // wait and the first one would resolve it. The board then commits and reboots
+    // into the new image while the tool reports "verify/finalize failed", fires
+    // ABORT and skips reopenAfterFlash() — a successful update presented as a
+    // failure, on the ordinary path. So wait under ONE deadline and discard
+    // [OTA:ACK,n] / [OTA:NAK,n] until the real verdict arrives, the same shape
+    // otaSendAwaitAck uses for the WCB path.
     setStatus('OTA: verifying…');
     log('All chunks sent — verifying image + switching boot slot…');
-    wait = _otaAwaitMarker(15000);
+    const _endDeadline = Date.now() + 15000;
+    let _endWait = _otaAwaitMarker(15000);
     await sendLine('?OTALOCAL,END', true);
-    m = await wait;
+    for (;;) {
+      m = await _endWait;
+      if (!/^\[OTA:(ACK|NAK),/.test(m)) break;      // a real verdict
+      const _left = _endDeadline - Date.now();
+      if (_left <= 0) throw new Error('timed out waiting for board response');
+      _endWait = _otaAwaitMarker(_left);             // straggler — keep waiting
+    }
     if (!/^\[OTA:END,OK/.test(m)) throw new Error('verify/finalize failed — ' + m);
     log('Verified. Board is rebooting into the new firmware…');
     setStatus('OTA: rebooting…');
@@ -17651,7 +17667,15 @@ async function otaUpdateOverWcb() {
     // no longer aborts the whole multi-thousand-packet transfer. The target treats
     // a resent BEGIN/DATA/END idempotently (re-erase / cursor re-ACK / re-verify).
     // Returns the matched ACK, or null if every attempt times out.
-    const otaSendAwaitAck = async (lineToSend, perTryMs, attempts) => {
+    // `accept` is an EXTRA predicate on top of session+src. END needs it: a DATA
+    // cursor ACK carries the same session, the same src and status 0, so without a
+    // discriminator a duplicate cursor ACK still in flight resolves the END wait and
+    // the tool reports "Verified" for an image the target never verified. The
+    // firmware provides that discriminator deliberately — handleOtaEndPacket() sends
+    // otaWrittenOffset() AFTER otaEnd() has cleared ota.active, so a genuine END ACK
+    // always carries offset 0 while a cursor ACK never does. See the invariant
+    // comment in navicore_ota.h; the WCB firmware holds the same one.
+    const otaSendAwaitAck = async (lineToSend, perTryMs, attempts, accept = null) => {
       for (let attempt = 0; attempt < attempts; attempt++) {
         let w = _otaAwaitMarker(perTryMs);
         await sendLine(lineToSend, true);
@@ -17661,7 +17685,7 @@ async function otaUpdateOverWcb() {
           catch (_) { break; }                               // timeout → resend (next attempt)
           const a = parseAck(m);
           if (!a) throw new Error('unexpected response during stream');
-          if (a.session === session && a.src === target) return a;   // ours
+          if (a.session === session && a.src === target && (!accept || accept(a))) return a;   // ours
           w = _otaAwaitMarker(perTryMs);                     // foreign/stale → keep waiting, no attempt spent
         }
       }
@@ -17761,7 +17785,9 @@ async function otaUpdateOverWcb() {
     // on timeout (re-verify is idempotent) and skip foreign/stale ACKs.
     setStatus('OTA-WCB: verifying on target…');
     log('All chunks sent — verifying + switching boot slot on the target…');
-    ack = await otaSendAwaitAck(`?OTA,END,${target},${session}`, 20000, 2);
+    // offset === 0 is what makes this the END answer and not a stale cursor ACK.
+    ack = await otaSendAwaitAck(`?OTA,END,${target},${session}`, 20000, 2,
+                                a => a.offset === 0);
     if (!ack || ack.status !== 0)
       throw new Error('target verify/finalize failed');
     log(`Verified. RC #${target} is rebooting into the new firmware — it will re-join the mesh shortly.`);
