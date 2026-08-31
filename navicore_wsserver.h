@@ -50,8 +50,19 @@ namespace naviws {
 
 // One command in flight at a time is the honest ceiling: rcSerial's capture tee
 // is a single slot (rc_serial.h), so two commands cannot have their output
-// separated anyway. Depth 3 just absorbs a burst without dropping it.
-static const uint8_t  WS_QUEUE_DEPTH = 3;
+// separated anyway. The depth only has to absorb a burst.
+//
+// Depth 3 did not. drain() runs ONE command per loop() pass, so a client that put
+// several lines in a single frame overran it immediately: measured at 3 of 6 PINGs
+// answered, with the other three discarded in the handler and NOTHING sent back.
+// Silent loss is the worst possible failure here — the client waits forever for a
+// reply to a command the board already threw away.
+static const uint8_t  WS_QUEUE_DEPTH = 8;
+// How long the handler will wait for room rather than discard a command. This is
+// the httpd task on Core 0, NOT the loop task, so blocking here costs a little
+// latency on other sockets and nothing on SBUS. It converts a silent drop into
+// ordinary backpressure, which is what TCP is for.
+static const uint32_t WS_ENQUEUE_WAIT_MS = 50;
 // Flush the reply in ~MSS-sized pieces. A GET_CONFIG reply is tens of KB; one
 // frame per output line would be hundreds of TCP writes, and buffering the whole
 // thing would need another 98 KB of PSRAM for no benefit.
@@ -105,6 +116,16 @@ class WsSink : public Print {
   // server will hold.
   void begin(int fd) {
     for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] == fd) return;   // already known
+    // FIRST client after a quiet period: start from a clean sheet. _dropping is set
+    // when a pump() fails, which is exactly what happens as the last client leaves
+    // mid-line - and nothing cleared it again, because write() returns at !live()
+    // BEFORE reaching the reset, and end() has no caller. It therefore survived the
+    // disconnect and ate the first whole line the next client was sent. Usually that
+    // is one 20 Hz telemetry frame and invisible; when it is the ~14 KB GET_CONFIG
+    // reply the tool comes up with no config at all, which reads as "the droid lost
+    // my settings". Only on the transition to live: clearing while another client is
+    // already connected would discard output buffered for it this pass.
+    if (!live()) { _len = 0; _dropping = false; }
     for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] < 0) { _fds[i] = fd; return; }
     _fds[0] = fd;   // full: evict the oldest rather than refuse the newcomer
   }
@@ -145,20 +166,51 @@ class WsSink : public Print {
   // than taking the others down with it. Returns false only when nobody is left.
   bool pump() {
     if (!_len || !wsServer) return live();
+    // NEVER CUT THROUGH A UTF-8 SEQUENCE. This is a TEXT frame, and RFC 6455 8.1
+    // requires each one to be valid UTF-8 on its own. The buffer is flushed on a
+    // BYTE count (write() at _len >= sizeof(_buf), and flushHook at arbitrary
+    // points), so a multi-byte character in a servo or sound name straddles the
+    // boundary and the frame ends in a bare continuation byte. A conforming client
+    // does not tolerate that - Python's `websockets` fails the connection with 1007,
+    // the reconnect replays the same bytes at the same alignment, and the link dies
+    // in a loop that looks like flaky WiFi. Hold the partial character back for the
+    // next frame instead; it is at most 3 bytes.
+    size_t send = _utf8SafeLen(_buf, _len);
+    if (!send) send = _len;          // cannot improve it - send rather than stall
     httpd_ws_frame_t f = {};
     f.final   = true;
     f.type    = HTTPD_WS_TYPE_TEXT;
     f.payload = (uint8_t*)_buf;
-    f.len     = _len;
+    f.len     = send;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
       if (_fds[i] < 0) continue;
       if (httpd_ws_send_frame_async(wsServer, _fds[i], &f) != ESP_OK) _fds[i] = -1;
     }
-    _len = 0;
+    const size_t left = _len - send;
+    if (left) memmove(_buf, _buf + send, left);
+    _len = left;
     return live();
   }
 
  private:
+  // Longest prefix of b[0..n) that does not end part-way through a UTF-8 sequence.
+  // Returns n when the tail is already complete, which is the overwhelmingly common
+  // case (pure ASCII), so this costs a couple of compares per flush.
+  static size_t _utf8SafeLen(const char* b, size_t n) {
+    if (!n) return 0;
+    size_t i = n, back = 0;
+    while (i > 0 && back < 3 && ((uint8_t)b[i - 1] & 0xC0) == 0x80) { i--; back++; }
+    if (i == 0) return n;                   // nothing but continuations: not UTF-8
+    const uint8_t lead = (uint8_t)b[i - 1];
+    size_t need = 1;
+    if      ((lead & 0x80) == 0x00) need = 1;
+    else if ((lead & 0xE0) == 0xC0) need = 2;
+    else if ((lead & 0xF0) == 0xE0) need = 3;
+    else if ((lead & 0xF8) == 0xF0) need = 4;
+    else                            need = 1;   // stray continuation: treat as done
+    return ((n - (i - 1)) >= need) ? n : i - 1;
+  }
+
   int    _fds[WS_MAX_CLIENTS] = { -1, -1, -1 };
   size_t _len      = 0;
   bool   _dropping = false;
@@ -320,7 +372,15 @@ inline esp_err_t wsHandler(httpd_req_t* req) {
         memcpy(line, ac->buf + start, len);
         line[len] = '\0';
         WsCmd m = { sockfd, line };
-        if (!wsQueue || xQueueSend(wsQueue, &m, 0) != pdTRUE) free(line);
+        // Wait briefly for room instead of discarding. Only a genuinely sustained
+        // overload reaches the free() now, and it says so on the console — a Core-0
+        // print is not teed to the client (rcSerial gates the tee by the arming
+        // core), so USB is the only place this can be reported.
+        if (!wsQueue ||
+            xQueueSend(wsQueue, &m, pdMS_TO_TICKS(WS_ENQUEUE_WAIT_MS)) != pdTRUE) {
+          Serial.println("[WS] command queue full - dropped a line");
+          free(line);
+        }
       }
     }
     start = i + 1;

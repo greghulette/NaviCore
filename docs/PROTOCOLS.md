@@ -41,6 +41,26 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   **lines** are dropped, never truncated — half a JSON object fails at the tool's
   `JSON.parse` and silently freezes a panel, whereas a lost 20 Hz sample is invisible.
 
+- Frames are cut at a **UTF-8 character boundary**, never on the raw byte count.
+  `pump()` flushes on a byte threshold, but RFC 6455 §8.1 requires every TEXT frame to be
+  valid UTF-8 on its own — a multi-byte character in a servo or sound name straddling the
+  2048 B mark produces a frame ending in a bare continuation byte, which a conforming client
+  rejects (Python's `websockets` fails the link with 1007). The reconnect then replays the
+  same bytes at the same alignment, so it looks like flaky WiFi rather than a framing bug.
+  `WsSink::_utf8SafeLen()` holds the partial character back for the next frame; at most 3
+  bytes.
+- **Nothing may latch across a disconnect.** `_dropping` (the drop-to-end-of-line flag) is
+  set when a `pump()` fails, which is exactly what happens as the last client leaves
+  mid-line — and `write()` returns at `!live()` *before* the flag's own reset, so it survived
+  until the next client was sent a whole line, which it ate. `begin()` clears `_dropping` and
+  `_len` on the transition to live, and only on that transition: clearing while another
+  client is already connected would discard output buffered for it this pass.
+- The command queue applies **backpressure, not silent loss.** `drain()` runs one command per
+  `loop()` pass, so a client that puts several lines in one frame drains slower than it
+  fills; at depth 3 with a zero-timeout `xQueueSend`, 3 of 6 `PING`s were answered and the
+  rest were discarded with nothing sent back — the client waits forever for a reply the board
+  already threw away. Depth is 8 and the handler now waits `WS_ENQUEUE_WAIT_MS` (50 ms) for
+  room. Blocking there is safe: it is the httpd task on Core 0, not `loop()`.
 - The line accumulator is **per socket** — one `WsAcc` slot per client (`accFor()`) — and a
   session-close hook (`cfg.close_fn = wsClose`) releases the slot the moment a client goes.
   A **message boundary is not a line boundary**: the tool splits anything over 512 B, so every
@@ -749,6 +769,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-30 | _(uncommitted)_ | **Three more WebSocket sink fixes, all found by audit and reproduced on hardware.** (a) TEXT frames were cut on a byte count, so a multi-byte character straddling the 2048 B buffer produced a frame ending in a bare continuation byte; RFC 6455 requires each TEXT frame to be valid UTF-8 on its own, and a conforming client fails the link with 1007 and then replays the same bytes at the same alignment forever. `_utf8SafeLen()` now holds the partial character back. (b) `_dropping` latched across a disconnect — `write()` returns at `!live()` before the flag's own reset and `end()` had no caller — so the first whole line the *next* client was sent got eaten, which for GET_CONFIG means the tool comes up with no config at all. `begin()` clears it on the transition to live. (c) `WS_QUEUE_DEPTH` was 3 against a `drain()` that runs one command per `loop()` pass, and `xQueueSend` used a zero timeout: measured 3 of 6 PINGs answered, the rest discarded silently. Depth 8 plus a 50 ms enqueue wait turns that into backpressure. |
 | 2026-08-30 | _(uncommitted)_ | **The WebSocket line accumulator is now per socket, and sessions have a close hook.** It was a single function-level `static` shared by every client, so any interleaving fused two clients' bytes into one garbage line. Not a rare race: the tool splits every line over 512 B, so an OTA `DATA` line is half-accumulated most of the time, and one discovery `PING` landing in that window corrupts the chunk — reproduced on hardware, where two valid `PING`s returned **zero** `PONG`s because both lines were destroyed. A client that disconnected mid-line left an unowned tail that ate the first command of the next client to connect, including a brand new one. Fixed with one `WsAcc` slot per fd (`accFor()`), eviction policy deliberately identical to `WsSink::begin()` so the two cannot drift, and `cfg.close_fn = wsClose` to release the accumulator and the sink slot at session end — which also gave `WsSink::drop()` its first caller; until now nothing called it and a departed client held its sink slot until some later send happened to fail on it. |
 | 2026-08-28 | _(uncommitted)_ | **Fixed the live monitor over WebSocket — the cause was not the capture tee.** `sendPWMUpdate()` is gated on `Serial.availableForWrite()`, and with no USB host attached (i.e. every WiFi session) that is permanently 0, so every monitor frame was dropped BEFORE it could reach the tee. Command replies worked throughout because they are unguarded `Serial.println`; `PWM_UPDATE` is not, and that difference was the entire bug. The guard itself is correct and stays — an unguarded USB write blocks up to HWCDC 50 ms and starves the SBUS decode in `loop()` — but it asks "can USB take this?" when the question is "can the DESTINATION take this?". When USB cannot, the frame now goes straight to the socket via `naviws::printlnDirect()`, which only appends to the sink buffer and so can never stall `loop()`. **The same guard applies to `wcbStreamLog()` and `vlogf()`**, which are still USB-only over a WebSocket session — deliberate for now, since they are debug chatter rather than the panel. |
 | 2026-08-28 | _(uncommitted)_ | **The WebSocket endpoint is now a console mirror, not request/response.** The `rcSerial` tee stays armed for the whole client session instead of only around `processInputLine()`. Symptom of the old behaviour: replies, `WCB_STATUS` and `MESH_STATS` all worked while the **live monitor was completely dead** — no SBUS, no button presses, no stick movement — because `PWM_UPDATE` is emitted from `loop()`, outside any command. Two rules recorded with it: `drain()` must re-arm every pass (the capture is one slot and `drainRemoteCli()` disarms unconditionally, so a single relayed CLI line would otherwise end the monitor permanently), and the sink buffers and sends only from `pump()` in `loop()` — never inside `write()`, which would put a TCP send between two halves of a `Serial.printf` on the core servicing SBUS. Overflow drops whole lines, never truncates: half a JSON object freezes a tool panel, a lost 20 Hz sample is invisible. |
