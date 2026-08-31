@@ -2214,11 +2214,34 @@ void rcDispatch(int buttonId, uint8_t tapCount) {
   // flashes the tier that fired); a dropped one costs a flash, nothing more.
   {
     char tb[96];
+    // No trailing newline in the buffer: the USB path appends one, and the
+    // WebSocket path goes through printlnDirect(), which appends its own.
     const int tn = snprintf(tb, sizeof(tb),
-                            "{\"sys\":1,\"type\":\"rc_trig\",\"id\":%u,\"mode\":%d,\"btn\":%d,\"tap\":%d}\n",
+                            "{\"sys\":1,\"type\":\"rc_trig\",\"id\":%u,\"mode\":%d,\"btn\":%d,\"tap\":%d}",
                             rcConfig.wcbNetwork.deviceId, mode, btn, tapCount);
-    if (tn > 0 && tn < (int)sizeof(tb) && Serial.availableForWrite() >= tn)
-      Serial.write((const uint8_t*)tb, (size_t)tn);
+    if (tn > 0 && tn < (int)sizeof(tb)) {
+      if (Serial.availableForWrite() >= tn + 1) {
+        Serial.write((const uint8_t*)tb, (size_t)tn);
+        Serial.write((uint8_t)'\n');
+      } else {
+        // SAME TRAP AS PWM_UPDATE, and it hid in exactly the same place. The
+        // guard above asks "can USB take this?" when the question is "can the
+        // DESTINATION take this?" — with no USB host attached (every WiFi
+        // session) availableForWrite() is permanently 0, so the event was
+        // dropped before it could ever reach the capture tee.
+        //
+        // The symptom is precise and easy to misread as a UI bug: the
+        // transmitter SVG still glows, because that is driven by PWM_UPDATE,
+        // while the assignment cards never flash, because only
+        // flashAssignmentTier() needs rc_trig. It looks like the assignment
+        // list broke; nothing was wrong with it.
+        //
+        // Unlike vlogf() and wcbStreamLog(), which stay USB-only on purpose
+        // (debug chatter, see docs/PROTOCOLS.md), this one drives a panel the
+        // user is actively watching, so it has to reach the socket too.
+        naviws::printlnDirect(tb);
+      }
+    }
   }
 
   const RcMapping& mapping = rcConfig.mappings[rcMapIndex(mode, btn)];

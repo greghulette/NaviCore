@@ -61,6 +61,17 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   rest were discarded with nothing sent back — the client waits forever for a reply the board
   already threw away. Depth is 8 and the handler now waits `WS_ENQUEUE_WAIT_MS` (50 ms) for
   room. Blocking there is safe: it is the httpd task on Core 0, not `loop()`.
+- **Every emitter a PANEL depends on must fall back to the socket.** The
+  `Serial.availableForWrite()` guard is correct and stays — an unguarded USB write
+  blocks up to HWCDC's 50 ms tx timeout and starves the SBUS decode in `loop()` — but it
+  asks "can USB take this?" when the question is "can the DESTINATION take this?", and
+  with no USB host attached (every WiFi session) it is permanently 0. `PWM_UPDATE` and
+  `rc_trig` both fall back to `naviws::printlnDirect()`. `vlogf()` and `wcbStreamLog()`
+  deliberately do not — they are debug chatter, not a panel.
+  The failure this causes is precise and reads as a UI bug rather than a transport one:
+  with `rc_trig` dropped, the transmitter SVG still glowed (that is `PWM_UPDATE`-driven)
+  while the assignment cards never flashed, because only `flashAssignmentTier()` needs
+  `rc_trig`. Nothing was wrong with the assignment list.
 - The line accumulator is **per socket** — one `WsAcc` slot per client (`accFor()`) — and a
   session-close hook (`cfg.close_fn = wsClose`) releases the slot the moment a client goes.
   A **message boundary is not a line boundary**: the tool splits anything over 512 B, so every
@@ -769,6 +780,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-31 | _(uncommitted)_ | **`rc_trig` now falls back to the WebSocket sink**, the second instance of the `availableForWrite()` trap. Fixing `PWM_UPDATE` in `bdf476e` did not sweep the other guarded emitters, so over WiFi every trigger event was still dropped before reaching the capture tee. Symptom: the transmitter SVG glowed but the Current Assignments cards never flashed orange — which looks like a broken assignment list and is actually a missing message. `vlogf()`/`wcbStreamLog()` stay USB-only on purpose. |
 | 2026-08-30 | _(uncommitted)_ | **Both OTA END waits now skip late DATA-phase markers.** Clearing `_otaPendingMarkers` before sending END only drops markers that have already ARRIVED; chunk ACKs still in flight land during the wait. On the USB path the first one resolved the wait, so the board committed and rebooted into the new image while the tool said "verify/finalize failed", fired ABORT and skipped `reopenAfterFlash()` — a successful update presented as a failure on the ordinary path. On the WCB path it was the opposite and worse: a cursor ACK carries the same session, src and status 0, so it read as **Verified** for an image the target never verified. Both now wait under one deadline and discard stragglers, and the WCB path checks the offset-0 discriminator the firmware deliberately provides (§6 of CONFIG_SCHEMA.md). |
 | 2026-08-30 | _(uncommitted)_ | **Three more WebSocket sink fixes, all found by audit and reproduced on hardware.** (a) TEXT frames were cut on a byte count, so a multi-byte character straddling the 2048 B buffer produced a frame ending in a bare continuation byte; RFC 6455 requires each TEXT frame to be valid UTF-8 on its own, and a conforming client fails the link with 1007 and then replays the same bytes at the same alignment forever. `_utf8SafeLen()` now holds the partial character back. (b) `_dropping` latched across a disconnect — `write()` returns at `!live()` before the flag's own reset and `end()` had no caller — so the first whole line the *next* client was sent got eaten, which for GET_CONFIG means the tool comes up with no config at all. `begin()` clears it on the transition to live. (c) `WS_QUEUE_DEPTH` was 3 against a `drain()` that runs one command per `loop()` pass, and `xQueueSend` used a zero timeout: measured 3 of 6 PINGs answered, the rest discarded silently. Depth 8 plus a 50 ms enqueue wait turns that into backpressure. |
 | 2026-08-30 | _(uncommitted)_ | **The WebSocket line accumulator is now per socket, and sessions have a close hook.** It was a single function-level `static` shared by every client, so any interleaving fused two clients' bytes into one garbage line. Not a rare race: the tool splits every line over 512 B, so an OTA `DATA` line is half-accumulated most of the time, and one discovery `PING` landing in that window corrupts the chunk — reproduced on hardware, where two valid `PING`s returned **zero** `PONG`s because both lines were destroyed. A client that disconnected mid-line left an unowned tail that ate the first command of the next client to connect, including a brand new one. Fixed with one `WsAcc` slot per fd (`accFor()`), eviction policy deliberately identical to `WsSink::begin()` so the two cannot drift, and `cfg.close_fn = wsClose` to release the accumulator and the sink slot at session end — which also gave `WsSink::drop()` its first caller; until now nothing called it and a departed client held its sink slot until some later send happened to fail on it. |
