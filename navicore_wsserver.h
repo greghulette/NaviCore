@@ -102,6 +102,18 @@ inline httpd_handle_t wsServer = nullptr;
 // object, which fails at JSON.parse and (per the tool's own notes) silently
 // freezes a panel. Dropping to the next newline loses a sample instead, which for
 // 20 Hz telemetry is invisible.
+// One queued transmission. Allocated by pump() on the loop task, freed by
+// wsSendWork() on the httpd task after the bytes are on the wire.
+struct WsTx {
+  char*  data;
+  size_t len;
+  int    fds[WS_MAX_CLIENTS];
+};
+
+// Forward declaration: pump() queues this, and it is defined below WsSink
+// because it needs the sink to drop a dead fd.
+void wsSendWork(void* arg);
+
 class WsSink : public Print {
  public:
   // MULTIPLE CLIENTS, not one.
@@ -164,6 +176,23 @@ class WsSink : public Print {
   // Called from loop() (and from write() when the buffer fills). Broadcasts to
   // every connected client; one that has gone away is dropped individually rather
   // than taking the others down with it. Returns false only when nobody is left.
+  // Sends are MARSHALLED ONTO THE HTTPD TASK, never issued from here.
+  //
+  // esp_http_server answers a client's PING with a PONG from its own task, on
+  // Core 0. pump() runs on Core 1 (loop). Nothing serialises the two, so a PONG
+  // and a data frame could be written to the same TCP socket at once and their
+  // bytes interleaved -- the client then reads a frame header out of the middle
+  // of a payload and kills the connection with 1002 "invalid opcode".
+  //
+  // Measured: with client pings on, the link died every ~90 s; with pings off,
+  // zero drops in 5.5 minutes. A read-only raw client that never pinged (so the
+  // droid never ponged) ran 7,393 frames / 2.5 MB clean through the same window
+  // in which the pinging client dropped three times.
+  //
+  // Turning pings off is not the fix -- ANY compliant client may ping, and the
+  // keepalive is what detects a vanished AP in ~3 s instead of ~34 s.
+  // httpd_queue_work() runs the send on the httpd task, so every write to the
+  // socket (ours and the server's own control frames) is issued by one task.
   bool pump() {
     if (!_len || !wsServer) return live();
     // NEVER CUT THROUGH A UTF-8 SEQUENCE. This is a TEXT frame, and RFC 6455 8.1
@@ -177,15 +206,26 @@ class WsSink : public Print {
     // next frame instead; it is at most 3 bytes.
     size_t send = _utf8SafeLen(_buf, _len);
     if (!send) send = _len;          // cannot improve it - send rather than stall
-    httpd_ws_frame_t f = {};
-    f.final   = true;
-    f.type    = HTTPD_WS_TYPE_TEXT;
-    f.payload = (uint8_t*)_buf;
-    f.len     = send;
-    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-      if (_fds[i] < 0) continue;
-      if (httpd_ws_send_frame_async(wsServer, _fds[i], &f) != ESP_OK) _fds[i] = -1;
+
+    // The work item owns its own copy: _buf is reused the moment this returns,
+    // and the send happens later on the other task.
+    WsTx* tx = (WsTx*)ps_malloc(sizeof(WsTx));
+    char* copy = tx ? (char*)ps_malloc(send) : nullptr;
+    if (!tx || !copy) {
+      if (copy) free(copy);
+      if (tx) free(tx);
+      return live();                 // keep the bytes buffered; the next pass retries
     }
+    memcpy(copy, _buf, send);
+    tx->data = copy;
+    tx->len  = send;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) tx->fds[i] = _fds[i];
+
+    if (httpd_queue_work(wsServer, wsSendWork, tx) != ESP_OK) {
+      free(copy); free(tx);
+      return live();                 // queue full — hold the bytes, try next pass
+    }
+
     const size_t left = _len - send;
     if (left) memmove(_buf, _buf + send, left);
     _len = left;
@@ -220,6 +260,28 @@ class WsSink : public Print {
 };
 
 inline WsSink wsSink;
+
+// RUNS ON THE HTTPD TASK. Every socket write goes through here, which is the
+// whole point: the server's own control frames (a PONG answering a client PING)
+// are issued by this same task, so they can no longer interleave with ours.
+inline void wsSendWork(void* arg) {
+  WsTx* tx = (WsTx*)arg;
+  if (!tx) return;
+  if (wsServer && tx->len) {
+    httpd_ws_frame_t f = {};
+    f.final   = true;
+    f.type    = HTTPD_WS_TYPE_TEXT;
+    f.payload = (uint8_t*)tx->data;
+    f.len     = tx->len;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+      if (tx->fds[i] < 0) continue;
+      if (httpd_ws_send_frame_async(wsServer, tx->fds[i], &f) != ESP_OK)
+        wsSink.drop(tx->fds[i]);     // that client is gone; stop writing to it
+    }
+  }
+  free(tx->data);
+  free(tx);
+}
 
 // Deliver a line to a connected WebSocket client WITHOUT going through Serial.
 //

@@ -72,6 +72,16 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   with `rc_trig` dropped, the transmitter SVG still glowed (that is `PWM_UPDATE`-driven)
   while the assignment cards never flashed, because only `flashAssignmentTier()` needs
   `rc_trig`. Nothing was wrong with the assignment list.
+- **Only ONE task may write the socket, so sends are marshalled onto the httpd task**
+  via `httpd_queue_work()` — never issued from `loop()`. `esp_http_server` answers a
+  client's PING with a PONG from its own task on Core 0; `pump()` runs on Core 1. With
+  nothing serialising them, a PONG and a data frame interleave on the same TCP socket and
+  the client reads a frame header out of the middle of a payload, killing the connection
+  with `1002 invalid opcode`. Measured: a drop every ~90 s with client pings on, zero in
+  5.5 min with them off, and a read-only raw client that never pinged ran 7,393 frames /
+  2.5 MB clean through the same window in which the pinging client dropped three times.
+  Disabling pings is NOT the fix — any compliant client may ping. The queued work item
+  owns a copy of the bytes, because `_buf` is reused as soon as `pump()` returns.
 - The line accumulator is **per socket** — one `WsAcc` slot per client (`accFor()`) — and a
   session-close hook (`cfg.close_fn = wsClose`) releases the slot the moment a client goes.
   A **message boundary is not a line boundary**: the tool splits anything over 512 B, so every
@@ -780,6 +790,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-31 | _(uncommitted)_ | **WebSocket sends are now issued only from the httpd task.** Two tasks were writing the same socket — `pump()` on Core 1 and the server's own PONG on Core 0 — so their bytes interleaved and clients died with `1002 invalid opcode` roughly every 90 s. Diagnosed by parsing the raw frame stream: a read-only client that never pinged stayed clean for 2.5 MB while the pinging client dropped three times in the same window. `pump()` now copies the bytes and hands them to `httpd_queue_work()`. |
 | 2026-08-31 | _(uncommitted)_ | **`rc_trig` now falls back to the WebSocket sink**, the second instance of the `availableForWrite()` trap. Fixing `PWM_UPDATE` in `bdf476e` did not sweep the other guarded emitters, so over WiFi every trigger event was still dropped before reaching the capture tee. Symptom: the transmitter SVG glowed but the Current Assignments cards never flashed orange — which looks like a broken assignment list and is actually a missing message. `vlogf()`/`wcbStreamLog()` stay USB-only on purpose. |
 | 2026-08-30 | _(uncommitted)_ | **Both OTA END waits now skip late DATA-phase markers.** Clearing `_otaPendingMarkers` before sending END only drops markers that have already ARRIVED; chunk ACKs still in flight land during the wait. On the USB path the first one resolved the wait, so the board committed and rebooted into the new image while the tool said "verify/finalize failed", fired ABORT and skipped `reopenAfterFlash()` — a successful update presented as a failure on the ordinary path. On the WCB path it was the opposite and worse: a cursor ACK carries the same session, src and status 0, so it read as **Verified** for an image the target never verified. Both now wait under one deadline and discard stragglers, and the WCB path checks the offset-0 discriminator the firmware deliberately provides (§6 of CONFIG_SCHEMA.md). |
 | 2026-08-30 | _(uncommitted)_ | **Three more WebSocket sink fixes, all found by audit and reproduced on hardware.** (a) TEXT frames were cut on a byte count, so a multi-byte character straddling the 2048 B buffer produced a frame ending in a bare continuation byte; RFC 6455 requires each TEXT frame to be valid UTF-8 on its own, and a conforming client fails the link with 1007 and then replays the same bytes at the same alignment forever. `_utf8SafeLen()` now holds the partial character back. (b) `_dropping` latched across a disconnect — `write()` returns at `!live()` before the flag's own reset and `end()` had no caller — so the first whole line the *next* client was sent got eaten, which for GET_CONFIG means the tool comes up with no config at all. `begin()` clears it on the transition to live. (c) `WS_QUEUE_DEPTH` was 3 against a `drain()` that runs one command per `loop()` pass, and `xQueueSend` used a zero timeout: measured 3 of 6 PINGs answered, the rest discarded silently. Depth 8 plus a 50 ms enqueue wait turns that into backpressure. |
