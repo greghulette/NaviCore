@@ -2301,8 +2301,8 @@
     </div>
 
     <!-- ─── Support Footer ───────────────────────────────────────────── -->
-    <div style="margin-top:48px;border-top:1px solid var(--border);padding:32px 8px 24px;display:flex;align-items:center;justify-content:space-between;gap:32px;flex-wrap:wrap">
-      <div style="display:flex;align-items:center;gap:18px">
+    <div class="nc-support-footer" style="margin-top:48px;border-top:1px solid var(--border);padding:32px 8px 24px;display:flex;align-items:center;justify-content:space-between;gap:24px 32px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:18px;min-width:0">
         <a href="https://beacons.ai/greghulette" target="_blank" rel="noopener" title="Scan for all contact links">
           <img src="../Images/qr-code.png" alt="Contact QR Code"
                style="width:72px;height:72px;border-radius:5px;display:block;opacity:0.85;transition:opacity 0.15s"
@@ -2315,11 +2315,11 @@
           </div>
         </div>
       </div>
-      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;min-width:0">
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">30.21:56.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.09:48.Q.AUG.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -19855,6 +19855,21 @@ body.view-note .cs-note{display:inline}
 .cs-box td{padding:3px 6px;vertical-align:top;border:0}
 .cs-tl{font-weight:600;white-space:nowrap;color:#555;padding-right:12px}
 .cs-empty{color:#999;font-style:italic;font-size:13px}
+/* Support footer — three blocks spread across one row for as long as they fit.
+   Their natural widths total ~1150px, which an ordinary window is right on the
+   edge of, so it used to flip in and out of wrapping as the window was resized:
+   space-between pushed the contact block and the version block hard against
+   opposite edges and stranded the buttons alone on a second row.
+   min-width:0 on the two text blocks (set inline) is what fixes the common case
+   — flex items default to min-width:auto and refuse to shrink below their
+   content, so the row wrapped rather than letting a line of text reflow.
+   Below the narrow breakpoint they genuinely cannot share a row, so stop
+   spreading and centre instead: space-between on a wrapped row always strands
+   the last line hard left, which is the ugly state this is avoiding. */
+@media (max-width: 760px){
+  .nc-support-footer{ justify-content:center; text-align:center; }
+  .nc-support-footer > div{ justify-content:center; }
+}
 @media (max-width:560px){
   .wrap{padding:14px 10px}
   section{padding:12px}
