@@ -1563,6 +1563,18 @@ static void vlogf(const char* fmt, ...) {
   // size, or the terminating NUL ships as a payload byte on the console.
   if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
   if (Serial.availableForWrite() >= n) Serial.write((const uint8_t*)buf, (size_t)n);
+  else naviws::writeDirect(buf, (size_t)n);
+  // THE THIRD INSTANCE of the availableForWrite() trap, after PWM_UPDATE and
+  // rc_trig. Everything dlog() emits comes through here -- every DBG_MAESTRO,
+  // DBG_WCB and friend -- so with no USB host attached (i.e. every WiFi session)
+  // the entire debug terminal was silent. Turning a category on did nothing at
+  // all, which reads as "debug flags are broken" rather than "the transport
+  // dropped it".
+  //
+  // The guard above still stands and is still right: an unguarded USB write
+  // blocks up to HWCDC's 50 ms tx timeout and starves the SBUS decode in loop().
+  // writeDirect() only appends to the sink buffer, so it can never stall loop(),
+  // and on overflow the sink drops whole lines rather than truncating one.
 }
 
 // Dispatch an HCR action.

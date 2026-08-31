@@ -261,6 +261,16 @@ class WsSink : public Print {
 
 inline WsSink wsSink;
 
+// The core drain() runs on, i.e. the loop task. Recorded there and used to gate
+// the direct emitters below.
+//
+// It deliberately does NOT ask rcSerial whether its capture is armed: the tee is
+// disarmed and re-armed constantly (drainRemoteCli() disarms unconditionally),
+// and printlnDirect() exists precisely to be independent of that state. Gating on
+// "is the tee armed right now" silently dropped every PWM_UPDATE whose loop pass
+// happened to fall on the disarmed side -- measured as a completely dead monitor.
+inline int wsLoopCore = -1;
+
 // RUNS ON THE HTTPD TASK. Every socket write goes through here, which is the
 // whole point: the server's own control frames (a PONG answering a client PING)
 // are issued by this same task, so they can no longer interleave with ours.
@@ -298,9 +308,20 @@ inline void wsSendWork(void* arg) {
 // Non-blocking by construction — the sink only appends to its buffer, and drops whole
 // lines rather than truncating when full, so this can never stall loop().
 inline void printlnDirect(const char* s) {
-  if (!wsSink.live()) return;
+  // Only the loop core may touch the sink buffer -- the same rule rc_serial.h's
+  // tee enforces, for the same reason: a Core-0 (WiFi / ESP-NOW) caller would race
+  // the single-threaded buffer. Gated on the CORE, not on the tee's armed state.
+  if (!wsSink.live() || (wsLoopCore >= 0 && xPortGetCoreID() != wsLoopCore)) return;
   wsSink.write((const uint8_t*)s, strlen(s));
   wsSink.write((uint8_t)'\n');
+}
+
+// As above, but writes EXACTLY n bytes and appends nothing. For callers whose
+// text already carries its own newline -- vlogf()'s format strings do, and a
+// second one would show as a blank line in the terminal for every debug message.
+inline void writeDirect(const char* s, size_t n) {
+  if (!n || !wsSink.live() || (wsLoopCore >= 0 && xPortGetCoreID() != wsLoopCore)) return;
+  wsSink.write((const uint8_t*)s, n);
 }
 
 inline bool clientConnected() { return wsSink.live(); }
@@ -502,6 +523,7 @@ inline void drain() {
   // 2. FLUSH. The sink buffers during arbitrary Serial.printf calls; this is the
   //    one place the bytes actually go out, so network I/O stays at a known point
   //    on the core that must also service SBUS.
+  wsLoopCore = xPortGetCoreID();   // this IS the loop task; see wsLoopCore
   if (wsSink.live()) {
     rcSerial.armCapture(&wsSink, flushHook);
     if (!wsSink.pump()) rcSerial.disarmCapture();   // client gone — stop teeing

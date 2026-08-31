@@ -86,6 +86,7 @@ class RcSerial : public Stream {
   // (e.g. ?REC,EDITLOAD) pick RTERM pacing vs full-speed USB.
   bool captureArmed() const    { return _cap != nullptr; }
 
+
  private:
   Print* _cap      = nullptr;
   void (*_capFlush)() = nullptr;   // push a buffering sink before the CPU stalls

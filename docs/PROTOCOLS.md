@@ -66,8 +66,18 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   blocks up to HWCDC's 50 ms tx timeout and starves the SBUS decode in `loop()` — but it
   asks "can USB take this?" when the question is "can the DESTINATION take this?", and
   with no USB host attached (every WiFi session) it is permanently 0. `PWM_UPDATE` and
-  `rc_trig` both fall back to `naviws::printlnDirect()`. `vlogf()` and `wcbStreamLog()`
-  deliberately do not — they are debug chatter, not a panel.
+  `rc_trig` fall back to `naviws::printlnDirect()`, and `vlogf()` — which is what every
+  `dlog()` category goes through — falls back to `naviws::writeDirect()` (same thing, but
+  appending no newline, since vlogf's format strings carry their own). With that missing,
+  the whole debug terminal was silent over WiFi: turning on `DBG_MAESTRO` or `DBG_WCB` did
+  nothing at all, which reads as "debug flags are broken" rather than "the transport
+  dropped it".
+- The direct emitters are gated on the **loop core** (`naviws::wsLoopCore`, recorded in
+  `drain()`), not on whether the `rcSerial` tee is armed. They exist precisely to be
+  independent of the tee's state — it is disarmed and re-armed constantly, since
+  `drainRemoteCli()` disarms unconditionally — so gating on "armed right now" silently
+  drops every frame whose loop pass lands on the disarmed side. The core check is what
+  keeps a Core-0 caller from racing the single-threaded sink buffer.
   The failure this causes is precise and reads as a UI bug rather than a transport one:
   with `rc_trig` dropped, the transmitter SVG still glowed (that is `PWM_UPDATE`-driven)
   while the assignment cards never flashed, because only `flashAssignmentTier()` needs
@@ -790,6 +800,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-31 | _(uncommitted)_ | **`vlogf()` now falls back to the WS sink — the debug terminal was entirely dead over WiFi.** Third instance of the `availableForWrite()` trap after `PWM_UPDATE` and `rc_trig`, and the widest: every `dlog()` category rides on `vlogf()`, so enabling `DBG_MAESTRO`/`DBG_WCB` produced nothing. Verified with a read-only `?MAE,GET`: 0 `[DISPATCH]` lines with the flag off, 3 with it on. Also fixed the gate on the direct emitters — briefly tied to the tee's armed state, which killed PWM_UPDATE; it is the loop CORE that matters, now recorded as `wsLoopCore`. |
 | 2026-08-31 | _(uncommitted)_ | **WebSocket sends are now issued only from the httpd task.** Two tasks were writing the same socket — `pump()` on Core 1 and the server's own PONG on Core 0 — so their bytes interleaved and clients died with `1002 invalid opcode` roughly every 90 s. Diagnosed by parsing the raw frame stream: a read-only client that never pinged stayed clean for 2.5 MB while the pinging client dropped three times in the same window. `pump()` now copies the bytes and hands them to `httpd_queue_work()`. |
 | 2026-08-31 | _(uncommitted)_ | **`rc_trig` now falls back to the WebSocket sink**, the second instance of the `availableForWrite()` trap. Fixing `PWM_UPDATE` in `bdf476e` did not sweep the other guarded emitters, so over WiFi every trigger event was still dropped before reaching the capture tee. Symptom: the transmitter SVG glowed but the Current Assignments cards never flashed orange — which looks like a broken assignment list and is actually a missing message. `vlogf()`/`wcbStreamLog()` stay USB-only on purpose. |
 | 2026-08-30 | _(uncommitted)_ | **Both OTA END waits now skip late DATA-phase markers.** Clearing `_otaPendingMarkers` before sending END only drops markers that have already ARRIVED; chunk ACKs still in flight land during the wait. On the USB path the first one resolved the wait, so the board committed and rebooted into the new image while the tool said "verify/finalize failed", fired ABORT and skipped `reopenAfterFlash()` — a successful update presented as a failure on the ordinary path. On the WCB path it was the opposite and worse: a cursor ACK carries the same session, src and status 0, so it read as **Verified** for an image the target never verified. Both now wait under one deadline and discard stragglers, and the WCB path checks the offset-0 discriminator the firmware deliberately provides (§6 of CONFIG_SCHEMA.md). |
