@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">31.15:31.Q.AUG.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">01.08:57.Q.SEP.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -17288,7 +17288,7 @@ function _otaLog(msg) {
   console.log('[reconnect]', msg);
 }
 
-async function reopenAfterFlash(p) {
+async function reopenAfterFlash(p, budgetMs = 75000, onWait = null) {
   // Let the board fully boot (setup() has a ~1.5 s delay) AND the native-USB
   // device re-enumerate before the first attempt.
   await new Promise(r => setTimeout(r, 3000));
@@ -17311,7 +17311,18 @@ async function reopenAfterFlash(p) {
   // it's unambiguously the board, e.g. after a re-enumeration that minted a new
   // object). Otherwise we give up cleanly and let the user reconnect by hand.
   // allowViaWcb=false: direct-USB session, never auto-bridge to a WCB.
-  for (let cycle = 0; cycle < 12; cycle++) {
+  // DEADLINE, NOT A CYCLE COUNT. Twelve cycles of (600 ms PONG wait + 500 ms
+  // pause) is about sixteen seconds, which is fine over USB — the device
+  // re-enumerates in a few — but nowhere near enough over WiFi. There the board
+  // reboots, its SoftAP disappears, this machine has to notice and re-associate,
+  // and only then can the socket come back: measured end to end at ~33 s. So the
+  // old count gave up while the update was still landing perfectly well, and said
+  // so in a way that reads as failure.
+  const _deadline = Date.now() + budgetMs;
+  for (let cycle = 0; Date.now() < _deadline; cycle++) {
+    // Say how long we have been waiting. Silence for half a minute is what makes
+    // people conclude it broke and start pulling cables mid-boot.
+    if (onWait) { try { onWait(Math.round((Date.now() - (_deadline - budgetMs)) / 1000)); } catch (_) {} }
     // (a) The original handle — the usual, unambiguous path.
     try {
       const live = await openPortAndStart(p, 600, /*allowViaWcb=*/false);
@@ -17321,10 +17332,10 @@ async function reopenAfterFlash(p) {
       // failed" means the USB device is not present yet. Without this the give-up
       // message says only "reconnect manually", which is the same text for both
       // and leaves nothing to diagnose from.
-      _otaLog(`reconnect ${cycle + 1}/12: port opened but no PONG in ~3 s`);
+      _otaLog(`reconnect attempt ${cycle + 1}: port opened but no PONG yet`);
       await disconnect();                    // opened but no PONG yet (still booting) — retry
     } catch (e) {
-      _otaLog(`reconnect ${cycle + 1}/12: open() failed — ${(e && e.message) || e}`);
+      _otaLog(`reconnect attempt ${cycle + 1}: open() failed — ${(e && e.message) || e}`);
       try { await p.close(); } catch (_) {}  // open() failed (device still down) — retry
     }
     // (b) Only if the handle was truly invalidated AND there is exactly ONE device
@@ -17353,6 +17364,10 @@ async function reopenAfterFlash(p) {
 // markers (the board writes the INACTIVE OTA slot, SHA-verifies, then reboots).
 // Brick-safe: a failed/interrupted transfer leaves the current app running.
 let _otaInProgress    = false;
+// Set the moment the board reports [OTA:END,OK]. Past that point the image is
+// verified and the boot slot switched, so no later error may be reported as a
+// failed update -- see the catch in otaUpdateOverUsb().
+let _otaCommitted     = false;
 let _otaMarkerResolver = null;   // set while awaiting the next [OTA:*] marker
 // Markers that arrived with NO active waiter. USB-CDC can coalesce two markers
 // emitted a few ms apart (e.g. [OTA:BEGIN,START] then a fast-erase [OTA:BEGIN,OK])
@@ -17415,6 +17430,7 @@ async function otaUpdateOverUsb() {
 
   _otaInProgress = true;
   _otaPendingMarkers = []; _otaMarkerResolver = null;   // discard any stale marker from a prior/aborted run
+  _otaCommitted = false;
   const btn = document.getElementById('btn-fw-ota');
   if (btn) { btn.disabled = true; btn.textContent = '⚡ Updating over USB…'; }
   _otaLockPortOwnerButtons(true);
@@ -17555,22 +17571,52 @@ async function otaUpdateOverUsb() {
       _endWait = _otaAwaitMarker(_left);             // straggler — keep waiting
     }
     if (!/^\[OTA:END,OK/.test(m)) throw new Error('verify/finalize failed — ' + m);
+
+    // FROM HERE THE UPDATE HAS SUCCEEDED. The board SHA-verified the image and
+    // switched its boot slot; it is already rebooting into the new firmware and
+    // nothing this tool does next can undo that. So everything below is reported
+    // as reconnection progress, never as an OTA failure -- and the ABORT in the
+    // catch must not fire either, because there is no session left to abort and
+    // the word "failed" on a completed update is what generates support requests.
+    _otaCommitted = true;
     log('Verified. Board is rebooting into the new firmware…');
     setStatus('OTA: rebooting…');
 
     // Tear down THIS live OTA session first — it still holds the port open, which
     // would block re-opening it. Capture the handle, disconnect, then reconnect to
-    // that SAME device across the reboot's USB re-enumeration.
+    // that SAME device across the reboot's re-enumeration (USB) or AP + socket
+    // recovery (WiFi).
     const navicorePort = port;
     try { await disconnect(); } catch (_) {}
-    const ok = await reopenAfterFlash(navicorePort);
-    setStatus(ok ? 'OTA complete — reconnected. ✓' : 'OTA complete — reconnect manually.');
-    log(ok ? 'Reconnected to the updated board.' : 'Board updated; please reconnect manually.');
+    let ok = false;
+    try {
+      ok = await reopenAfterFlash(navicorePort, 75000, secs => {
+        setStatus(`OTA complete ✓ — waiting for the board to come back (${secs}s)…`);
+      });
+    } catch (e) {
+      _otaLog('reconnect threw: ' + ((e && e.message) || e));
+    }
+    if (ok) {
+      setStatus('OTA complete — reconnected. ✓');
+      log('Reconnected to the updated board.');
+    } else {
+      // NOT a failure. Say what happened and what to do, in that order.
+      setStatus('OTA complete ✓ — board updated; reconnect when it is back');
+      log('Board updated and verified. It did not answer within 75 s — if you are on '
+        + 'WiFi, rejoin the NaviCore network; otherwise click Connect.');
+    }
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
-    log('OTA failed: ' + msg);
-    setStatus('OTA failed: ' + msg);
-    try { await sendLine('?OTALOCAL,ABORT', true); } catch (_) {}
+    if (_otaCommitted) {
+      // Reached only if something after the verified END threw. The image is on
+      // the board either way; do not call that a failed update.
+      log('Board updated and verified; the reconnect did not complete — ' + msg);
+      setStatus('OTA complete ✓ — board updated; reconnect when it is back');
+    } else {
+      log('OTA failed: ' + msg);
+      setStatus('OTA failed: ' + msg);
+      try { await sendLine('?OTALOCAL,ABORT', true); } catch (_) {}
+    }
   } finally {
     _otaInProgress = false;
     _otaMarkerResolver = null;
