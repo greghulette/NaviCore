@@ -24,15 +24,27 @@ audience and different rules.
 
 ## This repo is worked on from more than one machine
 
-**`git fetch` and check for incoming commits BEFORE making any change.** The same repo is
-worked on from a Windows box and a Mac, so the local clone may be behind even when nothing
-here has changed. Editing on top of a stale checkout produces conflicts at push time at
-best, and silently reverts the other machine's work at worst.
+**`git fetch` and check ALL BRANCHES before making any change.** The same repo is worked on
+from a Windows box and a Mac, so the local clone may be behind even when nothing here has
+changed.
+
+**Checking only `origin/main` is not enough, and this has already gone wrong.** Work pushed
+from the Mac landed on a branch called `macos-first-run`; `git status -sb` and
+`git log HEAD..origin/main` both reported "nothing incoming" for two days while eleven
+commits sat on the remote. The report was true and useless. Look at every branch:
 
 ```bash
-git fetch origin && git status -sb          # "behind N" means stop and pull first
-git log --oneline HEAD..origin/main         # what arrived while you were away
+git fetch --all --prune
+git branch -r                                  # EVERY remote branch, not just main
+git log --oneline --all --not main             # anything anywhere that main lacks
+git status -sb                                 # then the usual "behind N" check
 ```
+
+**Commit to `main`. Do not create feature branches in this repo.** The default Claude Code
+guidance is to branch when on the default branch, and that is what produced the split above
+— one session branched, another committed straight to `main`, and neither was wrong on its
+own. This repo wants a single line of history. If you think a branch is genuinely warranted,
+say so and get agreement first.
 
 Pull before you start, not when the push is rejected. If a push IS rejected, rebase onto
 what arrived and re-read anything you were about to edit — do not force.
