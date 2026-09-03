@@ -3765,6 +3765,19 @@ bool processInputLine(const String& line) {
   // call (early return) so loop() keeps heartbeats alive between the host's
   // ACK-paced OTA chunks. Unrecognised "?" commands report back rather than
   // being silently dropped.
+  // ── The WCB Wizard's bootstrap config pull ────────────────────────────
+  // Handled BEFORE the "?" branch because it deliberately carries NO funcChar
+  // prefix: that is how the Wizard pulls from a board whose configured prefix it
+  // does not yet know, a chicken-and-egg it cannot otherwise break. It therefore
+  // can never arrive through execCliLine() below — routing it only there was a
+  // bug, and a quiet one: the Wizard's first pull would time out (3 s, on every
+  // pull) and then succeed on its "?backup" fallback, but only for as long as
+  // that fallback's guessed funcChar happened to be "?".
+  if (line == "WCB_WEBTOOL_CONFIG_PULL") {
+    WcbMgmt::handleLine(line.c_str());
+    return true;
+  }
+
   if (line[0] == '?') {
     if (!execCliLine(line))
       Serial.printf("Unknown command: %s\n", line.c_str());
