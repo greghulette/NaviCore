@@ -47,6 +47,7 @@
 #include "esp_ota_ops.h"        // esp_ota_get_bootloader_description (boot banner)
 #include "rom/rtc.h"            // rtc_get_reset_reason (low-level boot telemetry)
 #include <WCB_Client.h>   // header in greghulette/WCBClient is WCB_Client.h
+#include <WCB_Mgmt.h>     // WCB Wizard management surface (?backup / ?WDP,DUMP / ?MGMT,*)
 #include <WcbCmd.h>       // shared device-command translators (Maestro/MP3/WLED/HCR) —
                           // ONE source of the device wire bytes across WCB + NaviCore
 #include <WCBStream.h>
@@ -3349,6 +3350,13 @@ String serialInputBuf;
 bool execCliLine(const String& line) {
   if (line.startsWith("?OTALOCAL,")) { naviota::processOtaLocalCommand(line.substring(10)); return true; }
   if (line.startsWith("?OTA,"))      { naviota::processOtaRelayCommand(line.substring(5));  return true; }
+  // The WCB Wizard's surface (?backup / ?version / ?WDP,DUMP / ?MGMT,*), which is
+  // what lets it manage every WCB THROUGH this board instead of needing a separate
+  // MgmtRelay on its own network. AFTER the OTA verbs above, deliberately: both
+  // namespaces are "?"-prefixed and nothing here may shadow a firmware-update
+  // command. Returns false for anything it does not own, so the rest of this
+  // dispatcher is untouched.
+  if (WcbMgmt::handleLine(line.c_str())) return true;
   // ?FORGET,<id>  — drop learned WCB <id> from the peer table + NVS
   // ?FORGET,ALL   — drop every learned (auto-joined) peer
   if (line.length() >= 7 && line.substring(0, 7).equalsIgnoreCase("?FORGET")) {
@@ -4728,6 +4736,40 @@ void setup() {
     // Core-0 hook lazily created its own queue and this line then overwrote the
     // handle — leaking that queue and anything already in it.
     naviota::otaPktQueue = xQueueCreate(12, sizeof(naviota::OtaPktSlot));
+    // ── The WCB Wizard's management surface ──────────────────────────────────
+    // Lets the Wizard drive every WCB THROUGH this board: config pulls, pushes,
+    // tests and the remote terminal all ride the mesh from here. Without it the
+    // Wizard needs a separate MgmtRelay on its own network, and the user needs a
+    // second connection to reach it.
+    //
+    // This is setup/configuration traffic — workshop and behind-the-table work,
+    // not something that happens while a droid is being animated — so it does not
+    // contend with the flight hot path in practice.
+    //
+    // OUTPUT GOES TO Serial ON PURPOSE. navicore_wsserver.h arms a WsSink around
+    // processInputLine() that mirrors Serial to every connected WebSocket client,
+    // so printing to Serial is what reaches a Wizard over WiFi as well as USB.
+    // Handing this module the sink directly would bypass the USB console.
+    //
+    // advertiseRelay emits "?RELAY,1" in the backup, which makes the Wizard file
+    // this board as a dedicated RELAY CARD rather than a configurable WCB in its
+    // numbered grid — correct, because NaviCore is a doorway to the mesh here, not
+    // a board the Wizard configures.
+    {
+      WcbMgmt::Identity id;
+      id.deviceId       = rcConfig.wcbNetwork.deviceId;
+      id.alias          = "NaviCore";
+      id.fw             = FW_VERSION;
+      id.meshPassword   = rcConfig.wcbNetwork.password;
+      id.hwVer          = 32;          // 32 = "not a real WCB", same as a MgmtRelay
+      id.macOct2        = rcConfig.wcbNetwork.macOct2;
+      id.macOct3        = rcConfig.wcbNetwork.macOct3;
+      id.wcbQuantity    = rcConfig.wcbNetwork.quantity;
+      id.advertiseRelay = true;
+      if (!WcbMgmt::begin(wcb, &Serial, id))
+        Serial.println("WcbMgmt: queue alloc failed — the Wizard cannot manage WCBs through this board");
+    }
+
     wcb->onCommand(onWCBCommand);   // queues must be live BEFORE the callback that feeds them
     wcb->onRawPacket(naviota::otaRawPacketHook);   // OTA control/data structs (55/243 B) over the mesh
     // Bulk command-library push (config tool → mesh → LittleFS). These fire on the
@@ -5229,6 +5271,13 @@ void loop() {
   // session. Both are cheap no-ops when no OTA is in flight.
   naviota::drainOtaPackets();
   naviota::checkOtaTimeout();
+
+  // WCB Wizard management replies — reassemble the config/stats/etm fragments and
+  // remote-terminal lines the raw-packet hook queued, and print them. Same split,
+  // and the same reason, as the OTA drain above: the hook runs on the WiFi task and
+  // may only copy, so every decode and every Serial write happens here on the loop
+  // task, leaving exactly one writer. A cheap no-op when the Wizard is not talking.
+  WcbMgmt::service();
 
   // Remote terminal — run any CLI line relayed from the config tool, with its
   // Serial output tee'd back to the bridge as RTERM packets. Cheap no-op when

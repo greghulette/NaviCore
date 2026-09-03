@@ -36,6 +36,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <WCB_Client.h>
+#include <WCB_Mgmt.h>      // the WCB Wizard management surface — otaRawPacketHook() feeds it
 #include "rc_config.h"     // rcConfig (= *g_rcConfig) — wcbNetwork.{deviceId,password}
 #include "fw_version.h"    // FW_VERSION
 
@@ -550,9 +551,25 @@ inline void otaRawPacketHook(const uint8_t * /*mac*/, const uint8_t *data, int l
     uint8_t pt = ((const espnow_struct_ota_ctrl *)data)->packetType;
     if (pt == PACKET_TYPE_OTA_ACK) handleOtaAckRelay(data);            // relay side, inline
     else                           enqueueOtaPacket(data, (uint16_t)len);  // target side, deferred
-  } else if (len == (int)sizeof(espnow_struct_ota_data)) {
-    enqueueOtaPacket(data, (uint16_t)len);                             // target side, deferred
+    return;
   }
+  if (len == (int)sizeof(espnow_struct_ota_data)) {
+    enqueueOtaPacket(data, (uint16_t)len);                             // target side, deferred
+    return;
+  }
+  // Not an OTA packet — offer it to the WCB Wizard management surface (the
+  // config/stats/etm fragments and remote-terminal lines a WCB sends back when we
+  // ask on the Wizard's behalf).
+  //
+  // COMPOSED HERE RATHER THAN REGISTERED SEPARATELY. WCB_Client::onRawPacket()
+  // takes exactly ONE callback, so a second registration would silently replace
+  // this hook and break firmware OTA — with nothing to see until an update failed.
+  // Size-discriminated like the branches above, and OTA is tested FIRST so no new
+  // packet type can ever be mistaken for an update.
+  //
+  // Still on the WiFi/ESP-NOW task here: WcbMgmt::onRawPacket only copies into a
+  // queue and returns, exactly as enqueueOtaPacket does, and for the same reason.
+  WcbMgmt::onRawPacket(data, len);
 }
 
 }  // namespace naviota

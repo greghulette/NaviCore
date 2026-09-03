@@ -457,6 +457,46 @@ through `execCliLine()`, so behaviour is identical. Case-insensitive.
 | `#L13` | Raw SBUS frame hex with byte-offset annotations |
 | `#L20` / `#L21` | Send a fixed HCR `SetEmotion(HAPPY,80)` straight to S3 / S4 — bypasses config **and** mapping, so it separates wiring faults from config faults |
 
+### WCB Wizard management (`?backup`, `?WDP,DUMP`, `?MGMT,…`)
+
+NaviCore is a **doorway into the WCB mesh for the WCB Wizard**: the Wizard connects here — over
+USB or `ws://<softAPIP>/ws` — and manages every WCB through this board, instead of needing a
+separate MgmtRelay on a network of its own.
+
+| Command | Effect |
+|---|---|
+| `WCB_WEBTOOL_CONFIG_PULL` / `?backup` | A WCB-style config backup identifying this board. Carries `?RELAY,1`. |
+| `?version` | `Software Version: <FW_VERSION>` / `End of Version` |
+| `?WDP,DUMP` | The mesh inventory: a SELF row, one `[WDP:…]` per neighbour, `[WDP:END,count=N]` |
+| `?MGMT,FRAG,<target>,<session>,<idx>,<total>,<payload>` | Forward one Wizard fragment to a WCB |
+| `?MGMT,PULL,<target>` | Request that board's config → `[MGMT:CONFIG,<n>]…` |
+| `?MGMT,STATS,<target>` | ESP-NOW stats → `[MGMT:STATS,<n>]…` |
+| `?MGMT,ETM,CHAR,<target>` | ETM characterization → `[MGMT:ETM,<n>]…` |
+
+A target running a remote terminal sends lines back as `[TERM:<n>]…`.
+
+**`?RELAY,1` is deliberate.** It makes the Wizard file this board as a dedicated *relay card*
+rather than a configurable WCB in its numbered grid — correct, because NaviCore is the doorway
+here, not a board the Wizard configures. Its mesh boards are then managed through it.
+
+**None of this is implemented here.** It lives in `WCB_Client`'s `WCB_Mgmt.h` and is shared with
+`examples/MgmtRelay`, because it is a wire protocol with three parties — the Wizard, this board
+and the WCB firmware — whose structs are byte-matched to `WCB.ino` and whose replies are
+byte-matched to the Wizard's parser. A second copy would drift the first time one side was
+fixed, and drift *silently*, because a stale copy still answers. Same reasoning as `WcbCmd`.
+
+Two integration rules that are load-bearing:
+
+- **`WcbMgmt::onRawPacket()` is called FROM `otaRawPacketHook()`, not registered separately.**
+  `WCB_Client::onRawPacket()` takes exactly one callback and OTA already owns it; a second
+  registration would silently replace the OTA hook, with nothing visible until an update failed.
+  OTA sizes are tested first, so no new packet type can be mistaken for an update.
+- **`WcbMgmt::begin()` runs before the callbacks are registered**, so the queue exists before the
+  hook can fire — the same create/publish race the OTA queue comment above it describes.
+
+Output goes to `Serial`, which is what reaches a WiFi client too: `navicore_wsserver.h` arms a
+`WsSink` around `processInputLine()` that mirrors Serial to every connected WebSocket client.
+
 ### Maestro (`?MAE,…`)
 
 | Form | Meaning |
@@ -800,6 +840,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-02 | _(uncommitted)_ | **NaviCore can now be the WCB Wizard's doorway into the mesh**, so the Wizard manages every WCB through this board instead of needing a separate MgmtRelay on its own network. Adds `?backup` / `WCB_WEBTOOL_CONFIG_PULL`, `?version`, `?WDP,DUMP` and `?MGMT,FRAG|PULL|STATS|ETM,CHAR`, replying with `[MGMT:CONFIG|STATS|ETM,<n>]` and `[TERM:<n>]`. The implementation is **not here** — it is `WCB_Client`'s `WCB_Mgmt.h`, shared with `examples/MgmtRelay`, because the structs are byte-matched to `WCB.ino` and the replies to the Wizard's parser, so a second copy would drift silently. Two load-bearing integration rules: `WcbMgmt::onRawPacket()` is called from `otaRawPacketHook()` rather than registered, because `onRawPacket()` takes ONE callback and OTA already owns it (a second registration would break firmware updates with nothing to see); and `WcbMgmt::begin()` runs before the callbacks are registered so the queue exists before the hook can fire. |
 | 2026-09-01 | _(uncommitted)_ | **A verified OTA can no longer report failure, and the post-reboot wait fits WiFi.** `reopenAfterFlash()` was 12 cycles of a 600 ms PONG wait — about 16 s, fine for a USB re-enumeration but far short of the ~33 s a WiFi recovery takes (board reboots, SoftAP vanishes, the host re-associates, the socket comes back). It is now deadline-based at 75 s and reports elapsed seconds, so a normal wait no longer looks like a hang. Separately, everything after `[OTA:END,OK]` runs outside the failure path: the image is SHA-verified and the boot slot switched by then, so a slow reconnect said "OTA failed" about an update that had already succeeded — and fired a pointless `?OTALOCAL,ABORT` at a board that had rebooted. `_otaCommitted` gates both. |
 | 2026-08-31 | _(uncommitted)_ | **`vlogf()` now falls back to the WS sink — the debug terminal was entirely dead over WiFi.** Third instance of the `availableForWrite()` trap after `PWM_UPDATE` and `rc_trig`, and the widest: every `dlog()` category rides on `vlogf()`, so enabling `DBG_MAESTRO`/`DBG_WCB` produced nothing. Verified with a read-only `?MAE,GET`: 0 `[DISPATCH]` lines with the flag off, 3 with it on. Also fixed the gate on the direct emitters — briefly tied to the tee's armed state, which killed PWM_UPDATE; it is the loop CORE that matters, now recorded as `wsLoopCore`. |
 | 2026-08-31 | _(uncommitted)_ | **WebSocket sends are now issued only from the httpd task.** Two tasks were writing the same socket — `pump()` on Core 1 and the server's own PONG on Core 0 — so their bytes interleaved and clients died with `1002 invalid opcode` roughly every 90 s. Diagnosed by parsing the raw frame stream: a read-only client that never pinged stayed clean for 2.5 MB while the pinging client dropped three times in the same window. `pump()` now copies the bytes and hands them to `httpd_queue_work()`. |
