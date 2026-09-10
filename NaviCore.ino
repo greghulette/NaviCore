@@ -46,6 +46,8 @@
 #include "esp_timer.h"          // one-shot boot-guard timer (cold-boot auto-recovery)
 #include "esp_ota_ops.h"        // esp_ota_get_bootloader_description (boot banner)
 #include "rom/rtc.h"            // rtc_get_reset_reason (low-level boot telemetry)
+#include <esp_netif.h>          // esp_netif_dhcps_option/_stop/_start — SoftAP offers no gateway
+#include "dhcpserver/dhcpserver.h"  // dhcps_offer_t
 #include <WCB_Client.h>   // header in greghulette/WCBClient is WCB_Client.h
 #include <WCB_Mgmt.h>     // WCB Wizard management surface (?backup / ?WDP,DUMP / ?MGMT,*)
 #include <WcbCmd.h>       // shared device-command translators (Maestro/MP3/WLED/HCR) —
@@ -4681,6 +4683,61 @@ void setup() {
         Serial.printf("[WIFI] SoftAP \"%s\" up on channel %d — %s\n",
                       ssid, ch, WiFi.softAPIP().toString().c_str());
         Serial.println("[WIFI] ESP-NOW will share this channel (WIFI_AP_STA).");
+
+        // NO DEFAULT GATEWAY. This AP is a local management link with no upstream, but
+        // stock, its DHCP server names 192.168.4.1 as the router (option 3). A laptop
+        // also on a real network then holds two default routes at the same metric and
+        // may send internet traffic here to die; a phone may decide the network is
+        // broken. With no router offered, a client reaches 192.168.4.1 on-link (same
+        // /24) and keeps its real default route. Same change as the WCB (b898088).
+        //
+        // THE OPTION IS A BOOLEAN, NOT A BITMASK. esp_netif_dhcps_option_api() (IDF 5.5)
+        // GETs 1/0 for "router offered" and SETs by truthiness: nonzero turns the router
+        // ON, zero turns it off, and the IDF clears OFFER_ROUTER in the server's offer
+        // mask itself, leaving the other bits alone. Writing 0 is the whole job. Never
+        // pass a "mask with the router bit cleared" such as OFFER_DNS — it is nonzero,
+        // so it ENABLES the router.
+        //
+        // SET is refused while the server runs and GET while it is stopped, hence
+        // get -> stop -> set -> start: the sequence the core's own
+        // APClass::enableDhcpCaptivePortal() uses. The value lives in the server object
+        // and survives the restart. The GET doubles as the readiness check — if it fails,
+        // the server is never touched, because stock behaviour beats a guess.
+        //
+        // THE RESTART IS UNCONDITIONAL. A stopped DHCP server is a dead AP — clients
+        // associate, get no lease, land on 169.254.x, and nothing points at the cause —
+        // and nothing else will restart it: the IDF's AP-start handler
+        // (esp_netif_start_api) only starts a server in INIT, never one left STOPPED. If
+        // the netif is not up yet, start just re-arms INIT and returns ESP_OK, and that
+        // handler starts the server moments later.
+        //
+        // NEVER use WiFi.softAPConfig() instead. On the WCB it broke DHCP whether called
+        // before or after softAP(): the right IP, clients associated, no lease ever.
+        {
+          esp_netif_t   *apNetif = WiFi.AP.netif();
+          dhcps_offer_t  router  = 0;   // 1 byte — the IDF rejects any other length
+          if (!apNetif || !WiFi.AP.started()) {
+            Serial.println("[WIFI] AP netif not ready — leaving the DHCP gateway option at its default.");
+          } else if (esp_netif_dhcps_option(apNetif, ESP_NETIF_OP_GET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS,
+                                            &router, sizeof(router)) != ESP_OK) {
+            Serial.println("[WIFI] could not read the DHCP gateway option — leaving it at its default.");
+          } else {
+            router = 0;                                  // boolean: offer no router
+            esp_netif_dhcps_stop(apNetif);               // ALREADY_STOPPED is harmless
+            const esp_err_t setErr   = esp_netif_dhcps_option(apNetif, ESP_NETIF_OP_SET,
+                                           ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &router, sizeof(router));
+            const esp_err_t startErr = esp_netif_dhcps_start(apNetif);   // unconditional — see above
+            if (startErr != ESP_OK && startErr != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED)
+              Serial.printf("[WIFI] *** DHCP server FAILED to restart (0x%x) — clients will get NO address. ***\n",
+                            (unsigned)startErr);
+            else if (setErr != ESP_OK)
+              Serial.printf("[WIFI] could not clear the DHCP gateway option (0x%x) — clients will be offered a router.\n",
+                            (unsigned)setErr);
+            else
+              Serial.println("[WIFI] DHCP offers no default gateway — clients keep their own route.");
+          }
+        }
+
         // Only now, with an AP actually up and an IP to print. begin() is
         // self-contained: if it fails it says so and leaves everything inert, so a
         // WebSocket that will not start can never take the droid down with it.

@@ -24,6 +24,41 @@ Direct USB, because it feeds the same `processInputLine()`; there is no second c
 surface to keep in step. Unlike Via WCB it has no 187-byte cap and no fragmentation — it is
 a direct link, so a large `SET_CONFIG` crosses in one frame.
 
+**The SoftAP offers no default gateway.** Its DHCP server hands out an address and a /24 but
+**no router** (option 3). The AP has no upstream, so naming itself the gateway only invites a
+client to send internet-bound traffic to a board that cannot deliver it: a laptop with a
+second adapter ends up with two default routes at the same metric, and a phone may decide
+the network is broken. With no router offered, the client reaches `192.168.4.1` on-link and
+keeps its own default route for everything else. `setup()` clears it through
+`esp_netif_dhcps_option(…, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, …)` right after `softAP()`
+succeeds and before `naviws::begin()`. Four things about that call are load-bearing:
+
+- **The option is a boolean, not a bitmask.** Get returns 1 or 0; set turns the router **on
+  for any nonzero value** and off for zero, and the IDF clears `OFFER_ROUTER` in the server's
+  own offer mask itself (`esp_netif_dhcps_option_api()`, IDF 5.5 `esp_netif_lwip.c`). A "mask
+  with the router bit cleared" such as `OFFER_DNS` is nonzero, so it *enables* the router.
+- **Set is refused while the server runs, and get while it is stopped** — hence get → stop →
+  set → start, the sequence the core's own `APClass::enableDhcpCaptivePortal()` uses. The value
+  lives in the server object and survives the restart.
+- **The restart is unconditional.** A stopped DHCP server is a dead AP — clients associate,
+  get no lease, and land on 169.254.x — and nothing else restarts it: the IDF's AP-start
+  handler (`esp_netif_start_api()`) only starts a server in `INIT`, never one left `STOPPED`.
+  If the get fails, the server is never touched.
+- **`WiFi.softAPConfig()` is never called.** On the WCB it broke DHCP whether called before or
+  after `softAP()` — the right IP, clients associated, and no lease ever arrived. The AP stays
+  on the stock `192.168.4.1`.
+
+**A client that was already connected keeps the old gateway.** A renewal is a REQUEST/ACK,
+and Windows keeps the previous gateway when the ACK simply omits option 3, so
+`ipconfig /renew` after flashing still shows `192.168.4.1`. Only a fresh DISCOVER —
+reconnecting, `ipconfig /release` then `/renew`, or lease expiry — gets the gateway-free
+lease. The boot log says which side it is: `[WIFI] DHCP offers no default gateway` means the
+firmware did its part.
+
+The server still offers `192.168.4.1` as **DNS** (option 6), with no DNS server behind it —
+`CONFIG_LWIP_DHCPS_ADD_DNS` is set in the core's prebuilt IDF, and the server falls back to
+its own address. Clearing that is the same idea at a smaller cost, and is untested.
+
 **It is a console mirror, not a request/response channel.** While a client is connected the
 `rcSerial` capture tee stays armed for the whole session, so everything printed on the loop
 task reaches it — replies, `PWM_UPDATE` at ~20 Hz, `WCB_STATUS` pushes, terminal output —
@@ -840,6 +875,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-10 | _(uncommitted)_ | **The SoftAP no longer offers a default gateway** (DHCP option 3), so a client reaches `192.168.4.1` on-link and keeps its real default route — a board with no upstream naming itself the router gives a two-adapter laptop competing default routes and can make a phone reject the network. Same change as WCB `b898088` (hardware-verified there), with one correction: the WCB treats `ESP_NETIF_ROUTER_SOLICITATION_ADDRESS` as a mask to read, clear a bit in and write back, but in IDF 5.5 get and set are **booleans** (`esp_netif_dhcps_option_api()`) — that code gets the right answer only because get returns 1 and `OFFER_ROUTER` is 1. NaviCore writes 0 and records the trap. Also recorded why the unconditional restart is load-bearing: `esp_netif_start_api()` never starts a server left `STOPPED`. Compile-verified; not yet verified on NaviCore hardware. |
 | 2026-09-02 | _(uncommitted)_ | **NaviCore can now be the WCB Wizard's doorway into the mesh**, so the Wizard manages every WCB through this board instead of needing a separate MgmtRelay on its own network. Adds `?backup` / `WCB_WEBTOOL_CONFIG_PULL`, `?version`, `?WDP,DUMP` and `?MGMT,FRAG|PULL|STATS|ETM,CHAR`, replying with `[MGMT:CONFIG|STATS|ETM,<n>]` and `[TERM:<n>]`. The implementation is **not here** — it is `WCB_Client`'s `WCB_Mgmt.h`, shared with `examples/MgmtRelay`, because the structs are byte-matched to `WCB.ino` and the replies to the Wizard's parser, so a second copy would drift silently. Two load-bearing integration rules: `WcbMgmt::onRawPacket()` is called from `otaRawPacketHook()` rather than registered, because `onRawPacket()` takes ONE callback and OTA already owns it (a second registration would break firmware updates with nothing to see); and `WcbMgmt::begin()` runs before the callbacks are registered so the queue exists before the hook can fire. |
 | 2026-09-01 | _(uncommitted)_ | **A verified OTA can no longer report failure, and the post-reboot wait fits WiFi.** `reopenAfterFlash()` was 12 cycles of a 600 ms PONG wait — about 16 s, fine for a USB re-enumeration but far short of the ~33 s a WiFi recovery takes (board reboots, SoftAP vanishes, the host re-associates, the socket comes back). It is now deadline-based at 75 s and reports elapsed seconds, so a normal wait no longer looks like a hang. Separately, everything after `[OTA:END,OK]` runs outside the failure path: the image is SHA-verified and the boot slot switched by then, so a slow reconnect said "OTA failed" about an update that had already succeeded — and fired a pointless `?OTALOCAL,ABORT` at a board that had rebooted. `_otaCommitted` gates both. |
 | 2026-08-31 | _(uncommitted)_ | **`vlogf()` now falls back to the WS sink — the debug terminal was entirely dead over WiFi.** Third instance of the `availableForWrite()` trap after `PWM_UPDATE` and `rc_trig`, and the widest: every `dlog()` category rides on `vlogf()`, so enabling `DBG_MAESTRO`/`DBG_WCB` produced nothing. Verified with a read-only `?MAE,GET`: 0 `[DISPATCH]` lines with the flag off, 3 with it on. Also fixed the gate on the direct emitters — briefly tied to the tee's armed state, which killed PWM_UPDATE; it is the loop CORE that matters, now recorded as `wsLoopCore`. |
