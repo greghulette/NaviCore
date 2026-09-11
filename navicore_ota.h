@@ -11,14 +11,18 @@
 //  table this needs — no partition change required.
 //
 //  Two transports drive the SAME core (otaBegin/otaWrite/otaEnd):
-//    * Direct USB   : ?OTALOCAL,* over the USB-CDC Serial (processOtaLocalCommand)
-//    * ESP-NOW relay: ?OTA,* via a USB-tethered relay board (processOtaRelayCommand)
-//      + target-side handlers fed by the WCB_Client raw-packet hook.
+//    * Direct       : ?OTALOCAL,* from the host, over USB-CDC or the SoftAP
+//                     WebSocket - both reach processOtaLocalCommand through
+//                     processInputLine()
+//    * ESP-NOW relay: ?OTA,* to a relay board - a WCB, or THIS board, whose
+//                     processOtaRelayCommand forwards it - + target-side
+//                     handlers fed by the WCB_Client raw-packet hook.
 //
 //  THE rule (esp_ota_* BLOCKS — esp_ota_begin erases ~1.2 MB): never run the
 //  flash calls in the ESP-NOW receive (WiFi-task) callback. otaRawPacketHook()
 //  only enqueues; drainOtaPackets() (loop context) runs the handlers. Same
-//  pattern rc_telemetry already uses for deferred config saves.
+//  pattern rc_telemetry already uses for deferred config saves. The relay-side
+//  ACK is deferred too, for a different reason: see handleOtaAckRelay().
 //
 //  Ported from Wireless_Communication_Board-WCB/Code/WCB/WCB_OTA.{h,cpp}.
 //  NaviCore adaptations: USB-CDC Serial directly (no WCB_RemoteTerm redirect),
@@ -414,8 +418,18 @@ inline void handleOtaAbortPacket(const uint8_t *raw) {
 }
 
 // ── Relay side ──────────────────────────────────────────────────────────────
-// A relay (this board, USB-tethered) received the target's OTA_ACK — surface it
-// to USB for the browser as "[OTA:ACK,<src>,<session>,<offset>,<status>]".
+// A relay (this board) received the target's OTA_ACK — surface it to the host as
+// "[OTA:ACK,<src>,<session>,<offset>,<status>]", the Wizard's flow-control token.
+//
+// RUNS IN loop() (Core 1), from drainOtaPackets() — never in the raw-packet hook.
+// Printed from the hook, every ACK went to USB and nowhere else: rcSerial's tee
+// only captures output on the core that armed it (rc_serial.h), and the WebSocket
+// arms it from loop(). Over USB that went unnoticed. Over the SoftAP the WCB
+// Wizard never saw a single ACK, and failed every relay OTA to a WCB with "no
+// response from WCB<n> via relay — is it online & on this firmware?" while the
+// target was answering. The WCB firmware defers the same print
+// (WCB_OTA.cpp, otaRelayPrint) for the neighbouring reason: a Core-0 write can
+// interleave with loop()'s output and garble the token.
 inline void handleOtaAckRelay(const uint8_t *raw) {
   espnow_struct_ota_ctrl pkt; memcpy(&pkt, raw, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
@@ -513,6 +527,8 @@ inline void processOtaRelayCommand(const String &args) {
 //    WiFi receive callback (they block; running them there stalls ESP-NOW and
 //    the session times out mid-stream). The raw hook enqueues; drainOtaPackets()
 //    (loop context) runs the handlers. Mirrors rc_telemetry's deferred queue.
+//    The ACKs this board RELAYS ride the same queue, so they print on the loop
+//    core where the WebSocket tee can see them (handleOtaAckRelay).
 typedef struct { uint8_t buf[244]; uint16_t len; } OtaPktSlot;   // 244 >= 243 (ota_data)
 static QueueHandle_t otaPktQueue = nullptr;
 
@@ -538,19 +554,19 @@ inline void drainOtaPackets() {
       if      (pt == PACKET_TYPE_OTA_BEGIN) handleOtaBeginPacket(slot.buf);
       else if (pt == PACKET_TYPE_OTA_END)   handleOtaEndPacket(slot.buf);
       else if (pt == PACKET_TYPE_OTA_ABORT) handleOtaAbortPacket(slot.buf);
+      else if (pt == PACKET_TYPE_OTA_ACK)   handleOtaAckRelay(slot.buf);   // relay side
     }
   }
 }
 
-// WCB_Client raw-packet hook — runs in the WiFi receive task. Route by size: the
-// relay-side ACK is lightweight (a printf) and stays inline; target-side
-// BEGIN/DATA/END/ABORT are DEFERRED to drainOtaPackets() in loop() because they
-// do blocking flash writes. Register via wcb->onRawPacket() in setup().
+// WCB_Client raw-packet hook — runs in the WiFi receive task. Route by size and
+// DEFER EVERYTHING to drainOtaPackets() in loop(): target-side BEGIN/DATA/END/
+// ABORT because they do blocking flash writes, and the relay-side ACK because its
+// print reaches a WebSocket client only from the loop core (handleOtaAckRelay).
+// Register via wcb->onRawPacket() in setup().
 inline void otaRawPacketHook(const uint8_t * /*mac*/, const uint8_t *data, int len) {
   if (len == (int)sizeof(espnow_struct_ota_ctrl)) {
-    uint8_t pt = ((const espnow_struct_ota_ctrl *)data)->packetType;
-    if (pt == PACKET_TYPE_OTA_ACK) handleOtaAckRelay(data);            // relay side, inline
-    else                           enqueueOtaPacket(data, (uint16_t)len);  // target side, deferred
+    enqueueOtaPacket(data, (uint16_t)len);   // BEGIN/END/ABORT (target) and ACK (relay)
     return;
   }
   if (len == (int)sizeof(espnow_struct_ota_data)) {

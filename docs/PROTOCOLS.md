@@ -70,6 +70,10 @@ Two consequences for anyone touching `navicore_wsserver.h`:
 - `drain()` must **re-arm every pass**. The capture is a single slot, and `drainRemoteCli()`
   takes it for mesh-relayed CLI lines then disarms unconditionally — without re-arming, one
   relayed command silently ends the monitor for the rest of the session.
+- **Only the loop task is mirrored.** The tee is gated to the core that armed it, so a line
+  printed from a Core-0 mesh callback goes to USB and never to a WiFi client. Anything a
+  WebSocket client must see goes through a queue to `loop()` first — the relay-OTA
+  `[OTA:ACK,…]` token is the case that proved it (§5).
 - Bytes are buffered by the sink and sent **only from `pump()` in `loop()`**, never inside
   `write()`. A TCP send inside `write()` lands between two halves of an arbitrary
   `Serial.printf`, on the core that must also service SBUS at ~111 fps. On overflow whole
@@ -821,7 +825,10 @@ Every packet begins with `char structPassword[40]`, matched against
 the boot pointer moves; any failure or timeout calls `esp_ota_abort`, which never switches.
 An interrupted transfer always leaves the board on its current firmware.
 `esp_ota_*` blocks (BEGIN erases ~1.2 MB) — **never call it from the receive callback**;
-`otaRawPacketHook()` only enqueues.
+`otaRawPacketHook()` only enqueues. That includes the **relay-side ACK**: when this board
+relays an OTA, `handleOtaAckRelay()` prints `[OTA:ACK,…]` from `drainOtaPackets()` on the
+loop task, because a print from the callback reaches USB but never a WebSocket client — and
+that token is the Wizard's only flow control.
 
 **RTERM.** NaviCore only ever *sends* these. The format is byte-identical to the WCB's, so
 an unmodified bridge WCB re-emits each packet to its USB as `[TERM:<sourceWCB>]<text>\n`
@@ -875,6 +882,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-10 | _(uncommitted)_ | **Relay OTA through this board now works over WiFi.** `handleOtaAckRelay()` printed `[OTA:ACK,…]` straight from the raw-packet hook on Core 0, and `rcSerial`'s tee mirrors only the core that armed it — the loop task, for the WebSocket. So every ACK went to USB alone: the WCB Wizard, attached through Intellex over the SoftAP, failed every wireless OTA to a WCB with *"no response from WCB2 via relay — is it online & on this firmware?"* while the target was answering. Over USB the ACK still reached the host, which is why it went unseen. The hook now enqueues the ACK like every other OTA packet and `drainOtaPackets()` prints it on the loop task — the deferral `WCB_OTA.cpp` already makes through `otaRelayPrint()`. §5 and the console-mirror rules say so. Compiles locally with the ESP32-S3 FQBN; not yet verified on hardware. |
 | 2026-09-10 | _(uncommitted)_ | **The SoftAP no longer offers a default gateway** (DHCP option 3), so a client reaches `192.168.4.1` on-link and keeps its real default route — a board with no upstream naming itself the router gives a two-adapter laptop competing default routes and can make a phone reject the network. Same change as WCB `b898088` (hardware-verified there), with one correction: the WCB treats `ESP_NETIF_ROUTER_SOLICITATION_ADDRESS` as a mask to read, clear a bit in and write back, but in IDF 5.5 get and set are **booleans** (`esp_netif_dhcps_option_api()`) — that code gets the right answer only because get returns 1 and `OFFER_ROUTER` is 1. NaviCore writes 0 and records the trap. Also recorded why the unconditional restart is load-bearing: `esp_netif_start_api()` never starts a server left `STOPPED`. Compile-verified; not yet verified on NaviCore hardware. |
 | 2026-09-02 | _(uncommitted)_ | **NaviCore can now be the WCB Wizard's doorway into the mesh**, so the Wizard manages every WCB through this board instead of needing a separate MgmtRelay on its own network. Adds `?backup` / `WCB_WEBTOOL_CONFIG_PULL`, `?version`, `?WDP,DUMP` and `?MGMT,FRAG|PULL|STATS|ETM,CHAR`, replying with `[MGMT:CONFIG|STATS|ETM,<n>]` and `[TERM:<n>]`. The implementation is **not here** — it is `WCB_Client`'s `WCB_Mgmt.h`, shared with `examples/MgmtRelay`, because the structs are byte-matched to `WCB.ino` and the replies to the Wizard's parser, so a second copy would drift silently. Two load-bearing integration rules: `WcbMgmt::onRawPacket()` is called from `otaRawPacketHook()` rather than registered, because `onRawPacket()` takes ONE callback and OTA already owns it (a second registration would break firmware updates with nothing to see); and `WcbMgmt::begin()` runs before the callbacks are registered so the queue exists before the hook can fire. |
 | 2026-09-01 | _(uncommitted)_ | **A verified OTA can no longer report failure, and the post-reboot wait fits WiFi.** `reopenAfterFlash()` was 12 cycles of a 600 ms PONG wait — about 16 s, fine for a USB re-enumeration but far short of the ~33 s a WiFi recovery takes (board reboots, SoftAP vanishes, the host re-associates, the socket comes back). It is now deadline-based at 75 s and reports elapsed seconds, so a normal wait no longer looks like a hang. Separately, everything after `[OTA:END,OK]` runs outside the failure path: the image is SHA-verified and the boot slot switched by then, so a slow reconnect said "OTA failed" about an update that had already succeeded — and fired a pointless `?OTALOCAL,ABORT` at a board that had rebooted. `_otaCommitted` gates both. |

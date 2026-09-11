@@ -55,6 +55,7 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | `skipRunning` action fires when it should have been gated | The gate **fails open** by design — no busy reply within `maeGateMs` (default 250) means fire anyway | `maestroVerbBusy()` |
 | `[CLIPDL:ERR] clip too large to edit over the WCB bridge` | Over 3000 events on the relayed path. Connect over USB | `execCliLine()` |
 | Bridge WCB reboots when a second tab connects | DTR toggling. The shared hub never asserts DTR and does not hand off on visibility, for this reason | `serial-hub.js` |
+| WCB Wizard attached to NaviCore over WiFi: *Wireless OTA failed: no response from WCB<n> via relay* | On firmware without the relayed-ACK deferral, **every** relay OTA over WiFi fails this way: the target's ACK was printed on Core 0, which `rcSerial` mirrors to USB only. On current firmware it means what it says — the target is offline, runs firmware without OTA, or could not reach this board (`[OTA] ACK -> WCB20 send failed` on the target's own USB) | `handleOtaAckRelay()`, `drainOtaPackets()` |
 
 ## Inputs and dispatch
 
@@ -124,6 +125,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-10 | _(uncommitted)_ | Added a *Mesh / Via WCB* row for the Wizard's *"no response from WCB<n> via relay"* through NaviCore over WiFi: before this change every relay OTA over WiFi failed that way, because the relayed ACK was printed on Core 0 and never reached the WebSocket; now it means the target really did not answer. |
 | 2026-09-10 | _(uncommitted)_ | Added two SoftAP DHCP rows: a Default Gateway that survives a firmware update (the client has not re-leased — a renewal keeps the old gateway, so `ipconfig /renew` alone proves nothing; `/release` then `/renew`), and clients stuck on 169.254.x (the DHCP server is not running — keyed on the new `[WIFI] *** DHCP server FAILED to restart` boot line, or a `softAPConfig()` call). |
 | 2026-08-29 | _(uncommitted)_ | **Reverted the SoftAP deauth-before-restart — it made reconnection WORSE.** Telling the client the AP is going away (rather than letting it time out) is the obvious improvement and is wrong on Windows: measured across three reboots, dead air went from ~11 s to **16/17/16 s**, consistently ~5 s worse. A deauth makes Windows tear the association down and run a full scan-and-reassociate cycle; a silently absent AP leaves the association up and it re-attaches to the known BSSID faster. `naviota::otaFarewellAP()` is kept as a documented no-op so the measurement sits next to the temptation. |
 | 2026-08-28 | _(uncommitted)_ | The SoftAP farewell now covers **all three** restart paths, not just the `REBOOT` command: local OTA (`?OTALOCAL,END`), relay OTA, and `REBOOT` all call `naviota::otaFarewellAP()`. This is the one that matters in practice — config changes needing a restart are rare, firmware updates are the common case, and every one ends in a restart. A bare `ESP.restart()` drops the AP silently, so the client keeps talking to an AP that is gone and only times out: ~11 s of dead air while the board is serving again at 2.4 s. |

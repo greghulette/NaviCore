@@ -209,7 +209,8 @@ Two cores touch this firmware:
   record/replay buffer.
 
 **Anything arriving on Core 0 that needs to act on droid hardware is enqueued, never
-executed inline.** The queues:
+executed inline.** So is anything a WebSocket client must *see*: `rcSerial` mirrors only the
+loop core, so a line printed on Core 0 reaches USB alone. The queues:
 
 | Queue | Producer (Core 0) | Consumer (Core 1) | Carries |
 |---|---|---|---|
@@ -219,7 +220,7 @@ executed inline.** The queues:
 | `maestroCmdQueue` | `onWCBCommand` — inbound `;M` | `drainMaestroCmd()` | `{sender, text[48]}` |
 | `forgetPeerQueue` | Via-WCB `FORGET_PEER` | `drainForgetPeer()` | board id (0 = all) |
 | `peerEventQueue` | `onWcbNeighbor` | `drainPeerEvents()` | board id |
-| `naviota::otaPktQueue` | `otaRawPacketHook` | `drainOtaPackets()` | OTA control/data structs |
+| `naviota::otaPktQueue` | `otaRawPacketHook` | `drainOtaPackets()` | OTA control/data structs — target side, and the ACKs this board relays |
 | `navirec` capture queue | `rcExecuteActionNow` (Core 1 — hop kept as a safeguard) | `navirec::drain()` | `RecEvent` |
 | `rcTelemetry` pending slots | `handle()` under `_pendingMutex` | `tick()` | deferred config saves, test actions |
 
@@ -430,6 +431,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-10 | _(uncommitted)_ | §8: the OTA queue also carries the ACKs this board relays, and the Core-0 rule now covers output a WebSocket client must see — `rcSerial` mirrors only the loop core, which is why relay OTA over WiFi never received an ACK. See PROTOCOLS.md's row of the same date. |
 | 2026-08-25 | _(uncommitted)_ | **Switch settle window** (`switchSettleMs`, default 80): a position must rest before its tier fires, so a 3-position switch swept end-to-end no longer fires the middle tier on the way past. **Switch easing is now seeded** from the resting position at boot/apply (`seedSwitchEasingFromTier`) — previously `g_switchEasing` was only ever set by an executed action, so a power-up believed `EASE_RELEASED` wherever the switch physically sat and easing silently did nothing until the pilot flicked it. **Easing writes are retransmitted** (bounded burst) because the Pololu protocol has no speed/accel readback and `maestroWrite()` reports success on queueing, making a lost write invisible and never retried. |
 | 2026-08-24 | `083207c` | **Long press added as tap tier 4.** `RcMapping::t[]` is now `RC_NUM_TAP_TIERS = 4`; holding a matrix button for the new `holdMs` config field (default 750) dispatches `t[3]` at the threshold while still held. Three constraints documented in §Taps: `holdMs` must exceed `tapWindowMs`, `checkDeferredTap()` parks the tap dispatch while the button is down (so press-and-hold now resolves on release, not mid-hold), and tier 4 always dispatches exclusively regardless of the `exclusive` flag. |
 | 2026-08-18 | _(uncommitted)_ | The three global audio destinations (`hcrDest`/`mp3Dest`/`dfpDest`) gained a **disabled** state (`transport` 2, JSON `"off"`) and now default to it. `RA_HCR`/`RA_MP3`/`RA_DFPLAYER` are no-ops while their device is disabled — the gate is in the executor, not at the port. |

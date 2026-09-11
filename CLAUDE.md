@@ -93,8 +93,9 @@ The wiki is present-tense too, and carries **no changelog at all** — different
 
 1. **Mesh callbacks run on Core 0** (`onWCBCommand`, `onNeighbor`, raw-packet hooks, and
    everything `rcTelemetry::handle()` does inline). Anything touching flash, NVS, or droid
-   hardware must be queued to `loop()` on Core 1. Create the queue *before* registering the
-   callback that feeds it.
+   hardware must be queued to `loop()` on Core 1 — and so must any line a WiFi client has to
+   see, because `rcSerial` mirrors only the loop core to the WebSocket. Create the queue
+   *before* registering the callback that feeds it.
 2. **A mesh payload is capped at 187 bytes** — ESP-NOW's 250 minus the bridge's
    `"|CRC%08X"` suffix in a 200-byte buffer. Over that, the packet is silently dropped.
    Measure escaped UTF-8 *bytes*, not string length.
