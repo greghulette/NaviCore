@@ -61,17 +61,19 @@ arduino-cli compile \
   NaviCore.ino
 ```
 
-> **Known state: a local compile of current `main` fails.** The sketchbook's `WCB_Client`
-> is **1.10.0** and has no `setPortLabel()`, which `rcAdvertiseSerialLabels()`
-> ([`NaviCore.ino`](../NaviCore.ino) ≈ L3180) calls — that needs **≥ 1.11.0**. Refresh the
-> sketchbook copy from `greghulette/WCBClient` master before trusting a local build:
+> **The sketchbook's `WCB_Client` shadows the real one** in every local compile, while CI
+> builds against `greghulette/WCBClient` master. A copy that lags can fail the compile or,
+> worse, pass against old library code. Before trusting a local build, this must print
+> nothing:
 >
 > ```bash
 > git -C C:/Users/ghulette/Documents/GitHub/WCBClient pull
-> # then mirror src/ into Arduino-Code/libraries/WCB_Client
+> diff -rq C:/Users/ghulette/Documents/GitHub/Arduino-Code/libraries/WCB_Client/src \
+>          C:/Users/ghulette/Documents/GitHub/WCBClient/src
 > ```
 >
-> Until that is done, **CI is the authoritative compile** — push and watch the workflow.
+> If it prints anything, mirror `src/` across first, or treat **CI as the authoritative
+> compile** — push and watch the workflow.
 
 Every FQBN field is load-bearing:
 
@@ -204,5 +206,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-10 | _(uncommitted)_ | §3: **a local compile of `main` passes again** (1,169,087 B). The sketchbook's `WCB_Client` now matches `greghulette/WCBClient` master — the `diff -rq` is empty. The callout recorded a *state* ("a local compile of current `main` fails"), which went stale without anything saying so; it now gives the check instead. CLAUDE.md's build note likewise. |
 | 2026-08-18 | _(uncommitted)_ | §5/§7 corrected against `flasher.js`: the per-build `_ESP32S3_boot.bin` is **never flashed** — the flasher writes the fixed-name `WCB_S3_custom_bootloader_16MB_wdt3s.bin` at `0x0`, which is why that name is fixed (a per-build `_boot.bin` must not shadow it) — and **Update Firmware** writes bootloader + partition table + app unconditionally rather than auto-detecting, because reading flash back over the S3's native USB wedges the esptool stub. Also recorded the app/table version pairing rule. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

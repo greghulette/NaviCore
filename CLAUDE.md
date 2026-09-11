@@ -117,9 +117,9 @@ node C:\Users\ghulette\tools\jscheck.js config_tool/index.html
 ```
 
 Every FQBN field is load-bearing (`PSRAM=opi` especially — without it the board halts on a
-red LED). A local compile of current `main` fails on a stale sketchbook `WCB_Client`; see
+red LED). A local compile uses the sketchbook's `WCB_Client`, which shadows the real one —
+check it matches `greghulette/WCBClient` master first, or a pass proves nothing; see
 [docs/BUILD_AND_RELEASE.md §3](docs/BUILD_AND_RELEASE.md#3-verifying-a-firmware-change).
-Until it is refreshed, **CI is the authoritative compile**.
 
 ## Conventions
 
