@@ -59,6 +59,7 @@ always address "the RC" without asking which one.
 | [`navicore_record.h`](../navicore_record.h) | Record/replay: capture queue, PSRAM clip buffer, clip files, replay interpolation, timeline-editor transport |
 | [`navicore_ota.h`](../navicore_ota.h) | Firmware OTA over USB (`?OTALOCAL`) and over the mesh (`?OTA`) |
 | [`navicore_rterm.h`](../navicore_rterm.h) | Remote terminal — ships captured CLI output back over the mesh as RTERM packets |
+| [`navicore_hil.h`](../navicore_hil.h) | HIL test hooks — `DBG_WIRE` and the `#L90`–`#L93` fault verbs. Compiled **only** with `-DNAVICORE_HIL_HOOKS=1` ([BUILD_AND_RELEASE.md §3](BUILD_AND_RELEASE.md#3-verifying-a-firmware-change)); CI and releases never define it |
 | [`rc_serial.h`](../rc_serial.h) | `RcSerial` USB-CDC tee — makes every existing `Serial.print` mirrorable to the remote terminal |
 | [`sbus_reader.h`](../sbus_reader.h) | SBUS-16 / SBUS-24 parser with auto-detect + byte-tee passthrough |
 | [`wcb_config.h`](../wcb_config.h) | Compile-time **factory defaults only** for mesh credentials (runtime values live in `RcConfig.wcbNetwork`) |
@@ -116,7 +117,7 @@ firmware numbering. See [ROADMAP.md §1](ROADMAP.md).
 | Internal SRAM | 512 KB | Everything else; the fragment reassembly pool is static DRAM (~10 KB) |
 | `nvs` @ `0x9000` | 20 KB | Legacy config store (migration source), WCB learned-peer table |
 | `app0`/`app1` | 1.9 MB each | OTA slots |
-| `spiffs` @ `0x3D0000` | 128 KB | Config LittleFS — `/config.json`, `/cmdlib.json`, staging temp files |
+| `spiffs` @ `0x3D0000` | 128 KB | Config LittleFS — `/config.json`, `/cmdlib.json`, staging temp files; `/config.json.hil` after a HIL hook build's `#L91` |
 | `clips` @ `0x400000` | 12 MB | Second LittleFS (own label + instance) for record/replay clips |
 
 **PSRAM is not optional.** Without `PSRAM=opi` in the FQBN, `ps_calloc` returns null and
@@ -182,6 +183,8 @@ path. Everything in it must stay non-blocking — SBUS arrives every ~9–14 ms 
 passthrough tee is in the same thread.
 
 ```
+navihil::loopStall()           NAVICORE_HIL_HOOKS builds only: a stall #L90 asked for
+kickUsbCdcTx()                 every 20 ms: release USB output the HWCDC core is holding (§6 step 4)
 wcb->update()                  mesh heartbeats, ACKs, WCBStream flush
 naviota::drainOtaPackets()     + checkOtaTimeout()
 drainRemoteCli()               relayed CLI lines → execCliLine with output tee'd to RTERM
@@ -440,7 +443,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending: INF9a)_ | §6 step 4: the boot banner now carries `App SHA256: <16 hex>`, the running image's identity (PROTOCOLS.md §3), and the USB RX buffer is 8 KB (`Serial.setRxBufferSize(8192)`; this page said 4 KB). |
+| 2026-09-28 | _(pending: INF9b)_ | §3 lists `navicore_hil.h`, the HIL hook header compiled only with `-DNAVICORE_HIL_HOOKS=1`; §5 the `/config.json.hil` copy its `#L91` leaves; §7's loop order gains the hook build's `#L90` stall and `kickUsbCdcTx()`, which already ran first. |
+| 2026-09-28 | `1e15601` | §6 step 4: the boot banner now carries `App SHA256: <16 hex>`, the running image's identity (PROTOCOLS.md §3), and the USB RX buffer is 8 KB (`Serial.setRxBufferSize(8192)`; this page said 4 KB). |
 | 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |
 | 2026-09-10 | _(uncommitted)_ | §8: the OTA queue also carries the ACKs this board relays, and the Core-0 rule now covers output a WebSocket client must see — `rcSerial` mirrors only the loop core, which is why relay OTA over WiFi never received an ACK. See PROTOCOLS.md's row of the same date. |
 | 2026-08-25 | _(uncommitted)_ | **Switch settle window** (`switchSettleMs`, default 80): a position must rest before its tier fires, so a 3-position switch swept end-to-end no longer fires the middle tier on the way past. **Switch easing is now seeded** from the resting position at boot/apply (`seedSwitchEasingFromTier`) — previously `g_switchEasing` was only ever set by an executed action, so a power-up believed `EASE_RELEASED` wherever the switch physically sat and easing silently did nothing until the pilot flicked it. **Easing writes are retransmitted** (bounded burst) because the Pololu protocol has no speed/accel readback and `maestroWrite()` reports success on queueing, making a lost write invisible and never retried. |

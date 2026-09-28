@@ -499,11 +499,23 @@ static uint32_t g_dbgFlags = 0;
 #define DBG_MP3        (1u << 4)
 #define DBG_SERIAL     (1u << 5)
 #define DBG_DFP        (1u << 6)   // DFPlayer Mini ;D dispatch (local frames + remote forwards)
+#ifdef NAVICORE_HIL_HOOKS
+#define DBG_WIRE       (1u << 7)   // HIL builds only: [WIRE] hex of every block written to a device port
+#endif
 // Category-gated log. ##__VA_ARGS__ swallows the trailing comma when only
 // a fmt is passed. Wraps vlogf so it inherits the same non-blocking USB
 // back-pressure handling (see vlogf() definition).
 #define dlog(catBit, fmt, ...) do { if (g_dbgFlags & (catBit)) vlogf(fmt, ##__VA_ARGS__); } while (0)
 #define WS_MONITOR_INTERVAL_MS  50
+
+// HIL test hooks (DBG_WIRE, #L90-#L93) exist only in a build that defines
+// NAVICORE_HIL_HOOKS — never CI or a release; see navicore_hil.h. Elsewhere
+// HIL_TAP(port) is the port itself, so a normal build writes straight to it.
+#ifdef NAVICORE_HIL_HOOKS
+#include "navicore_hil.h"
+#else
+#define HIL_TAP(p) (p)
+#endif
 
 // =============================================================================
 //  Tap detection state
@@ -643,7 +655,7 @@ static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
     return false;
   }
 
-  Stream* dest = (slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast;
+  Stream* dest = HIL_TAP((slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast);
   if (!dest) return false;              // remote slot but stream not yet up
 
   // ;M subroutine-trigger (0xA7) frame bytes now come from the shared WcbCmd library,
@@ -1385,9 +1397,9 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
 // String every call AND wrote one byte at a time; on a bit-banged port
 // each write blocks ~1 byte-time, so a long command stalled loop() (and
 // thus SBUS) for many ms.  One block write + one CR minimizes the hit.
-void writeS3(const String& s) { if (s3) { s3->write((const uint8_t*)s.c_str(), s.length()); s3->write('\r'); } }
-void writeS4(const String& s) { if (s4) { s4->write((const uint8_t*)s.c_str(), s.length()); s4->write('\r'); } }
-void writeS5(const String& s) { if (s5) { s5->write((const uint8_t*)s.c_str(), s.length()); s5->write('\r'); } }
+void writeS3(const String& s) { if (s3) { HIL_TAP(s3)->write((const uint8_t*)s.c_str(), s.length()); HIL_TAP(s3)->write('\r'); } }
+void writeS4(const String& s) { if (s4) { HIL_TAP(s4)->write((const uint8_t*)s.c_str(), s.length()); HIL_TAP(s4)->write('\r'); } }
+void writeS5(const String& s) { if (s5) { HIL_TAP(s5)->write((const uint8_t*)s.c_str(), s.length()); HIL_TAP(s5)->write('\r'); } }
 
 // =============================================================================
 //  HCR command formatter
@@ -1669,8 +1681,8 @@ static void executeHcrAction(const RcAction& a) {
     const int base = (g_hcrFade.active(ch) && g_hcrPreFade[ch] >= 0)
                    ? (int)g_hcrPreFade[ch] : g_hcr.getVol(ch);
     g_hcrPreFade[ch] = (int8_t)base;                        // survives this fade being superseded
-    if (a.fn == 12) g_hcrFade.start(g_hcr, *hcrSerial, ch, 0, base, sec, false, 0);   // FadeIn: 0 → pre-fade level
-    else { const int cur = g_hcr.getVol(ch); g_hcrFade.start(g_hcr, *hcrSerial, ch, cur, 0, sec, true, base); }  // FadeOut: cur → 0, StopWAV, restore pre-fade level
+    if (a.fn == 12) g_hcrFade.start(g_hcr, *HIL_TAP(hcrSerial), ch, 0, base, sec, false, 0);   // FadeIn: 0 → pre-fade level
+    else { const int cur = g_hcr.getVol(ch); g_hcrFade.start(g_hcr, *HIL_TAP(hcrSerial), ch, cur, 0, sec, true, base); }  // FadeOut: cur → 0, StopWAV, restore pre-fade level
     dlog(DBG_HCR, "[DISPATCH] HCR→%s  Fade%s ch=%d %ds\n", dest.target, a.fn == 12 ? "In" : "Out", a.chan, sec);
     return;
   }
@@ -1709,7 +1721,7 @@ static void executeHcrAction(const RcAction& a) {
   }
   dlog(DBG_HCR, "[DISPATCH] HCR→%s  fn=%u chan=%d track=%d  %s",
         dest.target, a.fn, a.chan, a.track, payload.c_str());
-  hcrSerial->print(payload);
+  HIL_TAP(hcrSerial)->print(payload);
 }
 
 // Build the ";A,<CMD>" MP3 verb for an RA_MP3 action — the SINGLE producer for
@@ -1787,7 +1799,7 @@ static void executeMp3Action(const RcAction& a) {
       dlog(DBG_MP3, "[DISPATCH] MP3-local: bad/out-of-range fn=%u arg=%d — skipped\n", a.fn, a.track);
       return;
     }
-    g_mp3.begin(*p);                          // rebind — the resolved port can change per action
+    g_mp3.begin(*HIL_TAP(p));                 // rebind — the resolved port can change per action
     bool ok = g_mp3.handle(cmd.c_str() + 1);  // skip leading ';' (handle tolerates the 'A' verb)
     dlog(DBG_MP3, "[DISPATCH] MP3→%s  fn=%u arg=%d vol=%u  %s\n",
           dest.target, a.fn, a.track, g_mp3.volume(), ok ? "OK" : "FAIL");
@@ -1910,7 +1922,7 @@ static void executeDfpAction(const RcAction& a) {
             a.fn, a.chan, a.track);
       return;
     }
-    g_dfp.begin(*p);                          // rebind — the resolved port can change per action
+    g_dfp.begin(*HIL_TAP(p));                 // rebind — the resolved port can change per action
     bool ok = g_dfp.handle(cmd.c_str() + 1);  // skip leading ';' (handle tolerates the 'D' verb)
     dlog(DBG_DFP, "[DISPATCH] DFP→%s  fn=%u chan=%d track=%d vol=%u  %s\n",
           dest.target, a.fn, a.chan, a.track, g_dfp.volume(), ok ? "OK" : "FAIL");
@@ -1994,7 +2006,7 @@ static void executeWledAction(const RcAction& a) {
     // pattern vlogf() exists to prevent. The dlog() below already reports the
     // no-op through the non-blocking, category-gated path. (Matches g_mp3/g_dfp,
     // which both take the default diag = nullptr.)
-    bool ok = WcbWled::emit(*port, body, nullptr);   // build ;L verb → WLED JSON, newline-framed
+    bool ok = WcbWled::emit(*HIL_TAP(port), body, nullptr);   // build ;L verb → WLED JSON, newline-framed
     dlog(DBG_WLED, "[DISPATCH] WLED %u→S%u  %s  %s\n", w.wledID, w.serialPort, body, ok ? "OK" : "no-op");
   } else if (w.remoteWCB >= 1 && w.remoteWCB <= WCB_MAX_BOARDS) {
     if (!wcb || !wcbReady) { dlog(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
@@ -3671,7 +3683,7 @@ bool execCliLine(const String& line) {
         // (TX/RX swap, ground, 3V3 vs 5V) or the EspSoftwareSerial port.
         case 20:
         case 21: {
-          Stream*     h  = (fn == 20) ? s3 : s4;
+          Stream*     h  = HIL_TAP((fn == 20) ? s3 : s4);
           const char* pn = (fn == 20) ? "S3" : "S4";
           Serial.printf("[HCR TEST] -> %s : SetEmotion(HAPPY,80) via hcrFormatCommand + raw frame\n", pn);
           // Send the SetEmotion(HAPPY,80) payload we'd normally dispatch
@@ -3683,6 +3695,14 @@ bool execCliLine(const String& line) {
           Serial.println("[HCR TEST] sent — watch the HCR; check TX wiring to HCR RX, common ground");
           break;
         }
+#ifdef NAVICORE_HIL_HOOKS
+        // HIL fault verbs (navicore_hil.h), in a NAVICORE_HIL_HOOKS build only. Left out
+        // of the "Valid:" list below on purpose: every other image answers these with that
+        // exact line, and the harness compares it whole (nccfg #L99) on both kinds.
+        case 90: case 91: case 92: case 93:
+          navihil::command(fn, line);
+          break;
+#endif
         default:
           Serial.printf("Unknown #L code %d. Valid: 1,2,9,10,11,12,13,20,21\n", fn);
           break;
@@ -3849,6 +3869,9 @@ bool processInputLine(const String& line) {
       // with no config fields, keep its built-in defaults, latch them as the baseline,
       // and the next Save would ship those defaults over the good on-board config.
       // Pass the error through at the TOP level so it can never read as a config.
+#ifdef NAVICORE_HIL_HOOKS
+      navihil::armGetConfigOverflow();   // #L92 armed: THIS rcConfigToJSON() takes its overflow branch
+#endif
       String cfg = rcConfigToJSON();
       if (cfg.startsWith("{\"type\":\"ERROR\"")) {
         Serial.println(cfg);
@@ -4533,6 +4556,9 @@ void setup() {
   Serial.println("\n\n=== NaviCore ===");   // active board profile logged at boot by applyBoardProfile()
   // The exact image (FW_VERSION changes only per commit) — see naviota::otaAppSha16().
   Serial.printf("App SHA256: %s\n", naviota::otaAppSha16());
+#ifdef NAVICORE_HIL_HOOKS
+  Serial.println("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L93 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, never a release");
+#endif
   printBootloaderInfo();
   printBootTelemetry();
 
@@ -5040,7 +5066,13 @@ static void auxTxPump() {
     Stream* p = auxStreamFor(i + 3);
     if (!p) { t.len = 0; continue; }               // port vanished (board profile) — drop it
     int budget = auxTxBudget(i);
+#ifdef NAVICORE_HIL_HOOKS
+    const uint8_t hilFrom = t.sent;   // DBG_WIRE: this pass's bytes as ONE block, not a line per byte
+#endif
     while (budget-- > 0 && t.sent < t.len) p->write((uint8_t)t.text[t.sent++]);
+#ifdef NAVICORE_HIL_HOOKS
+    navihil::wire(i == 0 ? "S3" : i == 1 ? "S4" : "S5", (const uint8_t*)t.text + hilFrom, t.sent - hilFrom);
+#endif
     if (t.sent >= t.len) {
       t.text[t.len - 1] = '\0';   // drop the framing CR — logging it would yank the terminal cursor
       t.len = 0;
@@ -5378,6 +5410,9 @@ static void kickUsbCdcTx() {
 #endif
 
 void loop() {
+#ifdef NAVICORE_HIL_HOOKS
+  navihil::loopStall();   // #L90 (HIL builds only): a requested stall, before anything else this pass
+#endif
 #if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
   kickUsbCdcTx();   // recover a stalled USB output - see above
 #endif
@@ -5504,7 +5539,7 @@ void loop() {
   if (rcConfig.hcrDest.transport == 0) {
     Stream* hp = hcrLocalSerial();
     if (hp) {
-      g_hcrFade.tick(g_hcr, *hp);
+      g_hcrFade.tick(g_hcr, *HIL_TAP(hp));
     } else if (g_hcrFade.active(0) || g_hcrFade.active(1) || g_hcrFade.active(2)) {
       // Local transport but no resolvable serial port (e.g. an out-of-range dest) —
       // can't tick, so cancel any in-flight fade rather than freeze the ramp.

@@ -471,10 +471,28 @@ of its own.
 | 4 | `DBG_MP3` | MP3 |
 | 5 | `DBG_SERIAL` | Aux serial TX/RX |
 | 6 | `DBG_DFP` | DFPlayer Mini `;D` dispatch |
+| 7 | `DBG_WIRE` | **`NAVICORE_HIL_HOOKS` builds only** — the bytes themselves, below. A normal build ignores the bit |
 
 Default 0 — every `[DISPATCH]` log is compiled in but costs nothing until enabled. Log
 sites use `dlog(BIT, fmt, …)`, which wraps `vlogf()` and drops the line rather than block
 when the USB TX buffer is full.
+
+**`DBG_WIRE` (bit 7, HIL hook builds).** One line per block handed to a device port, 48 bytes
+at most per line:
+
+```
+[WIRE] <port> <offset>/<length>: <hex>        port = S3 | S4 | S5 | Serial2 | WCBStream
+[WIRE] WCBStream 0/3: AA 04 04                (a remote Maestro frame: header, then payload)
+[WIRE] WCBStream 0/3: 05 70 2E
+```
+
+A block is one `write()`/`print()` call on the port, so a Maestro frame arrives as its
+3-byte header and then its payload, and an MP3 Trigger command a byte at a time; the one
+exception is the aux TX pump (mesh → serial forwards), which writes a byte per call and is
+logged once per pass. Join a port's lines in order to get its byte stream; `offset/length`
+shows when a line was lost, which happens because it goes through `vlogf()`. Device codecs
+(MP3, DFPlayer, WLED, HCR fades) are covered because they are handed a pass-through
+`Stream` (`HIL_TAP`, `navicore_hil.h`) instead of the port.
 
 ---
 
@@ -495,6 +513,25 @@ through `execCliLine()`, so behaviour is identical. Case-insensitive.
 | `#L12` | Mode + decoded matrix button + raw value |
 | `#L13` | Raw SBUS frame hex with byte-offset annotations |
 | `#L20` / `#L21` | Send a fixed HCR `SetEmotion(HAPPY,80)` straight to S3 / S4 — bypasses config **and** mapping, so it separates wiring faults from config faults |
+
+An unknown code answers `Unknown #L code <n>. Valid: 1,2,9,10,11,12,13,20,21`.
+
+### HIL test hooks (`NAVICORE_HIL_HOOKS` builds only)
+
+Fault verbs for the hardware-in-the-loop harness (the WCB repo's `tests/hil`), compiled in
+only with `-DNAVICORE_HIL_HOOKS=1` ([BUILD_AND_RELEASE.md §3](BUILD_AND_RELEASE.md#3-verifying-a-firmware-change)).
+Every other image answers them with the `Unknown #L code` line above, unchanged — the
+`Valid:` list does not name them in a hook build either — which is how the harness tells a
+hook image apart. A hook image also says so in its boot banner:
+`[HIL] NAVICORE_HIL_HOOKS build: …`. Each armed state is RAM, clear at boot.
+
+| Command | Effect |
+|---|---|
+| `#L90,<ms>` | Stall `loop()` once, for `<ms>` ms (capped at 60000), at the top of its next pass: `[HIL] #L90: loop() stalls <ms> ms at its next pass`, then `[HIL] #L90: loop() resumed after <n> ms`. `delay()`, so the WiFi task, the ESP-NOW callbacks and the drivers keep running. `#L90,0` stalls nothing |
+| `#L91` | Copy `/config.json` whole to `/config.json.hil` (checked), then cut `/config.json` to its first half: the next boot takes the *present-but-unreadable* path (`[CONFIG] LFS: /config.json parse failed (IncompleteInput) — keeping file, using defaults this boot`). The running config is unchanged until then, and any config save before it writes a whole file again |
+| `#L91,R` | Move `/config.json.hil` back over `/config.json` (atomic rename); takes effect at the next boot. The copy is on flash, so it survives the restarts a test in between makes |
+| `#L92` | The next `GET_CONFIG` over USB or the WebSocket takes `rcConfigToJSON()`'s overflow branch: `[CONFIG] ERROR: GET_CONFIG overflowed memory — …` and a top-level `{"type":"ERROR","msg":"GET_CONFIG overflow — …"}`. A config save or a mesh `GET_CONFIG` in between does not use it up |
+| `#L93` | The next config save (`rcConfigSaveLFS()`, any path) fails before touching flash: `[CONFIG] LFS: save failed (HIL fault #L93) — previous config kept`, and a USB `SET_CONFIG` answers `ok:false` "applied to RAM but could not be saved to flash (LittleFS write error)" with its `saveId` |
 
 ### WCB Wizard management (`?backup`, `?WDP,DUMP`, `?MGMT,…`)
 
@@ -892,7 +929,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending: INF9a)_ | **`App SHA256: <16 hex>` in `?OTALOCAL,STATUS` and the boot banner**: the running image's ELF SHA-256 (first 8 bytes), so two builds of one commit, which report the same `FW_VERSION`, can be told apart, and a backtrace is decoded against the right `.elf`. §3 now lists the STATUS block. Read from the app descriptor because `esp_app_get_elf_sha256()` stops at 9 hex digits in core 3.3.4. |
+| 2026-09-28 | _(pending: INF9b)_ | **HIL test hooks, `NAVICORE_HIL_HOOKS` builds only** (the WCB repo's HIL plan INF9 b): `DBG_WIRE` = debug bit 7, a `[WIRE] <port> <offset>/<length>: <hex>` line per block written to S3/S4/S5/Serial2/the WCBStream; §3's new table: `#L90,<ms>` (stall `loop()`), `#L91` / `#L91,R` (cut `/config.json`, keeping `/config.json.hil`; put it back), `#L92` (the next GET_CONFIG overflows), `#L93` (the next config save fails). Every other image answers them `Unknown #L code`, whose `Valid:` list is unchanged in both. |
+| 2026-09-28 | `1e15601` | **`App SHA256: <16 hex>` in `?OTALOCAL,STATUS` and the boot banner**: the running image's ELF SHA-256 (first 8 bytes), so two builds of one commit, which report the same `FW_VERSION`, can be told apart, and a backtrace is decoded against the right `.elf`. §3 now lists the STATUS block. Read from the app descriptor because `esp_app_get_elf_sha256()` stops at 9 hex digits in core 3.3.4. |
 | 2026-09-24 | _(uncommitted)_ | `?MGMT,PULL,<target>,P`: through WCB_Client's `WCB_Mgmt.h`, a config over 2912 characters is relayed as `[MGMT:CFGPART,<n>]` parts and a refusal as `[MGMT:CFGERR,<n>]` (WCB F13). Each line is one `printf` from `service()`, so it reaches the WebSocket (only loop-task output does). |
 | 2026-09-10 | _(uncommitted)_ | **Relay OTA through this board now works over WiFi.** `handleOtaAckRelay()` printed `[OTA:ACK,…]` straight from the raw-packet hook on Core 0, and `rcSerial`'s tee mirrors only the core that armed it — the loop task, for the WebSocket. So every ACK went to USB alone: the WCB Wizard, attached through Intellex over the SoftAP, failed every wireless OTA to a WCB with *"no response from WCB2 via relay — is it online & on this firmware?"* while the target was answering. Over USB the ACK still reached the host, which is why it went unseen. The hook now enqueues the ACK like every other OTA packet and `drainOtaPackets()` prints it on the loop task — the deferral `WCB_OTA.cpp` already makes through `otaRelayPrint()`. §5 and the console-mirror rules say so. Compiles locally with the ESP32-S3 FQBN; not yet verified on hardware. |
 | 2026-09-10 | _(uncommitted)_ | **The SoftAP no longer offers a default gateway** (DHCP option 3), so a client reaches `192.168.4.1` on-link and keeps its real default route — a board with no upstream naming itself the router gives a two-adapter laptop competing default routes and can make a phone reject the network. Same change as WCB `b898088` (hardware-verified there), with one correction: the WCB treats `ESP_NETIF_ROUTER_SOLICITATION_ADDRESS` as a mask to read, clear a bit in and write back, but in IDF 5.5 get and set are **booleans** (`esp_netif_dhcps_option_api()`) — that code gets the right answer only because get returns 1 and `OFFER_ROUTER` is 1. NaviCore writes 0 and records the trap. Also recorded why the unconditional restart is load-bearing: `esp_netif_start_api()` never starts a server left `STOPPED`. Compile-verified; not yet verified on NaviCore hardware. |

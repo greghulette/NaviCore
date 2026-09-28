@@ -1205,6 +1205,17 @@ static bool rcSeedProfile0FromOuts(const RcKnobOutput* outs, uint8_t cnt) {
   return any;
 }
 
+#ifdef NAVICORE_HIL_HOOKS
+// HIL fault one-shots (navicore_hil.h; a NAVICORE_HIL_HOOKS build only, never CI or a
+// release). RAM, clear at boot, each consumed by the one call it fails, so the failure
+// branches below can be driven on a healthy board:
+//   g_hilJsonOverflowNow — set by the GET_CONFIG handler for its own rcConfigToJSON()
+//                          call once #L92 is armed: that call takes the overflow branch
+//   g_hilFailNextSave    — #L93: the next rcConfigSaveLFS() fails before touching flash
+inline bool g_hilJsonOverflowNow = false;
+inline bool g_hilFailNextSave    = false;
+#endif
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Serialise full config to JSON string (for GET_CONFIG WebSocket response)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1468,7 +1479,13 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
 
   // Truncation guard — see the note at the top of this function. Better to
   // fail loudly than hand the tool an incomplete config it would re-save.
+#ifdef NAVICORE_HIL_HOOKS
+  const bool hilOverflow = g_hilJsonOverflowNow;   // #L92 (HIL builds only): this call overflows
+  g_hilJsonOverflowNow = false;
+  if (doc.overflowed() || hilOverflow) {
+#else
   if (doc.overflowed()) {
+#endif
     Serial.println("[CONFIG] ERROR: GET_CONFIG overflowed memory — config too large to serialize");
     return String("{\"type\":\"ERROR\",\"msg\":\"GET_CONFIG overflow — config too large, not sent. "
                   "Reduce mapped actions and retry.\"}");
@@ -2038,6 +2055,13 @@ bool rcConfigBeginLFS() {
 // failure (the caller surfaces it in the SET_CONFIG ACK).
 bool rcConfigSaveLFS() {
   if (!g_lfsReady) { Serial.println("[CONFIG] LittleFS not mounted — save skipped"); return false; }
+#ifdef NAVICORE_HIL_HOOKS
+  if (g_hilFailNextSave) {   // #L93 (HIL builds only): fail as a write error would, flash untouched
+    g_hilFailNextSave = false;
+    Serial.println("[CONFIG] LFS: save failed (HIL fault #L93) — previous config kept");
+    return false;
+  }
+#endif
   String json = rcConfigToJSON();
   if (json.startsWith("{\"type\":\"ERROR\"")) {   // rcConfigToJSON hit a heap overflow
     Serial.println("[CONFIG] LFS save aborted — config failed to serialize");

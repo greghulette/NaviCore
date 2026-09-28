@@ -84,6 +84,25 @@ Every FQBN field is load-bearing:
 | `PartitionScheme=custom` | Uses [`partitions.csv`](../partitions.csv) — the 12 MB `clips` partition |
 | `FlashSize=16M` | The `clips` partition starts at 0x400000 |
 
+**The HIL hook build.** The WCB repo's hardware-in-the-loop harness builds a test image with
+the same FQBN plus one define:
+
+```bash
+arduino-cli compile --fqbn "<the FQBN above>" --build-path <a private folder> \
+  --build-property "compiler.cpp.extra_flags=-DNAVICORE_HIL_HOOKS=1" NaviCore.ino
+```
+
+(`compiler.cpp.extra_flags` is empty by default in the esp32 3.3.4 recipe, so nothing else
+changes.) That compiles in [`navicore_hil.h`](../navicore_hil.h): `DBG_WIRE` and the
+`#L90`–`#L93` fault verbs ([PROTOCOLS.md §3](PROTOCOLS.md#hil-test-hooks-navicore_hil_hooks-builds-only)).
+They are fault injectors — a corrupted config file, a failed save — so **CI, the release bins
+and the flasher never define it**, and without it the image is byte-for-byte what it would be
+if the hooks did not exist: every hook site sits inside `#ifdef NAVICORE_HIL_HOOKS`, and
+`HIL_TAP(port)` is the port itself. A hook image names itself in its boot banner
+(`[HIL] NAVICORE_HIL_HOOKS build: …`) and knows `#L90`; any other answers
+`Unknown #L code 90`. The harness builds both through `tests/hil/hil/ncflash.py`
+(`build(tag, hooks=True)`), whose `BUILD.json` records which.
+
 **Config-tool check** (no compiler, so this is the substitute):
 
 ```
@@ -216,7 +235,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending: INF9a)_ | §4: the version names a commit, not an image — `App SHA256` (boot banner, `?OTALOCAL,STATUS`) names the image and the `.elf` that decodes its backtraces. §7: how STATUS confirms an OTA. |
+| 2026-09-28 | _(pending: INF9b)_ | §3: **the HIL hook build** — `-DNAVICORE_HIL_HOOKS=1` through `compiler.cpp.extra_flags` compiles in `navicore_hil.h` (`DBG_WIRE`, `#L90`–`#L93`); CI and releases never define it, and without it the image is the same bytes as with no hook code at all (checked: 71 differing bytes against the pre-hook tree, all version stamp, compile time and hashes). |
+| 2026-09-28 | `1e15601` | §4: the version names a commit, not an image — `App SHA256` (boot banner, `?OTALOCAL,STATUS`) names the image and the `.elf` that decodes its backtraces. §7: how STATUS confirms an OTA. |
 | 2026-09-10 | _(uncommitted)_ | §3: **a local compile of `main` passes again** (1,169,087 B). The sketchbook's `WCB_Client` now matches `greghulette/WCBClient` master — the `diff -rq` is empty. The callout recorded a *state* ("a local compile of current `main` fails"), which went stale without anything saying so; it now gives the check instead. CLAUDE.md's build note likewise. |
 | 2026-08-18 | _(uncommitted)_ | §5/§7 corrected against `flasher.js`: the per-build `_ESP32S3_boot.bin` is **never flashed** — the flasher writes the fixed-name `WCB_S3_custom_bootloader_16MB_wdt3s.bin` at `0x0`, which is why that name is fixed (a per-build `_boot.bin` must not shadow it) — and **Update Firmware** writes bootloader + partition table + app unconditionally rather than auto-detecting, because reading flash back over the S3's native USB wedges the esptool stub. Also recorded the app/table version pairing rule. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |
