@@ -270,6 +270,7 @@ highest-risk category of edit in the repo.
 | `RcDfpFn` enum | `dfpFnLabels` + `DFP_FN_USES_CHAN`/`_TRACK` + bounds | 1–18 |
 | `dfpFormatCommand()` arg ranges | `dfpTrackBounds` / `dfpChanBounds` | must equal `DfPlayerCodec::handle()`'s |
 | `DBG_DFP` | `DEBUG_CATEGORIES` `dfp` bit | `1 << 6` |
+| `DBG_WIRE` (`NAVICORE_HIL_HOOKS` builds only) | — never sent; a new tool category takes bit 8, not 7 | `1 << 7` |
 | `rcTelemetry::FRAG_CHUNK_BYTES` | `FRAG_CHUNK_BYTES` | 80 |
 | `rcTelemetry::FRAG_MAX_PARTS` | `FRAG_MAX_PARTS` | 192 (upload) |
 | `rcTelemetry::FRAG_SEND_MAX_PARTS` | `FRAG_MAX_PARTS_RECV` | 512 (download) |
@@ -319,6 +320,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | `703a0e7` | §6: debug bit 7 is `DBG_WIRE` in a HIL hook build (PROTOCOLS.md §2), so the tool never sends it and a new debug category takes bit 8. |
 | 2026-08-30 | _(uncommitted)_ | Recorded the OTA END discriminator as a cross-file invariant (§6). The firmware has always sent the END ACK with offset 0 — deliberately, with a comment in `navicore_ota.h` forbidding anyone to "improve" it — but the tool's `otaSendAwaitAck()` matched only session+src, so a duplicate DATA cursor ACK still in flight satisfied the END wait and reported **Verified** for an image the target never verified. The tool now checks the offset. |
 | 2026-08-28 | _(uncommitted)_ | `wifiEnabled` is now **live** — `setup()` raises the SoftAP before `wcb->begin()`, which is what lets WCB_Client detect it and select WIFI_AP_STA instead of forcing STA and tearing the AP down. The channel is passed explicitly from `wcbNetwork.channel`: `softAP()`s 3rd parameter defaults to 1, and once an AP owns the radio WCB_Client only warns on a mismatch, so a defaulted channel would be a silent total mesh blackout. An empty or under-8-char password refuses to start the AP rather than falling back to an open network. Every path logs a `[WIFI]` line. |
 | 2026-08-28 | _(uncommitted)_ | Added `wifiSsid` (char[33]) and `wifiPassword` (char[64]) alongside `wifiEnabled` — the flag alone could not actually raise an AP. Empty SSID derives `NaviCore-<deviceId>`. Empty or under-8-char password **refuses to raise the AP**: `WiFi.softAP()` creates an OPEN network on an empty password, and with no per-command auth on this surface that is an unauthenticated command channel to the whole mesh, so it fails closed rather than falling back. Kept in their own NVS key (`wifi`) rather than folded into `wcb`, because AP credentials and mesh credentials must never be confused — `wcbNetwork.password` is public by construction, riding in cleartext in every ESP-NOW packet. The tool warns inline on a short password rather than letting the user save, reboot, and find no AP with only a serial line to explain it. |

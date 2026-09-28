@@ -443,7 +443,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-09-28 | _(pending: INF9b)_ | §3 lists `navicore_hil.h`, the HIL hook header compiled only with `-DNAVICORE_HIL_HOOKS=1`; §5 the `/config.json.hil` copy its `#L91` leaves; §7's loop order gains the hook build's `#L90` stall and `kickUsbCdcTx()`, which already ran first. |
+| 2026-09-28 | `703a0e7` | §3 lists `navicore_hil.h`, the HIL hook header compiled only with `-DNAVICORE_HIL_HOOKS=1`; §5 the `/config.json.hil` copy its `#L91` leaves; §7's loop order gains the hook build's `#L90` stall and `kickUsbCdcTx()`, which already ran first. |
 | 2026-09-28 | `1e15601` | §6 step 4: the boot banner now carries `App SHA256: <16 hex>`, the running image's identity (PROTOCOLS.md §3), and the USB RX buffer is 8 KB (`Serial.setRxBufferSize(8192)`; this page said 4 KB). |
 | 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |
 | 2026-09-10 | _(uncommitted)_ | §8: the OTA queue also carries the ACKs this board relays, and the Core-0 rule now covers output a WebSocket client must see — `rcSerial` mirrors only the loop core, which is why relay OTA over WiFi never received an ACK. See PROTOCOLS.md's row of the same date. |
