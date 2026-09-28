@@ -2144,6 +2144,13 @@ static bool rcTestAction(JsonObject act) {
   if (act.isNull()) return false;
   RcAction a{};   // zero-init so any field the parser leaves unset (skipRunning/delayMs/…) is clean
   if (!actionFromJson(act, a)) return false;
+  // The ok flag must mean 'the action fired', not 'the JSON parsed'. rcExecuteActionNow
+  // silently does nothing for a board id outside 1-WCB_MAX_BOARDS, so a Test button on an
+  // action pointing at board 0 or 99 reported success for a command that never left.
+  if (a.type == RA_WCB_UNICAST) {
+    const int boardId = atoi(a.target);
+    if (boardId < 1 || boardId > WCB_MAX_BOARDS) return false;
+  }
   rcExecuteActionNow(a);
   return true;
 }
@@ -3596,7 +3603,11 @@ bool execCliLine(const String& line) {
       else
         fn = line[2] - '0';
       switch (fn) {
-        case 1:  Serial.println("NaviCore — WCB HW 3.2"); break;
+        // Name the profile that actually booted. This was hardcoded, so a board running the
+        // NaviCore v2 profile still reported "WCB HW 3.2" - the one diagnostic whose job is to
+        // tell you which hardware you are on.
+        case 1:  Serial.printf("NaviCore — %s\n",
+                               appliedBoardType == BOARD_WCB_HW_32 ? "WCB HW 3.2" : "NaviCore v2"); break;
         case 2:  ESP.restart(); break;
         case 9:  dumpSbusState(); break;
         case 10: sbusLiveDump = !sbusLiveDump;
@@ -4032,12 +4043,17 @@ bool processInputLine(const String& line) {
       if (!wcb || !wcbReady) {
         Serial.println("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"WCB not ready (init failed)\"}");
       } else {
+        // ok reflects whether the library actually SENT it. Both calls return bool and both
+        // refuse for real reasons (no peer, oversize payload, mesh not up); discarding that and
+        // always answering true told the config tool a refused command had gone out.
         if (target == 0) {
-          wcb->broadcast(cmd);
-          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+          const bool sent = wcb->broadcast(cmd);
+          if (sent) Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+          else      Serial.println("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"broadcast refused by WCB_Client\"}");
         } else if (target >= 1 && target <= WCB_MAX_BOARDS) {
-          wcb->send((uint8_t)target, cmd);
-          Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+          const bool sent = wcb->send((uint8_t)target, cmd);
+          if (sent) Serial.println("{\"type\":\"ACK\",\"ok\":true}");
+          else      Serial.println("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"send refused by WCB_Client\"}");
         } else {
           Serial.printf("{\"type\":\"ACK\",\"ok\":false,\"msg\":\"target %d out of range (0=broadcast, 1-%d=unicast)\"}\n",
                         target, WCB_MAX_BOARDS);
@@ -5065,9 +5081,12 @@ void drainSerialFwd() {
 static void maeInboundActuate(uint8_t id, const uint8_t* frame, size_t n) {
   const uint16_t arg14 = (n >= 6) ? (uint16_t)(frame[4] | ((uint16_t)frame[5] << 7)) : 0;
   switch (frame[2]) {
-    case WcbMaestro::CMD_SET_TARGET:  maestroSetTarget(id, frame[3], arg14);            break;
-    case WcbMaestro::CMD_SET_SPEED:   maestroSetSpeed (id, frame[3], arg14);            break;
-    case WcbMaestro::CMD_SET_ACCEL:   maestroSetAccel (id, frame[3], (uint8_t)arg14);   break;
+    // Guard first: the wrappers are void, so a channel they skip (> 31) would otherwise still
+    // reach the "<- mesh" dispatch line below and claim a Serial2 write that never happened
+    // (HIL navicore.maestro_skip_not_logged_as_dispatch). The guard prints its own "skipped" line.
+    case WcbMaestro::CMD_SET_TARGET:  if (!maestroChanOk(id, frame[3])) return; maestroSetTarget(id, frame[3], arg14);          break;
+    case WcbMaestro::CMD_SET_SPEED:   if (!maestroChanOk(id, frame[3])) return; maestroSetSpeed (id, frame[3], arg14);          break;
+    case WcbMaestro::CMD_SET_ACCEL:   if (!maestroChanOk(id, frame[3])) return; maestroSetAccel (id, frame[3], (uint8_t)arg14); break;
     case WcbMaestro::CMD_GO_HOME:     maestroGoHome(id);                                break;
     case WcbMaestro::CMD_STOP_SCRIPT: maestroStopScript(id);                            break;
     // Straight to maestroRestartScript, NOT via executeMaestroCmd's "restartScript"
@@ -5332,7 +5351,34 @@ void drainForgetPeer() {
   while (xQueueReceive(forgetPeerQueue, &id, 0) == pdTRUE) doForgetPeer(id);
 }
 
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+#include "hal/usb_serial_jtag_ll.h"
+// HWCDC (esp32 core 3.3.4, HWCDC.cpp) flips its `connected` flag to false the moment one write
+// makes no progress for tx_timeout_ms (50 ms here - see setTxTimeoutMs in setup). From then on
+// every write is only queued, and the one thing that reliably flips it back is the host SENDING a
+// packet (OUT_RECV_PKT). So after any brief pause in the host draining a big reply (a 2-4 KB CONFIG,
+// the RC telemetry stream), NaviCore's replies sat in the ring until the next command arrived - the
+// config tool and the HIL harness both saw answers arrive one command late, or not at all.
+// Re-arming IN_EMPTY lets the core's own ISR notice the host is draining again (it sets connected and
+// empties the ring). IN_EMPTY only fires once the host has emptied the TX FIFO, so with no reader
+// attached the FIFO stays full, nothing fires, and the 50 ms no-host guard is untouched.
+static void kickUsbCdcTx() {
+  static uint32_t last = 0;
+  const uint32_t now = millis();
+  if (now - last < 20) return;
+  last = now;
+  // Flush first: this peripheral sends a partially filled TX FIFO only when told to, and IN_EMPTY
+  // only fires once the FIFO has emptied - an unflushed partial packet would block both forever.
+  // The core's own not-connected path does the same pair (HWCDC::isCDC_Connected).
+  usb_serial_jtag_ll_txfifo_flush();
+  usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+}
+#endif
+
 void loop() {
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  kickUsbCdcTx();   // recover a stalled USB output - see above
+#endif
   // WCB — heartbeats, ACKs, WCBStream flushes
   if (wcb && wcbReady) wcb->update();
 

@@ -142,6 +142,13 @@ reformat — the config filesystem.
    `Serial2.begin()` runs ~2 s later.
 4. USB-CDC: 4 KB RX buffer, 8 KB TX buffer, 50 ms TX timeout — all **before**
    `Serial.begin()`.
+   `loop()` also calls `kickUsbCdcTx()` every 20 ms, which flushes the USB-Serial/JTAG TX FIFO and re-arms
+   its IN_EMPTY interrupt. The core (`HWCDC.cpp`, esp32 3.3.4) marks the host *disconnected* the moment one
+   write makes no progress for the TX timeout, then only queues output, and the only thing that reliably
+   reconnects it is the host sending a packet — so a reply could sit in the ring until the next command
+   arrived (about 2 % of back-to-back commands on the HIL bench; 0 of 800 with the kick). IN_EMPTY only
+   fires once the host drains the FIFO, so with no reader attached nothing changes and the no-host guard
+   still holds.
 5. `ps_calloc` the config, then `rcConfigLoadDefaults()` → `rcConfigBeginLFS()` →
    `rcConfigLoadLFS()`, falling back to a one-time NVS→LittleFS migration. A
    *present-but-unreadable* `/config.json` is kept and defaults run for that boot —
@@ -431,6 +438,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |
 | 2026-09-10 | _(uncommitted)_ | §8: the OTA queue also carries the ACKs this board relays, and the Core-0 rule now covers output a WebSocket client must see — `rcSerial` mirrors only the loop core, which is why relay OTA over WiFi never received an ACK. See PROTOCOLS.md's row of the same date. |
 | 2026-08-25 | _(uncommitted)_ | **Switch settle window** (`switchSettleMs`, default 80): a position must rest before its tier fires, so a 3-position switch swept end-to-end no longer fires the middle tier on the way past. **Switch easing is now seeded** from the resting position at boot/apply (`seedSwitchEasingFromTier`) — previously `g_switchEasing` was only ever set by an executed action, so a power-up believed `EASE_RELEASED` wherever the switch physically sat and easing silently did nothing until the pilot flicked it. **Easing writes are retransmitted** (bounded burst) because the Pololu protocol has no speed/accel readback and `maestroWrite()` reports success on queueing, making a lost write invisible and never retried. |
 | 2026-08-24 | `083207c` | **Long press added as tap tier 4.** `RcMapping::t[]` is now `RC_NUM_TAP_TIERS = 4`; holding a matrix button for the new `holdMs` config field (default 750) dispatches `t[3]` at the threshold while still held. Three constraints documented in §Taps: `holdMs` must exceed `tapWindowMs`, `checkDeferredTap()` parks the tap dispatch while the button is down (so press-and-hold now resolves on release, not mid-hold), and tier 4 always dispatches exclusively regardless of the `exclusive` flag. |

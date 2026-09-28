@@ -376,8 +376,13 @@ inline void handleOtaDataPacket(const uint8_t *raw) {
   // rewinds, resends, and is answered with OK+0 forever — a genuine infinite hang with
   // no error and a frozen progress bar. OTA_ST_ERR makes it fail loudly instead.
   // A frame for a DIFFERENT session is answered with its own id, which the browser
-  // filters out, so this cannot disturb a live transfer.
-  sendOtaAck(pkt.sourceWCB, pkt.sessionId, inSession ? OTA_ST_OK : OTA_ST_ERR,
+  // filters out, so this cannot disturb a live transfer. The state is read AFTER the
+  // write: otaWrite itself ends the session on an overrun or write error, so the
+  // pre-write `inSession` ACKed the very frame that tore it down OK+0 (the WCB twin's
+  // HIL ota.relay_teardown_frame_err, WCB tracker #70). A dup/gap write returns false
+  // without ending the session, so it still ACKs OK with the cursor.
+  const bool live = (ota.active && pkt.sessionId == otaActiveSession());
+  sendOtaAck(pkt.sourceWCB, pkt.sessionId, live ? OTA_ST_OK : OTA_ST_ERR,
              otaWrittenOffset());
 }
 
