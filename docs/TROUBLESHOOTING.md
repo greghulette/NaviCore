@@ -93,6 +93,7 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | Config tool loads but nothing responds to clicks | JavaScript syntax error — there is no build step to catch it. Run `node C:\Users\ghulette\tools\jscheck.js config_tool/index.html` | [CONFIG_TOOL.md](CONFIG_TOOL.md) |
 | Firmware CI did not run | The paths filter excludes `fw_version.h` (the hook stamps it every commit). A bare version bump needs `workflow_dispatch` | `build-firmware.yml` |
 | A library fix did not reach the flashed board | CI clones `greghulette/WCBClient`; the `Arduino-Code` copy is local-bench only | [BUILD_AND_RELEASE.md §2](BUILD_AND_RELEASE.md#2-dependencies) |
+| Which build is on this board? / a decoded backtrace names functions that cannot be on that path | `FW_VERSION` is the same for every build of one commit, so it cannot say. `App SHA256` (boot banner, `?OTALOCAL,STATUS`) is the image's ELF SHA-256: find the build whose `NaviCore.ino.elf` hashes to it, and decode only with that `.elf` | [BUILD_AND_RELEASE.md §4](BUILD_AND_RELEASE.md#4-versioning) |
 | Two tabs cannot share a port | They are not same-origin. `BroadcastChannel` and Web Locks are origin-scoped | `serial-hub.js` |
 
 ## Config tool state
@@ -126,6 +127,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending: INF9a)_ | *Build and tooling*: which build a board runs, and decoding a backtrace against the wrong `.elf` — answered by the new `App SHA256` line. |
 | 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |
 | 2026-09-10 | _(uncommitted)_ | Added a *Mesh / Via WCB* row for the Wizard's *"no response from WCB<n> via relay"* through NaviCore over WiFi: before this change every relay OTA over WiFi failed that way, because the relayed ACK was printed on Core 0 and never reached the WebSocket; now it means the target really did not answer. |
 | 2026-09-10 | _(uncommitted)_ | Added two SoftAP DHCP rows: a Default Gateway that survives a firmware update (the client has not re-leased — a renewal keeps the old gateway, so `ipconfig /renew` alone proves nothing; `/release` then `/renew`), and clients stuck on 169.254.x (the DHCP server is not running — keyed on the new `[WIFI] *** DHCP server FAILED to restart` boot line, or a `softAPConfig()` call). |

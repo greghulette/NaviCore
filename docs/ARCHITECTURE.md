@@ -140,8 +140,10 @@ reformat — the config filesystem.
    completes (cold-boot auto-recovery). Disarmed on the last line.
 3. Drive `MAESTRO_TX_PIN` high — a floating command line makes servos twitch before
    `Serial2.begin()` runs ~2 s later.
-4. USB-CDC: 4 KB RX buffer, 8 KB TX buffer, 50 ms TX timeout — all **before**
-   `Serial.begin()`.
+4. USB-CDC: 8 KB RX buffer, 8 KB TX buffer, 50 ms TX timeout — all **before**
+   `Serial.begin()`. Then 1.5 s for a host to attach, and the boot banner: `=== NaviCore ===`,
+   `App SHA256: <16 hex>` (which image this is — [PROTOCOLS.md §3](PROTOCOLS.md#other)), the
+   bootloader line, the reset reason and the boot-attempt count.
    `loop()` also calls `kickUsbCdcTx()` every 20 ms, which flushes the USB-Serial/JTAG TX FIFO and re-arms
    its IN_EMPTY interrupt. The core (`HWCDC.cpp`, esp32 3.3.4) marks the host *disconnected* the moment one
    write makes no progress for the TX timeout, then only queues output, and the only thing that reliably
@@ -438,6 +440,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending: INF9a)_ | §6 step 4: the boot banner now carries `App SHA256: <16 hex>`, the running image's identity (PROTOCOLS.md §3), and the USB RX buffer is 8 KB (`Serial.setRxBufferSize(8192)`; this page said 4 KB). |
 | 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |
 | 2026-09-10 | _(uncommitted)_ | §8: the OTA queue also carries the ACKs this board relays, and the Core-0 rule now covers output a WebSocket client must see — `rcSerial` mirrors only the loop core, which is why relay OTA over WiFi never received an ACK. See PROTOCOLS.md's row of the same date. |
 | 2026-08-25 | _(uncommitted)_ | **Switch settle window** (`switchSettleMs`, default 80): a position must rest before its tier fires, so a 3-position switch swept end-to-end no longer fires the middle tier on the way past. **Switch easing is now seeded** from the resting position at boot/apply (`seedSwitchEasingFromTier`) — previously `g_switchEasing` was only ever set by an executed action, so a power-up believed `EASE_RELEASED` wherever the switch physically sat and easing silently did nothing until the pilot flicked it. **Easing writes are retransmitted** (bounded burst) because the Pololu protocol has no speed/accel readback and `maestroWrite()` reports success on queueing, making a lost write invisible and never retried. |

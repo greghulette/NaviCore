@@ -112,6 +112,14 @@ stay in lock-step: `FW_VERSION_DTG` and the `#footer-dtg` span in the config too
 - Non-blocking: a failure still lets the commit through.
 - Activate per clone: `git config core.hooksPath tools/git-hooks` (already set in this one).
 
+**The version names a commit, not an image.** Every build of one commit — or of an uncommitted
+tree on top of it — reports the same `FW_VERSION`. The image itself is named by
+`App SHA256: <16 hex>`, which the board prints in its boot banner and in `?OTALOCAL,STATUS`: the
+first 8 bytes of the build's ELF SHA-256, the value elf2image stamps at image offset `0xB0`. Match
+it against `sha256sum NaviCore.ino.elf` of a build to know which one a board runs, and decode a
+backtrace only with the `.elf` whose hash it starts — `addr2line` against any other build prints
+plausible, wrong function names.
+
 ---
 
 ## 5. Firmware CI
@@ -178,7 +186,9 @@ A serial app-flash preserves `/config.json` (it lives in LittleFS, not NVS). Bla
 need the full set including the 16 MB custom bootloader.
 
 **OTA.** `?OTALOCAL,*` over USB, or `?OTA,*` relayed through a tethered board over the mesh
-(windowed/pipelined, roughly 3 minutes per MB).
+(windowed/pipelined, roughly 3 minutes per MB). After the restart, `?OTALOCAL,STATUS` confirms
+the flash: `Running` is the slot that was `Next`, and `App SHA256` starts the new build's ELF
+SHA-256 (§4).
 
 **Offline builds.** `tools/build-firmware.ps1` (Windows) or `tools/build-firmware.sh` — same
 FQBN and pruning logic as CI; you commit and push the bins yourself. The Arduino IDE also
@@ -206,6 +216,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending: INF9a)_ | §4: the version names a commit, not an image — `App SHA256` (boot banner, `?OTALOCAL,STATUS`) names the image and the `.elf` that decodes its backtraces. §7: how STATUS confirms an OTA. |
 | 2026-09-10 | _(uncommitted)_ | §3: **a local compile of `main` passes again** (1,169,087 B). The sketchbook's `WCB_Client` now matches `greghulette/WCBClient` master — the `diff -rq` is empty. The callout recorded a *state* ("a local compile of current `main` fails"), which went stale without anything saying so; it now gives the check instead. CLAUDE.md's build note likewise. |
 | 2026-08-18 | _(uncommitted)_ | §5/§7 corrected against `flasher.js`: the per-build `_ESP32S3_boot.bin` is **never flashed** — the flasher writes the fixed-name `WCB_S3_custom_bootloader_16MB_wdt3s.bin` at `0x0`, which is why that name is fixed (a per-build `_boot.bin` must not shadow it) — and **Update Firmware** writes bootloader + partition table + app unconditionally rather than auto-detecting, because reading flash back over the S3's native USB wedges the esptool stub. Also recorded the app/table version pairing rule. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

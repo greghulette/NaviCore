@@ -564,9 +564,18 @@ Timeline-editor transport: `EDITLOAD,<name>` · `EDITBEGIN` · `EDITEV,<idx>,<js
 |---|---|
 | `?FORGET,<id>` / `?FORGET,ALL` | Drop a learned peer from the ESP-NOW table + NVS |
 | `?OTALOCAL,*` | Direct-USB firmware OTA |
+| `?OTALOCAL,STATUS` | The OTA status block: `Chip`, `Firmware`, `App SHA256`, `Running`, `Next (OTA)`, `Session` (`idle`, or `ACTIVE id=1  <written> / <size> B`), between dashed lines |
 | `?OTA,*` | Mesh-relayed firmware OTA — `DATA` carries an optional CRC-32, see below |
 
 An unrecognised `?` command replies `Unknown command: …` rather than being dropped.
+
+**`App SHA256: <16 hex>`** — in `?OTALOCAL,STATUS` and in the boot banner, right after
+`=== NaviCore ===` — is the running image's identity: the first 8 bytes of its ELF's SHA-256
+(`naviota::otaAppSha16()`), the value elf2image stamps at image offset `0xB0`. `FW_VERSION` cannot
+tell two images apart, because its DTG changes only on a commit, so this is what tells you which
+build a board runs and which `.elf` decodes its backtraces. It comes from
+`esp_app_get_description()`, not `esp_app_get_elf_sha256()`: in core 3.3.4 that call returns at
+most 9 hex digits whatever buffer it is given (`CONFIG_APP_RETRIEVE_LEN_ELF_SHA=9`).
 
 ### Machine markers on the terminal
 
@@ -883,6 +892,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-28 | _(pending: INF9a)_ | **`App SHA256: <16 hex>` in `?OTALOCAL,STATUS` and the boot banner**: the running image's ELF SHA-256 (first 8 bytes), so two builds of one commit, which report the same `FW_VERSION`, can be told apart, and a backtrace is decoded against the right `.elf`. §3 now lists the STATUS block. Read from the app descriptor because `esp_app_get_elf_sha256()` stops at 9 hex digits in core 3.3.4. |
 | 2026-09-24 | _(uncommitted)_ | `?MGMT,PULL,<target>,P`: through WCB_Client's `WCB_Mgmt.h`, a config over 2912 characters is relayed as `[MGMT:CFGPART,<n>]` parts and a refusal as `[MGMT:CFGERR,<n>]` (WCB F13). Each line is one `printf` from `service()`, so it reaches the WebSocket (only loop-task output does). |
 | 2026-09-10 | _(uncommitted)_ | **Relay OTA through this board now works over WiFi.** `handleOtaAckRelay()` printed `[OTA:ACK,…]` straight from the raw-packet hook on Core 0, and `rcSerial`'s tee mirrors only the core that armed it — the loop task, for the WebSocket. So every ACK went to USB alone: the WCB Wizard, attached through Intellex over the SoftAP, failed every wireless OTA to a WCB with *"no response from WCB2 via relay — is it online & on this firmware?"* while the target was answering. Over USB the ACK still reached the host, which is why it went unseen. The hook now enqueues the ACK like every other OTA packet and `drainOtaPackets()` prints it on the loop task — the deferral `WCB_OTA.cpp` already makes through `otaRelayPrint()`. §5 and the console-mirror rules say so. Compiles locally with the ESP32-S3 FQBN; not yet verified on hardware. |
 | 2026-09-10 | _(uncommitted)_ | **The SoftAP no longer offers a default gateway** (DHCP option 3), so a client reaches `192.168.4.1` on-link and keeps its real default route — a board with no upstream naming itself the router gives a two-adapter laptop competing default routes and can make a phone reject the network. Same change as WCB `b898088` (hardware-verified there), with one correction: the WCB treats `ESP_NETIF_ROUTER_SOLICITATION_ADDRESS` as a mask to read, clear a bit in and write back, but in IDF 5.5 get and set are **booleans** (`esp_netif_dhcps_option_api()`) — that code gets the right answer only because get returns 1 and `OFFER_ROUTER` is 1. NaviCore writes 0 and records the trap. Also recorded why the unconditional restart is load-bearing: `esp_netif_start_api()` never starts a server left `STOPPED`. Compile-verified; not yet verified on NaviCore hardware. |

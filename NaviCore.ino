@@ -4531,6 +4531,8 @@ void setup() {
 #endif
   delay(1500);
   Serial.println("\n\n=== NaviCore ===");   // active board profile logged at boot by applyBoardProfile()
+  // The exact image (FW_VERSION changes only per commit) — see naviota::otaAppSha16().
+  Serial.printf("App SHA256: %s\n", naviota::otaAppSha16());
   printBootloaderInfo();
   printBootTelemetry();
 

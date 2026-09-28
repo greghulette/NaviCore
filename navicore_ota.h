@@ -7,8 +7,8 @@
 //  esp_ota_end BEFORE the boot pointer is switched, and any failure/timeout
 //  calls esp_ota_abort (which never switches). A failed/interrupted transfer
 //  always leaves the board on its current firmware. NaviCore builds with
-//  PartitionScheme=min_spiffs, which already provides the ota_0/ota_1 + otadata
-//  table this needs — no partition change required.
+//  PartitionScheme=custom (partitions.csv), whose app0/app1 + otadata rows are
+//  the stock min_spiffs ones — the table this needs, no partition change required.
 //
 //  Two transports drive the SAME core (otaBegin/otaWrite/otaEnd):
 //    * Direct       : ?OTALOCAL,* from the host, over USB-CDC or the SoftAP
@@ -223,12 +223,37 @@ inline bool otaEnd(uint16_t sessionId) {
   return true;   // caller reboots
 }
 
+// Which image is running, exactly: the first 8 bytes of its ELF's SHA-256 as 16
+// lowercase hex characters, printed as "App SHA256: <hex>" by otaPrintStatus() and
+// the boot banner. FW_VERSION cannot tell images apart — its DTG changes only when a
+// commit is made, so every build of one commit (or of an uncommitted tree) reports
+// the same string. elf2image stamps the ELF's SHA-256 into the app descriptor
+// (image offset 0xB0, --elf-sha256-offset in the core's platform.txt), so this also
+// names the one .elf that decodes this board's backtraces; addr2line against any
+// other build gives wrong function names that look plausible.
+// Read from esp_app_get_description(), NOT esp_app_get_elf_sha256(): in esp32 core
+// 3.3.4 (IDF 5.5, CONFIG_APP_RETRIEVE_LEN_ELF_SHA=9) that call copies from a 10-byte
+// cache kept for the panic handler and returns at most 9 hex digits, whatever the
+// size of the buffer it is given.
+inline const char *otaAppSha16() {
+  static char hex[17];
+  static const char digits[] = "0123456789abcdef";
+  const uint8_t *sha = esp_app_get_description()->app_elf_sha256;
+  for (int i = 0; i < 8; i++) {
+    hex[2 * i]     = digits[sha[i] >> 4];
+    hex[2 * i + 1] = digits[sha[i] & 0x0F];
+  }
+  hex[16] = '\0';
+  return hex;
+}
+
 inline void otaPrintStatus() {
   const esp_partition_t *run  = esp_ota_get_running_partition();
   const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
   Serial.println("---------- OTA Status ----------");
   Serial.printf("Chip:        %s (family %u)\n", ESP.getChipModel(), otaLocalChipFamily());
   Serial.printf("Firmware:    %s\n", FW_VERSION);
+  Serial.printf("App SHA256:  %s\n", otaAppSha16());
   if (run)  Serial.printf("Running:     '%s' @0x%06x (%u B)\n", run->label,  run->address,  run->size);
   if (next) Serial.printf("Next (OTA):  '%s' @0x%06x (%u B)\n", next->label, next->address, next->size);
   else      Serial.println("Next (OTA):  none — partition table has no spare OTA slot!");
