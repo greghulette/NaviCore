@@ -18,6 +18,31 @@
 #include <ArduinoJson.h>
 #include "wcb_config.h"   // provides WCB_MAC_OCT2/3, WCB_PASSWORD, WCB_QUANTITY, WCB_DEVICE_ID used as factory defaults
 
+// strlcpy that never cuts through a UTF-8 character. EVERY string copy in this file
+// goes through it. The fields are fixed char[] cut at their struct size in BYTES, and
+// plain strlcpy cutting through a multi-byte character kept its lead byte alone:
+// GET_CONFIG and /config.json then carried invalid UTF-8, the config tool decoded it
+// as U+FFFD, and its next save wrote that back (3 bytes), so a name with an accent
+// at the cut was corrupted on every round trip (HIL nccfg.string_truncation_utf8).
+// When the source does not fit, an incomplete last character is dropped, so the
+// stored string is the longest whole-character prefix that fits. ASCII copies
+// exactly as strlcpy does, and the return value is strlcpy's (strlen(src)).
+static inline size_t cfgStrlcpy(char* dst, const char* src, size_t size) {
+  const size_t n = strlcpy(dst, src, size);
+  if (size == 0 || n < size) return n;            // it fitted: nothing was cut
+  const size_t len = size - 1;                    // bytes kept
+  size_t i = len, back = 0;
+  while (i > 0 && back < 3 && ((uint8_t)dst[i - 1] & 0xC0) == 0x80) { i--; back++; }
+  if (i == 0) return n;                           // only continuation bytes: not UTF-8, leave it
+  const uint8_t lead = (uint8_t)dst[i - 1];
+  size_t need = 1;                                // bytes the last character's lead byte announces
+  if      ((lead & 0xE0) == 0xC0) need = 2;
+  else if ((lead & 0xF0) == 0xE0) need = 3;
+  else if ((lead & 0xF8) == 0xF0) need = 4;
+  if (len - (i - 1) < need) dst[i - 1] = '\0';    // the cut split it: drop the partial character
+  return n;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Action types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -739,9 +764,9 @@ static inline RcAction makeWCBUnicast(const char* wcbId, const char* cmd,
                                       uint16_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_WCB_UNICAST;
-  strlcpy(a.target, wcbId, sizeof(a.target));
-  strlcpy(a.cmd,    cmd,   sizeof(a.cmd));
-  strlcpy(a.note,   note,  sizeof(a.note));
+  cfgStrlcpy(a.target, wcbId, sizeof(a.target));
+  cfgStrlcpy(a.cmd,    cmd,   sizeof(a.cmd));
+  cfgStrlcpy(a.note,   note,  sizeof(a.note));
   a.delayMs = delayMs;
   return a;
 }
@@ -749,8 +774,8 @@ static inline RcAction makeWCBBroadcast(const char* cmd,
                                          uint16_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_WCB_BROADCAST;
-  strlcpy(a.cmd,  cmd,  sizeof(a.cmd));
-  strlcpy(a.note, note, sizeof(a.note));
+  cfgStrlcpy(a.cmd,  cmd,  sizeof(a.cmd));
+  cfgStrlcpy(a.note, note, sizeof(a.note));
   a.delayMs = delayMs;
   return a;
 }
@@ -758,8 +783,8 @@ static inline RcAction makeMaestroLocal(const char* cmd,
                                          uint16_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_MAESTRO_LOCAL;
-  strlcpy(a.cmd,  cmd,  sizeof(a.cmd));
-  strlcpy(a.note, note, sizeof(a.note));
+  cfgStrlcpy(a.cmd,  cmd,  sizeof(a.cmd));
+  cfgStrlcpy(a.note, note, sizeof(a.note));
   a.delayMs = delayMs;
   return a;
 }
@@ -767,9 +792,9 @@ static inline RcAction makeMaestroRemote(const char* slot, const char* cmd,
                                           uint16_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_MAESTRO_REMOTE;
-  strlcpy(a.target, slot, sizeof(a.target));
-  strlcpy(a.cmd,    cmd,  sizeof(a.cmd));
-  strlcpy(a.note,   note, sizeof(a.note));
+  cfgStrlcpy(a.target, slot, sizeof(a.target));
+  cfgStrlcpy(a.cmd,    cmd,  sizeof(a.cmd));
+  cfgStrlcpy(a.note,   note, sizeof(a.note));
   a.delayMs = delayMs;
   return a;
 }
@@ -777,9 +802,9 @@ static inline RcAction makeSerial(const char* port, const char* cmd,
                                    uint16_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_SERIAL;
-  strlcpy(a.target, port, sizeof(a.target));
-  strlcpy(a.cmd,    cmd,  sizeof(a.cmd));
-  strlcpy(a.note,   note, sizeof(a.note));
+  cfgStrlcpy(a.target, port, sizeof(a.target));
+  cfgStrlcpy(a.cmd,    cmd,  sizeof(a.cmd));
+  cfgStrlcpy(a.note,   note, sizeof(a.note));
   a.delayMs = delayMs;
   return a;
 }
@@ -860,7 +885,7 @@ void rcConfigLoadDefaults() {
   };
   for (int i = 0; i < RC_NUM_THRESHOLDS; i++) {
     rcConfig.thresholds[i].id = i + 1;
-    strlcpy(rcConfig.thresholds[i].label, bands[i].label, 24);
+    cfgStrlcpy(rcConfig.thresholds[i].label, bands[i].label, 24);
     rcConfig.thresholds[i].minPwm = bands[i].mn;
     rcConfig.thresholds[i].maxPwm = bands[i].mx;
   }
@@ -898,20 +923,20 @@ void rcConfigLoadDefaults() {
   // that wire. The user enables each one in the config tool's Audio section.
   // Existing stored configs are unaffected — they carry an explicit transport.
   rcConfig.hcrDest.transport = 2;
-  strlcpy(rcConfig.hcrDest.target, "S3", sizeof(rcConfig.hcrDest.target));
+  cfgStrlcpy(rcConfig.hcrDest.target, "S3", sizeof(rcConfig.hcrDest.target));
   rcConfig.hcrDest.wcbPort   = 1;
 
   // Default global MP3 Trigger destination — WCB unicast to WCB 2 (no effect
   // until the user adds RA_MP3 actions and points this at the right place).
   rcConfig.mp3Dest.transport = 2;
-  strlcpy(rcConfig.mp3Dest.target, "2", sizeof(rcConfig.mp3Dest.target));
+  cfgStrlcpy(rcConfig.mp3Dest.target, "2", sizeof(rcConfig.mp3Dest.target));
 
   // Default global DFPlayer destination — LOCAL S3 (no effect until the user adds
   // RA_DFPLAYER actions). Local is the sensible default here where the MP3 Trigger
   // defaults to a WCB: a DFPlayer is cheap enough to be soldered straight onto the
   // controller's own aux header, which is the common build.
   rcConfig.dfpDest.transport = 2;
-  strlcpy(rcConfig.dfpDest.target, "S3", sizeof(rcConfig.dfpDest.target));
+  cfgStrlcpy(rcConfig.dfpDest.target, "S3", sizeof(rcConfig.dfpDest.target));
 
   // Default WLED slots — all empty (no WLED configured). The user maps id→dest in
   // the config tool's WLED panel. All-zero ⇒ configured=false, wledID=0 (mirrors the
@@ -948,13 +973,13 @@ void rcConfigLoadDefaults() {
 
   // Smoothing profiles — all empty; profile 0 pre-named "Default".
   memset(rcConfig.smoothProfiles, 0, sizeof(rcConfig.smoothProfiles));
-  strlcpy(rcConfig.smoothProfiles[0].name, "Default", sizeof(rcConfig.smoothProfiles[0].name));
+  cfgStrlcpy(rcConfig.smoothProfiles[0].name, "Default", sizeof(rcConfig.smoothProfiles[0].name));
 
   // WCB network credentials — compile-time defaults from wcb_config.h.
   // NVS overrides these at runtime (see rcConfigLoadNVS).
   rcConfig.wcbNetwork.macOct2  = WCB_MAC_OCT2;
   rcConfig.wcbNetwork.macOct3  = WCB_MAC_OCT3;
-  strlcpy(rcConfig.wcbNetwork.password, WCB_PASSWORD, sizeof(rcConfig.wcbNetwork.password));
+  cfgStrlcpy(rcConfig.wcbNetwork.password, WCB_PASSWORD, sizeof(rcConfig.wcbNetwork.password));
   rcConfig.wcbNetwork.quantity = WCB_QUANTITY;
   rcConfig.wcbNetwork.deviceId = WCB_DEVICE_ID;
   rcConfig.wcbNetwork.channel  = 1;    // default ESP-NOW mesh channel (matches WCB_MESH_CHANNEL)
@@ -1066,20 +1091,20 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
   bool ok = false;
   if (strcmp(type, "wcb_unicast") == 0) {
     a.type = RA_WCB_UNICAST;
-    strlcpy(a.target, obj["target"] | "", sizeof(a.target));
-    strlcpy(a.cmd,    obj["cmd"]    | "", sizeof(a.cmd));
+    cfgStrlcpy(a.target, obj["target"] | "", sizeof(a.target));
+    cfgStrlcpy(a.cmd,    obj["cmd"]    | "", sizeof(a.cmd));
     a.delayMs     = obj["delay"]       | 0;
     a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "wcb_broadcast") == 0) {
     a.type = RA_WCB_BROADCAST;
-    strlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
+    cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
     a.delayMs     = obj["delay"]       | 0;
     a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "maestro_local") == 0) {
     a.type = RA_MAESTRO_LOCAL;
-    strlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
+    cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
     a.delayMs = obj["delay"] | 0;
     ok = true;
   } else if (strcmp(type, "maestro_remote") == 0 || strcmp(type, "maestro") == 0) {
@@ -1088,15 +1113,15 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     // Both store target = Maestro slot ID 1-8 (firmware uses rcConfig.maestros[]
     // to decide where the bytes actually go).
     a.type = RA_MAESTRO_REMOTE;
-    strlcpy(a.target, obj["target"] | "", sizeof(a.target));
-    strlcpy(a.cmd,    obj["cmd"]    | "", sizeof(a.cmd));
+    cfgStrlcpy(a.target, obj["target"] | "", sizeof(a.target));
+    cfgStrlcpy(a.cmd,    obj["cmd"]    | "", sizeof(a.cmd));
     a.delayMs     = obj["delay"]      | 0;
     a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "serial") == 0) {
     a.type = RA_SERIAL;
-    strlcpy(a.target, obj["port"] | "", sizeof(a.target));
-    strlcpy(a.cmd,    obj["cmd"]  | "", sizeof(a.cmd));
+    cfgStrlcpy(a.target, obj["port"] | "", sizeof(a.target));
+    cfgStrlcpy(a.cmd,    obj["cmd"]  | "", sizeof(a.cmd));
     a.delayMs = obj["delay"] | 0;
     ok = true;
   } else if (strcmp(type, "hcr") == 0) {
@@ -1129,17 +1154,17 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     // WLED routing is a global config (RcConfig::wledSlots). The action only
     // carries the ";L<id>,<verb>" command string.
     a.type = RA_WLED;
-    strlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
+    cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
     a.delayMs = obj["delay"] | 0;
     ok = true;
   } else if (strcmp(type, "record") == 0) {
     a.type    = RA_RECORD;
-    strlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));   // clip name
+    cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));   // clip name
     a.delayMs = obj["delay"] | 0;
     ok = true;
   } else if (strcmp(type, "play") == 0) {
     a.type    = RA_PLAY;
-    strlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));   // clip name
+    cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));   // clip name
     a.fn      = (uint8_t)(obj["fn"] | 0);             // loop 0/1
     a.delayMs = obj["delay"] | 0;
     ok = true;
@@ -1150,7 +1175,7 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
   }
   // (type "smooth" / RA_SMOOTH_OVERRIDE retired — an old config's smooth action
   //  matches nothing here, so ok stays false and it's silently dropped.)
-  if (ok) strlcpy(a.note, obj["note"] | "", sizeof(a.note));
+  if (ok) cfgStrlcpy(a.note, obj["note"] | "", sizeof(a.note));
   return ok;
 }
 
@@ -1525,9 +1550,9 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   // containsKey guard means a diff-save that omits the key leaves the current value alone.
   if (doc.containsKey("wifiEnabled"))      rcConfig.wifiEnabled      = doc["wifiEnabled"]      | false;
   if (doc.containsKey("wifiSsid"))
-    strlcpy(rcConfig.wifiSsid,     doc["wifiSsid"]     | rcConfig.wifiSsid,     sizeof(rcConfig.wifiSsid));
+    cfgStrlcpy(rcConfig.wifiSsid,     doc["wifiSsid"]     | rcConfig.wifiSsid,     sizeof(rcConfig.wifiSsid));
   if (doc.containsKey("wifiPassword"))
-    strlcpy(rcConfig.wifiPassword, doc["wifiPassword"] | rcConfig.wifiPassword, sizeof(rcConfig.wifiPassword));
+    cfgStrlcpy(rcConfig.wifiPassword, doc["wifiPassword"] | rcConfig.wifiPassword, sizeof(rcConfig.wifiPassword));
   if (doc.containsKey("maeGateMs"))        rcConfig.maeGateMs        = doc["maeGateMs"]         | 250;
   if (doc.containsKey("boardType"))        rcConfig.boardType        = (uint8_t)(doc["boardType"] | 0);
   if (doc.containsKey("tapWindowMs"))   rcConfig.tapWindowMs   = doc["tapWindowMs"];
@@ -1587,7 +1612,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     for (JsonObject th : thArr) {
       if (i >= RC_NUM_THRESHOLDS) break;
       rcConfig.thresholds[i].id = th["id"] | (i + 1);
-      strlcpy(rcConfig.thresholds[i].label, th["label"] | "", 24);
+      cfgStrlcpy(rcConfig.thresholds[i].label, th["label"] | "", 24);
       rcConfig.thresholds[i].minPwm = th["minPwm"] | 0;
       rcConfig.thresholds[i].maxPwm = th["maxPwm"] | 0;
       i++;
@@ -1606,7 +1631,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       JsonObject mObj = kv.value().as<JsonObject>();
       m.exclusive = mObj["exclusive"] | false;
       for (int ti = 0; ti < RC_NUM_TAP_TIERS; ti++) {
-        strlcpy(m.t[ti].note, mObj[String("t") + (ti + 1) + "note"] | "", sizeof(m.t[ti].note));
+        cfgStrlcpy(m.t[ti].note, mObj[String("t") + (ti + 1) + "note"] | "", sizeof(m.t[ti].note));
         String tierKey = String("t") + (ti + 1);
         if (!mObj.containsKey(tierKey)) continue;
         JsonArray acts = mObj[tierKey];
@@ -1629,7 +1654,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       s.channel   = sObj["channel"]   | RC_SWITCH_DEFAULT_CH[i];
       s.positions = sObj["positions"] | RC_SWITCH_DEFAULT_POS[i];
       for (int pi = 0; pi < 3; pi++) {
-        strlcpy(s.t[pi].note, sObj[String("p") + pi + "note"] | "", sizeof(s.t[pi].note));
+        cfgStrlcpy(s.t[pi].note, sObj[String("p") + pi + "note"] | "", sizeof(s.t[pi].note));
         String tierKey = String("p") + pi;
         if (!sObj.containsKey(tierKey)) continue;
         JsonArray acts = sObj[tierKey];
@@ -1680,7 +1705,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     for (JsonObject pObj : doc["smoothProfiles"].as<JsonArray>()) {
       if (p >= RC_NUM_SMOOTH_PROFILES) break;
       RcSmoothProfile& prof = rcConfig.smoothProfiles[p];
-      strlcpy(prof.name, pObj["name"] | "", sizeof(prof.name));
+      cfgStrlcpy(prof.name, pObj["name"] | "", sizeof(prof.name));
       if (pObj.containsKey("entries"))
         for (JsonObject e : pObj["entries"].as<JsonArray>()) {
           int mid = e["mid"] | 1, ch = e["ch"] | 0;
@@ -1705,7 +1730,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     }
     if (any) {
       kn.smoothProfile = 0;
-      if (!rcConfig.smoothProfiles[0].name[0]) strlcpy(rcConfig.smoothProfiles[0].name, "Default", sizeof(rcConfig.smoothProfiles[0].name));
+      if (!rcConfig.smoothProfiles[0].name[0]) cfgStrlcpy(rcConfig.smoothProfiles[0].name, "Default", sizeof(rcConfig.smoothProfiles[0].name));
     }
   }
 
@@ -1731,7 +1756,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
           int c = cObj["ch"].as<int>();
           if (c < 0 || c >= RC_MAESTRO_CHANNELS) continue;
           RcMaestroChannel& mc = rcConfig.maestros[i].channels[c];
-          strlcpy(mc.name, cObj["name"] | "", sizeof(mc.name));
+          cfgStrlcpy(mc.name, cObj["name"] | "", sizeof(mc.name));
           mc.minPos = (uint16_t)(cObj["min"] | 0);
           mc.maxPos = (uint16_t)(cObj["max"] | 0);
         }
@@ -1749,10 +1774,10 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     if (rcConfig.hcrDest.transport == 1) {
       // HCR over WCB is unicast-only; default to WCB 2 (not 0/broadcast) when
       // the key is missing so a partial config doesn't produce an invalid target.
-      strlcpy(rcConfig.hcrDest.target, hcrObj["target"] | "2", sizeof(rcConfig.hcrDest.target));
+      cfgStrlcpy(rcConfig.hcrDest.target, hcrObj["target"] | "2", sizeof(rcConfig.hcrDest.target));
       rcConfig.hcrDest.wcbPort = (uint8_t)(hcrObj["wcbPort"] | 1);
     } else {
-      strlcpy(rcConfig.hcrDest.target, hcrObj["port"]   | "S3", sizeof(rcConfig.hcrDest.target));
+      cfgStrlcpy(rcConfig.hcrDest.target, hcrObj["port"]   | "S3", sizeof(rcConfig.hcrDest.target));
       rcConfig.hcrDest.wcbPort = 0;
     }
   }
@@ -1764,7 +1789,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     // the old value when the user sets an octet to 0.
     if (wcbObj.containsKey("macOct2")) rcConfig.wcbNetwork.macOct2 = (uint8_t)(wcbObj["macOct2"].as<int>() & 0xFF);
     if (wcbObj.containsKey("macOct3")) rcConfig.wcbNetwork.macOct3 = (uint8_t)(wcbObj["macOct3"].as<int>() & 0xFF);
-    strlcpy(rcConfig.wcbNetwork.password,
+    cfgStrlcpy(rcConfig.wcbNetwork.password,
             wcbObj["password"] | rcConfig.wcbNetwork.password,
             sizeof(rcConfig.wcbNetwork.password));
     rcConfig.wcbNetwork.quantity = (uint8_t)(wcbObj["quantity"] | rcConfig.wcbNetwork.quantity);
@@ -1793,10 +1818,10 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     for (JsonObject o : wpArr) {
       if (n >= RC_MAX_WCB_PROFILES) break;
       RcWcbProfile& wp = rcConfig.wcbProfiles[n];
-      strlcpy(wp.name, o["name"] | "", sizeof(wp.name));
+      cfgStrlcpy(wp.name, o["name"] | "", sizeof(wp.name));
       wp.macOct2  = (uint8_t)(o["macOct2"].as<int>() & 0xFF);
       wp.macOct3  = (uint8_t)(o["macOct3"].as<int>() & 0xFF);
-      strlcpy(wp.password, o["password"] | "", sizeof(wp.password));
+      cfgStrlcpy(wp.password, o["password"] | "", sizeof(wp.password));
       wp.quantity = (uint8_t)(o["quantity"] | 4);
       wp.deviceId = (uint8_t)(o["deviceId"] | 20);
       { int ch = o["channel"] | 1; wp.channel = (uint8_t)((ch < 1 || ch > 11) ? 1 : ch); }   // 1-11, out-of-range → 1: see wcbNetwork.channel above
@@ -1811,10 +1836,10 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     rcConfig.mp3Dest.transport = (strcmp(tp, "off") == 0) ? 2
                                : (strcmp(tp, "wcb") == 0) ? 1 : 0;
     if (rcConfig.mp3Dest.transport == 1) {
-      strlcpy(rcConfig.mp3Dest.target, mp3Obj["target"] | "2",
+      cfgStrlcpy(rcConfig.mp3Dest.target, mp3Obj["target"] | "2",
               sizeof(rcConfig.mp3Dest.target));
     } else {
-      strlcpy(rcConfig.mp3Dest.target, mp3Obj["port"] | "S3",
+      cfgStrlcpy(rcConfig.mp3Dest.target, mp3Obj["port"] | "S3",
               sizeof(rcConfig.mp3Dest.target));
     }
   }
@@ -1825,10 +1850,10 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     rcConfig.dfpDest.transport = (strcmp(tp, "off") == 0) ? 2
                                : (strcmp(tp, "wcb") == 0) ? 1 : 0;
     if (rcConfig.dfpDest.transport == 1) {
-      strlcpy(rcConfig.dfpDest.target, dfpObj["target"] | "2",
+      cfgStrlcpy(rcConfig.dfpDest.target, dfpObj["target"] | "2",
               sizeof(rcConfig.dfpDest.target));
     } else {
-      strlcpy(rcConfig.dfpDest.target, dfpObj["port"] | "S3",
+      cfgStrlcpy(rcConfig.dfpDest.target, dfpObj["port"] | "S3",
               sizeof(rcConfig.dfpDest.target));
     }
   }
@@ -1874,7 +1899,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     for (JsonPair kv : slObj) {
       for (int s = 0; s < RC_NUM_SLBL; s++) {
         if (strcmp(kv.key().c_str(), RC_SLBL_KEYS[s]) != 0) continue;
-        strlcpy(rcConfig.serialLabels[s], kv.value() | "", sizeof(rcConfig.serialLabels[0]));
+        cfgStrlcpy(rcConfig.serialLabels[s], kv.value() | "", sizeof(rcConfig.serialLabels[0]));
         break;
       }
     }
@@ -1898,11 +1923,11 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     rcConfig.modeReport.enabled = mr["enabled"] | rcConfig.modeReport.enabled;
     rcConfig.modeReport.wcb     = (uint8_t)(mr["wcb"] | rcConfig.modeReport.wcb);
     if (mr.containsKey("template"))
-      strlcpy(rcConfig.modeReport.tmpl, mr["template"] | "", sizeof(rcConfig.modeReport.tmpl));
+      cfgStrlcpy(rcConfig.modeReport.tmpl, mr["template"] | "", sizeof(rcConfig.modeReport.tmpl));
     if (mr.containsKey("cmds")) {
       JsonArray mc = mr["cmds"];
       for (int i = 0; i < 3; i++)
-        strlcpy(rcConfig.modeReport.cmds[i],
+        cfgStrlcpy(rcConfig.modeReport.cmds[i],
                 (!mc.isNull() && i < (int)mc.size()) ? (mc[i] | "") : "",
                 sizeof(rcConfig.modeReport.cmds[0]));
     }
@@ -1979,7 +2004,7 @@ inline const char* rcModeReportCmd(int mode, char* out, size_t outSz) {
   out[0] = '\0';
   if (mode < 1 || mode > 3) return out;
   const char* ov = rcConfig.modeReport.cmds[mode - 1];
-  if (ov[0]) { strlcpy(out, ov, outSz); return out; }
+  if (ov[0]) { cfgStrlcpy(out, ov, outSz); return out; }
   const char* t = rcConfig.modeReport.tmpl;
   if (!t[0]) return out;
   const char md = (char)('0' + mode);
@@ -2442,7 +2467,7 @@ void rcConfigLoadNVS() {
       for (JsonObject o : arr) {
         if (i >= RC_NUM_THRESHOLDS) break;
         rcConfig.thresholds[i].id = o["id"] | (i + 1);
-        strlcpy(rcConfig.thresholds[i].label, o["label"] | "", 24);
+        cfgStrlcpy(rcConfig.thresholds[i].label, o["label"] | "", 24);
         rcConfig.thresholds[i].minPwm = o["minPwm"] | rcConfig.thresholds[i].minPwm;
         rcConfig.thresholds[i].maxPwm = o["maxPwm"] | rcConfig.thresholds[i].maxPwm;
         i++;
@@ -2576,10 +2601,10 @@ void rcConfigLoadNVS() {
                                  : (strcmp(tp, "wcb") == 0) ? 1 : 0;
       if (rcConfig.hcrDest.transport == 1) {
         // HCR over WCB is unicast-only; default to WCB 2 (not 0/broadcast).
-        strlcpy(rcConfig.hcrDest.target, root["target"] | "2", sizeof(rcConfig.hcrDest.target));
+        cfgStrlcpy(rcConfig.hcrDest.target, root["target"] | "2", sizeof(rcConfig.hcrDest.target));
         rcConfig.hcrDest.wcbPort = (uint8_t)(root["wcbPort"] | 1);
       } else {
-        strlcpy(rcConfig.hcrDest.target, root["port"]   | "S3", sizeof(rcConfig.hcrDest.target));
+        cfgStrlcpy(rcConfig.hcrDest.target, root["port"]   | "S3", sizeof(rcConfig.hcrDest.target));
         rcConfig.hcrDest.wcbPort = 0;
       }
     }
@@ -2593,7 +2618,7 @@ void rcConfigLoadNVS() {
       // Presence-check, not '|' — 0x00 is a legitimate MAC octet (see rcConfigFromJSON).
       if (root.containsKey("macOct2")) rcConfig.wcbNetwork.macOct2 = (uint8_t)(root["macOct2"].as<int>() & 0xFF);
       if (root.containsKey("macOct3")) rcConfig.wcbNetwork.macOct3 = (uint8_t)(root["macOct3"].as<int>() & 0xFF);
-      strlcpy(rcConfig.wcbNetwork.password,
+      cfgStrlcpy(rcConfig.wcbNetwork.password,
               root["password"] | rcConfig.wcbNetwork.password,
               sizeof(rcConfig.wcbNetwork.password));
       rcConfig.wcbNetwork.quantity = (uint8_t)(root["quantity"] | rcConfig.wcbNetwork.quantity);
@@ -2606,8 +2631,8 @@ void rcConfigLoadNVS() {
     DynamicJsonDocument doc(192);
     if (deserializeJson(doc, s) == DeserializationError::Ok) {
       JsonObject root = doc.as<JsonObject>();
-      strlcpy(rcConfig.wifiSsid,     root["ssid"] | rcConfig.wifiSsid,     sizeof(rcConfig.wifiSsid));
-      strlcpy(rcConfig.wifiPassword, root["pw"]   | rcConfig.wifiPassword, sizeof(rcConfig.wifiPassword));
+      cfgStrlcpy(rcConfig.wifiSsid,     root["ssid"] | rcConfig.wifiSsid,     sizeof(rcConfig.wifiSsid));
+      cfgStrlcpy(rcConfig.wifiPassword, root["pw"]   | rcConfig.wifiPassword, sizeof(rcConfig.wifiPassword));
     }
   }
 
@@ -2617,7 +2642,7 @@ void rcConfigLoadNVS() {
     if (deserializeJson(doc, s) == DeserializationError::Ok) {
       JsonObject root = doc.as<JsonObject>();
       rcConfig.mp3Dest.transport = (uint8_t)(root["transport"] | rcConfig.mp3Dest.transport);
-      strlcpy(rcConfig.mp3Dest.target,
+      cfgStrlcpy(rcConfig.mp3Dest.target,
               root["target"] | rcConfig.mp3Dest.target,
               sizeof(rcConfig.mp3Dest.target));
     }

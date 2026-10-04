@@ -26,6 +26,11 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 `RC_NUM_MAPPINGS × RC_NUM_TAP_TIERS × RC_ACTIONS_PER_TIER = 108 × 4 × 5 = 2160` action slots.
 Widening a field in `RcAction` costs kilobytes per byte.
 
+Every string field is a fixed `char[]`, and a value longer than its field is cut silently at
+the field's size in bytes — but never through a UTF-8 character: every copy in `rc_config.h`
+goes through `cfgStrlcpy()`, which drops an incomplete last character. A plain `strlcpy` cut
+kept half a character, and the tool's next save wrote U+FFFD back.
+
 ---
 
 ## 2. Capacity constants
@@ -320,6 +325,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC42)_ | String fields are cut back to a whole UTF-8 character (`cfgStrlcpy`) when the value is longer than the field (HIL `nccfg.string_truncation_utf8`). |
 | 2026-09-28 | `703a0e7` | §6: debug bit 7 is `DBG_WIRE` in a HIL hook build (PROTOCOLS.md §2), so the tool never sends it and a new debug category takes bit 8. |
 | 2026-08-30 | _(uncommitted)_ | Recorded the OTA END discriminator as a cross-file invariant (§6). The firmware has always sent the END ACK with offset 0 — deliberately, with a comment in `navicore_ota.h` forbidding anyone to "improve" it — but the tool's `otaSendAwaitAck()` matched only session+src, so a duplicate DATA cursor ACK still in flight satisfied the END wait and reported **Verified** for an image the target never verified. The tool now checks the offset. |
 | 2026-08-28 | _(uncommitted)_ | `wifiEnabled` is now **live** — `setup()` raises the SoftAP before `wcb->begin()`, which is what lets WCB_Client detect it and select WIFI_AP_STA instead of forcing STA and tearing the AP down. The channel is passed explicitly from `wcbNetwork.channel`: `softAP()`s 3rd parameter defaults to 1, and once an AP owns the radio WCB_Client only warns on a mismatch, so a defaulted channel would be a silent total mesh blackout. An empty or under-8-char password refuses to start the AP rather than falling back to an open network. Every path logs a `[WIFI]` line. |
