@@ -97,6 +97,7 @@ bool                applyConfigSideEffects();   // post-save live re-apply, shar
 String rcConfigToJSON();
 bool   rcConfigFromJSON(const String& json);
 bool   rcConfigFromJSON(const JsonObject& doc);   // JsonObject overload — skip the double-parse
+void   rcConfigResetKeepIdentity();               // RESET_DEFAULTS: factory defaults minus the network identity
 bool   rcConfigSaveNVS();   // DEAD — nothing calls it; the NVS *load* is the migration source
 bool   rcConfigSaveLFS();   // primary: persist config to /config.json on LittleFS
 void   rcAdvertiseSerialLabels();   // push effective per-port labels to WCB_Client (WDP PORTLABEL) — def in NaviCore.ino
@@ -1531,14 +1532,15 @@ inline void tick() {
   }
   // ── RESET_DEFAULTS parked by handle() ────────────────────────────────────────
   // RAM-only, exactly like the USB path — the tool's follow-up Save persists it, so
-  // there is no flash write to keep off this path.  applyConfigSideEffects() is the
-  // shared live re-apply and ends in resetMaestroReleaseState(), which is what the
-  // USB handler calls directly (that one is static to the .ino); a false return only
-  // means boardType changed and the pin profile needs the reboot the GUI prompts for.
+  // there is no flash write to keep off this path.  Both paths run the same two
+  // calls: rcConfigResetKeepIdentity() (factory defaults minus the network identity -
+  // wcbNetwork, wcbProfiles, boardType, the SoftAP fields) and applyConfigSideEffects(),
+  // the shared live re-apply, which ends in resetMaestroReleaseState(). boardType is
+  // kept, so its false return (a pin-profile change) cannot happen here.
   if (_pendingResetDefaults != 0) {
     const uint8_t to = _pendingResetDefaults;
     _pendingResetDefaults = 0;
-    rcConfigLoadDefaults();
+    rcConfigResetKeepIdentity();
     applyConfigSideEffects();
     Serial.printf("[RC] RESET_DEFAULTS from W%u → live config reset to factory defaults (not persisted)\n",
                   (unsigned)to);
@@ -2442,7 +2444,8 @@ inline bool handle(uint8_t senderID, const char* command) {
 
   // ── RESET_DEFAULTS — factory-reset the LIVE config (RAM only, same as USB;
   //    the tool's follow-up Save is what persists it) ─────────────────────────
-  // PARK ONLY, for the same reason: rcConfigLoadDefaults() rewrites the rcConfig
+  // Factory defaults MINUS the network identity (rcConfigResetKeepIdentity).
+// PARK ONLY, for the same reason: rcConfigResetKeepIdentity() rewrites the rcConfig
   // that Core 1 reads every SBUS frame, and the live re-apply reopens serial ports.
   // Neither belongs on this callback stack.  Until this branch existed the message
   // fell through to "unknown type" while the tool's follow-up GET_CONFIG (which IS

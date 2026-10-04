@@ -231,7 +231,7 @@ payload approaches 98 KB and copying it per line is real cost.
 | `{"type":"START_MONITOR"}` | streams `PWM_UPDATE` every 50 ms | |
 | `{"type":"STOP_MONITOR"}` | `ACK` | Also force-clears calibration mute |
 | `{"type":"CALIB","on":bool}` | `ACK` | Mutes **all** action dispatch while on |
-| `{"type":"RESET_DEFAULTS"}` | `ACK` | Reloads factory defaults |
+| `{"type":"RESET_DEFAULTS"}` | `ACK` | Factory defaults for everything **except the network identity** — `wcbNetwork`, `wcbProfiles`, `boardType` and the `wifi*` fields stay (`rcConfigResetKeepIdentity`). RAM only (the next Save persists it); the live side effects (bauds, SBUS OUT, easing, auto-release) run at once. The bridged form does the same and ACKs `{"of":"RESET_DEFAULTS"}` |
 | `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}` | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects) |
 | `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | |
 | `{"type":"TRIGGER","mode":M,"btn":B,"tap":T}` | — | Virtual button press. `tap` 1–4; **4 = long press** (tier `t4`), which always dispatches exclusively |
@@ -933,6 +933,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC16)_ | `RESET_DEFAULTS` keeps the network identity (`wcbNetwork`, `wcbProfiles`, `boardType`, `wifi*`) on both transports, and the USB form now runs the live side effects as the bridged one does (HIL `nccfg.reset_defaults_keeps_identity`, `ncmesh.bridged_reset_keeps_identity`). |
 | 2026-10-04 | _(D-NC17)_ | RTERM, OTA auth/ACKs and WcbMgmt take the mesh password from `g_meshPasswordBoot` (the copy `WCB_Client` got at boot), not the live config field, so an unrebooted password change or reset no longer splits them from the ETM stack (HIL `nccfg.mesh_creds_live_split`). |
 | 2026-09-28 | `703a0e7` | **HIL test hooks, `NAVICORE_HIL_HOOKS` builds only** (the WCB repo's HIL plan INF9 b): `DBG_WIRE` = debug bit 7, a `[WIRE] <port> <offset>/<length>: <hex>` line per block written to S3/S4/S5/Serial2/the WCBStream; §3's new table: `#L90,<ms>` (stall `loop()`), `#L91` / `#L91,R` (cut `/config.json`, keeping `/config.json.hil`; put it back), `#L92` (the next GET_CONFIG overflows), `#L93` (the next config save fails). Every other image answers them `Unknown #L code`, whose `Valid:` list is unchanged in both. |
 | 2026-09-28 | `1e15601` | **`App SHA256: <16 hex>` in `?OTALOCAL,STATUS` and the boot banner**: the running image's ELF SHA-256 (first 8 bytes), so two builds of one commit, which report the same `FW_VERSION`, can be told apart, and a backtrace is decoded against the right `.elf`. §3 now lists the STATUS block. Read from the app descriptor because `esp_app_get_elf_sha256()` stops at 9 hex digits in core 3.3.4. |

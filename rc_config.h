@@ -1000,6 +1000,35 @@ void rcConfigLoadDefaults() {
   rcConfig.wcbProfileCount = 0;
 }
 
+// RESET_DEFAULTS, on BOTH transports (the USB handler and rcTelemetry::tick()):
+// factory defaults for everything EXCEPT the network identity - wcbNetwork (octets,
+// password, quantity, deviceId, channel), wcbProfiles, boardType and the SoftAP fields.
+// RAM only, like the defaults themselves; the tool's next Save persists the result.
+// Keeping the identity is the point: a reset loaded the compile-time mesh password,
+// deviceId 20, boardType 0 and WiFi off, and the very next Save of ANYTHING persisted
+// them, so the droid came up on the default mesh credentials and pin profile at its
+// next boot (HIL nccfg.reset_defaults_keeps_identity, ncmesh.bridged_reset_keeps_identity).
+// rcConfigLoadDefaults() itself stays a FULL reset: setup() runs it before the load.
+void rcConfigResetKeepIdentity() {
+  const RcWcbNetwork net       = rcConfig.wcbNetwork;
+  const uint8_t      nProfiles = rcConfig.wcbProfileCount;
+  const uint8_t      boardType = rcConfig.boardType;
+  const bool         wifiOn    = rcConfig.wifiEnabled;
+  RcWcbProfile profiles[RC_MAX_WCB_PROFILES];
+  char ssid[sizeof(rcConfig.wifiSsid)], wpw[sizeof(rcConfig.wifiPassword)];
+  memcpy(profiles, rcConfig.wcbProfiles, sizeof(profiles));
+  memcpy(ssid, rcConfig.wifiSsid, sizeof(ssid));
+  memcpy(wpw,  rcConfig.wifiPassword, sizeof(wpw));
+  rcConfigLoadDefaults();
+  rcConfig.wcbNetwork      = net;
+  rcConfig.wcbProfileCount = nProfiles;
+  rcConfig.boardType       = boardType;
+  rcConfig.wifiEnabled     = wifiOn;
+  memcpy(rcConfig.wcbProfiles, profiles, sizeof(profiles));
+  memcpy(rcConfig.wifiSsid, ssid, sizeof(ssid));
+  memcpy(rcConfig.wifiPassword, wpw, sizeof(wpw));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  JSON helpers — action ↔ JSON object
 // ─────────────────────────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@
 //    {"type":"SET_CONFIG","data":{...}} → {"type":"ACK","ok":true}
 //    {"type":"START_MONITOR"}    → streams PWM_UPDATE every 50 ms until STOP_MONITOR
 //    {"type":"STOP_MONITOR"}     → {"type":"ACK","ok":true}
-//    {"type":"RESET_DEFAULTS"}   → reloads factory defaults, replies ACK
+//    {"type":"RESET_DEFAULTS"}   → factory defaults minus the network identity, replies ACK
 //    {"type":"REBOOT"}           → ACKs then restarts the board after 250 ms
 //    {"type":"TRIGGER","mode":1,"btn":3,"tap":1} → fires virtual button press
 //    {"type":"WCB_SEND","target":2,"cmd":":PP100"} → manually fires WCB command
@@ -4010,8 +4010,13 @@ bool processInputLine(const String& line) {
       Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
     } else if (strcmp(type,"RESET_DEFAULTS")==0) {
-      rcConfigLoadDefaults();
-      resetMaestroReleaseState();   // clear stale auto-release state so defaults take effect live
+      // Factory defaults minus the network identity (rcConfigResetKeepIdentity), then
+      // the same live re-apply as every config apply - ports, SBUS OUT, easing, and the
+      // auto-release state - exactly as the Via-WCB path does in rcTelemetry::tick().
+      // This path used to load the defaults and reset only the auto-release state, so a
+      // USB reset left the old bauds and SBUS OUT running until a reboot. RAM only.
+      rcConfigResetKeepIdentity();
+      applyConfigSideEffects();     // ends in resetMaestroReleaseState()
       Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
     } else if (strcmp(type,"TEST_ACTION")==0) {
