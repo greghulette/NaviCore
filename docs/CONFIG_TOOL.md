@@ -168,6 +168,8 @@ Saving is diff-based, and the guard rails exist because each failure mode actual
    not list) keeps an option of its own. Otherwise opening an editor and applying it
    unchanged differs from the baseline, and the next Save ships that branch
    (`nctool.noop_apply_every_editor`).
+9. **Refresh asks before it discards unsaved edits** (`_configUnsaved()`): the `CONFIG` it
+   pulls replaces `config` wholesale. Declined, nothing is sent.
 
 ### Verified clip download
 
@@ -670,6 +672,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **Refresh asks before discarding unsaved edits** (§5 item 9, D-NC31). It sent `GET_CONFIG` at once, and `applyConfig` replaced the unsaved edit without a word. |
 | 2026-10-04 | _(pending)_ | **A bridged Save the fragmenter cannot carry is refused before it is latched** (§5 Push-budget readout). The refusal (over 192 fragments, or a slice whose envelope is over 187 B) moved into `_bridgedFragPlan()`, shared by `sendJSON()` and `saveConfigToBoard()`; Save asks first, so it no longer shows "Saving…" for 12 s and leaves `_pendingSaveBaseline` set for a save that never left. `sendJSON()` now resolves `true`/`false`. |
 | 2026-10-04 | _(pending)_ | **A stored `;W<n>;S<p>` command opens with the prefix reserved in its field cap** (§10 item 6). `_appendCommandView`'s length and chain refreshers read the destination by id, and both run from `sync()` and the render-time check while the row is still detached, so the cap opened at 95 and the render-time over-length flag never fired. They read the hidden destination input by reference now. |
 | 2026-10-04 | _(pending)_ | **A no-op Apply changes nothing** (§5 item 8, D-NC32). `saveKnobModal` wrote every knob with its defaults spelled out (`smoothProfile: -1`, `easeSwitchOverride: false`, `midClosed: false`, `releaseIdleMs: 0`) and dropped an HCR Volume output's `maestroCh`, and the legacy HCR editor had no option for an `fn` it does not list, so its select fell back to PlayWAV and rewrote the action. Each untouched editor became a diff the next Save shipped. |
