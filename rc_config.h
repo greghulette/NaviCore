@@ -757,6 +757,17 @@ struct RcConfig {
 extern RcConfig* g_rcConfig;
 #define rcConfig (*g_rcConfig)
 
+// The mesh password WCB_Client was constructed with: setup() copies it here just
+// before `new WCB_Client` and hands the library this copy. The library keeps its own
+// copy for the ETM stack, so while RTERM, OTA auth/ACKs and WcbMgmt read
+// rcConfig.wcbNetwork.password live, a password changed (or reset) without a reboot
+// split the board: ETM packets carried the boot password, the hand-built ones the new
+// one, and each peer dropped whichever disagreed with it - ;W20,?version ran here but
+// its [TERM] reply never arrived (HIL nccfg.mesh_creds_live_split). Every hand-built
+// packet takes the password from HERE, so the board speaks one password until the
+// reboot a credential change already requires. Never write it after setup().
+inline char g_meshPasswordBoot[sizeof(RcWcbNetwork::password)] = "";
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Construction helpers
 // ─────────────────────────────────────────────────────────────────────────────

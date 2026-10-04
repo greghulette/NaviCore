@@ -864,8 +864,12 @@ Sizes already claimed elsewhere in the ecosystem: **43, 204, 226, 230, 249, 252*
 [`navicore_rterm.h`](../navicore_rterm.h) fail the build if a struct drifts — **do not
 suppress them**; pick a different size instead.
 
-Every packet begins with `char structPassword[40]`, matched against
-`rcConfig.wcbNetwork.password`.
+Every packet begins with `char structPassword[40]`, filled from and matched against
+`g_meshPasswordBoot` — the password `WCB_Client` was constructed with at boot, **not** the
+live `rcConfig.wcbNetwork.password`. The library keeps that boot copy for every ETM packet,
+so a hand-built packet reading the live field split the board after an unrebooted password
+change or reset: ETM traffic on one password, RTERM/OTA/WcbMgmt on the other. A credential
+change takes effect at the reboot it already requires, for every packet at once.
 
 **OTA safety model.** Writes always target the inactive slot
 (`esp_ota_get_next_update_partition`); the image is SHA-verified by `esp_ota_end` *before*
@@ -929,6 +933,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC17)_ | RTERM, OTA auth/ACKs and WcbMgmt take the mesh password from `g_meshPasswordBoot` (the copy `WCB_Client` got at boot), not the live config field, so an unrebooted password change or reset no longer splits them from the ETM stack (HIL `nccfg.mesh_creds_live_split`). |
 | 2026-09-28 | `703a0e7` | **HIL test hooks, `NAVICORE_HIL_HOOKS` builds only** (the WCB repo's HIL plan INF9 b): `DBG_WIRE` = debug bit 7, a `[WIRE] <port> <offset>/<length>: <hex>` line per block written to S3/S4/S5/Serial2/the WCBStream; §3's new table: `#L90,<ms>` (stall `loop()`), `#L91` / `#L91,R` (cut `/config.json`, keeping `/config.json.hil`; put it back), `#L92` (the next GET_CONFIG overflows), `#L93` (the next config save fails). Every other image answers them `Unknown #L code`, whose `Valid:` list is unchanged in both. |
 | 2026-09-28 | `1e15601` | **`App SHA256: <16 hex>` in `?OTALOCAL,STATUS` and the boot banner**: the running image's ELF SHA-256 (first 8 bytes), so two builds of one commit, which report the same `FW_VERSION`, can be told apart, and a backtrace is decoded against the right `.elf`. §3 now lists the STATUS block. Read from the app descriptor because `esp_app_get_elf_sha256()` stops at 9 hex digits in core 3.3.4. |
 | 2026-09-24 | _(uncommitted)_ | `?MGMT,PULL,<target>,P`: through WCB_Client's `WCB_Mgmt.h`, a config over 2912 characters is relayed as `[MGMT:CFGPART,<n>]` parts and a refusal as `[MGMT:CFGERR,<n>]` (WCB F13). Each line is one `printf` from `service()`, so it reaches the WebSocket (only loop-task output does). |

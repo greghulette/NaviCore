@@ -4797,10 +4797,13 @@ void setup() {
   // enabled it runs WIFI_AP_STA and shares that AP's channel; with it off (the
   // default) this is ESP-NOW only, exactly as before. Credentials come from NVS
   // (editable via the GUI's "WCB Network" sidebar); a reboot is required
-  // for credential changes to take effect.
+  // for credential changes to take effect. The password goes in through
+  // g_meshPasswordBoot, which every hand-built packet (RTERM, OTA, WcbMgmt) also
+  // reads, so a later unrebooted change cannot split them from the ETM stack.
+  strlcpy(g_meshPasswordBoot, rcConfig.wcbNetwork.password, sizeof(g_meshPasswordBoot));
   wcb = new WCB_Client(rcConfig.wcbNetwork.macOct2,
                       rcConfig.wcbNetwork.macOct3,
-                      rcConfig.wcbNetwork.password,
+                      g_meshPasswordBoot,
                       rcConfig.wcbNetwork.quantity,
                       rcConfig.wcbNetwork.deviceId);
   // Pin the ESP-NOW radio to the mesh channel every WCB is on BEFORE begin() — the
@@ -4874,7 +4877,7 @@ void setup() {
       id.deviceId       = rcConfig.wcbNetwork.deviceId;
       id.alias          = "NaviCore";
       id.fw             = FW_VERSION;
-      id.meshPassword   = rcConfig.wcbNetwork.password;
+      id.meshPassword   = g_meshPasswordBoot;   // the boot copy WCB_Client uses - never the live field
       id.hwVer          = 32;          // 32 = "not a real WCB", same as a MgmtRelay
       id.macOct2        = rcConfig.wcbNetwork.macOct2;
       id.macOct3        = rcConfig.wcbNetwork.macOct3;
