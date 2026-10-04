@@ -180,7 +180,9 @@ over from an earlier setup cannot leak output.
 
 The stored `port`/`target` is preserved while disabled, so re-enabling a device puts it back
 where it was rather than on a default. An existing stored config is unaffected: it carries an
-explicit `transport`, so upgrading does not silently switch a working device off.
+explicit `transport`, so upgrading does not silently switch a working device off. A
+destination sent as `null` or `{}` reads as disabled (`rcDestBlank`), never as the
+transport's default, and leaves the stored `port`/`target` as it was.
 
 All three live in the config tool's single **Audio** tab, as the first entry in each device's
 **Via:** dropdown.
@@ -325,6 +327,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC22)_ | A `hcrDest`/`mp3Dest`/`dfpDest` sent as `null` or `{}` reads as disabled instead of enabling the device on its default transport (HIL `nccfg.dest_null_hazard`). |
 | 2026-10-04 | _(D-NC43)_ | `tapWindowMs` is capped at 4900 on input, so `holdMs` (ceiling 5000) always clears it by 100 (HIL `nccfg.hold_exceeds_tap_window`). |
 | 2026-10-04 | _(D-NC42)_ | String fields are cut back to a whole UTF-8 character (`cfgStrlcpy`) when the value is longer than the field (HIL `nccfg.string_truncation_utf8`). |
 | 2026-09-28 | `703a0e7` | §6: debug bit 7 is `DBG_WIRE` in a HIL hook build (PROTOCOLS.md §2), so the tool never sends it and a new debug category takes bit 8. |

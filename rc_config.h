@@ -1541,6 +1541,15 @@ static inline uint32_t rcSanBaud(uint32_t b, uint32_t def) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Load config from JSON object (from SET_CONFIG WebSocket message)
 // ─────────────────────────────────────────────────────────────────────────────
+// A device destination (hcrDest / mp3Dest / dfpDest) that is present but null or {}
+// means "nothing configured" and reads as OFF. Taking each transport's `| default`
+// there ENABLED the device - serial S3 for the HCR and the DFPlayer, WCB 2 for the MP3
+// Trigger - while the sender meant nothing: the tool's diff-save sends null for a
+// baseline-only branch (HIL nccfg.dest_null_hazard). Only the transport changes; the
+// stored port/target stays, so a re-enable puts the device back where it was. An
+// object with keys but no "transport" (an older config) still takes the default.
+static inline bool rcDestBlank(JsonObject o) { return o.isNull() || o.size() == 0; }
+
 bool rcConfigFromJSON(const JsonObject& doc) {
   if (doc.containsKey("txModel"))       rcConfig.txModel       = (uint8_t)(doc["txModel"] | (int)TX_MODEL_X18);
   if (doc.containsKey("threeAxisGimbals")) rcConfig.threeAxisGimbals = doc["threeAxisGimbals"] | false;
@@ -1770,7 +1779,9 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     }
   }
 
-  if (doc.containsKey("hcrDest")) {
+  if (doc.containsKey("hcrDest") && rcDestBlank(doc["hcrDest"])) {
+    rcConfig.hcrDest.transport = 2;                  // null/{} = off (rcDestBlank)
+  } else if (doc.containsKey("hcrDest")) {
     JsonObject hcrObj = doc["hcrDest"];
     const char* tp = hcrObj["transport"] | "serial";
     // "off" = user disabled this device; see RcHcrDest::transport.
@@ -1835,7 +1846,9 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     rcConfig.wcbProfileCount = n;
   }
 
-  if (doc.containsKey("mp3Dest")) {
+  if (doc.containsKey("mp3Dest") && rcDestBlank(doc["mp3Dest"])) {
+    rcConfig.mp3Dest.transport = 2;                  // null/{} = off (rcDestBlank)
+  } else if (doc.containsKey("mp3Dest")) {
     JsonObject mp3Obj = doc["mp3Dest"];
     const char* tp = mp3Obj["transport"] | "wcb";
     rcConfig.mp3Dest.transport = (strcmp(tp, "off") == 0) ? 2
@@ -1849,7 +1862,9 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     }
   }
 
-  if (doc.containsKey("dfpDest")) {
+  if (doc.containsKey("dfpDest") && rcDestBlank(doc["dfpDest"])) {
+    rcConfig.dfpDest.transport = 2;                  // null/{} = off (rcDestBlank)
+  } else if (doc.containsKey("dfpDest")) {
     JsonObject dfpObj = doc["dfpDest"];
     const char* tp = dfpObj["transport"] | "serial";   // local is the DFPlayer default
     rcConfig.dfpDest.transport = (strcmp(tp, "off") == 0) ? 2
