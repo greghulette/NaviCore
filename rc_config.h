@@ -1563,7 +1563,18 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   if (doc.containsKey("wifiPassword"))
     cfgStrlcpy(rcConfig.wifiPassword, doc["wifiPassword"] | rcConfig.wifiPassword, sizeof(rcConfig.wifiPassword));
   if (doc.containsKey("maeGateMs"))        rcConfig.maeGateMs        = doc["maeGateMs"]         | 250;
-  if (doc.containsKey("boardType"))        rcConfig.boardType        = (uint8_t)(doc["boardType"] | 0);
+  // boardType is 0 (NaviCore v2) or 1 (WCB HW 3.2) and nothing else. Any other value was
+  // stored as sent, and the readers disagreed on it: applyBoardProfile() takes only 1 as
+  // WCB 3.2, so a 2 booted the v2 pins, while the WDP advert and auxPortLabel() take
+  // anything non-zero as WCB 3.2 (HIL ncboot.boardtype2_mismatch). An out-of-range value
+  // is IGNORED, never clamped onto 1: that profile's pins differ, and a typo must not
+  // move the droid's ports.
+  if (doc.containsKey("boardType")) {
+    const int bt = doc["boardType"] | -1;
+    if (bt == 0 || bt == 1) rcConfig.boardType = (uint8_t)bt;
+    else Serial.printf("[CFG] boardType %d ignored - 0 = NaviCore v2, 1 = WCB HW 3.2; kept %u\n",
+                       bt, (unsigned)rcConfig.boardType);
+  }
   if (doc.containsKey("tapWindowMs"))   rcConfig.tapWindowMs   = doc["tapWindowMs"];
   // A sub-100 ms window makes the multi-tap test (now - lastTap < tapWindowMs)
   // effectively always-false, silently killing double/triple taps while single
@@ -2468,7 +2479,10 @@ void rcConfigLoadNVS() {
   if (prefs.isKey("3xg"))      rcConfig.threeAxisGimbals = prefs.getBool("3xg", rcConfig.threeAxisGimbals);
   if (prefs.isKey("sbusout"))  rcConfig.sbusOutEnabled   = prefs.getBool("sbusout", rcConfig.sbusOutEnabled);
   if (prefs.isKey("wifien"))   rcConfig.wifiEnabled      = prefs.getBool("wifien",  rcConfig.wifiEnabled);
-  if (prefs.isKey("board"))    rcConfig.boardType        = prefs.getUChar("board", rcConfig.boardType);
+  if (prefs.isKey("board")) {  // 0/1 only, as on the JSON path (rcConfigFromJSON's boardType note)
+    const uint8_t bt = prefs.getUChar("board", rcConfig.boardType);
+    if (bt <= 1) rcConfig.boardType = bt;
+  }
   if (prefs.isKey("cfg"))      rcConfig.tapWindowMs   = prefs.getInt("cfg",      rcConfig.tapWindowMs);
   if (rcConfig.tapWindowMs < 100) rcConfig.tapWindowMs = 500;   // guard a stale/zero NVS value that would disable multi-tap
   if (prefs.isKey("matrixCh")) rcConfig.matrixChannel = prefs.getInt("matrixCh", rcConfig.matrixChannel);
