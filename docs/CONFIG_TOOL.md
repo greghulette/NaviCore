@@ -644,6 +644,11 @@ will not reappear on their own.
    fragmentation or bulk transfer.
 5. Keep firmware/tool constant pairs in sync —
    [CONFIG_SCHEMA.md §6](CONFIG_SCHEMA.md#6-cross-file-invariants).
+6. An action row (`appendActionFields` and the views it calls) is **built detached** and
+   attached afterwards, so anything it reads while rendering must be held by reference:
+   `document.getElementById` finds none of the row's own controls until then. Reading the
+   destination by id is how a command stored with a `;W<n>;S<p>` prefix opened capped at
+   95 instead of 95 minus the prefix (`nctool.command_view_cap_on_open`).
 6. Syntax-check: `node C:\Users\ghulette\tools\jscheck.js config_tool/index.html`.
 7. Push — the Pages workflow deploys `main` to `/config_tool` and any other branch to
    `/dev/<branch>/config_tool` automatically.
@@ -658,6 +663,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **A stored `;W<n>;S<p>` command opens with the prefix reserved in its field cap** (§10 item 6). `_appendCommandView`'s length and chain refreshers read the destination by id, and both run from `sync()` and the render-time check while the row is still detached, so the cap opened at 95 and the render-time over-length flag never fired. They read the hidden destination input by reference now. |
 | 2026-10-04 | _(pending)_ | **A no-op Apply changes nothing** (§5 item 8, D-NC32). `saveKnobModal` wrote every knob with its defaults spelled out (`smoothProfile: -1`, `easeSwitchOverride: false`, `midClosed: false`, `releaseIdleMs: 0`) and dropped an HCR Volume output's `maestroCh`, and the legacy HCR editor had no option for an `fn` it does not list, so its select fell back to PlayWAV and rewrote the action. Each untouched editor became a diff the next Save shipped. |
 | 2026-08-28 | _(uncommitted)_ | The hidden WiFi block gained **AP name + password fields** with a show/hide eye, next to the toggle. The inline note restates the pending state on every edit and turns red on a password under 8 characters, because the firmware fails closed there — without the warning the user saves, reboots, finds no AP, and has only an unwatched serial line to go on. |
 | 2026-08-28 | _(uncommitted)_ | **The relay chip now shows its mesh-stats line.** The bridging WCB is deliberately kept out of the roster arrays (so the bridged `WCB_STATUS` fits one packet) and is drawn as its own chip — but that chip was built by hand and never called `_meshStatsChipLine()`, so the busiest link on the mesh was the one link with no numbers. Every command to and from the RC crosses it: with a MgmtRelay bridging, the detail modal showed 2275 sent / 4 retries against 89 and 46 for the two real boards, while the sidebar showed nothing. Data was always present — `_meshStatsPeerRow()` is a plain id lookup with no roster filter, and the code at `_meshStatsChipLine` already states the line is drawn for temporary peers such as a mgmt relay. Purely a missing call. |

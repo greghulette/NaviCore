@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:36.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:38.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -15079,11 +15079,18 @@ function _appendCommandView(container, action) {
   // (≈5586), and ";s<n>"/";P" are local writes that never route. So
   // ";w3;s4:PP100^;w3;s4:PL5" is delivered correctly and gets no warning.
   const IMPLICIT_ROUTED = /^;\s*(SEQ|[ADHMLC])/i;   // NB: ";s" must not match — hence SEQ spelled out
+  // The hidden destination input (wire mode only), held by REFERENCE. Both refreshers
+  // also run from sync() and the render-time check below while the row is still
+  // detached, where document.getElementById(fid + '-destsel') is null: the field
+  // then opened capped at the full 95 instead of 95 minus the ";W<n>;S<p>" prefix,
+  // and the render-time over-length flag never fired (nctool.command_view_cap_on_open).
+  let destEl = null;
+  const destValue = () => (destEl ? destEl.value : '');
   const chainWarn = document.createElement('div');
   chainWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
   container.appendChild(chainWarn);
   const refreshChainWarn = () => {
-    const dest = document.getElementById(fid + '-destsel')?.value || '';
+    const dest = destValue();
     const cmd  = cmdInput.value || '';
     // sync() writes a bare board number for unicast ('0'/"W<n>S<p>" = broadcast, "S<n>" = local serial).
     const parts = cmd.split('^');
@@ -15106,7 +15113,7 @@ function _appendCommandView(container, action) {
   lenWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
   container.appendChild(lenWarn);
   const refreshLenWarn = () => {
-    const dest   = document.getElementById(fid + '-destsel')?.value || '';
+    const dest   = destValue();
     const prefix = _rcDestPrefix(dest);
     cmdInput.maxLength = _rcCmdFieldCap(dest);
     // Read-back skips the prefix when the user hand-typed their own ";W…" routing.
@@ -15151,6 +15158,7 @@ function _appendCommandView(container, action) {
     const targetInput = document.createElement('input'); targetInput.type = 'hidden'; targetInput.id = fid + '-target'; targetInput.value = action.target || 1;
     const portInput   = document.createElement('input'); portInput.type   = 'hidden'; portInput.id   = fid + '-port';   portInput.value   = action.port || 'S3';
     const destHidden  = document.createElement('input'); destHidden.type  = 'hidden'; destHidden.id  = fid + '-destsel';
+    destEl = destHidden;   // the refreshers read it by reference (see destValue)
     row1.appendChild(targetInput); row1.appendChild(portInput); row1.appendChild(destHidden);
 
     // Initial (WCB target, serial port) from the action.
