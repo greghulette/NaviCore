@@ -420,7 +420,8 @@ droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
   reassembly and dispatch; WCB status/alias/port-label metadata; bulk-transfer sink.
   A saved config is applied identically on both transports: USB `SET_CONFIG` and the bridged
   `_applyReassembled()` both call **`applyConfigSideEffects()`** (in the .ino) for the live
-  re-apply of baud, SBUS-OUT, Maestro easing and auto-release policy. **Any new post-save fixup
+  re-apply of baud, SBUS-OUT, Maestro easing and auto-release policy, and to forget any matrix
+  gesture in progress (`rcMatrixResetGesture()`). **Any new post-save fixup
   belongs in that helper, not in one caller** — the two paths previously drifted, and a Save
   over the mesh silently left the board on its old settings until the next reboot.
 - **`navirec`** — records dispatched actions plus synthesized servo/volume keyframes into a
@@ -443,6 +444,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC44)_ | §13: `applyConfigSideEffects()` also forgets a parked tap or hold and re-arms the matrix (`rcMatrixResetGesture()`), so every config apply on either transport, `RESET_DEFAULTS` included, drops a gesture in progress (HIL `sbus.reconfig_parked_tap_cleared`). |
 | 2026-09-28 | `703a0e7` | §3 lists `navicore_hil.h`, the HIL hook header compiled only with `-DNAVICORE_HIL_HOOKS=1`; §5 the `/config.json.hil` copy its `#L91` leaves; §7's loop order gains the hook build's `#L90` stall and `kickUsbCdcTx()`, which already ran first. |
 | 2026-09-28 | `1e15601` | §6 step 4: the boot banner now carries `App SHA256: <16 hex>`, the running image's identity (PROTOCOLS.md §3), and the USB RX buffer is 8 KB (`Serial.setRxBufferSize(8192)`; this page said 4 KB). |
 | 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |

@@ -235,6 +235,9 @@ path caps at ~15 KB (see [PROTOCOLS.md §4](PROTOCOLS.md#4-the-via-wcb-bridge)).
 `applySerialBauds()` (only ports whose baud actually changed re-open, so an unrelated save
 does not blip a live port), `applySbusOut()`, and a board-profile change check. Mesh
 credentials are the exception — `WCB_Client` is constructed once, so those need a reboot.
+Every apply — either transport, and `RESET_DEFAULTS` — also forgets any matrix gesture in
+progress (`rcMatrixResetGesture()`): a tap parked on a held button is dropped, never fired
+against the new mapping, and the matrix fires again only after a confirmed neutral.
 
 ---
 
@@ -327,6 +330,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC44)_ | Every config apply (both `SET_CONFIG` paths, both `RESET_DEFAULTS` paths) forgets a parked tap or hold and re-arms the matrix (HIL `sbus.reconfig_parked_tap_cleared`). |
 | 2026-10-04 | _(D-NC19)_ | `boardType` accepts only 0 and 1; another value is ignored instead of stored, where it booted the v2 pins under a "WCB 3.2" advert (HIL `ncboot.boardtype2_mismatch`). |
 | 2026-10-04 | _(D-NC22)_ | A `hcrDest`/`mp3Dest`/`dfpDest` sent as `null` or `{}` reads as disabled instead of enabling the device on its default transport (HIL `nccfg.dest_null_hazard`). |
 | 2026-10-04 | _(D-NC43)_ | `tapWindowMs` is capped at 4900 on input, so `holdMs` (ceiling 5000) always clears it by 100 (HIL `nccfg.hold_exceeds_tap_window`). |

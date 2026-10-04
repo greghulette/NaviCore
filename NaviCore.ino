@@ -540,6 +540,24 @@ struct TapState {
 };
 TapState tapState;
 
+// Forget any matrix gesture in progress - a deferred tap, a hold, the tap count - and
+// require a CONFIRMED neutral, then a fresh press, before the matrix fires again.
+// Called by every config apply (applyConfigSideEffects, which both SET_CONFIG paths
+// and both RESET_DEFAULTS paths run). Two reasons, both seen on the bench:
+//  - the deferred tap is dispatched against the mapping as it is WHEN IT FIRES, so a
+//    press parked across a save fired the new mapping, or a save's own leftovers acted:
+//    defaults whose matrix band covered the held value registered a press nobody made
+//    (HIL sbus.reconfig_parked_tap_cleared);
+//  - the save blocks loop() for 100+ ms (flash write, port re-opens), and a debounce
+//    frozen across that gap could manufacture an edge when loop() resumes.
+static void rcMatrixResetGesture() {
+  matrixArmed        = false;
+  matrixCandidate    = 0;
+  matrixCandCount    = 0;
+  matrixNeutralCount = 0;
+  tapState           = TapState{};
+}
+
 // Last-seen switch positions for change detection
 int switchPrevPos[RC_NUM_SWITCHES];
 
@@ -3331,6 +3349,7 @@ static void applySbusOut(bool initial) {
 // OLD board's pins.  Everything pin-dependent defers to the reboot the GUI
 // already prompts for after a board change; the caller reports that its own way.
 bool applyConfigSideEffects() {
+  rcMatrixResetGesture();    // first, whatever the return below - see rcMatrixResetGesture()
   if (rcConfig.boardType != appliedBoardType) return false;
   applySerialBauds(false);   // HCR / MP3 / Maestro pick up a new rate immediately
   applySbusOut(false);       // apply a flipped SBUS-OUT toggle live
@@ -3960,19 +3979,10 @@ bool processInputLine(const String& line) {
           rcAdvertiseSerialLabels();   // a changed port label / HCR/MP3/WLED dest → re-advertise over WDP
           // Live re-apply of baud / SBUS-OUT / easing / auto-release. Shared with the
           // Via-WCB save path — see applyConfigSideEffects().
+          // It also re-arms the matrix and forgets any parked tap (rcMatrixResetGesture),
+          // so the save's 100+ ms block cannot manufacture a button event.
           if (!applyConfigSideEffects())
             Serial.println("{\"type\":\"INFO\",\"msg\":\"boardType changed — reboot to apply the new pin profile\"}");
-          // rcConfigSaveLFS() (flash write) + applySerialBauds()
-          // block loop() for 100+ ms, during which processSbus() can't
-          // run.  If the operator was holding a matrix button across
-          // that gap, the frozen debounce state could produce a phantom
-          // edge when loop() resumes.  Reset the matrix state machine to
-          // a clean "must see a confirmed neutral, then a fresh press"
-          // condition so the save can't manufacture a button event.
-          matrixArmed        = false;
-          matrixCandidate    = 0;
-          matrixCandCount    = 0;
-          matrixNeutralCount = 0;
           if (saved) Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":true,\"saveId\":%ld}\n", saveId);
           else       Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"applied to RAM but could not be saved to flash (LittleFS write error)\",\"saveId\":%ld}\n", saveId);
         } else {
