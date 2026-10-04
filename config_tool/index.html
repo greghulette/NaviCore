@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:42.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:46.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -5505,7 +5505,11 @@ const FRAG_MAX_PARTS_RECV = 512;   // 512 × 80 = 40 KB max fragmented download
 // this is exceeded.  Bail loudly client-side so we notice if the chunk
 // math drifts.
 const FRAG_MAX_ENV_BYTES = 187;
-let   _nextOutSid      = 1;
+// Fragment session id, 1..65535 (0 is the RC's free-slot sentinel). A random start
+// per tab, for the same reason as _saveWireId: two tabs on one shared WCB both
+// counting from 1 would put two concurrent uploads under one sid in NaviCore's
+// reassembly pool (D-NC35).
+let   _nextOutSid      = 1 + Math.floor(Math.random() * 65535);
 
 // Split a string into chunks each <= maxBytes UTF-8 bytes, never cutting a
 // codepoint. Iterating `for..of` walks by code point (surrogate pairs stay
@@ -9637,7 +9641,7 @@ function handleBoardMessage(line) {
       // the user's subsequent Save will diff against the ORIGINAL
       // baseline (last known good) instead of a baseline that includes
       // the rejected edits.
-      if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _pendingSaveId)) {
+      if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _saveWireId(_pendingSaveId))) {
         appendTerminalLine('< [config] Save NACK\'d by board — baseline NOT advanced', 'rx');
         _pendingSaveBaseline = null;
         if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
@@ -9655,7 +9659,7 @@ function handleBoardMessage(line) {
     // is ignored, so it can't be misattributed to a newer save and advance the
     // baseline to a snapshot the board never stored. (undefined saveId = firmware
     // not yet reflashed → fall back to the old, un-correlated behavior.)
-    if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _pendingSaveId)) {
+    if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _saveWireId(_pendingSaveId))) {
       _configBaseline = _pendingSaveBaseline;
       _pendingSaveBaseline = null;
       if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
@@ -16784,9 +16788,9 @@ function _pushBudgetInfo() {
   const branches = Object.keys(payload);
   if (!branches.length) return { branches, bytes: 0, frags: 0, empty: true };
 
-  // saveId is a small integer whose width can't shift the fragment count; using
-  // the next real one keeps the string byte-identical to what Save would build.
-  const inner = JSON.stringify({ sys: 1, type: 'SET_CONFIG', data: payload, saveId: _saveSeq + 1 });
+  // Use the saveId the next Save will send (_saveWireId), so the string is
+  // byte-identical to the one Save builds and the count cannot be off by a digit.
+  const inner = JSON.stringify({ sys: 1, type: 'SET_CONFIG', data: payload, saveId: _saveWireId(_saveSeq + 1) });
   const bytes = new TextEncoder().encode(inner).length;
   // sendJSON's single-packet fast path: <= FRAG_MAX_ENV_BYTES never enters the
   // fragmenter at all, so it consumes none of the 192-slot pool.
@@ -17020,7 +17024,7 @@ async function saveConfigToBoard() {
   // could not come (nctool.push_refused_not_pending). saveId is the one this save
   // would take, so the line measured is byte-identical to the one sendJSON builds.
   if (viaWcbActive) {
-    const refusal = _bridgedSendRefusal({ type: 'SET_CONFIG', data: payload, saveId: _saveSeq + 1 });
+    const refusal = _bridgedSendRefusal({ type: 'SET_CONFIG', data: payload, saveId: _saveWireId(_saveSeq + 1) });
     if (refusal) {
       console.error('saveConfigToBoard: ' + refusal);
       appendTerminalLine('< [config] ' + refusal, 'error');
@@ -17052,7 +17056,7 @@ async function saveConfigToBoard() {
   _dismissToast(_saveToast);
   _saveToast = showToast('Saving to NaviCore…', 'info', 15000);
 
-  await sendJSON({ type: 'SET_CONFIG', data: payload, saveId: _pendingSaveId });
+  await sendJSON({ type: 'SET_CONFIG', data: payload, saveId: _saveWireId(_pendingSaveId) });
   appendTerminalLine(`< [config] Save sent (branches: ${branches}) — awaiting ACK`, 'rx');
 
   // Watchdog: if no ACK in 12 s (longer than the worst-case 40-fragment
@@ -17100,8 +17104,19 @@ let _pendingSaveTimer     = null;
 // ignore any reply whose id isn't the one currently in flight. (Firmware that
 // doesn't yet echo saveId → msg.saveId undefined → we fall back to the old
 // behavior, so this is safe to ship ahead of the reflash.)
+//
+// _pendingSaveId / _saveSeq count THIS tab's saves (1, 2, …). The id on the wire is
+// _saveWireId(n) = a random per-tab base + n. Every tab used to send its count
+// itself, so all of them numbered their saves from 1 — and on one shared WCB (the
+// WcbSerialHub, or any host that fans one port out to several pages) every tab reads
+// every ACK, so a tab took another tab's ACK for its own save, advanced its baseline
+// over an edit the board never stored, and the next Save no longer sent it (D-NC35,
+// nctool.multi_tab_save). The base is a multiple of 1000 so a log still shows the
+// tab's count in the last digits; base + count stays far inside the firmware's long.
 let _pendingSaveId = 0;
 let _saveSeq       = 0;
+const _saveIdBase  = (1 + Math.floor(Math.random() * 1e6)) * 1000;
+function _saveWireId(n) { return _saveIdBase + n; }
 document.getElementById('btn-hwsetup-save').addEventListener('click', saveConfigToBoard);
 
 document.getElementById('btn-defaults').addEventListener('click', async () => {

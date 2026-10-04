@@ -170,6 +170,11 @@ Saving is diff-based, and the guard rails exist because each failure mode actual
    (`nctool.noop_apply_every_editor`).
 9. **Refresh asks before it discards unsaved edits** (`_configUnsaved()`): the `CONFIG` it
    pulls replaces `config` wholesale. Declined, nothing is sent.
+10. **Each save carries a `saveId` that the ACK echoes**, and an ACK for any other id is
+    ignored. On the wire it is `_saveWireId(n)`: a random per-tab base plus the tab's own
+    count `n` (`_pendingSaveId`). Every tab reads every ACK on a shared WCB, so ids that
+    counted from 1 in each tab let one tab's ACK confirm another tab's save
+    (`nctool.multi_tab_save`).
 
 ### Verified clip download
 
@@ -672,6 +677,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **Two tabs on one WCB no longer take each other's save ACKs** (§5 item 10, D-NC35). The `saveId` on the wire is a random per-tab base plus the tab's count (`_saveWireId`), and the fragment `sid` starts at random per tab (`_nextOutSid`); both counted from 1 in every tab. |
 | 2026-10-04 | _(pending)_ | **Refresh asks before discarding unsaved edits** (§5 item 9, D-NC31). It sent `GET_CONFIG` at once, and `applyConfig` replaced the unsaved edit without a word. |
 | 2026-10-04 | _(pending)_ | **A bridged Save the fragmenter cannot carry is refused before it is latched** (§5 Push-budget readout). The refusal (over 192 fragments, or a slice whose envelope is over 187 B) moved into `_bridgedFragPlan()`, shared by `sendJSON()` and `saveConfigToBoard()`; Save asks first, so it no longer shows "Saving…" for 12 s and leaves `_pendingSaveBaseline` set for a save that never left. `sendJSON()` now resolves `true`/`false`. |
 | 2026-10-04 | _(pending)_ | **A stored `;W<n>;S<p>` command opens with the prefix reserved in its field cap** (§10 item 6). `_appendCommandView`'s length and chain refreshers read the destination by id, and both run from `sync()` and the render-time check while the row is still detached, so the cap opened at 95 and the render-time over-length flag never fired. They read the hidden destination input by reference now. |

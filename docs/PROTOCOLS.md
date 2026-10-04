@@ -224,7 +224,7 @@ payload approaches 98 KB and copying it per line is real cost.
 |---|---|---|
 | `PING` / `{"type":"PING"}` | `{"type":"PONG","version":"<FW_VERSION>"}` | Also clears a stale calibration mute |
 | `{"type":"GET_CONFIG"}` | `{"type":"CONFIG","data":{…}}` | Full `rcConfigToJSON()` |
-| `{"type":"SET_CONFIG","data":{…}}` | `{"type":"ACK","ok":true}` | Deserialised un-filtered; re-applies bauds, SBUS-out, board profile live |
+| `{"type":"SET_CONFIG","data":{…},"saveId":N}` | `{"type":"ACK","of":"SET_CONFIG","ok":bool,"saveId":N}` | Deserialised un-filtered; re-applies bauds, SBUS-out, board profile live. `saveId` is echoed so the tool can tell its own save's ACK from a late or foreign one; the tool sends a random per-tab base plus its own save count (`_saveWireId`) |
 | `{"type":"GET_CMDLIB"}` | `{"type":"CMDLIB","size":N,"hash":H,"data":{…}}` | Command library stored on the droid, opaque to firmware |
 | `{"type":"GET_CMDLIB_META"}` | `{"type":"CMDLIB_META","size":N,"hash":H}` | Cheap change-check so a connect can skip the pull |
 | `{"type":"SET_CMDLIB","data":{…}}` | `ACK` | Raw value pulled by substring, stored verbatim |
@@ -699,7 +699,9 @@ Rules baked into the implementation, each for a reason that cost real debugging:
 - **Slices split on UTF-8 codepoint boundaries.** The receiver concatenates raw slices, so
   a split multi-byte character corrupts the JSON.
 - **`sid` never 0** — 0 is the free-slot sentinel. It wraps 65535 → 1.
-- **Sessions key on `(sid, senderID)`** — two tools both start at `sid = 1`.
+- **Sessions key on `(sid, senderID)`** — two tools behind different WCBs may hold the same
+  sid. Tabs sharing ONE WCB share its senderID, so the tool starts each tab's sid at random
+  (`_nextOutSid`).
 - **Expired slots are reclaimed before the sid match**, so a wrapped sid cannot merge into
   stale parts.
 - **Receive pool is static DRAM.** Raising `FRAG_MAX_PARTS` to 384 crash-loops the board
@@ -929,6 +931,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | §2 `SET_CONFIG` row brought up to the wire (`of`, `saveId`). The tool's `saveId` is now a random per-tab base plus the tab's count, and its fragment `sid` starts at random per tab: every tab numbered both from 1, so two tabs on one shared WCB took each other's ACKs (D-NC35, `nctool.multi_tab_save`). |
 | 2026-10-04 | _(pending)_ | §2 `TEST_ACTION`: the tool now reads the ACK. An `ok:false` reached only the raw terminal echo, so a refused ▶ Test looked like one that fired (D-NC20, `nctool.test_action_refusal_shown`). |
 | 2026-09-28 | `703a0e7` | **HIL test hooks, `NAVICORE_HIL_HOOKS` builds only** (the WCB repo's HIL plan INF9 b): `DBG_WIRE` = debug bit 7, a `[WIRE] <port> <offset>/<length>: <hex>` line per block written to S3/S4/S5/Serial2/the WCBStream; §3's new table: `#L90,<ms>` (stall `loop()`), `#L91` / `#L91,R` (cut `/config.json`, keeping `/config.json.hil`; put it back), `#L92` (the next GET_CONFIG overflows), `#L93` (the next config save fails). Every other image answers them `Unknown #L code`, whose `Valid:` list is unchanged in both. |
 | 2026-09-28 | `1e15601` | **`App SHA256: <16 hex>` in `?OTALOCAL,STATUS` and the boot banner**: the running image's ELF SHA-256 (first 8 bytes), so two builds of one commit, which report the same `FW_VERSION`, can be told apart, and a backtrace is decoded against the right `.elf`. §3 now lists the STATUS block. Read from the app descriptor because `esp_app_get_elf_sha256()` stops at 9 hex digits in core 3.3.4. |
