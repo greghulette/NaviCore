@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:46.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:49.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -19205,10 +19205,13 @@ function handleConfigImportFile(event) {
       // board". Without the seed the next Save ships the branch and rc_config.h:1497 /
       // :1520 read the absent tNnote/pNnote key back as "" — every user-typed Action
       // Name gone from the droid and the cheat sheet, with nothing reporting it.
+      // `exclusive` starts false, not absent: rcConfigToJSON prints it on every mapping
+      // (rc_config.h mObj["exclusive"]), so an absent key differs from the baseline and
+      // the CSV's empty "exclusive" cell would turn every mapping into a change.
       const seedMapping = (key) => {
         if (imported.mappings[key]) return imported.mappings[key];
         const prev = (config.mappings || {})[key] || {};
-        const m = {};
+        const m = { exclusive: false };
         for (let t = 1; t <= NUM_TAP_TIERS; t++) if (prev['t' + t + 'note']) m['t' + t + 'note'] = prev['t' + t + 'note'];
         imported.mappings[key] = m;
         return m;
@@ -19537,13 +19540,24 @@ function handleConfigImportFile(event) {
             if (Number.isFinite(mn) && Number.isFinite(mx)) center = Math.round((mn + mx) / 2);
           }
           if (center !== null) {
+            // The CSV carries a band's CENTRE only. Keep the band the tool already
+            // has when that centre is unchanged, and otherwise re-centre it at the
+            // same half-width — ±12, the tool's and the firmware's default
+            // (defaultThresholds, rc_config.h's bands[]), when there is none. A fixed
+            // ±10 here narrowed every band by 2 µs a side on a plain round trip, and
+            // the next Save shipped that to the board (nctool.csv_roundtrip).
+            // A physical button's `control` cell is getBtnLabel(), not its stored
+            // label, so only a logical button's custom name comes from the CSV.
+            const prevT = imported.thresholds[buttonId - 1];
+            const hasPrev = prevT && Number.isFinite(prevT.minPwm) && Number.isFinite(prevT.maxPwm) && prevT.maxPwm > prevT.minPwm;
+            const keep = hasPrev && Math.round((prevT.minPwm + prevT.maxPwm) / 2) === center;
+            const half = hasPrev ? Math.round((prevT.maxPwm - prevT.minPwm) / 2) : 12;
             imported.thresholds[buttonId - 1] = {
               id: buttonId,
-              // Logical buttons carry the user's custom name in the CSV's
-              // `control` column — restore it so names survive a round-trip.
-              label: (buttonId > RC_PHYSICAL_SLOTS && controlName) ? controlName : getBtnLabel(buttonId),
-              minPwm: center - 10,
-              maxPwm: center + 10,
+              label: (buttonId > RC_PHYSICAL_SLOTS && controlName) ? controlName
+                   : ((prevT && prevT.label) || getBtnLabel(buttonId)),
+              minPwm: keep ? prevT.minPwm : center - half,
+              maxPwm: keep ? prevT.maxPwm : center + half,
             };
           }
           const key = String(mode * 100 + buttonId);
@@ -19644,8 +19658,12 @@ function handleConfigImportFile(event) {
       config.wcbProfiles = Array.isArray(config.wcbProfiles)
         ? config.wcbProfiles.filter(Boolean).slice(0, WCB_MAX_PROFILES).map(_normWcbProfile) : [];
       _wcbSelectedProfile = '';   // import isn't "editing" a profile; radio falls back to config-match
-      if (Object.keys(newSwitches).length) config.switches = newSwitches;
-      if (Object.keys(newKnobs).length) config.knobs = newKnobs;
+      // Merged, not replaced: the export writes the switches and knobs of the ACTIVE
+      // transmitter model only (switchDefaults / knobDefaults), so a control the CSV
+      // does not list is one it has no opinion on — replacing the whole object dropped
+      // the bench's S3 and J5 knobs on a plain round trip.
+      if (Object.keys(newSwitches).length) config.switches = { ...(config.switches || {}), ...newSwitches };
+      if (Object.keys(newKnobs).length) config.knobs = { ...(config.knobs || {}), ...newKnobs };
       // Re-apply the transmitter model so activeTxModel + the model SVG, the
       // 3-axis checkbox/body class, and the axes/switch renders reflect the
       // imported txModel/threeAxisGimbals (the render helpers key off the module-

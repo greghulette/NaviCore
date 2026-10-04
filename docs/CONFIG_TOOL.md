@@ -597,6 +597,13 @@ takes the lossless JSON path (`_cfgExtractConfig` → `applyConfig`, left unsave
 otherwise it falls back to the legacy **CSV** parser. `exportConfigCsv` still exists but is a
 **partial, human-editable spreadsheet** export — it cannot represent the variable-length knob
 output lists (per-mode passthrough), `peerEvent` actions, etc., so it is **not** a full backup.
+What the CSV cannot carry, its importer keeps from the config already in the tool, so a CSV
+exported and imported straight back leaves nothing for Save to send (`nctool.csv_roundtrip`):
+a button row carries a band's **centre** only, so the band is kept when the centre is
+unchanged and otherwise re-centred at its existing half-width (±12 when there is none); a
+physical button keeps its stored label; a mapping's `exclusive` is `false`, never absent (the
+firmware prints it on every mapping); and switches and knobs the CSV does not list — it lists
+the active transmitter model's only — are kept, not dropped.
 
 **Cloud config backup.** There is **no visible button** — click the "NaviCore" wordmark
 four times quickly to open it. A **username + password** pair (independent of the WCB
@@ -677,6 +684,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **A CSV round trip leaves nothing for Save to send** (§9 Export / Import). The importer rebuilt every button band as centre ±10 where the tool's and the firmware's bands are ±12, relabelled the physical buttons with `getBtnLabel()`, wrote `exclusive:false` as an absent key, and replaced `config.knobs`/`config.switches` with only the active model's controls; a Save after Import narrowed every band on the board and dropped two knobs. |
 | 2026-10-04 | _(pending)_ | **Two tabs on one WCB no longer take each other's save ACKs** (§5 item 10, D-NC35). The `saveId` on the wire is a random per-tab base plus the tab's count (`_saveWireId`), and the fragment `sid` starts at random per tab (`_nextOutSid`); both counted from 1 in every tab. |
 | 2026-10-04 | _(pending)_ | **Refresh asks before discarding unsaved edits** (§5 item 9, D-NC31). It sent `GET_CONFIG` at once, and `applyConfig` replaced the unsaved edit without a word. |
 | 2026-10-04 | _(pending)_ | **A bridged Save the fragmenter cannot carry is refused before it is latched** (§5 Push-budget readout). The refusal (over 192 fragments, or a slice whose envelope is over 187 B) moved into `_bridgedFragPlan()`, shared by `sendJSON()` and `saveConfigToBoard()`; Save asks first, so it no longer shows "Saving…" for 12 s and leaves `_pendingSaveBaseline` set for a save that never left. `sendJSON()` now resolves `true`/`false`. |
