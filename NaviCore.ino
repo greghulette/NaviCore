@@ -2419,6 +2419,23 @@ static void rcMatrixRelease() {
   if (tapState.deferredPending) tapState.deferredFireAt = now + rcConfig.tapWindowMs;
 }
 
+// Frame loss cancels a matrix gesture in flight, exactly as a failsafe frame does
+// (processSbus's failsafe gate). With no frame nothing reaches processSbus - there is
+// no other frame timeout - so a press held when the frames stopped stayed parked
+// through any outage, and the first neutral frames after it were its release: it fired
+// tapWindowMs after the link came back, for a button let go seconds before (HIL
+// sbus.frame_stop_held_press). "No frames" is the status LED's definition, 500 ms
+// (SBUS_LED_TIMEOUT_MS). Only a gesture in flight is cancelled; called from loop()
+// right after processSbus(), which has drained any frames a stalled pass left queued,
+// so a slow loop() pass cannot read as an outage.
+#define SBUS_GESTURE_TIMEOUT_MS 500
+static void checkSbusGestureTimeout() {
+  if (!tapState.deferredPending && !tapState.holdActive) return;   // nothing in flight
+  if (sbusLastFrameMs == 0) return;                                 // no stream yet
+  if ((uint32_t)(millis() - sbusLastFrameMs) < SBUS_GESTURE_TIMEOUT_MS) return;
+  rcMatrixResetGesture();
+}
+
 void checkDeferredTap() {
   if (!tapState.deferredPending) return;
   // Park the dispatch while the button is still physically down. holdMs is by
@@ -2798,16 +2815,13 @@ void processSbus() {
   // NOTE: this gates on `failsafe` only, NOT `lostFrame` — lostFrame is a
   // single-frame transient and gating on it would make control feel laggy.
   if (sbusRx.failsafe) {
-    matrixArmed        = false;   // require a confirmed neutral to re-arm post-recovery
-    matrixCandidate    = 0;
-    matrixCandCount    = 0;
-    matrixNeutralCount = 0;
-    // Abandon any hold in progress. The link dropped mid-press, so we never saw
-    // the release edge that would normally close it — left set, holdActive would
-    // park checkDeferredTap() forever and the button would go dead after recovery.
-    tapState.holdActive = false;
-    tapState.holdFired  = false;
-    tapState.holdBtn    = 0;
+    // Require a confirmed neutral to re-arm post-recovery, and CANCEL any gesture in
+    // flight: the hold (whose release edge we will never see) AND the deferred tap.
+    // Clearing only the hold left the tap pending, and checkDeferredTap() runs from
+    // loop() whatever the frames say - a tap released just before the failsafe fired
+    // during it, and a press held into it fired sooner, since holdActive was the only
+    // thing parking it (HIL sbus.failsafe_deferred_tap). The press must be made again.
+    rcMatrixResetGesture();
     return;
   }
 
@@ -5515,6 +5529,7 @@ void loop() {
 
   // SBUS
   processSbus();
+  checkSbusGestureTimeout();   // frame loss cancels a gesture in flight, as failsafe does
   checkDeferredTap();
 
   // Re-send any owed easing repeats (cheap no-op when none are pending).

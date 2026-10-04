@@ -198,6 +198,7 @@ drainTestAction()              bridged per-action Test button
 navirec::pollControl/drain/checkRecordBackstop/replayTick
 rcTelemetry::tick()            rc_hb 0.5 Hz, rc_ch at chRateHz, outbound fragment pump
 processSbus()                  ← the real-time path
+checkSbusGestureTimeout()      500 ms with no frame cancels a matrix gesture in flight (§9)
 checkDeferredTap()
 updateStatusLed()
 checkPendingActions()          delayed actions
@@ -315,8 +316,11 @@ an ordinary double/triple. A 4-tap flurry still saturates at triple — tier 4 i
 by holding. The hold is opened by the debounced press commit and closed by the debounced
 NEUTRAL (`rcMatrixRelease()`), so a one-frame transient cannot cancel it, and sliding onto a
 neighbouring band cannot fire the wrong button's long press (the threshold test requires
-`decoded == holdBtn`). An SBUS failsafe clears the hold — otherwise `holdActive` would park
-the tap dispatch forever and the button would go dead after recovery.
+`decoded == holdBtn`). An SBUS failsafe frame, or `SBUS_GESTURE_TIMEOUT_MS` (500 ms, the
+status LED's "no signal") with no frame at all, **cancels the whole gesture** — the hold and
+any deferred tap — and re-arms the matrix (`rcMatrixResetGesture()`); the press must be made
+again. Clearing only the hold left the deferred tap to fire during the failsafe, and with no
+frame timeout a press held when the frames stopped resolved as a tap once they returned.
 
 **Switch settle.** A switch position becomes a *candidate* on change and only dispatches
 once it has held for `switchSettleMs` (default 80, `0` = fire immediately). A 3-position
@@ -444,6 +448,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC21)_ | §7 lists `checkSbusGestureTimeout()`. A failsafe frame, or 500 ms with no SBUS frame (`checkSbusGestureTimeout()`), cancels any matrix gesture in flight — the deferred tap as well as the hold (HIL `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press`). |
 | 2026-10-04 | _(D-NC44)_ | §13: `applyConfigSideEffects()` also forgets a parked tap or hold and re-arms the matrix (`rcMatrixResetGesture()`), so every config apply on either transport, `RESET_DEFAULTS` included, drops a gesture in progress (HIL `sbus.reconfig_parked_tap_cleared`). |
 | 2026-09-28 | `703a0e7` | §3 lists `navicore_hil.h`, the HIL hook header compiled only with `-DNAVICORE_HIL_HOOKS=1`; §5 the `/config.json.hil` copy its `#L91` leaves; §7's loop order gains the hook build's `#L90` stall and `kickUsbCdcTx()`, which already ran first. |
 | 2026-09-28 | `1e15601` | §6 step 4: the boot banner now carries `App SHA256: <16 hex>`, the running image's identity (PROTOCOLS.md §3), and the USB RX buffer is 8 KB (`Serial.setRxBufferSize(8192)`; this page said 4 KB). |
