@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">28.14:26.Q.SEP.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:31.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -14163,7 +14163,7 @@ function _cmdlibUse() {
     const cur = +(document.getElementById(fid + '-target')?.value) || 1;   // keep the row's slot if any
     const skip = !!document.getElementById(fid + '-skiprun')?.checked;
     action = { type: 'maestro', target: String(cur >= 1 && cur <= NUM_MAESTRO_SLOTS ? cur : 1), cmd: wire,
-               ...(skip ? { skipRunning: 1 } : {}) };
+               ...(skip ? { skipRunning: true } : {}) };   // a JSON boolean — see readActionFromFid
   } else if (mode === 'wled') {
     action = { type: 'wled', cmd: wire };
   } else if (mode === 'device') {
@@ -14200,7 +14200,7 @@ function _cmdlibUse() {
   // (the row's checkbox persists it; a fresh pick starts unchecked and is read on Save).
   if (action && (action.type === 'wcb_unicast' || action.type === 'wcb_broadcast')
       && /;M[1-8]/i.test(action.cmd || '') && document.getElementById(fid + '-skiprun')?.checked) {
-    action.skipRunning = 1;
+    action.skipRunning = true;   // a JSON boolean — see readActionFromFid
   }
   // The composer writes action.cmd into the row PROGRAMMATICALLY, and the field's
   // maxLength constrains typing only — so the 95-char store (RC_ACTION_CMD_MAX)
@@ -15422,6 +15422,12 @@ function readActionFromUI(tier, ai) {
 // — both render their fields via the SAME appendActionFields(container, action),
 // so reading them back needs to share this too, or the two editors would
 // silently drift apart over time.
+//
+// skipRunning is written as the JSON boolean true, NEVER 1. rcConfigFromJSON reads
+// it as `obj["skipRunning"] | false`, and ArduinoJson 7 returns the default for any
+// value that is not a boolean — so a 1 arrived, was read as false, and every Apply
+// on a gated action quietly cleared the gate on the board (nctool.skip_running_saved).
+// The same holds for every bool the firmware reads with `| false` / `| true`.
 function readActionFromFid(fid, type, extras) {
   if (type === '') return null;
 
@@ -15430,7 +15436,7 @@ function readActionFromFid(fid, type, extras) {
     const cmd    = document.getElementById(fid + '-cmd')?.value || '';
     if (!cmd.trim()) return null;
     const skipRunning = /;M[1-8]/i.test(cmd) && !!document.getElementById(fid + '-skiprun')?.checked;
-    return { type, target: String(target), cmd, ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
+    return { type, target: String(target), cmd, ...(skipRunning ? { skipRunning: true } : {}), ...extras };
   }
   if (type === 'wcb_broadcast') {
     let cmd = document.getElementById(fid + '-cmd')?.value || '';
@@ -15443,7 +15449,7 @@ function readActionFromFid(fid, type, extras) {
     const m = /^W(\d+)S(\d)$/.exec(dv);
     if (m && !/^;W/i.test(cmd)) cmd = `;W${m[1]};S${m[2]}` + cmd;
     const skipRunning = /;M[1-8]/i.test(cmd) && !!document.getElementById(fid + '-skiprun')?.checked;
-    return { type, cmd, ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
+    return { type, cmd, ...(skipRunning ? { skipRunning: true } : {}), ...extras };
   }
   if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
     // Authored from the command library (nc-maestro board): the verb string
@@ -15455,7 +15461,7 @@ function readActionFromFid(fid, type, extras) {
     if (!cmd.trim()) return null;
     const skipRunning = !!document.getElementById(fid + '-skiprun')?.checked;        // skip-if-running gate (user toggle)
     return { type: 'maestro', target: String(target), cmd,
-             ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
+             ...(skipRunning ? { skipRunning: true } : {}), ...extras };
   }
   if (type === 'serial') {
     const port = document.getElementById(fid + '-port')?.value || 'S3';
