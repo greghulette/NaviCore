@@ -1560,6 +1560,11 @@ bool rcConfigFromJSON(const JsonObject& doc) {
   // effectively always-false, silently killing double/triple taps while single
   // taps keep working. Treat a nonsensically small/zero value as unset → default.
   if (rcConfig.tapWindowMs < 100) rcConfig.tapWindowMs = 500;
+  // And an upper bound. holdMs must stay above tapWindowMs + 100 and is capped at
+  // 5000 below, so an uncapped window over 4900 left holdMs under it: the deferred
+  // tap fired first and the long press could never be recognised (HIL
+  // nccfg.hold_exceeds_tap_window). A multi-second tap window is a typo anyway.
+  if (rcConfig.tapWindowMs > 4900) rcConfig.tapWindowMs = 4900;
   if (doc.containsKey("holdMs"))        rcConfig.holdMs        = doc["holdMs"];
   // Long press is recognised by holding PAST the deferred tap dispatch, so the
   // threshold must clear tapWindowMs with margin — at or below it the single-tap

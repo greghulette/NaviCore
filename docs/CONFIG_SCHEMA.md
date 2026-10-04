@@ -65,7 +65,7 @@ kept half a character, and the tool's next save wrote U+FFFD back.
 | `wifiSsid` | `char[33]` | SoftAP SSID. 32 bytes is the 802.11 max, +1 NUL. **Empty = derive `NaviCore-<deviceId>` at bring-up**, so a droid always has a distinguishable name without the user inventing one |
 | `wifiPassword` | `char[64]` | SoftAP WPA2 passphrase, 8–63 chars +1 NUL. **Empty or <8 must refuse to raise the AP — fail closed, never fall back to an open network.** `WiFi.softAP()` will happily create an open AP on an empty password, and this command surface has no per-command auth (`RESET_DEFAULTS`/`REBOOT` dispatch on a bare `type`), so an open AP is an unauthenticated command channel to the whole mesh. **Never reuse `wcbNetwork.password`** — that one rides in cleartext in every ESP-NOW packet the droid emits and is public by construction. NVS key `wifi` (a JSON blob, kept separate from `wcb` so mesh and AP credentials cannot be confused) |
 | `boardType` | `uint8_t` | 0 = NaviCore v2 PCB, 1 = WCB HW 3.2 — selects the pin profile |
-| `tapWindowMs` | `int` | Multi-tap detection window |
+| `tapWindowMs` | `int` | Multi-tap detection window, 100–4900 ms: below 100 reads as 500, above 4900 is capped to 4900 so `holdMs` can stay above it |
 | `holdMs` | `int` | Long-press (tier `t4`) threshold, default 750. **Must exceed `tapWindowMs`** — the tap dispatch is deferred by `tapWindowMs` and would fire first. Both sides clamp a too-small value to `tapWindowMs + 250`, and 5000 ms is the ceiling |
 | `switchSettleMs` | `uint16_t` | A switch position must hold this long before its tier fires, default 80, clamped 0–1000. **0 = fire immediately (pre-settle behaviour).** Without it, a 3-position switch swept end-to-end fires the *middle* tier in full on the way past |
 | `chRateHz` | `uint8_t` | `rc_ch` broadcast rate, 1–20 (default 5). High rates flood the mesh |
@@ -325,6 +325,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC43)_ | `tapWindowMs` is capped at 4900 on input, so `holdMs` (ceiling 5000) always clears it by 100 (HIL `nccfg.hold_exceeds_tap_window`). |
 | 2026-10-04 | _(D-NC42)_ | String fields are cut back to a whole UTF-8 character (`cfgStrlcpy`) when the value is longer than the field (HIL `nccfg.string_truncation_utf8`). |
 | 2026-09-28 | `703a0e7` | §6: debug bit 7 is `DBG_WIRE` in a HIL hook build (PROTOCOLS.md §2), so the tool never sends it and a new debug category takes bit 8. |
 | 2026-08-30 | _(uncommitted)_ | Recorded the OTA END discriminator as a cross-file invariant (§6). The firmware has always sent the END ACK with offset 0 — deliberately, with a comment in `navicore_ota.h` forbidding anyone to "improve" it — but the tool's `otaSendAwaitAck()` matched only session+src, so a duplicate DATA cursor ACK still in flight satisfied the END wait and reported **Verified** for an image the target never verified. The tool now checks the offset. |
