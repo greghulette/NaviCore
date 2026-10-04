@@ -1148,12 +1148,28 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
       if (wnet.containsKey("macOct3"))  wnet.remove("macOct3");
       if (wnet.containsKey("password")) wnet.remove("password");
       if (wnet.containsKey("quantity")) wnet.remove("quantity");
+      // The mesh channel too: a valid other channel would be saved and take this board
+      // off the mesh at its next boot (the tool already strips it; HIL
+      // ncmesh.bridged_set_config_strip).
+      if (wnet.containsKey("channel"))  wnet.remove("channel");
       // If we stripped every field, drop the empty `wcbNetwork: {}` so
       // rcConfigFromJSON's containsKey("wcbNetwork") check short-circuits
       // and we skip the whole "apply each field from JSON with fallback"
       // loop.  Tiny perf win; avoids touching strlcpy(password) etc.
       // with the same values they already hold.
       if (wnet.size() == 0) data.remove("wcbNetwork");
+    }
+    // ...and the SoftAP settings, for the same reason: wifiEnabled / wifiSsid /
+    // wifiPassword are read at boot only, so a bridged Save could switch the AP off,
+    // rename it or change its key for the NEXT boot with nothing visible now - and
+    // the AP is how a WiFi client reaches this board at all. Radio settings change
+    // over USB (or the AP's own socket), never through the mesh.
+    {
+      bool strippedWifi = false;
+      for (const char* k : { "wifiEnabled", "wifiSsid", "wifiPassword" })
+        if (data.containsKey(k)) { data.remove(k); strippedWifi = true; }
+      if (strippedWifi)
+        Serial.println("[RC] SET_CONFIG: ignoring incoming wifi* fields (WCB-transport saves can't change the SoftAP)");
     }
     // Pass the JsonObject directly instead of re-serializing → re-parsing.
     // The old String round-trip allocated 3 KB for `dataJson` AND another

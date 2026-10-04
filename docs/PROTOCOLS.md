@@ -645,6 +645,10 @@ Inbound `rc_*` messages are filtered by `id == 20` so other mesh peers do not bl
 
 `SET_CONFIG` and `GET_CONFIG` **do** work over the bridge via fragmentation, but a
 very large config or command library still needs Direct USB (see the caps below).
+A bridged `SET_CONFIG` can never change this board's radio settings: `_applyReassembled()`
+strips `wcbNetwork.deviceId`, `macOct2`, `macOct3`, `password`, `quantity` and `channel`,
+and the top-level `wifiEnabled`, `wifiSsid` and `wifiPassword`, before applying. Those
+change over USB or the SoftAP's own socket only.
 
 ### Fragmentation
 
@@ -933,6 +937,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC18)_ | A bridged `SET_CONFIG` also strips `wcbNetwork.channel` and the `wifi*` fields, so a Save over the mesh can no longer move the board's mesh channel or SoftAP at its next boot (HIL `ncmesh.bridged_set_config_strip`). |
 | 2026-10-04 | _(D-NC16)_ | `RESET_DEFAULTS` keeps the network identity (`wcbNetwork`, `wcbProfiles`, `boardType`, `wifi*`) on both transports, and the USB form now runs the live side effects as the bridged one does (HIL `nccfg.reset_defaults_keeps_identity`, `ncmesh.bridged_reset_keeps_identity`). |
 | 2026-10-04 | _(D-NC17)_ | RTERM, OTA auth/ACKs and WcbMgmt take the mesh password from `g_meshPasswordBoot` (the copy `WCB_Client` got at boot), not the live config field, so an unrebooted password change or reset no longer splits them from the ETM stack (HIL `nccfg.mesh_creds_live_split`). |
 | 2026-09-28 | `703a0e7` | **HIL test hooks, `NAVICORE_HIL_HOOKS` builds only** (the WCB repo's HIL plan INF9 b): `DBG_WIRE` = debug bit 7, a `[WIRE] <port> <offset>/<length>: <hex>` line per block written to S3/S4/S5/Serial2/the WCBStream; §3's new table: `#L90,<ms>` (stall `loop()`), `#L91` / `#L91,R` (cut `/config.json`, keeping `/config.json.hil`; put it back), `#L92` (the next GET_CONFIG overflows), `#L93` (the next config save fails). Every other image answers them `Unknown #L code`, whose `Valid:` list is unchanged in both. |
