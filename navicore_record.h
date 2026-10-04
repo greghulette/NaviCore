@@ -880,8 +880,13 @@ inline void editStream(Print& out, bool paced = true,
 
 // UPLOAD step 1: stage a fresh edit session. Reuses `_buf`/`_count` (guarded to
 // ST_IDLE, same as every other clip operation) so there's no second buffer.
-inline bool editBegin() {
+// `mode` (1-3, the tool's "?REC,EDITBEGIN,<mode>") is the clip's recording mode,
+// which saveClip() writes into the header. 0 / out of range keeps the resident
+// _mode — an older tool sends no argument. Without it every upload (a restore, a
+// timeline save) took the mode of whatever clip was loaded or recorded last (D-NC33).
+inline bool editBegin(uint8_t mode = 0) {
   if (_state != ST_IDLE || !_buf) return false;
+  if (mode >= 1 && mode <= 3) _mode = mode;
   _count = 0; _residencyClear();
   _state = ST_EDITING;
   return true;

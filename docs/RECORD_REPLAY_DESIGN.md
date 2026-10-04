@@ -322,7 +322,9 @@ LOAD/SAVE already do.
   device state mutated) and trivially retried, so the config tool just checks the BEGIN-declared `count`
   against events actually received and shows a clear error + retry prompt on mismatch — full OTA-grade
   ACKing would be overkill for something this cheap to just redo.
-- **Upload** (`EDITBEGIN` → `EDITEV,<json>` ×N → `EDITEND,<name>`): this WRITES, so a lost event would
+- **Upload** (`EDITBEGIN[,<mode>]` → `EDITEV,<json>` ×N → `EDITEND,<name>`): `<mode>` (1–3) becomes the
+  resident `_mode`, which `saveClip()` writes into the header; absent or out of range, the resident mode
+  stands. This WRITES, so a lost event would
   silently corrupt the saved clip — needs real integrity. Per-event ACK/NAK with retry, mirroring naviota's
   OTA DATA/ACK contract: `[CLIPUL:BEGIN,OK|ERR]`, `[CLIPUL:ACK,<count>]`/`[CLIPUL:NAK,<reason>]` per event
   (3 attempts, then abort), `[CLIPUL:END,OK|ERR,<reason>]`. A NEW firmware state, `ST_EDITING`, brackets the
@@ -372,6 +374,11 @@ as edited.
 
 ## 12. Changelog
 
+- **EDITBEGIN carries the clip mode (2026-10-04, firmware + tool; reflash required):** `editBegin(mode)`
+  makes `?REC,EDITBEGIN,<mode>` (1–3) the resident `_mode`. `editBegin()` used to leave `_mode` as it
+  was, so every upload — a restore, a timeline save — was saved with the mode of whatever clip had
+  been loaded or recorded last (D-NC33). The tool sends the clip's mode; an older board ignores the
+  argument (the `?REC` parser passes it as the unused name), and an older tool sends none.
 - **doc sync (2026-08-18, no code change):** page reconciled with the shipped firmware. Status is
   **BUILT**, not "ready for phase-1 build". §1: `rcExecuteActionNow` runs on **Core 1 only** — a remote
   ESP-NOW TRIGGER is queued by `rcTelemetry::handle()` and dispatched by `drainRemoteTriggers()` from

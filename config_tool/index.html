@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:49.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:59.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6868,12 +6868,23 @@ async function clipsDownloadAll(onProgress) {
 // unsafe BY CONSTRUCTION: it would let a month-old backup destroy a clip
 // recorded yesterday, unrecoverably. Callers must resolve collisions first;
 // this function just writes what it is told to write.
+// A clip's recording mode as the EDITBEGIN argument: 1-3 (FunctionSwState), else
+// null — then EDITBEGIN goes without one and the board keeps the resident mode.
+function _clipModeArg(m) {
+  m = +m;
+  return (Number.isInteger(m) && m >= 1 && m <= 3) ? m : null;
+}
 async function clipRestoreOne(clip, destName, onProgress) {
   const events = clip.events || [];
   if (!events.length) throw new Error('clip has no events');
 
+  // EDITBEGIN carries the clip's mode: saveClip stores the RESIDENT mode, and an
+  // EDITBEGIN without one leaves whatever the last loaded or recorded clip had, so a
+  // restored clip took that mode instead of its own (D-NC33). Firmware that predates
+  // the argument ignores it (the ?REC parser hands it over as the unused name).
+  const mode = _clipModeArg(clip.mode);
   const beginP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:BEGIN'));
-  await sendRcCli('?REC,EDITBEGIN', true);
+  await sendRcCli('?REC,EDITBEGIN' + (mode ? ',' + mode : ''), true);
   const begin = await beginP;
   if (!begin.includes('OK')) throw new Error('board rejected EDITBEGIN (busy recording or replaying?)');
 
@@ -7351,7 +7362,9 @@ async function _tlSave() {
   try {
     _tlSetStatus('Saving 0/' + events.length + '…');
     const beginP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:BEGIN'));
-    await sendRcCli('?REC,EDITBEGIN');
+    // The clip's own mode, as clipRestoreOne sends it — not whatever is resident by now.
+    const mode = _clipModeArg(clip.mode);
+    await sendRcCli('?REC,EDITBEGIN' + (mode ? ',' + mode : ''));
     const begin = await beginP;
     if (!begin.includes('OK')) throw new Error('board rejected EDITBEGIN (busy recording/replaying?)');
 

@@ -479,8 +479,10 @@ RDP-based smoothing, easing insertion, undo history, and **live preview** that d
 real servos to the cursor position via `?MAE` writes.
 
 Transport is `?REC,EDITLOAD` down (`[CLIPDL:*]` lines) and
-`EDITBEGIN` / `EDITEV,<idx>,<json>` / `EDITEND` up, with indexed ACKs so a timeout retry
-cannot duplicate an event. It can also export a clip as Maestro **script source**.
+`EDITBEGIN,<mode>` / `EDITEV,<idx>,<json>` / `EDITEND` up, with indexed ACKs so a timeout retry
+cannot duplicate an event. `EDITBEGIN` carries the clip's own mode (`_clipModeArg`), here and in
+the clip restore, because the board saves the resident mode. It can also export a clip as
+Maestro **script source**.
 
 ---
 
@@ -684,6 +686,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **A restored clip keeps its own mode** (§7, D-NC33). `clipRestoreOne` and `_tlSave` send `?REC,EDITBEGIN,<mode>` (needs the matching firmware; an older board ignores it). |
 | 2026-10-04 | _(pending)_ | **A CSV round trip leaves nothing for Save to send** (§9 Export / Import). The importer rebuilt every button band as centre ±10 where the tool's and the firmware's bands are ±12, relabelled the physical buttons with `getBtnLabel()`, wrote `exclusive:false` as an absent key, and replaced `config.knobs`/`config.switches` with only the active model's controls; a Save after Import narrowed every band on the board and dropped two knobs. |
 | 2026-10-04 | _(pending)_ | **Two tabs on one WCB no longer take each other's save ACKs** (§5 item 10, D-NC35). The `saveId` on the wire is a random per-tab base plus the tab's count (`_saveWireId`), and the fragment `sid` starts at random per tab (`_nextOutSid`); both counted from 1 in every tab. |
 | 2026-10-04 | _(pending)_ | **Refresh asks before discarding unsaved edits** (§5 item 9, D-NC31). It sent `GET_CONFIG` at once, and `applyConfig` replaced the unsaved edit without a word. |

@@ -592,8 +592,10 @@ hosting WCB relays a `:MQR` reply asynchronously, surfaced by `maePumpRemoteEmit
 `START` · `STOP` · `PLAY[,name]` · `SAVE[,name]` · `LOAD,name` · `LS` · `RM,name` ·
 `RENAME,from,to` · `CLEAR` · `INFO` (bare `?REC` = INFO).
 
-Timeline-editor transport: `EDITLOAD,<name>` · `EDITBEGIN` · `EDITEV,<idx>,<json>` ·
-`EDITEND,<name>` · `EDITCANCEL`.
+Timeline-editor transport: `EDITLOAD,<name>` · `EDITBEGIN[,<mode>]` · `EDITEV,<idx>,<json>` ·
+`EDITEND,<name>` · `EDITCANCEL`. `<mode>` (1–3) is the clip's recording mode, which `EDITEND`
+saves into its header; without it the board keeps the resident mode — that of whatever clip was
+loaded or recorded last. The tool sends it on every upload (a restore, a timeline save).
 
 ### Other
 
@@ -931,6 +933,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | §3 `?REC`: `EDITBEGIN` takes an optional `<mode>` (1–3) that `editBegin()` makes the resident mode, so an uploaded clip is saved with its own mode. Without it a restored clip took the mode of whatever was loaded last (D-NC33). An older board ignores the argument; an older tool sends none. |
 | 2026-10-04 | _(pending)_ | §2 `SET_CONFIG` row brought up to the wire (`of`, `saveId`). The tool's `saveId` is now a random per-tab base plus the tab's count, and its fragment `sid` starts at random per tab: every tab numbered both from 1, so two tabs on one shared WCB took each other's ACKs (D-NC35, `nctool.multi_tab_save`). |
 | 2026-10-04 | _(pending)_ | §2 `TEST_ACTION`: the tool now reads the ACK. An `ok:false` reached only the raw terminal echo, so a refused ▶ Test looked like one that fired (D-NC20, `nctool.test_action_refusal_shown`). |
 | 2026-09-28 | `703a0e7` | **HIL test hooks, `NAVICORE_HIL_HOOKS` builds only** (the WCB repo's HIL plan INF9 b): `DBG_WIRE` = debug bit 7, a `[WIRE] <port> <offset>/<length>: <hex>` line per block written to S3/S4/S5/Serial2/the WCBStream; §3's new table: `#L90,<ms>` (stall `loop()`), `#L91` / `#L91,R` (cut `/config.json`, keeping `/config.json.hil`; put it back), `#L92` (the next GET_CONFIG overflows), `#L93` (the next config save fails). Every other image answers them `Unknown #L code`, whose `Valid:` list is unchanged in both. |
