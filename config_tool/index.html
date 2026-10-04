@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:39.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:41.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -5593,6 +5593,36 @@ function _fragChunks(str) {
   return chunks;
 }
 
+// What a Via-WCB send of `inner` (the serialized message, sys stamp included) takes:
+// its fragment slices, and the reason sendJSON refuses it — null when it fits. The
+// envelope check assumes the widest sid (65535), so a slice that passes here passes
+// with whatever sid the send draws. ONE function for both callers, so they cannot
+// disagree: sendJSON, and saveConfigToBoard, which must know BEFORE it latches the
+// pending save. sendJSON alone found the refusal only after the save was latched,
+// and the tool showed "Saving to NaviCore…" until the 12 s watchdog for a save that
+// never left (nctool.push_refused_not_pending).
+function _bridgedFragPlan(inner) {
+  const chunks = _fragChunks(inner);
+  if (chunks.length > FRAG_MAX_PARTS) {
+    return { chunks, refusal: `Send aborted — payload needs ${chunks.length} fragments (max ${FRAG_MAX_PARTS}). Use Direct USB for a config this large.` };
+  }
+  const enc = new TextEncoder();
+  for (let i = 0; i < chunks.length; i++) {
+    const n = enc.encode(JSON.stringify({ f: i + 1, of: chunks.length, sid: 65535, s: chunks[i] })).length;
+    if (n > FRAG_MAX_ENV_BYTES) {
+      return { chunks, refusal: `Send aborted — fragment ${i + 1}/${chunks.length} needs a ${n} B envelope, over the ${FRAG_MAX_ENV_BYTES} B cap (heavily-escaped value). Use Direct USB.` };
+    }
+  }
+  return { chunks, refusal: null };
+}
+// The refusal a Via-WCB sendJSON(obj) would hit, or null. Builds the line exactly as
+// sendJSON does (sys stamped first); a message that fits one packet is never refused.
+function _bridgedSendRefusal(obj) {
+  const inner = JSON.stringify({ sys: 1, ...obj });
+  if (new TextEncoder().encode(inner).length <= FRAG_MAX_ENV_BYTES) return null;
+  return _bridgedFragPlan(inner).refusal;
+}
+
 // True only while a bridged (Via WCB) MULTI-FRAGMENT send is mid-flight. The
 // background pollers (3 s WCB status, 30 s WCB_META) read this and skip their
 // sends, so a status/meta packet can't slot between SET_CONFIG fragments and
@@ -5614,10 +5644,13 @@ async function sendJSON(obj, silent = false) {
   // trailing `,"sys":1` in the stored library. The firmware side no longer depends
   // on key order, but keeping sys first makes its comment true again — and costs
   // nothing, since every consumer switches on `type`.
+  //
+  // Resolves true once the line (every fragment) is written, false when the send was
+  // refused or abandoned — a caller that latches state on a send checks it.
   obj = { sys: 1, ...obj };
   if (!viaWcbActive) {
     await sendLine(JSON.stringify(obj), silent);
-    return;
+    return true;
   }
   const inner  = JSON.stringify(obj);
   // WCB's local-serial command syntax for "relay this to another WCB" is
@@ -5648,7 +5681,7 @@ async function sendJSON(obj, silent = false) {
   const innerBytes = new TextEncoder().encode(inner).length;
   if (innerBytes <= FRAG_MAX_ENV_BYTES) {
     await sendLine(prefix + inner, silent);
-    return;
+    return true;
   }
 
   // Fragment.  Sender-chosen sid wraps at 65535 → 1 (never 0; the RC uses
@@ -5658,13 +5691,12 @@ async function sendJSON(obj, silent = false) {
   // Chunk on UTF-8 byte budget + codepoint boundaries (not code-unit substring),
   // so a multi-byte character is never split across two fragments — the RC joins
   // the `s` slices, so the reassembled JSON must stay valid UTF-8.
-  const chunks = _fragChunks(inner);
+  const { chunks, refusal } = _bridgedFragPlan(inner);
   const total  = chunks.length;
-  if (total > FRAG_MAX_PARTS) {
-    const msg = `Send aborted — payload needs ${total} fragments (max ${FRAG_MAX_PARTS}). Use Direct USB for a config this large.`;
-    console.error('sendJSON: ' + msg);
-    appendTerminalLine('< [config] ' + msg, 'error');   // surface it, don't fail silently
-    return;
+  if (refusal) {
+    console.error('sendJSON: ' + refusal);
+    appendTerminalLine('< [config] ' + refusal, 'error');   // surface it, don't fail silently
+    return false;
   }
   // Quiesce the background bridged polls for the WHOLE multi-fragment send (see
   // _bridgeUploadInFlight): their single-packet lines otherwise interleave the
@@ -5680,7 +5712,7 @@ async function sendJSON(obj, silent = false) {
     // its 5 s FRAG_TIMEOUT_MS.
     if ((!port && !sharedActive) || disconnecting) {
       console.warn(`sendJSON: port closed mid-send, aborted at fragment ${i + 1}/${total}`);
-      return;
+      return false;
     }
     const slice = chunks[i];
     const env   = JSON.stringify({ f: i + 1, of: total, sid, s: slice });
@@ -5692,7 +5724,7 @@ async function sendJSON(obj, silent = false) {
       const msg = `Send aborted at fragment ${i + 1}/${total} — envelope ${envBytes} B over the ${FRAG_MAX_ENV_BYTES} B cap (heavily-escaped value). Use Direct USB.`;
       console.error('sendJSON: ' + msg);
       appendTerminalLine('< [config] ' + msg, 'error');   // surface it, don't fail silently
-      return;
+      return false;
     }
     await sendLine(prefix + env, silent);
     // Inter-fragment pacing. Two independent floors, take the larger:
@@ -5733,6 +5765,7 @@ async function sendJSON(obj, silent = false) {
   } finally {
     _bridgeUploadInFlight = false;   // resume the background polls
   }
+  return true;
 }
 
 // ── Terminal debug filter ────────────────────────────────────────────────
@@ -16969,6 +17002,21 @@ async function saveConfigToBoard() {
 
   const branches = Object.keys(payload).join(', ');
   console.log(`saveConfigToBoard: sending diff (${branches})`);
+
+  // Refuse a bridged save the fragmenter cannot carry BEFORE latching it as pending.
+  // sendJSON would refuse it too, but only after _pendingSaveBaseline was set and the
+  // "Saving…" toast was up, so the tool waited out the 12 s watchdog for an ACK that
+  // could not come (nctool.push_refused_not_pending). saveId is the one this save
+  // would take, so the line measured is byte-identical to the one sendJSON builds.
+  if (viaWcbActive) {
+    const refusal = _bridgedSendRefusal({ type: 'SET_CONFIG', data: payload, saveId: _saveSeq + 1 });
+    if (refusal) {
+      console.error('saveConfigToBoard: ' + refusal);
+      appendTerminalLine('< [config] ' + refusal, 'error');
+      showToast('Save refused — this change is too large for the WCB bridge. Connect via USB to save it.', 'error', 10000);
+      return;
+    }
+  }
 
   // Stash the proposed new baseline.  We DO NOT advance _configBaseline
   // until the firmware ACKs the save — see _pendingSaveBaseline /

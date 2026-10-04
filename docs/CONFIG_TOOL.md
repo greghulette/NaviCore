@@ -251,10 +251,17 @@ it snap on and fade off — a pulse, not a swell.
 ### Push-budget readout
 
 A Via-WCB `SET_CONFIG` is fragmented, and the board's reassembly pool is
-`FRAG_MAX_PARTS` (192) **static** `String` slots — a payload needing more is refused by
-`sendJSON()` with *"Use Direct USB for a config this large."* `updatePushBudget()` shows that
-same fragment count live in the Config modal footer so the ceiling is visible on approach
-rather than at Save time.
+`FRAG_MAX_PARTS` (192) **static** `String` slots — a payload needing more is refused with
+*"Use Direct USB for a config this large."* `updatePushBudget()` shows that same fragment count
+live in the Config modal footer so the ceiling is visible on approach rather than at Save time.
+
+Both refusals below live in one function, `_bridgedFragPlan()`, which `sendJSON()` and
+`saveConfigToBoard()` share (the latter through `_bridgedSendRefusal()`). **Save asks it before
+it latches the save as pending**: a refused bridged Save prints the abort line, shows an error
+toast and leaves no pending save behind. Refusing only inside `sendJSON()` came too late —
+`_pendingSaveBaseline` and the "Saving…" toast were already up, so the tool waited out the 12 s
+watchdog for an ACK that could not come (`nctool.push_refused_not_pending`). `sendJSON()`
+resolves `false` when it refuses or abandons a send.
 
 `_pushBudgetInfo()` **must mirror `saveConfigToBoard()`'s payload construction exactly**, and
 three transforms are easy to miss — each alone makes the number wrong by a large factor:
@@ -663,6 +670,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **A bridged Save the fragmenter cannot carry is refused before it is latched** (§5 Push-budget readout). The refusal (over 192 fragments, or a slice whose envelope is over 187 B) moved into `_bridgedFragPlan()`, shared by `sendJSON()` and `saveConfigToBoard()`; Save asks first, so it no longer shows "Saving…" for 12 s and leaves `_pendingSaveBaseline` set for a save that never left. `sendJSON()` now resolves `true`/`false`. |
 | 2026-10-04 | _(pending)_ | **A stored `;W<n>;S<p>` command opens with the prefix reserved in its field cap** (§10 item 6). `_appendCommandView`'s length and chain refreshers read the destination by id, and both run from `sync()` and the render-time check while the row is still detached, so the cap opened at 95 and the render-time over-length flag never fired. They read the hidden destination input by reference now. |
 | 2026-10-04 | _(pending)_ | **A no-op Apply changes nothing** (§5 item 8, D-NC32). `saveKnobModal` wrote every knob with its defaults spelled out (`smoothProfile: -1`, `easeSwitchOverride: false`, `midClosed: false`, `releaseIdleMs: 0`) and dropped an HCR Volume output's `maestroCh`, and the legacy HCR editor had no option for an `fn` it does not list, so its select fell back to PlayWAV and rewrote the action. Each untouched editor became a diff the next Save shipped. |
 | 2026-08-28 | _(uncommitted)_ | The hidden WiFi block gained **AP name + password fields** with a show/hide eye, next to the toggle. The inline note restates the pending state on every edit and turns red on a password under 8 characters, because the firmware fails closed there — without the warning the user saves, reboots, finds no AP, and has only an unwatched serial line to go on. |
