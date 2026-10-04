@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:31.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:36.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -15296,15 +15296,21 @@ function appendActionFields(container, action) {
     const fnSel = document.createElement('select');
     fnSel.id = fid + '-fn';
     fnSel.style.minWidth = '140px';
-    [[14,'PlayWAV'],[16,'StopWAV'],[9,'StopEmote'],[8,'Stop All'],[4,'Stimulate'],
+    const hcrFns = [[14,'PlayWAV'],[16,'StopWAV'],[9,'StopEmote'],[8,'Stop All'],[4,'Stimulate'],
      [3,'Trigger'],[2,'SetEmotion'],[17,'SetVolume'],
      [18,'Volume Up'],[19,'Volume Down'],[12,'Fade In'],[15,'Fade Out'],
      [5,'Overload'],[10,'Override Emotions'],
      [6,'Muse'],[7,'Muse Gap'],[13,'Auto-Muse On/Off'],[11,'ResetEmotions']
-    ].forEach(([v,lbl]) => {
+    ];
+    // A stored fn this list does not name gets an option of its own. Without it no
+    // option matched, the select fell back to its first (PlayWAV), and opening and
+    // applying the action unchanged rewrote its fn to 14 (D-NC32).
+    const curFn = +(action.fn || 14);
+    if (!hcrFns.some(([v]) => v === curFn)) hcrFns.push([curFn, `fn ${curFn}`]);
+    hcrFns.forEach(([v,lbl]) => {
       const o = document.createElement('option');
       o.value = v; o.textContent = lbl;
-      if (v === (action.fn || 14)) o.selected = true;
+      if (v === curFn) o.selected = true;
       fnSel.appendChild(o);
     });
     // Re-render the chan + track widgets whenever the function changes.
@@ -15312,7 +15318,7 @@ function appendActionFields(container, action) {
     container.appendChild(makeFieldGroup('Function', fnSel));
 
     // Initial chan + track fields for the selected fn.
-    renderHcrParamFields(container, +(action.fn || 14), action.chan, action.track);
+    renderHcrParamFields(container, curFn, action.chan, action.track);
     _appendChangeTypeLink(container);
   } else if (type === 'mp3') {
     // LEGACY editor, kept only so existing mp3 actions still load/save unchanged.
@@ -16135,23 +16141,32 @@ function saveKnobModal() {
   if (!config.knobs) config.knobs = {};
   syncKnobOutputsFromDom();
   const fn = +document.getElementById('kn-function').value;
-  // Drop maestroCh for HCR Volume outputs (it's unused). For Maestro
-  // Pass-Through, keep all four fields. Applied per mode.
+  // The knob is written in exactly the shape rcConfigToJSON prints it (rc_config.h
+  // rcWriteKnobOuts + the knob loop): target, maestroCh, posMin and posMax always;
+  // midClosed only when true, releaseIdleMs only when non-zero, smoothProfile only
+  // when not -1, easeSwitchOverride only when true. Writing the defaults out instead
+  // made a no-op Apply differ from the board's own copy, so every untouched knob
+  // became a "change" that the next Save shipped (D-NC32, nctool.noop_apply_every_editor).
+  // maestroCh is unused by an HCR Volume output but the firmware prints it (0) all
+  // the same, so it stays. Applied per mode.
   const clean = arr => (arr || []).map(o => {
     if (fn === KF_HCR_VOLUME) {
       // Preserve a genuine Vol-max of 0 (mute): `|| 99` would silently rewrite it.
       // A cleared field arrives as 0 (syncKnobOutputsFromDom coerces), which is the
       // correct 0=mute value; only NaN/undefined falls back to 99.
-      return { target: +o.target || 0, posMin: +o.posMin || 0, posMax: Number.isFinite(+o.posMax) ? +o.posMax : 99 };
+      return { target: +o.target || 0, maestroCh: +o.maestroCh || 0, posMin: +o.posMin || 0,
+               posMax: Number.isFinite(+o.posMax) ? +o.posMax : 99 };
     }
-    return {
+    const out = {
       target:    Math.max(1, Math.min(NUM_MAESTRO_SLOTS, +o.target || 1)),
       maestroCh: +o.maestroCh || 0,
       posMin:    +o.posMin || 0,
       posMax:    +o.posMax || 0,
-      midClosed: !!o.midClosed,
-      releaseIdleMs: Math.max(0, Math.min(60000, +o.releaseIdleMs || 0)),
     };
+    if (o.midClosed) out.midClosed = true;
+    const idle = Math.max(0, Math.min(60000, +o.releaseIdleMs || 0));
+    if (idle) out.releaseIdleMs = idle;
+    return out;
   });
   const modeAware = !!document.getElementById('kn-modeaware')?.checked;
   const byMode = editingKnobDraft.outputsByMode || [editingKnobDraft.outputs, [], []];
@@ -16163,10 +16178,11 @@ function saveKnobModal() {
     reverse:   !!document.getElementById('kn-reverse').checked,
     modeAware: modeAware,
     modeSwitchOverride: (modeAware && modeSrc >= 0 && modeSrc <= 7) ? modeSrc : -1,
-    smoothProfile: (fn === KF_MAESTRO_PASSTHROUGH) ? (+(document.getElementById('kn-smprof')?.value ?? -1)) : -1,
-    easeSwitchOverride: (fn === KF_MAESTRO_PASSTHROUGH) ? !!document.getElementById('kn-easeovr')?.checked : false,
-    outputs:   fn === KF_NONE ? [] : clean(byMode[0]),   // mode 1 (+ all modes when !modeAware)
   };
+  const smProf = (fn === KF_MAESTRO_PASSTHROUGH) ? (+(document.getElementById('kn-smprof')?.value ?? -1)) : -1;
+  if (smProf !== -1) obj.smoothProfile = smProf;                         // -1 = none (omitted, as the firmware prints it)
+  if (fn === KF_MAESTRO_PASSTHROUGH && document.getElementById('kn-easeovr')?.checked) obj.easeSwitchOverride = true;
+  obj.outputs = fn === KF_NONE ? [] : clean(byMode[0]);   // mode 1 (+ all modes when !modeAware)
   if (modeAware && fn !== KF_NONE) {                      // per-mode sets only when opted in
     obj.outputs2 = clean(byMode[1]);
     obj.outputs3 = clean(byMode[2]);

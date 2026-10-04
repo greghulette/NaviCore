@@ -160,6 +160,14 @@ Saving is diff-based, and the guard rails exist because each failure mode actual
 6. **`_postFlashReload`** re-snapshots after a flash reconnect for the same reason.
 7. The result is reported by a **toast driven by the board's actual ACK**, not by a
    terminal line the user never reads.
+8. **An editor's Apply writes the object in the shape `rcConfigToJSON` prints it**: a
+   field the firmware omits at its default is omitted (a knob's `smoothProfile` -1,
+   `easeSwitchOverride` false, an output's `midClosed` false and `releaseIdleMs` 0), every
+   field it always prints is written (an output's `maestroCh`, HCR Volume included),
+   booleans are `true`, and a stored value the editor has no option for (an HCR `fn` it does
+   not list) keeps an option of its own. Otherwise opening an editor and applying it
+   unchanged differs from the baseline, and the next Save ships that branch
+   (`nctool.noop_apply_every_editor`).
 
 ### Verified clip download
 
@@ -650,6 +658,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **A no-op Apply changes nothing** (§5 item 8, D-NC32). `saveKnobModal` wrote every knob with its defaults spelled out (`smoothProfile: -1`, `easeSwitchOverride: false`, `midClosed: false`, `releaseIdleMs: 0`) and dropped an HCR Volume output's `maestroCh`, and the legacy HCR editor had no option for an `fn` it does not list, so its select fell back to PlayWAV and rewrote the action. Each untouched editor became a diff the next Save shipped. |
 | 2026-08-28 | _(uncommitted)_ | The hidden WiFi block gained **AP name + password fields** with a show/hide eye, next to the toggle. The inline note restates the pending state on every edit and turns red on a password under 8 characters, because the firmware fails closed there — without the warning the user saves, reboots, finds no AP, and has only an unwatched serial line to go on. |
 | 2026-08-28 | _(uncommitted)_ | **The relay chip now shows its mesh-stats line.** The bridging WCB is deliberately kept out of the roster arrays (so the bridged `WCB_STATUS` fits one packet) and is drawn as its own chip — but that chip was built by hand and never called `_meshStatsChipLine()`, so the busiest link on the mesh was the one link with no numbers. Every command to and from the RC crosses it: with a MgmtRelay bridging, the detail modal showed 2275 sent / 4 retries against 89 and 46 for the two real boards, while the sidebar showed nothing. Data was always present — `_meshStatsPeerRow()` is a plain id lookup with no roster filter, and the code at `_meshStatsChipLine` already states the line is drawn for temporary peers such as a mgmt relay. Purely a missing call. |
 | 2026-08-28 | _(uncommitted)_ | **Upload fragments are filled adaptively** (`_fragChunks`), replacing the fixed `FRAG_CHUNK_BYTES` split at both call sites — the SET_CONFIG sender and `_pushBudgetInfo`, which must agree or the budget readout mispredicts. Each chunk grows while the *measured* escaped envelope stays inside `FRAG_ENV_TARGET_BYTES` (180 B), then is verified against the real serialized envelope and shrunk if needed, so an oversized fragment cannot ship. Two wins: **1.46×** fewer fragments on a realistic config (288 → 197), which is both faster and buys headroom against the RC's 192-fragment receive cap; and it **fixes a latent overflow** — the fixed 80 produced envelopes over the 187 B cap on escape-heavy content (75 of 76 for quote-dense input, worst 195 B; 25 of 25 for control chars, worst 515 B), which the client-side check turned into a refused save. A quote typed into a note field is escaped once by the config JSON and again by the envelope, so that was reachable. Verified by extracting the shipped functions and round-tripping realistic config, all-quotes, ASCII, CJK, surrogate pairs and control chars — every envelope ≤187 B, every round-trip byte-exact. |
