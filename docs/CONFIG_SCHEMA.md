@@ -330,12 +330,12 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-04 | _(D-NC25)_ | `peerNewActions` / the new-peer alert no longer fire for boards already online when the boot grace ends (HIL `ncboot.new_peer_after_boot`). |
-| 2026-10-04 | _(D-NC44)_ | Every config apply (both `SET_CONFIG` paths, both `RESET_DEFAULTS` paths) forgets a parked tap or hold and re-arms the matrix (HIL `sbus.reconfig_parked_tap_cleared`). |
-| 2026-10-04 | _(D-NC19)_ | `boardType` accepts only 0 and 1; another value is ignored instead of stored, where it booted the v2 pins under a "WCB 3.2" advert (HIL `ncboot.boardtype2_mismatch`). |
-| 2026-10-04 | _(D-NC22)_ | A `hcrDest`/`mp3Dest`/`dfpDest` sent as `null` or `{}` reads as disabled instead of enabling the device on its default transport (HIL `nccfg.dest_null_hazard`). |
-| 2026-10-04 | _(D-NC43)_ | `tapWindowMs` is capped at 4900 on input, so `holdMs` (ceiling 5000) always clears it by 100 (HIL `nccfg.hold_exceeds_tap_window`). |
-| 2026-10-04 | _(D-NC42)_ | String fields are cut back to a whole UTF-8 character (`cfgStrlcpy`) when the value is longer than the field (HIL `nccfg.string_truncation_utf8`). |
+| 2026-10-04 | `073bfc2` | `peerNewActions` / the new-peer alert no longer fire for boards already online when the boot grace ends (HIL `ncboot.new_peer_after_boot`). |
+| 2026-10-04 | `6cdaa8a` | Every config apply (both `SET_CONFIG` paths, both `RESET_DEFAULTS` paths) forgets a parked tap or hold and re-arms the matrix (HIL `sbus.reconfig_parked_tap_cleared`). |
+| 2026-10-04 | `2ebcc42` | `boardType` accepts only 0 and 1; another value is ignored instead of stored, where it booted the v2 pins under a "WCB 3.2" advert (HIL `ncboot.boardtype2_mismatch`). |
+| 2026-10-04 | `a10589f` | A `hcrDest`/`mp3Dest`/`dfpDest` sent as `null` or `{}` reads as disabled instead of enabling the device on its default transport (HIL `nccfg.dest_null_hazard`). |
+| 2026-10-04 | `62b6cf3` | `tapWindowMs` is capped at 4900 on input, so `holdMs` (ceiling 5000) always clears it by 100 (HIL `nccfg.hold_exceeds_tap_window`). |
+| 2026-10-04 | `7274eca` | String fields are cut back to a whole UTF-8 character (`cfgStrlcpy`) when the value is longer than the field (HIL `nccfg.string_truncation_utf8`). |
 | 2026-09-28 | `703a0e7` | §6: debug bit 7 is `DBG_WIRE` in a HIL hook build (PROTOCOLS.md §2), so the tool never sends it and a new debug category takes bit 8. |
 | 2026-08-30 | _(uncommitted)_ | Recorded the OTA END discriminator as a cross-file invariant (§6). The firmware has always sent the END ACK with offset 0 — deliberately, with a comment in `navicore_ota.h` forbidding anyone to "improve" it — but the tool's `otaSendAwaitAck()` matched only session+src, so a duplicate DATA cursor ACK still in flight satisfied the END wait and reported **Verified** for an image the target never verified. The tool now checks the offset. |
 | 2026-08-28 | _(uncommitted)_ | `wifiEnabled` is now **live** — `setup()` raises the SoftAP before `wcb->begin()`, which is what lets WCB_Client detect it and select WIFI_AP_STA instead of forcing STA and tearing the AP down. The channel is passed explicitly from `wcbNetwork.channel`: `softAP()`s 3rd parameter defaults to 1, and once an AP owns the radio WCB_Client only warns on a mismatch, so a defaulted channel would be a silent total mesh blackout. An empty or under-8-char password refuses to start the AP rather than falling back to an open network. Every path logs a `[WIFI]` line. |

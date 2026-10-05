@@ -181,6 +181,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-04 | _(D-NC23)_ | The two subroutine writers refuse a subroutine over 127 (`maeSubOk()`), so no path - an action or an inbound `;M` frame - puts a command-range byte inside a Pololu frame (HIL `ncdev.mae_subroutine_msb`). |
-| 2026-10-04 | _(D-NC56)_ | Maestro action numbers are range-checked before any cast: channel/accel/subroutine refused out of range, target/speed/parameter clamped at 16383, negatives refused; the inbound `;M` accel frame refuses over 255 (HIL `ncdev.mae_verb_no_alias`). |
+| 2026-10-04 | `1e3265d` | The two subroutine writers refuse a subroutine over 127 (`maeSubOk()`), so no path - an action or an inbound `;M` frame - puts a command-range byte inside a Pololu frame (HIL `ncdev.mae_subroutine_msb`). |
+| 2026-10-04 | `57cc237` | Maestro action numbers are range-checked before any cast: channel/accel/subroutine refused out of range, target/speed/parameter clamped at 16383, negatives refused; the inbound `;M` accel frame refuses over 255 (HIL `ncdev.mae_verb_no_alias`). |
 | 2026-08-18 | _(uncommitted)_ | Corrected the "Current state" section: it claimed the local Maestro bus is write-only and that a Remote slot has no return path. Both reads are implemented — `maestroLocalQuery()` does a bounded 25 ms blocking read off Serial2 for Get Position / Get Moving State / Get Errors, and a Remote slot gets an asynchronous `:MQR` reply relayed home over the mesh. |
