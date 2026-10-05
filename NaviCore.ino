@@ -2053,8 +2053,9 @@ static void executeDfpAction(const RcAction& a) {
 //   • local slot (serialPort 3/4/5) → WcbWled::emit(port, verb-body) — the SAME
 //                                     shared translator a WCB runs, so a WLED on a
 //                                     NaviCore aux port sees byte-identical JSON
-//   • remote slot (remoteWCB 1-20)  → wcb->send(remoteWCB, full ";L<id>,…"); the
-//                                     host WCB's own router drives its WLED
+//   • remote slot (remoteWCB 1-20)  → wcb->send(remoteWCB, ";L<id>,<body>") REBUILT
+//                                     from what was parsed; the host WCB's own
+//                                     router drives its WLED
 static void executeWledAction(const RcAction& a) {
   // ── Parse the id: digits immediately after 'L' (";L3,PS,2"→3; ";L,ON"→0) ──
   const char* s = a.cmd;
@@ -2108,8 +2109,17 @@ static void executeWledAction(const RcAction& a) {
     dlog(DBG_WLED, "[DISPATCH] WLED %u→S%u  %s  %s\n", w.wledID, w.serialPort, body, ok ? "OK" : "no-op");
   } else if (w.remoteWCB >= 1 && w.remoteWCB <= WCB_MAX_BOARDS) {
     if (!wcb || !wcbReady) { dskip(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
-    bool ok = wcb->send(w.remoteWCB, a.cmd);          // forward the full ";L<id>,…" string
-    dlog(DBG_WLED, "[DISPATCH] WLED %u→WCB%u  %s  %s\n", w.wledID, w.remoteWCB, a.cmd, ok ? "OK" : "FAIL");
+    // Forward the command REBUILT from what was parsed, not as written. The parse above
+    // tolerates a missing ';' (and leading blanks), so "L1,ON" routes like ";L1,ON" - but
+    // forwarded verbatim, a WCB runs a unicast without its command character as plain
+    // broadcast text: its WLED got nothing and "L1,ON" went out every port with broadcast
+    // output on, so the same saved action worked locally and failed remotely (HIL
+    // ncdev.wled_forward_normalised). A well-formed ";L<id>,<body>" is unchanged.
+    char fwd[sizeof(a.cmd) + 8];
+    if (*body) snprintf(fwd, sizeof(fwd), ";L%u,%s", (unsigned)w.wledID, body);
+    else       snprintf(fwd, sizeof(fwd), ";L%u", (unsigned)w.wledID);
+    bool ok = wcb->send(w.remoteWCB, fwd);
+    dlog(DBG_WLED, "[DISPATCH] WLED %u→WCB%u  %s  %s\n", w.wledID, w.remoteWCB, fwd, ok ? "OK" : "FAIL");
   } else {
     dskip(DBG_WLED, "[DISPATCH] WLED %u: slot has no valid destination — skipped\n", w.wledID);
   }

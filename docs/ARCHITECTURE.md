@@ -389,7 +389,7 @@ An `RcAction` is `{type, target[6], cmd[96], delayMs, note[20], skipRunning, fn,
 | `RA_MP3` (7) | `executeMp3Action` → `;A,…` | **global** `mp3Dest` |
 | `RA_RECORD` (8) / `RA_PLAY` (9) / `RA_STOP` (10) | `navirec` control (deferred to Core 1) | — never captured into a clip |
 | `RA_SMOOTH_OVERRIDE` (11) | global passthrough smoothing latch | runtime only |
-| `RA_WLED` (12) | `executeWledAction` → `;L<id>,<verb>` | per-id routing in `wledSlots` |
+| `RA_WLED` (12) | `executeWledAction` → `;L<id>,<verb>` | per-id routing in `wledSlots`; a remote slot gets `;L<id>,<body>` rebuilt from the parse, so `L1,ON` (no `;`) works remotely as it does locally |
 | `RA_DFPLAYER` (13) | `executeDfpAction` → `;D,…` | **global** `dfpDest` — local aux port or a WCB |
 
 HCR, MP3 and DFPlayer destinations are **global, not per-action** — an action carries only
@@ -461,6 +461,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC60)_ | §10: a WLED action to a remote slot forwards `;L<id>,<body>` rebuilt from the parse instead of the text as written (HIL `ncdev.wled_forward_normalised`). |
 | 2026-10-04 | _(D-NC72)_ | §9 "Framing": a partial frame is dropped after 6 ms of real line silence and breaks the lock, so a cut frame can no longer join the next frame's bytes into a decoded phantom (HIL `sbus.truncated_frame_no_phantom`). |
 | 2026-10-04 | _(D-NC73)_ | §9 "Framing": locked on SBUS-16 the reader decodes a 25-byte buffer only on the next header or a silence, never eagerly (HIL `sbus.sbus24_return_no_prefix_decode`); the post-stall eager flush is SBUS-24 only. |
 | 2026-10-04 | _(D-NC21)_ | §7 lists `checkSbusGestureTimeout()`. A failsafe frame, or 500 ms with no SBUS frame (`checkSbusGestureTimeout()`), cancels any matrix gesture in flight — the deferred tap as well as the hold (HIL `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press`). |
