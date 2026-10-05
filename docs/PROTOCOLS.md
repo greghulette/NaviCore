@@ -200,7 +200,10 @@ WCB Wizard can mute the tool's chatter when both share a port.
 `handleSerialInput()` reads bytes off `Serial` and assembles lines;
 **`processInputLine(const String&)` is the transport-agnostic dispatcher** and is where every
 message above is actually handled. Anything else that can produce a complete line calls
-`processInputLine()` directly rather than duplicating the dispatch.
+`processInputLine()` directly rather than duplicating the dispatch — and frames like USB does:
+**trim the line, and skip it if that leaves it empty**. `processInputLine()` switches on the
+first character, so an untrimmed leading space drops a line silently and a trailing one makes
+`?version ` an unknown command.
 
 `naviws::drain()` is the second caller (the WebSocket endpoint,
 [`navicore_wsserver.h`](../navicore_wsserver.h)). Its shape is the constraint worth
@@ -939,6 +942,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC61)_ | WebSocket lines are trimmed (and skipped when empty) before `processInputLine()`, as USB lines always were (HIL `ncwifi.ws_line_trim`). |
 | 2026-10-04 | _(D-NC29)_ | A bridged `REBOOT` is ACKed (`"of":"REBOOT"`) and the restart deferred to `loop()` until the queues are quiet, instead of a silent `ESP.restart()` on the Core-0 receive callback (HIL `ncboot.mesh_reboot`). |
 | 2026-10-04 | _(D-NC45)_ | The dispatch trace prints a send line only for a send that happens: a serial action to a port other than S3-S5 (or one this board lacks) prints `[DISPATCH] Serial port '<p>' is not S3/S4/S5 — skipped`, and the Maestro line follows the skip-if-running gate (HIL `ncengine.skip_not_traced_as_sent`). |
 | 2026-10-04 | _(D-NC20)_ | `TEST_ACTION` answers `ok:false` with a `msg` when the executor skips the action, on both transports, instead of `ok:true` for anything that parsed (HIL `ncengine.test_action_skipped_not_ok`). |

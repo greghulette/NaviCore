@@ -542,7 +542,15 @@ inline void drain() {
   // CONFIG_SPIRAM_USE_MALLOC=y with CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096, so any
   // allocation over 4 KB is served from PSRAM, not the ~256 KB of internal SRAM.
   // Worth knowing before "optimising" this copy away — it is not on the scarce heap.
-  processInputLine(String(m.line));  // the SAME dispatcher the USB path uses
+  //
+  // TRIMMED, and skipped when that leaves it empty - exactly what handleSerialInput()
+  // does to every USB line. processInputLine() switches on the first character, so an
+  // untrimmed socket line with a leading space or tab was dropped with no reply, and a
+  // trailing one made "?version " an unknown command: the same protocol only if the
+  // framing matches too (HIL ncwifi.ws_line_trim).
+  String line(m.line);
+  line.trim();
+  if (line.length()) processInputLine(line);   // the SAME dispatcher the USB path uses
 
   // Push the reply now rather than waiting for the next pass, so a command feels
   // immediate instead of picking up one loop() of latency.
