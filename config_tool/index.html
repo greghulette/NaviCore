@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:06.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:08.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -17677,10 +17677,16 @@ async function otaUpdateOverUsb() {
       if (cursor > confirmed) {                  // progress
         confirmed = cursor; noAdvance = 0; stalls = 0;
       } else if (nextSend > confirmed) {
-        // Not advancing while chunks are outstanding. After a whole window of that,
-        // the chunk AT the cursor is genuinely lost rather than merely reordered —
-        // a reorder advances first and resets the counter.
-        if (++noAdvance >= WINDOW) { nextSend = confirmed; noAdvance = 0; }
+        // Not advancing while chunks are outstanding: the chunk AT the cursor is
+        // lost (USB keeps lines in order, so this is no reorder). Every chunk sent
+        // after it answers with the same cursor; rewind once ALL of them have —
+        // then no stale NAK is left in flight to rewind again. That is the chunks
+        // in flight minus the lost one: WINDOW - 1 in a full window, fewer at the
+        // image's end. Counting to WINDOW could never be reached, so every loss
+        // waited out the 10 s marker timeout above (nctool.ota_usb_lost_chunk;
+        // otaUpdateOverWcb counts to WINDOW - 1 for the same reason).
+        const behind = Math.ceil((nextSend - confirmed) / CHUNK) - 1;
+        if (++noAdvance >= Math.max(1, behind)) { nextSend = confirmed; noAdvance = 0; }
         if (++stalls > 200) throw new Error(`OTA stalled at ${confirmed} — board not advancing`);
       }
       setProgress(confirmed, size);

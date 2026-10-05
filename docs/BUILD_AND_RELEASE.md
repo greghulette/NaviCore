@@ -216,6 +216,12 @@ disconnected from a board nothing had touched.
 the flash: `Running` is the slot that was `Next`, and `App SHA256` starts the new build's ELF
 SHA-256 (§4).
 
+The tool's senders keep 8 chunks in flight and rewind to the board's write cursor once the
+chunk at the cursor is lost — counted by the cursor-stuck answers of the chunks sent after it,
+which is at most 7 in a full window (the USB sender counts exactly the chunks in flight behind
+the cursor, so a loss near the image's end rewinds too). A threshold of a whole window can never
+be reached, and every lost chunk then waits out the 10 s marker timeout.
+
 **Offline builds.** `tools/build-firmware.ps1` (Windows) or `tools/build-firmware.sh` — same
 FQBN and pruning logic as CI; you commit and push the bins yourself. The Arduino IDE also
 works: ESP32S3 Dev Module, custom partition scheme, **PSRAM: OPI PSRAM**, then Export
@@ -242,6 +248,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | §7 OTA: the USB sender rewinds once every chunk behind a lost one has answered; it counted to a whole window (8), which one loss can never produce, so each lost chunk cost a 10 s stall (`nctool.ota_usb_lost_chunk`). |
 | 2026-10-04 | _(pending)_ | §7: a flash from a live session fetches the flash tool and the image set before the teardown (`prepareFirmwareFlash()`), so a refused set no longer leaves the session disconnected (`nctool.fw_refused_flash_keeps_session`). |
 | 2026-10-04 | _(pending)_ | §7 Full Wipe row corrected: it erases NVS and OTA data only — `/config.json`, the command library and the clips survive, and the tool's texts that promised the config is erased now say so (D-NC34). |
 | 2026-09-28 | `703a0e7` | §3: **the HIL hook build** — `-DNAVICORE_HIL_HOOKS=1` through `compiler.cpp.extra_flags` compiles in `navicore_hil.h` (`DBG_WIRE`, `#L90`–`#L93`); CI and releases never define it, and without it the image is the same bytes as with no hook code at all (checked: 71 differing bytes against the pre-hook tree, all version stamp, compile time and hashes). |
