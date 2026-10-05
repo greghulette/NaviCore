@@ -39,6 +39,7 @@
 #include <esp_http_server.h>
 #include <WiFi.h>
 #include <lwip/sockets.h>   // close() - the session-close hook must close the socket itself
+#include <errno.h>          // wsSendAll tells a send timeout from a dead socket
 #include "rc_serial.h"   // rcSerial — the capture tee this borrows
 
 // Defined in NaviCore.ino. Declared here because this header is included near the
@@ -71,6 +72,13 @@ static const size_t   WS_TX_CHUNK    = 1400;
 // the server will accept is just dead slots; fewer means a connected client the sink
 // never writes to, which is the silent-deafness bug this array exists to prevent.
 static const uint8_t  WS_MAX_CLIENTS = 3;
+// How long a client's socket may take NO byte before NaviCore gives up on it and shuts
+// it down (wsSendAll). Not shorter: a WiFi hiccup stalls a healthy link for seconds - 3 s
+// with nothing moving, measured on the bench in HIL ncwifi.ws_ping_soak - and a 1 s bound
+// closed that healthy client. 5 s is the per-send timeout httpd shipped with, which that
+// soak always survived; it is also short enough that one stalled client holds the httpd
+// task (and so every other client) about 5 s once, then never again.
+static const uint32_t WS_STALL_MS    = 5000;
 
 struct WsCmd {
   int   fd;      // client socket, for the async reply
@@ -425,13 +433,50 @@ inline void wsClose(httpd_handle_t hd, int sockfd) {
   close(sockfd);
 }
 
+// The send function of every WebSocket session, installed at the handshake (wsHandler).
+// RUNS ON THE HTTPD TASK, for our frames (wsSendWork) and the server's own (PONG, close).
+//
+// A FRAME GOES OUT WHOLE, OR IT IS THE LAST THING ON THAT SOCKET. httpd's default send
+// is one send(), and with SO_SNDTIMEO set (send_wait_timeout) lwIP ends a write that
+// times out after making progress with a SHORT count, which httpd_ws_send_frame_async
+// takes as success: a frame went out cut short and the next frame's header followed it,
+// so the client read headers out of the middle of payloads (HIL ncwifi.ws_ping_soak:
+// opcodes 3, 12 and 2 after a 3 s WiFi stall, then a reset). Here a short write is
+// continued until the buffer is out. Only when no byte has gone for WS_STALL_MS - the
+// client has stopped reading, or is gone - does it give up, and then it shuts the
+// socket down at once, so a frame that may now be cut short is never followed by
+// another. httpd's select() sees the shut socket and deletes the session itself
+// (close_fn = wsClose), and the client sees its connection end and can reconnect.
+inline int wsSendAll(httpd_handle_t hd, int sockfd, const char* buf, size_t len, int flags) {
+  (void)hd;
+  if (!buf) return HTTPD_SOCK_ERR_INVALID;
+  size_t   done     = 0;
+  uint32_t lastByte = millis();
+  while (done < len) {
+    const int n = send(sockfd, buf + done, len - done, flags);   // returns within send_wait_timeout
+    if (n > 0) { done += (size_t)n; lastByte = millis(); continue; }
+    const int  e     = errno;
+    const bool retry = (n == 0) || e == EAGAIN || e == EWOULDBLOCK || e == EINTR || e == ENOMEM;
+    if (!retry || (uint32_t)(millis() - lastByte) >= WS_STALL_MS) {
+      shutdown(sockfd, SHUT_RDWR);
+      return retry ? HTTPD_SOCK_ERR_TIMEOUT : HTTPD_SOCK_ERR_FAIL;
+    }
+    if (n == 0) vTaskDelay(1);   // a send() that returns at once with nothing done must not spin
+  }
+  return (int)len;
+}
+
 // ── Handler — RUNS ON THE HTTPD TASK (Core 0). Enqueue only. ────────────────
 inline esp_err_t wsHandler(httpd_req_t* req) {
   // GET is the opening handshake; esp_http_server completes it for us. Remember the
   // socket: from here on the sink mirrors Serial to it continuously, which is what
-  // makes the live monitor work rather than only command replies.
+  // makes the live monitor work rather than only command replies. And give the
+  // session wsSendAll, so every frame on it goes out whole (the handshake reply,
+  // already sent, is the only write it does not cover).
   if (req->method == HTTP_GET) {
-    wsSink.begin(httpd_req_to_sockfd(req));
+    const int sockfd = httpd_req_to_sockfd(req);
+    httpd_sess_set_send_override(req->handle, sockfd, wsSendAll);
+    wsSink.begin(sockfd);
     return ESP_OK;
   }
 
@@ -525,12 +570,11 @@ inline bool begin() {
   // the idle task on Core 0 is watched by the task WDT.
   cfg.max_open_sockets = 3;    // a config channel, not a hotspot
   cfg.lru_purge_enable = true; // a stale client must not permanently consume a slot
-  // Bound how long ONE client can hold the single httpd task. Every socket write is a
-  // work item on that task, sent to each client in turn with a blocking send, and the
-  // default 5 s let a client that stopped reading stall every other client per frame
-  // while the work queue overflowed behind it (HIL ncwifi.ws_stalled_client). 1 s, the
-  // config's floor (whole seconds; 0 means no timeout), still covers a healthy client:
-  // a send blocks only once its TCP window is full, and a 2 KB item drains in ms.
+  // How often wsSendAll regains control while a send is blocked - NOT how long a client
+  // may stall (that is WS_STALL_MS, counted across these). Each send() returns within it,
+  // with a short count or nothing, and wsSendAll decides whether to go on. 1 s, the
+  // config's floor (whole seconds; 0 means no timeout). Never rely on it alone to bound a
+  // send: a timeout that ends a write part-way leaves a frame cut short (see wsSendAll).
   cfg.send_wait_timeout = 1;
   // Release the sink slot and the line accumulator the moment a session ends,
   // rather than leaving both to be noticed later, or never. See wsClose().
