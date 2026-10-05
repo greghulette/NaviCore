@@ -521,7 +521,11 @@ shows when a line was lost, which happens because it goes through `vlogf()`. Dev
 ## 3. CLI commands
 
 Typed on the USB console **or** relayed from the tool's terminal over the mesh — both run
-through `execCliLine()`, so behaviour is identical. Case-insensitive.
+through `execCliLine()`, so behaviour is identical. Case-insensitive. A relayed line longer
+than 199 characters (a queue slot, `RemoteCliMsg.cmd[200]`) is **refused with a
+`[WCB] CLI line from WCB<n> is <len> characters … dropped` line, never run cut short**; a
+mesh→serial line over 200 characters (`SerialFwdMsg.text[201]`) likewise. `WCB_Client`
+reassembles a fragmented command whole, so the length is the sender's, not a packet's.
 
 ### Diagnostics
 
@@ -959,6 +963,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC26)_ | A relayed CLI line over 199 characters, or a mesh→serial line over 200, is refused with a log line instead of being truncated into its queue slot and run (HIL `ncmesh.long_command_truncation`). |
 | 2026-10-04 | _(D-NC27)_ | A bridged `WCB_SEND` ACKs the library's send result instead of `ok:true` regardless, and its fragmented form is sent and ACKed instead of dropped (HIL `ncmesh.bridged_wcb_send_findings`). |
 | 2026-10-04 | _(D-NC47)_ | The bridged `SET_CMDLIB` uses the USB path's bracket-matched extraction (`rcCmdlibExtractData()`), not "everything up to the message's last `}`" (HIL `ncmesh.bridged_cmdlib_keys_after_data`). |
 | 2026-10-04 | _(D-NC63)_ | `?REC,EDITLOAD` decides "relayed" from the line's transport (`g_rtermRelay`, `naviws::lineFromSocket()`), not `rcSerial.captureArmed()`, so a USB download is no longer cut to 512 events while a WebSocket client is connected (HIL `ncwifi.usb_editload_with_socket`). |

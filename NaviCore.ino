@@ -3087,6 +3087,16 @@ void dumpSbusState() {
 // _fragClear() in rc_telemetry.h.)
 static void __attribute__((noinline)) queueRemoteCli(uint8_t relay, const char* command) {
   RemoteCliMsg m;
+  // REFUSE an over-long line, never truncate it. WCB_Client reassembles a fragmented
+  // command whole (up to 16 x 179 characters), and strlcpy into cmd[200] silently ran
+  // its first 199 characters as if that were the command (HIL
+  // ncmesh.long_command_truncation). Same rule as queueMaestroCmd and queueSerialFwd.
+  const size_t n = strlen(command);
+  if (n >= sizeof(m.cmd)) {
+    Serial.printf("[WCB] CLI line from WCB%u is %u characters, over the %u a queue slot holds - dropped, not run cut short\n",
+                  relay, (unsigned)n, (unsigned)(sizeof(m.cmd) - 1));
+    return;
+  }
   m.relay = relay;
   strlcpy(m.cmd, command, sizeof(m.cmd));
   xQueueSend(remoteCliQueue, &m, 0);   // non-blocking; drop under load
@@ -3100,6 +3110,14 @@ static void __attribute__((noinline)) queueRemoteCli(uint8_t relay, const char* 
 static void __attribute__((noinline)) queueSerialFwd(uint8_t fwPort, const char* text) {
   if (!serialFwdQueue || !text || !text[0]) return;
   SerialFwdMsg m;
+  // Refused, never truncated (see queueRemoteCli): a cut line would put a different
+  // command on the device's wire than the one sent.
+  const size_t n = strlen(text);
+  if (n >= sizeof(m.text)) {
+    Serial.printf("[WCB] mesh->serial line for port %u is %u characters, over the %u a queue slot holds - dropped\n",
+                  fwPort, (unsigned)n, (unsigned)(sizeof(m.text) - 1));
+    return;
+  }
   m.fwPort = fwPort;
   strlcpy(m.text, text, sizeof(m.text));
   xQueueSend(serialFwdQueue, &m, 0);   // non-blocking; drop under load
