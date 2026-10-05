@@ -239,6 +239,13 @@ Backup-all warns with real numbers before starting — clip count, bytes, and a 
 from the measured mesh ceiling (~150 events/s over the bridge). Uploads are ACK-gated per
 event with the index echoed, so a retry after a lost ACK cannot duplicate.
 
+**● Record arms Stop & Save only on the board's yes.** The board answers `?REC,START` with a
+plain line, `[REC] recording…` or `[REC] busy / no buffer` (it refuses unless idle), which the
+line dispatch feeds to the marker waiters while still printing it. `clipRecordToggle` waits
+for that answer; with none (a reply lost on the mesh) it asks `?REC,INFO` for the state rather
+than assume. Arming on a refused START is how the Stop & Save after it SAVEd the clip that was
+replaying under the typed name (`nctool.clip_record_refused`).
+
 ### Live trigger flash
 
 `flashAssignmentTier(mode, btn, tap)` lights the exact tier row in the assignment cards when
@@ -686,6 +693,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **A refused Record no longer arms Stop & Save** (§5 Clip backup and restore). `clipRecordToggle` waited for a `[CLIPUL:REC]` marker no firmware prints, timed out, and assumed the START worked; it now waits for the board's `[REC] recording…` / `[REC] busy` line, and asks `?REC,INFO` when there is no answer. |
 | 2026-10-04 | _(pending)_ | **A restored clip keeps its own mode** (§7, D-NC33). `clipRestoreOne` and `_tlSave` send `?REC,EDITBEGIN,<mode>` (needs the matching firmware; an older board ignores it). |
 | 2026-10-04 | _(pending)_ | **A CSV round trip leaves nothing for Save to send** (§9 Export / Import). The importer rebuilt every button band as centre ±10 where the tool's and the firmware's bands are ±12, relabelled the physical buttons with `getBtnLabel()`, wrote `exclusive:false` as an absent key, and replaced `config.knobs`/`config.switches` with only the active model's controls; a Save after Import narrowed every band on the board and dropped two knobs. |
 | 2026-10-04 | _(pending)_ | **Two tabs on one WCB no longer take each other's save ACKs** (§5 item 10, D-NC35). The `saveId` on the wire is a random per-tab base plus the tab's count (`_saveWireId`), and the fragment `sid` starts at random per tab (`_nextOutSid`); both counted from 1 in every tab. |

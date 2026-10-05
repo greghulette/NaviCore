@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:59.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:01.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -6500,13 +6500,28 @@ async function clipRecordToggle() {
     // started — and saveClip persists whatever is in the RAM buffer, which after
     // a ?REC,PLAY is the clip that was just loaded. That silently writes a copy
     // of the played clip over the typed name (saveClip opens with "w", no
-    // clobber guard). Wait for the board's marker instead. Timeout → pre-marker
-    // firmware: fall back to the legacy assume-ok behavior (same pattern as
-    // clipRename above).
-    const startP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:REC'), 1500).catch(() => null);
+    // clobber guard). So wait for the board's own answer to START, which is a
+    // plain line (NaviCore.ino "?REC,START"): "[REC] recording…" or "[REC] busy /
+    // no buffer". This used to wait for a [CLIPUL:REC] marker no firmware prints,
+    // time out, and assume the START worked — so a refused one armed Stop & Save
+    // anyway (nctool.clip_record_refused). No answer at all (a reply lost over the
+    // mesh) is settled by asking for the recorder's state, never by assuming.
+    const isStartReply = t => /^\[REC\] (recording|busy)/.test(t);
+    const startP = _tlWaitForMarker(isStartReply, 3000).catch(() => null);
     if (!(await sendRcCli('?REC,START'))) return;
-    const r = await startP;
-    if (r && r.includes('ERR')) {
+    let r = await startP;
+    if (!r) {
+      const infoP = _tlWaitForMarker(t => t.startsWith('[REC] state='), 3000).catch(() => null);
+      if (await sendRcCli('?REC,INFO')) {
+        const st = await infoP;
+        if (st) r = /state=RECORDING\b/.test(st) ? '[REC] recording' : '[REC] busy';
+      }
+    }
+    if (!r) {
+      alert('No answer from the board to Record, so the panel cannot tell whether it is recording. Check the board, then try again.');
+      return;
+    }
+    if (!/^\[REC\] recording/.test(r)) {
       alert('The board refused to start recording — it is busy (playing, already recording, or editing). Stop that first, then try again.');
       return;
     }
@@ -9091,6 +9106,9 @@ function handleBoardMessage(line) {
   // "Timeline editor" section below for _clipDlFeed / _tlFeedMarker.
   if (line.startsWith('[CLIPDL:')) { _clipDlFeed(null, line); return; }
   if (line.startsWith('[CLIPUL:')) { _tlFeedMarker(line); return; }
+  // ?REC's plain replies ("[REC] recording…", "[REC] busy / no buffer", "[REC] state=…")
+  // answer clipRecordToggle's waiter. Fed, not consumed: they still print below.
+  if (line.startsWith('[REC] ')) _tlFeedMarker(line);
   // Maestro 2-way query reply (?MAE,GET/MOVING/ERR): [MAE:<slot>]{…} — route to the
   // Maestro Locations inline readout, not the terminal. Also re-dispatched below inside
   // the [TERM:] unwrap so a Phase-2 remote reply relayed as [TERM:20][MAE:…] still works.
@@ -9109,6 +9127,7 @@ function handleBoardMessage(line) {
       if (_clipListFeed(m[1], m[2])) return;
       if (_clipDlFeed(m[1], m[2])) return;
       if (m[2].startsWith('[CLIPUL:')) { _tlFeedMarker(m[2]); return; }
+      if (m[2].startsWith('[REC] ')) _tlFeedMarker(m[2]);   // as on USB above; still printed
       if (m[2].startsWith('[MAE:')) { _maeReadFeed(m[2]); return; }
       appendTerminalLine((m[1] === String(RC_WCB_DEVICE_ID) ? '' : `[#${m[1]}] `) + m[2], 'rx', 'main');
     } else {
