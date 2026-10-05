@@ -358,10 +358,18 @@ inline void requestStop() { _pendingCtl = CTL_STOP; }
 // allocate _curveNext before this point.)
 
 // Initial build, called once from startReplay(). Also resets speed/accel (0 =
-// unlimited) on every touched channel — the Maestro's OWN latched limits live
-// device-side and can't be read back, so we force-reset rather than snapshot,
-// else they'd double-smooth our interpolated stream — then eases known-home
-// channels toward their current position (a no-op if nothing drifted).
+// unlimited) on every channel THE CLIP DRIVES — the Maestro's OWN latched limits
+// live device-side and can't be read back, so we force-reset rather than snapshot,
+// else they'd double-smooth our interpolated stream — then eases each of those with
+// a known home toward its current position (a no-op if nothing drifted).
+//
+// ONLY the clip's channels become active: its keyframes activate them below. Every
+// channel with a known position used to start active, so ANY clip - even one with no
+// Maestro event - zeroed the speed/accel of every servo moved since boot and
+// re-sent its stale target: a channel whose limits live in the Maestro's own
+// settings lost them, and one a Maestro script had moved since snapped back at full
+// speed (HIL ncrec.replay_only_clip_channels; RECORD_REPLAY_DESIGN.md §3/§6 always
+// said "every (slot,ch) the clip drives").
 inline void _buildCurveIndex() {
   int16_t lastIdx[8][32];
   for (int s = 0; s < 8; s++) {
@@ -373,7 +381,7 @@ inline void _buildCurveIndex() {
       cv.tPrev = 0;
       cv.firstIdx = cv.nextIdx = -1;
       cv.lastEmitted = cv.pPrev;
-      cv.active = known;
+      cv.active = false;      // a keyframe below activates it - only the clip's channels are touched
       cv.reanchor = !known;   // no known home → the first keyframe snaps instead of easing from 0
     }
   }
