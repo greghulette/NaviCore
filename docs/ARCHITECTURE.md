@@ -471,7 +471,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-05 | _(D-NC62 queue)_ | §8: WebSocket output is a Core 1 → httpd-task hand-off through NaviCore's own PSRAM queue under `wsTxMux`, one `wsDrainWork` at a time. |
+| 2026-10-05 | `bb0dda6` | §8: WebSocket output is a Core 1 → httpd-task hand-off through NaviCore's own PSRAM queue under `wsTxMux`, one `wsDrainWork` at a time. |
 | 2026-10-04 | `aa6ae0a` | §7 lists `checkDeferredRestart()`, last in `loop()`: a mesh `REBOOT` is ACKed from `rcTelemetry::tick()` and restarts once the inbound queues are quiet (HIL `ncboot.mesh_reboot`). |
 | 2026-10-04 | `4833716` | §7, §10: a serial action goes through the paced aux transmitter (`queueSerialAction()` → `auxTxPump()`) instead of one blocking whole-line write (HIL `ncdev.serial_action_paced`). |
 | 2026-10-04 | `42c8a61` | §10: a WLED action to a remote slot forwards `;L<id>,<body>` rebuilt from the parse instead of the text as written (HIL `ncdev.wled_forward_normalised`). |
