@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:15.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:20.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4565,6 +4565,37 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
   // auto-enables with no manual toggle, and if neither answers we revert to
   // direct so no stale Via-WCB flag lingers. (Replaces the old status-text
   // sniff, which a real direct board would set within the first ping.)
+  //
+  // FIRST, IDENTIFY THE DEVICE — before a byte of JSON goes out (D-NC70). A WCB runs
+  // any console line that starts with neither its function nor its command character
+  // as a BROADCAST (WCB.ino handleSingleCommand): the direct probe's bare JSON PINGs
+  // went out of every one of its serial ports with broadcast output, into whatever
+  // device listens there, and onto the mesh — up to six of them per connect. So the
+  // first line is a '?' line, which a WCB runs locally and broadcasts nothing for:
+  // bare "?REC", read-only on both. A NaviCore answers "[REC] state=…" (a firmware
+  // too old for ?REC: "Unknown command: ?REC", the '?' kept); a WCB answers
+  // "Unknown command: REC" (it strips the '?') and "Type '? ?' for help".
+  //   NaviCore → the direct probe below, and no fall-back to Via WCB.
+  //   WCB      → Via WCB at once; nothing is written to it bare, even if NaviCore
+  //              never answers through it.
+  //   silence  → neither spoke (a doorway that forwards only JSON, a board still
+  //              booting): the PING probe decides, from the PONGs' shape.
+  // Skipped when the caller forces Via WCB, and when it forbids bridging
+  // (allowViaWcb=false: the post-flash reconnect to the board just flashed).
+  const identifyDevice = async () => {
+    let verdict = null;
+    _transportProbe = (line) => {
+      if (/^\[REC\] /.test(line) || /^Unknown command: \?REC\b/i.test(line)) verdict = 'navicore';
+      else if (!verdict && (/^Unknown command: REC\b/i.test(line) || line.startsWith("Type '? ?' for help"))) verdict = 'wcb';
+    };
+    try {
+      for (let i = 0; i < 3 && !verdict; i++) {
+        await sendLine('?REC', true);
+        for (let t = 0; t < 10 && !verdict; t++) await new Promise(r => setTimeout(r, 50));
+      }
+    } finally { _transportProbe = null; }
+    return verdict;
+  };
   // A phase resolves to the LINK its PONG came over — 'direct' or 'relayed', read
   // from the PONG's shape (see _pongRelayed) — or null when nothing answered in it.
   const pingForPong = async () => {
@@ -4577,7 +4608,12 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
     return _pongSeenEpoch === ep ? (_pongRelayed ? 'relayed' : 'direct') : null;
   };
   if (forceViaWcb) onViaWcbToggle(true);      // caller KNOWS it's a WCB — start in Via WCB, skip the direct probe
-  let link   = await pingForPong();           // try current transport (Direct USB, or forced Via WCB)
+  const device = (!viaWcbActive && allowViaWcb) ? await identifyDevice() : null;
+  if (device === 'wcb') {
+    onViaWcbToggle(true);
+    appendTerminalLine('< [link] this port is a WCB — connecting Via WCB', 'rx');
+  }
+  let link   = await pingForPong();           // try current transport (Direct USB, or Via WCB)
   let pongOk = !!link;
   if (link === 'relayed' && !viaWcbActive) {
     // A RELAYED PONG answered a bare PING: this port is a WCB or relay doorway that put
@@ -4589,7 +4625,7 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
     showToast('This port is a WCB, not a NaviCore — switched to Via WCB.', 'warn', 8000);
     appendTerminalLine('< [link] relayed PONG on the direct probe — this port is a WCB; switched to Via WCB', 'rx');
   }
-  if (!pongOk && allowViaWcb && !viaWcbActive) {
+  if (!pongOk && allowViaWcb && !viaWcbActive && device !== 'navicore') {
     console.log('No direct PONG — retrying through a tethered WCB (Via WCB)…');
     onViaWcbToggle(true);                     // wrap PINGs so the WCB relays them
     link   = await pingForPong();             // try the bridge
@@ -4611,6 +4647,11 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
     }
   }
   if (!pongOk) console.warn('PING never received PONG (direct or Via WCB) — proceeding anyway.');
+  if (!pongOk && device === 'wcb') {
+    // Identified as a WCB, so the session stays Via WCB (never bare JSON on a WCB) —
+    // but say that NaviCore has not answered through it rather than "Connected".
+    document.getElementById('status-text').textContent = `WCB connected — no answer from RC #${RC_WCB_DEVICE_ID} yet`;
+  }
 
   await sendJSON({ type: 'GET_CONFIG' });
   await new Promise(r => setTimeout(r, 400));
@@ -5394,6 +5435,9 @@ let _pongSeen    = false;   // set by the PONG handler — connect uses it to au
 let _pongEpoch     = 0;
 let _pongSeenEpoch = -1;
 let _pongRelayed   = false;   // the last PONG's shape: true = relayed through a WCB (it carries "id")
+// While openPortAndStart identifies the device on a fresh port (the "?REC" probe),
+// every received line is offered to this hook first; null otherwise.
+let _transportProbe = null;
 let _rcTrigReleaseTimer = null;   // setTimeout handle for rc_trig auto-release
 // Via WCB: SBUS RECEIVER block freshness tracking.  PWM_UPDATE carries
 // the RC's local SBUS metrics inline (Direct USB path).  Over WCB we
@@ -9122,6 +9166,7 @@ function handleBoardMessage(line) {
   _lastRxKind = _isOwnEcho ? _lastRxKind : line.startsWith('{')
     ? (/"type"\s*:\s*"([A-Za-z0-9_]+)"/.exec(line) || [, 'json'])[1]
     : (line.slice(0, 12).replace(/[^\x20-\x7e]/g, '') || 'text');
+  if (_transportProbe) { try { _transportProbe(line); } catch (_) {} }   // the connect's device probe (openPortAndStart)
   // OTA markers ([OTA:ACK,..]/[OTA:NAK,..]/[OTA:BEGIN,..]/[OTA:END,..]) are not
   // JSON — feed them to the OTA-over-USB orchestrator's marker resolver (when an
   // OTA is active) so it can advance its ACK-paced loop, then echo to the terminal.

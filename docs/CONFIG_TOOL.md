@@ -44,8 +44,17 @@ Three transports, chosen in the connect modal:
 | **Via WCB** | `connectViaWcbOpt()` | A tethered bridge WCB that relays to NaviCore at slot 20 |
 | **Shared port** | `connectSharedPort()` | A port already owned by another same-origin tab |
 
-Transport is auto-detected at connect: the tool pings direct first, then — if nothing answers
-— flips to Via WCB and pings again.
+Transport is auto-detected at connect. **The first line on a fresh port is `?REC`, never JSON**
+(`openPortAndStart()`, `identifyDevice`): a WCB runs any console line that starts with neither
+`?` nor `;` as a broadcast out of its serial ports and onto the mesh, so the old direct probe's
+bare JSON PINGs reached whatever device sat on a tethered WCB's ports (D-NC70,
+`nctool.board_usb_probe_no_broadcast`). Bare `?REC` is read-only on both: a NaviCore answers
+`[REC] state=…` (a firmware too old for `?REC`: `Unknown command: ?REC`), a WCB `Unknown
+command: REC` — it strips the `?` — and `Type '? ?' for help`. A NaviCore gets the direct PING
+probe and no fall-back to Via WCB; a WCB goes Via WCB at once and stays there even if NaviCore
+never answers through it; a port where neither spoke (a doorway forwarding only JSON, a board
+still booting) gets the PING probe below. The probe is skipped when the caller forces Via WCB
+or forbids bridging (the post-flash reconnect).
 
 **The link a PONG came over is read from the PONG, not from the phase it lands in.** A
 relayed PONG carries the NaviCore's mesh `id`; a direct one never does (`_pongRelayed`,
@@ -708,6 +717,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **Connect via USB identifies the device with `?REC` before any JSON** (§2, D-NC70). On a tethered WCB the direct probe's up to six bare JSON PINGs were broadcast out of the WCB's serial ports and onto the mesh; a WCB is now recognised by its answer and connected Via WCB with nothing bare written. |
 | 2026-10-04 | _(pending)_ | **A WCB doorway is no longer taken for a direct NaviCore** (§2, D-NC30). Any PONG satisfied the direct probe, so a relayed one left the session "direct" with USB OTA enabled against the WCB; a relayed PONG on the direct probe now switches to Via WCB, announced. |
 | 2026-10-04 | _(pending)_ | **A slow direct board is no longer taken for a bridged one** (§2). The epoch only told which phase a PONG arrived in, so a direct PONG 3.5 s late satisfied the Via-WCB probe; the probe now reads the link from the PONG's shape (`id` = relayed). |
 | 2026-10-04 | _(pending)_ | **Via a WCB writes nothing bare** (§2, D-NC71). `connectSharedPort()` raised `viaWcbActive` after waiting for the hub's port, and the status poll that `setConnected(true)` starts during that wait sent its first `GET_WCB_STATUS` unwrapped, which the WCB broadcast. The flag now goes up before `join()` and comes down on a failed attach. |
