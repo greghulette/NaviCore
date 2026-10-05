@@ -55,7 +55,11 @@ counts only a reply that arrived during it, but a board that answers *late* (sta
 and credited to that phase, the tool concluded it was bridged, reporting "Connected via WCB"
 **with no WCB attached**. That is not cosmetic: Save strips WCB Network over the bridge, so a
 misdetected session silently refuses to write those settings. A direct PONG in the bridge
-phase now returns the session to Direct USB (`nctool.pong_epoch_slow_direct`).
+phase now returns the session to Direct USB (`nctool.pong_epoch_slow_direct`). The other way
+round, a **relayed** PONG answering the *direct* probe means the port is a WCB or relay
+doorway that put the bare PING on the mesh: the tool switches to Via WCB, which also gates
+USB OTA — `?OTALOCAL` is a `?` command a doorway runs itself, so an OTA "to the NaviCore"
+would have targeted the WCB (D-NC30, `nctool.doorway_pong_misdetect`).
 
 An auto-switch is also announced now, in a toast and the terminal. Changing transport changes
 behaviour, and if the user did not plug in a bridge it is a misdetection they need to see.
@@ -704,6 +708,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **A WCB doorway is no longer taken for a direct NaviCore** (§2, D-NC30). Any PONG satisfied the direct probe, so a relayed one left the session "direct" with USB OTA enabled against the WCB; a relayed PONG on the direct probe now switches to Via WCB, announced. |
 | 2026-10-04 | _(pending)_ | **A slow direct board is no longer taken for a bridged one** (§2). The epoch only told which phase a PONG arrived in, so a direct PONG 3.5 s late satisfied the Via-WCB probe; the probe now reads the link from the PONG's shape (`id` = relayed). |
 | 2026-10-04 | _(pending)_ | **Via a WCB writes nothing bare** (§2, D-NC71). `connectSharedPort()` raised `viaWcbActive` after waiting for the hub's port, and the status poll that `setConnected(true)` starts during that wait sent its first `GET_WCB_STATUS` unwrapped, which the WCB broadcast. The flag now goes up before `join()` and comes down on a failed attach. |
 | 2026-10-04 | _(pending)_ | **The Full Wipe texts tell the truth** (D-NC34): the button titles, the Firmware tab notes, the confirm and the completion log said the saved configuration is erased, but `flasher.js` erases only NVS and otadata and `/config.json` lives in LittleFS at 0x3D0000. They now say the config, command library and clips are kept, and point at Restore Defaults + Save for a reset. |

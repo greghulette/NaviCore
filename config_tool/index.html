@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:14.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:15.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4579,6 +4579,16 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
   if (forceViaWcb) onViaWcbToggle(true);      // caller KNOWS it's a WCB — start in Via WCB, skip the direct probe
   let link   = await pingForPong();           // try current transport (Direct USB, or forced Via WCB)
   let pongOk = !!link;
+  if (link === 'relayed' && !viaWcbActive) {
+    // A RELAYED PONG answered a bare PING: this port is a WCB or relay doorway that put
+    // the PING on the mesh, not a NaviCore. Accepting it as a direct link left USB OTA
+    // enabled — and ?OTALOCAL is a '?' command the doorway runs ITSELF, retargeting the
+    // update at the WCB (D-NC30, nctool.doorway_pong_misdetect; Intellex's shim forced
+    // Via WCB after the handshake to get round it). Via WCB from here on, announced.
+    onViaWcbToggle(true);
+    showToast('This port is a WCB, not a NaviCore — switched to Via WCB.', 'warn', 8000);
+    appendTerminalLine('< [link] relayed PONG on the direct probe — this port is a WCB; switched to Via WCB', 'rx');
+  }
   if (!pongOk && allowViaWcb && !viaWcbActive) {
     console.log('No direct PONG — retrying through a tethered WCB (Via WCB)…');
     onViaWcbToggle(true);                     // wrap PINGs so the WCB relays them
