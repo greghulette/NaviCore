@@ -89,7 +89,7 @@ kept half a character, and the tool's next save wrote U+FFFD back.
 | `serialBcastOut[3]` / `serialBcastIn[3]` | `bool` | Per-aux-port mesh bridging, indexed like `auxBaud` (`[0]`=S3, `[1]`=S4, `[2]`=S5). JSON key `serialBcast`, keyed `"S3"/"S4"/"S5"` with `{out,in}`. Both default **off** — a port only joins the broadcast domain when asked; targeted `;s<n>` writes need neither flag. See [ROADMAP.md §1](ROADMAP.md) |
 | `maeGateMs` | `uint16_t` | Remote Maestro busy-gate validity (default 250; fails **open**) |
 | `smoothProfiles[6]` | `RcSmoothProfile` | ~4.6 KB of per-mode/per-channel speed+accel |
-| `peerNewActions` | `RcTier` | Up to 5 actions fired when a new mesh peer appears |
+| `peerNewActions` | `RcTier` | Up to 5 actions fired when a new mesh peer appears — once per board per session, and never for a board already online when the 8 s boot grace ends (`drainPeerEvents()` records those silently), so a restart does not re-fire them for the fleet |
 | `peerAlert` | `bool` | Also flash the LED and print a terminal line |
 | `modeReport` | `RcModeReport` | `{enabled, wcb, tmpl[48], cmds[3][48]}` — optional: send the mode-select position to one WCB on every change and every 60 s. `{mode}` in `tmpl` → the position; a non-empty `cmds[mode-1]` overrides it |
 | `statsReport` | `RcStatsReport` | `{enabled, wcb}` — `enabled` states that this droid uses mesh stats (drives the tool's default view); `wcb` is an **optional** collector, 0 = collect/display only. See below |
@@ -330,6 +330,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC25)_ | `peerNewActions` / the new-peer alert no longer fire for boards already online when the boot grace ends (HIL `ncboot.new_peer_after_boot`). |
 | 2026-10-04 | _(D-NC44)_ | Every config apply (both `SET_CONFIG` paths, both `RESET_DEFAULTS` paths) forgets a parked tap or hold and re-arms the matrix (HIL `sbus.reconfig_parked_tap_cleared`). |
 | 2026-10-04 | _(D-NC19)_ | `boardType` accepts only 0 and 1; another value is ignored instead of stored, where it booted the v2 pins under a "WCB 3.2" advert (HIL `ncboot.boardtype2_mismatch`). |
 | 2026-10-04 | _(D-NC22)_ | A `hcrDest`/`mp3Dest`/`dfpDest` sent as `null` or `{}` reads as disabled instead of enabling the device on its default transport (HIL `nccfg.dest_null_hazard`). |

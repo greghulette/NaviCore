@@ -5462,6 +5462,19 @@ void onWcbNeighbor(const WCBNeighbor& nb) {
 // action tier + the passive alert. Fires at most once per board per session.
 void drainPeerEvents() {
   if (!peerEventQueue) return;
+  // The grace window alone cannot hold the boot fleet: it is 8 s, and a WCB advertises
+  // every 60 s, so most boards' first advert of the session lands after it and every WCB
+  // that never left fired the new-peer alert and the user's peer actions after each
+  // NaviCore restart (HIL ncboot.new_peer_after_boot). So the moment the grace ends, every
+  // board ALREADY ONLINE in the ETM table (its heartbeats reach us within seconds of boot)
+  // is recorded as seen, silently. One shot; a board that appears later still fires.
+  static bool graceClosed = false;
+  if (!graceClosed && (int32_t)(millis() - g_peerGraceUntil) >= 0) {
+    graceClosed = true;
+    if (wcb && wcbReady)
+      for (uint8_t b = 1; b <= WCB_MAX_BOARDS; b++)
+        if (wcb->isOnline(b)) g_peerSeenMask |= 1UL << (b - 1);
+  }
   uint8_t id;
   while (xQueueReceive(peerEventQueue, &id, 0) == pdTRUE) {
     if (id < 1 || id > WCB_MAX_BOARDS) continue;
