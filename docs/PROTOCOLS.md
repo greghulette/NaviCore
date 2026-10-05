@@ -100,16 +100,30 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   rest were discarded with nothing sent back — the client waits forever for a reply the board
   already threw away. Depth is 8 and the handler now waits `WS_ENQUEUE_WAIT_MS` (50 ms) for
   room. Blocking there is safe: it is the httpd task on Core 0, not `loop()`.
+- **A frame goes out whole, or it is the last thing on its socket.** Every WebSocket session
+  sends through `wsSendAll()` (installed at the handshake with
+  `httpd_sess_set_send_override`), which continues a short write until the buffer is out.
+  httpd's own send is one `send()`, and with `SO_SNDTIMEO` set lwIP ends a timed-out write
+  that made progress with a **short count**, which `httpd_ws_send_frame_async` takes as
+  success: the frame left cut short, the next frame's header followed it, and the client
+  read headers out of the middle of payloads. `send_wait_timeout` (1 s) is only how often
+  `wsSendAll` regains control. It gives up when **no byte has gone for `WS_STALL_MS`
+  (5 s)** — never sooner, since a WiFi hiccup stalls a healthy link for seconds — and then
+  shuts the socket down at once, so a possibly cut frame is never followed by another.
 - **One stalled client must not hold the others.** Every socket write is a work item on the
-  single httpd task, sent to each client in turn with a blocking send. `send_wait_timeout` is
-  **1 s** (the config's floor; the 5 s default let one client that stopped reading hold every
-  other client's replies). A client whose send fails is dropped from the sink **and its
-  session closed** (`httpd_sess_trigger_close`) — dropped alone, it stayed open and deaf, able
-  to send lines that ran but never to receive another — and work items queued meanwhile skip
-  it (`WsSink::has()`). When `pump()` cannot free room in a full sink, `write()` drops the
-  **whole line** (and ends a head already sent with a newline) instead of storing past the end
-  of its 2 KB buffer. Residual: work items queued during that ≤ 1 s stall can still overflow
-  httpd's 6-deep control socket, which loses them (and their PSRAM copies) silently.
+  single httpd task, sent to each client in turn, so a client that stops reading holds every
+  other client for up to `WS_STALL_MS` once, until `wsSendAll` gives up on it. A client whose
+  send fails is dropped from the sink **and its socket shut down** (`shutdown()`; httpd's
+  `select()` then deletes the session) — dropped alone, it stayed open and deaf, able to send
+  lines that ran but never to receive another — and work items queued meanwhile skip it
+  (`WsSink::has()`). **Never `httpd_sess_trigger_close()`**: it queues the close as a work
+  item on httpd's control socket, which holds 6 (`CONFIG_LWIP_UDP_RECVMBOX_SIZE`) and drops
+  the rest without an error (`CONFIG_HTTPD_QUEUE_WORK_BLOCKING` is off), and that socket is
+  full exactly when a client has stalled the httpd task: the lost close is what left a
+  stalled client deaf. For the same reason `pump()` queues nothing behind a send that has run
+  `WS_LINK_SLOW_MS` (250 ms, `wsSendSince`): lines wait in the 2 KB sink instead, and when it
+  fills, `write()` drops the **whole line** (and ends a head already sent with a newline) —
+  lost lines, never broken ones, and never a store past the end of the buffer.
 - **Every emitter a PANEL depends on must fall back to the socket.** The
   `Serial.availableForWrite()` guard is correct and stays — an unguarded USB write
   blocks up to HWCDC's 50 ms tx timeout and starves the SBUS decode in `loop()` — but it
@@ -977,6 +991,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | `37428e4` | A client whose send fails is shut down with `shutdown()`, not `httpd_sess_trigger_close()`, whose queued close was lost in httpd's full control socket and left the stalled client open and deaf (HIL `ncwifi.ws_stalled_client`); `pump()` queues nothing behind a send stalled 250 ms (`WS_LINK_SLOW_MS`). |
+| 2026-10-04 | `2428167` | WebSocket sessions send through `wsSendAll()`: a short write is continued until the frame is out, and only a socket that takes no byte for 5 s (`WS_STALL_MS`) is given up on and shut down. The 1 s `send_wait_timeout` alone cut frames short in a 3 s WiFi stall (lwIP's short count, which httpd takes as success) and closed a healthy client (HIL `ncwifi.ws_ping_soak`, a regression from `2aec189`). |
 | 2026-10-04 | `3df29d0` | `?REC,EDITCANCEL` empties the buffer, and `?REC,CLEAR` answers busy instead of "cleared" when the recorder is not idle (HIL `ncrec.editcancel_empties`). |
 | 2026-10-04 | `a35249a` | `?REC,PLAY,<name>`, `LOAD` and `EDITLOAD` say the recorder is busy instead of "not found" when it is not idle (HIL `ncrec.busy_load_not_missing`). |
 | 2026-10-04 | `cb314f6` | `WCB_SEQ` names and the `WCB_SEQVAL` key and value are JSON-escaped instead of having `"`, `\` and control characters stripped (HIL `ncmesh.seqval_verbatim`). |
