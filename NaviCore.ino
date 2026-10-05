@@ -3807,7 +3807,10 @@ bool execCliLine(const String& line) {
       else     Serial.println("[CLIPUL:END,OK]");
     }
     else if (sub.equalsIgnoreCase("EDITCANCEL")) { navirec::editCancel(); Serial.println("[CLIPUL:CANCEL,OK]"); }
-    else if (sub.equalsIgnoreCase("CLEAR")) { navirec::clearClip(); Serial.println("[REC] cleared"); }
+    else if (sub.equalsIgnoreCase("CLEAR")) {
+      if (navirec::clearClip()) Serial.println("[REC] cleared");
+      else Serial.printf("[REC] busy (%s) - not cleared\n", navirec::stateName());   // never "cleared" for a clear that did not happen
+    }
     else                                    navirec::info(Serial);   // bare "?REC" or "?REC,INFO"
     return true;
   }

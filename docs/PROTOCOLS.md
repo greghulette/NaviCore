@@ -625,7 +625,9 @@ A clip asked for while the recorder is busy (recording, replaying, mid-upload) i
 missing**: `PLAY,<name>` and `LOAD` answer `[REC] busy (<state>) …`, and `EDITLOAD` of a clip
 not already resident answers `[CLIPDL:ERR]recorder busy (<state>)`, which the tool's ranged
 download raises as an error. `<state>` is `?REC,INFO`'s name (`RECORDING`, `REPLAYING`,
-`EDITING`).
+`EDITING`). `CLEAR` likewise answers `[REC] busy (<state>) - not cleared` unless idle, and
+`EDITCANCEL` empties the staged events (they used to stay in the buffer, playable and
+saveable).
 
 ### Other
 
@@ -971,6 +973,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC66)_ | `?REC,EDITCANCEL` empties the buffer, and `?REC,CLEAR` answers busy instead of "cleared" when the recorder is not idle (HIL `ncrec.editcancel_empties`). |
 | 2026-10-04 | _(D-NC65)_ | `?REC,PLAY,<name>`, `LOAD` and `EDITLOAD` say the recorder is busy instead of "not found" when it is not idle (HIL `ncrec.busy_load_not_missing`). |
 | 2026-10-04 | _(D-NC46)_ | `WCB_SEQ` names and the `WCB_SEQVAL` key and value are JSON-escaped instead of having `"`, `\` and control characters stripped (HIL `ncmesh.seqval_verbatim`). |
 | 2026-10-04 | _(D-NC26)_ | A relayed CLI line over 199 characters, or a mesh→serial line over 200, is refused with a log line instead of being truncated into its queue slot and run (HIL `ncmesh.long_command_truncation`). |

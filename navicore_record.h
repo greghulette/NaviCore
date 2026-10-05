@@ -305,7 +305,14 @@ inline void stopRecord() {
   drain();                                    // flush in-flight events
   _state = ST_IDLE;
 }
-inline void clearClip() { if (_state == ST_IDLE) { _count = 0; _residencyClear(); } }
+// Empties the buffer - only when idle, and says so: false while recording, replaying or
+// mid-upload. The CLI answered "[REC] cleared" whatever happened, so during a take it
+// claimed a clear that never happened (HIL ncrec.editcancel_empties).
+inline bool clearClip() {
+  if (_state != ST_IDLE) return false;
+  _count = 0; _residencyClear();
+  return true;
+}
 inline uint32_t clipDurationMs() { return _count ? _buf[_count - 1].tMs : 0; }
 inline uint32_t eventCount()     { return _count; }
 
@@ -954,8 +961,15 @@ inline const char* editEnd(const char* name) {
 }
 
 // Abort an in-progress upload (browser closed the editor, or a step NAK'd) —
-// discards whatever was staged; nothing was written to flash.
-inline void editCancel() { if (_state == ST_EDITING) _state = ST_IDLE; }
+// discards whatever was staged; nothing was written to flash. DISCARDS means the
+// buffer is emptied: dropping only the state left the staged events in _buf, where
+// ?REC,PLAY played them and ?REC,SAVE saved them (saveClip gates on idle only) - the
+// partial-upload exposure stop()'s comment warns about (HIL ncrec.editcancel_empties).
+inline void editCancel() {
+  if (_state != ST_EDITING) return;
+  _count = 0; _residencyClear();
+  _state = ST_IDLE;
+}
 
 // Emits the clip library as one small "[CLIPITEM]{...}" line per clip, bracketed
 // by "[CLIPLIST:BEGIN]" / "[CLIPLIST:END]", which the config-tool Clips panel
