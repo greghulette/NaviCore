@@ -260,6 +260,15 @@ store with one logical writer.
 The USB-CDC tee (`RcSerial`) gates its capture sink on `xPortGetCoreID() == _capCore`, so a
 Core-0 print landing mid-command cannot corrupt the single-threaded RTERM line buffer.
 
+**WebSocket output crosses the other way, Core 1 → the httpd task (Core 0).** The sink
+(`naviws::WsSink`, loop task) moves its bytes onto NaviCore's own PSRAM queue (`wsTxHead`),
+and one httpd work item at a time (`wsDrainWork`) sends them; the list and its flags are
+shared under the spinlock `wsTxMux`, which nothing holds across a socket call or an
+allocation. Never hand httpd one work item per frame: its control socket drops what it
+cannot hold, without an error. Every socket write happens on the httpd task, through
+`wsSendAll`, so the server's own control frames cannot interleave with ours — see
+[PROTOCOLS.md](PROTOCOLS.md) on the WebSocket transport.
+
 **`onWcbStatus` is the one callback that fires on *both* cores.** The ONLINE edge comes
 from the ESP-NOW receive callback (Core 0, first heartbeat after silence); the OFFLINE edge
 comes from `wcb->update()` inside `loop()` (Core 1, heartbeat-miss sweep). It therefore has
@@ -462,6 +471,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-05 | `bb0dda6` | §8: WebSocket output is a Core 1 → httpd-task hand-off through NaviCore's own PSRAM queue under `wsTxMux`, one `wsDrainWork` at a time. |
 | 2026-10-04 | `aa6ae0a` | §7 lists `checkDeferredRestart()`, last in `loop()`: a mesh `REBOOT` is ACKed from `rcTelemetry::tick()` and restarts once the inbound queues are quiet (HIL `ncboot.mesh_reboot`). |
 | 2026-10-04 | `4833716` | §7, §10: a serial action goes through the paced aux transmitter (`queueSerialAction()` → `auxTxPump()`) instead of one blocking whole-line write (HIL `ncdev.serial_action_paced`). |
 | 2026-10-04 | `42c8a61` | §10: a WLED action to a remote slot forwards `;L<id>,<body>` rebuilt from the parse instead of the text as written (HIL `ncdev.wled_forward_normalised`). |

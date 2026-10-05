@@ -79,9 +79,19 @@ static const uint8_t  WS_MAX_CLIENTS = 3;
 // soak always survived; it is also short enough that one stalled client holds the httpd
 // task (and so every other client) about 5 s once, then never again.
 static const uint32_t WS_STALL_MS    = 5000;
-// How long one send may run before pump() stops queueing work behind it (wsSendSince).
-// A healthy link takes a 2 KB item in a few ms, so this only ever trips on a stall.
-static const uint32_t WS_LINK_SLOW_MS = 250;
+// The outbound queue (wsTxHead): a line that STARTS while it holds this many bytes is
+// dropped whole (WsSink::write's admission). Sized well past what a stall can pile up:
+// the monitor adds ~13 KB a second, and a stalled client holds the queue at most about
+// WS_STALL_MS before it is shut down, so this is ~20 s of it - only clients that take
+// nothing for that long see a line refused, and a reply to a healthy client never is. A
+// line already started is always queued whole, past the cap if need be. PSRAM (8 MB).
+static const size_t   WS_TX_MAX_QUEUED = 256 * 1024;
+// Frames one wsDrainWork run sends before it re-queues itself, so httpd serves its
+// sockets (a client's PING, its next command) between runs of a long backlog.
+static const uint8_t  WS_DRAIN_BATCH   = 8;
+// A wsDrainWork queued this long ago that has not started was lost (httpd's control
+// socket drops what it cannot hold, without an error); wsKick then queues another.
+static const uint32_t WS_KICK_LOST_MS  = 2000;
 
 struct WsCmd {
   int   fd;      // client socket, for the async reply
@@ -90,9 +100,6 @@ struct WsCmd {
 
 inline QueueHandle_t  wsQueue  = nullptr;
 inline httpd_handle_t wsServer = nullptr;
-// millis() (never 0) at which the send wsSendAll is running began; 0 while none runs.
-// Written on the httpd task, read by pump() on the loop task (one aligned word).
-inline volatile uint32_t wsSendSince = 0;
 // True only while drain() runs a line that came in on a socket - the transport a
 // handler can ask about. NOT the capture tee: that stays armed for a client's whole
 // session (below), so it says "a client is connected", never "this line came from one".
@@ -117,21 +124,61 @@ inline bool lineFromSocket() { return wsLineRunning; }
 // service SBUS at ~111 fps. Buffering here and flushing at one known point in
 // loop() keeps the blocking where it can be reasoned about.
 //
-// OVERFLOW DROPS WHOLE LINES. Truncating mid-line would hand the tool half a JSON
-// object, which fails at JSON.parse and (per the tool's own notes) silently
-// freezes a panel. Dropping to the next newline loses a sample instead, which for
-// 20 Hz telemetry is invisible.
-// One queued transmission. Allocated by pump() on the loop task, freed by
-// wsSendWork() on the httpd task after the bytes are on the wire.
+// A LINE GOES OUT WHOLE OR NOT AT ALL. Truncating mid-line would hand the tool half
+// a JSON object, which fails at JSON.parse and (per the tool's own notes) silently
+// freezes a panel. Dropping a whole line loses a sample instead, which for 20 Hz
+// telemetry is invisible. See the admission in write().
+
+// One frame of the outbound stream. Queued on wsTxHead/wsTxTail by pump() on the loop
+// task; sent and freed by wsDrainWork() on the httpd task. `fds` are the clients that
+// were connected when its bytes were written.
 struct WsTx {
+  WsTx*  next;
   char*  data;
   size_t len;
   int    fds[WS_MAX_CLIENTS];
 };
 
-// Forward declaration: pump() queues this, and it is defined below WsSink
-// because it needs the sink to drop a dead fd.
-void wsSendWork(void* arg);
+// ── The outbound queue: OURS, drained by ONE httpd work item at a time ──────
+// pump() used to hand httpd one work item per frame. httpd's control socket holds 6
+// (CONFIG_LWIP_UDP_RECVMBOX_SIZE) and drops the rest without an error
+// (CONFIG_HTTPD_QUEUE_WORK_BLOCKING is off in core 3.3.4), so any burst the httpd task
+// could not keep up with - a reply over ~6 frames, or anything written while a send was
+// slow - lost frames out of its middle, each lost item leaking its PSRAM copy, and
+// httpd's own control messages could be lost with them. Holding the bytes back instead
+// (a 2 KB buffer behind a slow send) cut GET_CONFIG at 2048 characters on a healthy
+// socket (HIL ncwifi.ws_parity). Now frames wait here, in PSRAM, for as long as they
+// need, and at most one wsDrainWork item of ours is ever in httpd's queue.
+// The list and the flags are shared by the loop task (pump, wsKick) and the httpd task
+// (wsDrainWork, wsKick): every access holds wsTxMux, and nothing inside it calls a
+// socket function or allocates.
+inline portMUX_TYPE wsTxMux        = portMUX_INITIALIZER_UNLOCKED;
+inline WsTx*        wsTxHead       = nullptr;
+inline WsTx*        wsTxTail       = nullptr;
+inline size_t       wsTxQueued     = 0;       // bytes in the list, frames being sent included
+inline bool         wsKickPending  = false;   // a wsDrainWork is in httpd's queue, not yet started
+inline bool         wsDrainRunning = false;   // a wsDrainWork is running (it re-queues itself)
+inline uint32_t     wsKickAtMs     = 0;       // when the pending one was queued
+inline uint32_t     wsDroppedLines = 0;       // lines refused whole (loop task); drain() says so on USB
+
+// Defined below WsSink: they need the sink to drop a dead fd.
+void wsDrainWork(void* arg);
+void wsKick();
+
+// Free every queued frame. ONLY on the httpd task, and only while no client is live:
+// then nothing writes to the queue (write() returns at !live()) and no drain is running
+// (drains run on this same task). WsSink::begin() calls it as the first client of a new
+// session arrives, so a frame written for a session that has ended is never delivered to
+// a newcomer that happens to get one of its socket numbers back.
+inline void wsTxDiscard() {
+  portENTER_CRITICAL(&wsTxMux);
+  WsTx* tx   = wsTxHead;
+  wsTxHead   = nullptr;
+  wsTxTail   = nullptr;
+  wsTxQueued = 0;
+  portEXIT_CRITICAL(&wsTxMux);
+  while (tx) { WsTx* next = tx->next; free(tx->data); free(tx); tx = next; }
+}
 
 class WsSink : public Print {
  public:
@@ -147,22 +194,25 @@ class WsSink : public Print {
   // server will hold.
   void begin(int fd) {
     for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] == fd) return;   // already known
-    // FIRST client after a quiet period: start from a clean sheet. _dropping is set
-    // when a pump() fails, which is exactly what happens as the last client leaves
-    // mid-line - and nothing cleared it again, because write() returns at !live()
-    // BEFORE reaching the reset, and end() has no caller. It therefore survived the
-    // disconnect and ate the first whole line the next client was sent. Usually that
-    // is one 20 Hz telemetry frame and invisible; when it is the ~14 KB GET_CONFIG
-    // reply the tool comes up with no config at all, which reads as "the droid lost
-    // my settings". Only on the transition to live: clearing while another client is
-    // already connected would discard output buffered for it this pass.
-    if (!live()) { _len = 0; _dropping = false; _lineStart = 0; _lineHeadSent = false; }
+    // FIRST client after a quiet period: start from a clean sheet. _dropping (a line
+    // being refused) can be left set as the last client leaves mid-line - and nothing
+    // cleared it again, because write() returns at !live() BEFORE reaching the reset,
+    // and end() has no caller. It therefore survived the disconnect and ate the first
+    // whole line the next client was sent. Usually that is one 20 Hz telemetry frame and
+    // invisible; when it is the ~14 KB GET_CONFIG reply the tool comes up with no config
+    // at all, which reads as "the droid lost my settings". Frames still queued for the
+    // ended session go too (wsTxDiscard). Only on the transition to live: clearing while
+    // another client is already connected would discard output buffered for it.
+    if (!live()) {
+      _len = 0; _dropping = false; _atLineStart = true; _lineQueued = false; _lineStartInBuf = 0;
+      wsTxDiscard();
+    }
     for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] < 0) { _fds[i] = fd; return; }
     _fds[0] = fd;   // full: evict the oldest rather than refuse the newcomer
   }
   void drop(int fd) { for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] == fd) _fds[i] = -1; }
   bool has(int fd) const { for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] == fd) return true; return false; }
-  void end() { for (int i = 0; i < WS_MAX_CLIENTS; i++) _fds[i] = -1; _len = 0; _dropping = false; _lineStart = 0; _lineHeadSent = false; }
+  void end() { for (int i = 0; i < WS_MAX_CLIENTS; i++) _fds[i] = -1; _len = 0; _dropping = false; _atLineStart = true; _lineQueued = false; _lineStartInBuf = 0; }
   bool live() const {
     for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] >= 0) return true;
     return false;
@@ -170,36 +220,34 @@ class WsSink : public Print {
 
   size_t write(uint8_t c) override {
     if (!live()) return 1;
-    if (_dropping) { if (c == '\n') _dropping = false; return 1; }
-    if (_len >= sizeof(_buf)) {
-      // FULL — flush right here rather than dropping. A single CONFIG reply is one
-      // ~14 KB line, so a drop-on-full policy discarded the whole thing and the tool
-      // sat there with no config at all ("Configure WCB Network..."), while the
-      // ~640 B PWM_UPDATE fitted and made the monitor look healthy.
-      //
-      // Yes, this puts a TCP send inside a Serial.printf on the SBUS core — the very
-      // thing pump() exists to avoid. It is the lesser evil and it is RARE: only a
-      // line longer than the buffer reaches here, i.e. a config or cmdlib dump, not
-      // the 20 Hz telemetry that motivated the buffering. Losing the config is a
-      // hard failure; a few ms of jitter on an explicit user action is not.
-      if (!pump()) { _dropping = true; return 1; }   // send failed: client is gone
-      if (_len >= sizeof(_buf)) {
-        // pump() could NOT free room: httpd refused the work item, or there was no
-        // PSRAM for its copy - both happen while a stalled client holds the send task.
-        // Storing anyway wrote past the end of _buf (HIL ncwifi.ws_stalled_client). Drop
-        // this WHOLE line instead, per the policy above: the part of it still buffered
-        // goes too, so no client gets half a line glued to the next one. If its head has
-        // already been sent (a line longer than the buffer), end that head with a newline
-        // so only this one line fails to parse.
-        _len = _lineStart;
-        if (_lineHeadSent && _len < sizeof(_buf)) _buf[_len++] = '\n';
-        _lineStart = _len; _lineHeadSent = false;
-        _dropping = true;
-        return 1;
-      }
+    if (_atLineStart) {
+      // ADMISSION: ONCE PER LINE, AT ITS FIRST BYTE, never again mid-line. A line that
+      // starts while the outbound queue holds WS_TX_MAX_QUEUED is dropped whole, and
+      // counted for drain()'s note on USB. Any other line is queued whole, however long
+      // it is and however far past the cap it takes the queue - GET_CONFIG's ~14 KB, a
+      // cmdlib, a clip list - so a slow client still gets every reply it can take, and
+      // nothing is ever cut in the middle by a full queue.
+      _atLineStart    = false;
+      _lineQueued     = false;
+      _lineStartInBuf = _len;
+      if (wsTxQueued >= WS_TX_MAX_QUEUED) { _dropping = true; wsDroppedLines++; }
+    }
+    if (_dropping) { if (c == '\n') { _dropping = false; _atLineStart = true; } return 1; }
+    // FULL: move the buffer into the outbound queue and go on. A line longer than the
+    // buffer - a config, a cmdlib - leaves in buffer-sized frames, every one queued.
+    if (_len >= sizeof(_buf) && !_stage()) {
+      // ...unless there is no PSRAM for the frame - never seen: the queue is capped far
+      // below it. This line can then no longer go out whole, so drop what of it is still
+      // here and the rest of it, and if its head was already queued, end that head with
+      // a newline so no client gets it glued to the next line: the one way a line can
+      // still arrive cut.
+      _len = _lineStartInBuf;
+      if (_lineQueued && _len < sizeof(_buf)) _buf[_len++] = '\n';
+      _dropping = true; wsDroppedLines++;
+      return 1;
     }
     _buf[_len++] = (char)c;
-    if (c == '\n') { _lineStart = _len; _lineHeadSent = false; }
+    if (c == '\n') _atLineStart = true;
     return 1;
   }
   size_t write(const uint8_t* b, size_t n) override {
@@ -226,18 +274,20 @@ class WsSink : public Print {
   //
   // Turning pings off is not the fix -- ANY compliant client may ping, and the
   // keepalive is what detects a vanished AP in ~3 s instead of ~34 s.
-  // httpd_queue_work() runs the send on the httpd task, so every write to the
-  // socket (ours and the server's own control frames) is issued by one task.
+  // wsDrainWork() runs the sends on the httpd task, so every write to the socket
+  // (ours and the server's own control frames) is issued by one task.
   bool pump() {
-    if (!_len || !wsServer) return live();
-    // DON'T QUEUE BEHIND A STALLED SEND. While the httpd task is stuck in one (a client
-    // not reading, a WiFi stall: up to WS_STALL_MS), a work item queued now cannot run,
-    // and httpd's control socket holds only 6: the rest are dropped without an error, a
-    // chunk of the stream lost for every client and its PSRAM copy leaked, and httpd's own
-    // control messages lost with them. So hold the bytes until the send ends; if the
-    // buffer fills meanwhile, write() drops whole lines - lost lines, never broken ones.
-    { const uint32_t s = wsSendSince;
-      if (s && (uint32_t)(millis() - s) >= WS_LINK_SLOW_MS) return live(); }
+    if (!wsServer) return live();
+    _stage();   // a frame PSRAM cannot take stays buffered for the next pass
+    wsKick();
+    return live();
+  }
+
+ private:
+  // Move the buffered bytes onto the outbound queue as one frame. False only when
+  // PSRAM has no room for it; the bytes then stay in _buf.
+  bool _stage() {
+    if (!_len) return true;
     // NEVER CUT THROUGH A UTF-8 SEQUENCE. This is a TEXT frame, and RFC 6455 8.1
     // requires each one to be valid UTF-8 on its own. The buffer is flushed on a
     // BYTE count (write() at _len >= sizeof(_buf), and flushHook at arbitrary
@@ -250,35 +300,35 @@ class WsSink : public Print {
     size_t send = _utf8SafeLen(_buf, _len);
     if (!send) send = _len;          // cannot improve it - send rather than stall
 
-    // The work item owns its own copy: _buf is reused the moment this returns,
-    // and the send happens later on the other task.
+    // The frame owns its own copy: _buf is reused the moment this returns, and the
+    // send happens later on the other task.
     WsTx* tx = (WsTx*)ps_malloc(sizeof(WsTx));
     char* copy = tx ? (char*)ps_malloc(send) : nullptr;
     if (!tx || !copy) {
       if (copy) free(copy);
       if (tx) free(tx);
-      return live();                 // keep the bytes buffered; the next pass retries
+      return false;
     }
     memcpy(copy, _buf, send);
+    tx->next = nullptr;
     tx->data = copy;
     tx->len  = send;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) tx->fds[i] = _fds[i];
-
-    if (httpd_queue_work(wsServer, wsSendWork, tx) != ESP_OK) {
-      free(copy); free(tx);
-      return live();                 // queue full — hold the bytes, try next pass
-    }
+    portENTER_CRITICAL(&wsTxMux);
+    if (wsTxTail) wsTxTail->next = tx; else wsTxHead = tx;
+    wsTxTail    = tx;
+    wsTxQueued += send;
+    portEXIT_CRITICAL(&wsTxMux);
 
     const size_t left = _len - send;
     if (left) memmove(_buf, _buf + send, left);
     _len = left;
-    // Track where the unfinished line starts (write()'s whole-line drop needs it).
-    if (_lineStart > send) _lineStart -= send;
-    else { if (_lineStart < send) _lineHeadSent = true; _lineStart = 0; }
-    return live();
+    // Where the unfinished line starts, and whether its head is now queued (write()).
+    if (_lineStartInBuf >= send) _lineStartInBuf -= send;
+    else { _lineQueued = true; _lineStartInBuf = 0; }
+    return true;
   }
 
- private:
   // Longest prefix of b[0..n) that does not end part-way through a UTF-8 sequence.
   // Returns n when the tail is already complete, which is the overwhelmingly common
   // case (pure ASCII), so this costs a couple of compares per flush.
@@ -299,9 +349,10 @@ class WsSink : public Print {
 
   int    _fds[WS_MAX_CLIENTS] = { -1, -1, -1 };
   size_t _len      = 0;
-  bool   _dropping = false;
-  size_t _lineStart    = 0;      // index in _buf where the unfinished line begins
-  bool   _lineHeadSent = false;  // ...and whether pump() already sent part of that line
+  bool   _dropping = false;        // dropping the current line, to its newline
+  bool   _atLineStart    = true;   // the next byte starts a line (admission is decided then)
+  bool   _lineQueued     = false;  // part of the current line is already on the queue
+  size_t _lineStartInBuf = 0;      // where the current line begins in _buf
   // One PWM_UPDATE is ~640 B and they arrive at ~20 Hz; loop() pumps far faster
   // than that, so this only has to absorb one busy pass, not a backlog.
   char   _buf[2048];
@@ -319,12 +370,35 @@ inline WsSink wsSink;
 // happened to fall on the disarmed side -- measured as a completely dead monitor.
 inline int wsLoopCore = -1;
 
-// RUNS ON THE HTTPD TASK. Every socket write goes through here, which is the
-// whole point: the server's own control frames (a PONG answering a client PING)
-// are issued by this same task, so they can no longer interleave with ours.
-inline void wsSendWork(void* arg) {
-  WsTx* tx = (WsTx*)arg;
-  if (!tx) return;
+// Make sure a wsDrainWork is coming while the outbound queue holds frames. Called by
+// pump() (loop task) and by wsDrainWork as it ends (httpd task). Queues nothing while a
+// drain runs - that drain re-queues itself if it leaves frames - or while one is already
+// queued, unless it was queued WS_KICK_LOST_MS ago and never started: then httpd's
+// control socket dropped it, and another is the only way the queue moves again.
+inline void wsKick() {
+  if (!wsServer) return;
+  const uint32_t now = millis();
+  bool kick = false;
+  portENTER_CRITICAL(&wsTxMux);
+  if (wsTxHead && !wsDrainRunning &&
+      (!wsKickPending || (uint32_t)(now - wsKickAtMs) >= WS_KICK_LOST_MS)) {
+    wsKickPending = true;
+    wsKickAtMs    = now;
+    kick          = true;
+  }
+  portEXIT_CRITICAL(&wsTxMux);
+  if (kick && httpd_queue_work(wsServer, wsDrainWork, nullptr) != ESP_OK) {
+    portENTER_CRITICAL(&wsTxMux);
+    wsKickPending = false;                     // refused outright: the next pump() asks again
+    portEXIT_CRITICAL(&wsTxMux);
+  }
+}
+
+// One frame to every client it was written for that is still connected. RUNS ON THE
+// HTTPD TASK. Every socket write goes through here, which is the whole point: the
+// server's own control frames (a PONG answering a client PING) are issued by this same
+// task, so they can no longer interleave with ours.
+inline void wsSendFrame(WsTx* tx) {
   if (wsServer && tx->len) {
     httpd_ws_frame_t f = {};
     f.final   = true;
@@ -333,9 +407,9 @@ inline void wsSendWork(void* arg) {
     f.len     = tx->len;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
       if (tx->fds[i] < 0) continue;
-      // Skip a client an EARLIER work item already dropped: items queued while it held
-      // the task still list its fd, and each would block on it again for the full send
-      // timeout, holding every other client up behind a socket we know is dead.
+      // Skip a client an EARLIER frame already dropped: frames queued while it held the
+      // task still list its fd, and each would block on it again for the full stall
+      // bound, holding every other client up behind a socket we know is dead.
       if (!wsSink.has(tx->fds[i])) continue;
       if (httpd_ws_send_frame_async(wsServer, tx->fds[i], &f) != ESP_OK) {
         // That client is gone or stalled: stop writing to it AND end its session. Only
@@ -355,8 +429,35 @@ inline void wsSendWork(void* arg) {
       }
     }
   }
-  free(tx->data);
-  free(tx);
+}
+
+// RUNS ON THE HTTPD TASK, queued by wsKick. Sends up to WS_DRAIN_BATCH frames in order,
+// then, if any are left, queues itself again rather than looping on: httpd serves its
+// sockets (a client's PING, its next command) between the runs of a long backlog. A
+// frame stays counted in wsTxQueued until it is sent, so write()'s admission sees it.
+inline void wsDrainWork(void* arg) {
+  (void)arg;
+  portENTER_CRITICAL(&wsTxMux);
+  wsKickPending  = false;
+  wsDrainRunning = true;
+  portEXIT_CRITICAL(&wsTxMux);
+  for (uint8_t n = 0; n < WS_DRAIN_BATCH; n++) {
+    portENTER_CRITICAL(&wsTxMux);
+    WsTx* tx = wsTxHead;
+    if (tx) { wsTxHead = tx->next; if (!wsTxHead) wsTxTail = nullptr; }
+    portEXIT_CRITICAL(&wsTxMux);
+    if (!tx) break;
+    wsSendFrame(tx);
+    portENTER_CRITICAL(&wsTxMux);
+    wsTxQueued -= tx->len;
+    portEXIT_CRITICAL(&wsTxMux);
+    free(tx->data);
+    free(tx);
+  }
+  portENTER_CRITICAL(&wsTxMux);
+  wsDrainRunning = false;
+  portEXIT_CRITICAL(&wsTxMux);
+  wsKick();   // frames left, or written meanwhile: come back after httpd's own turn
 }
 
 // Deliver a line to a connected WebSocket client WITHOUT going through Serial.
@@ -454,7 +555,7 @@ inline void wsClose(httpd_handle_t hd, int sockfd) {
 }
 
 // The send function of every WebSocket session, installed at the handshake (wsHandler).
-// RUNS ON THE HTTPD TASK, for our frames (wsSendWork) and the server's own (PONG, close).
+// RUNS ON THE HTTPD TASK, for our frames (wsSendFrame) and the server's own (PONG, close).
 //
 // A FRAME GOES OUT WHOLE, OR IT IS THE LAST THING ON THAT SOCKET. httpd's default send
 // is one send(), and with SO_SNDTIMEO set (send_wait_timeout) lwIP ends a write that
@@ -472,7 +573,6 @@ inline int wsSendAll(httpd_handle_t hd, int sockfd, const char* buf, size_t len,
   if (!buf) return HTTPD_SOCK_ERR_INVALID;
   size_t   done     = 0;
   uint32_t lastByte = millis();
-  wsSendSince = lastByte | 1u;                                     // pump() holds while this runs long
   while (done < len) {
     const int n = send(sockfd, buf + done, len - done, flags);   // returns within send_wait_timeout
     if (n > 0) { done += (size_t)n; lastByte = millis(); continue; }
@@ -480,12 +580,10 @@ inline int wsSendAll(httpd_handle_t hd, int sockfd, const char* buf, size_t len,
     const bool retry = (n == 0) || e == EAGAIN || e == EWOULDBLOCK || e == EINTR || e == ENOMEM;
     if (!retry || (uint32_t)(millis() - lastByte) >= WS_STALL_MS) {
       shutdown(sockfd, SHUT_RDWR);
-      wsSendSince = 0;
       return retry ? HTTPD_SOCK_ERR_TIMEOUT : HTTPD_SOCK_ERR_FAIL;
     }
     if (n == 0) vTaskDelay(1);   // a send() that returns at once with nothing done must not spin
   }
-  wsSendSince = 0;
   return (int)len;
 }
 
@@ -640,6 +738,22 @@ inline void drain() {
     rcSerial.armCapture(&wsSink, flushHook);
     if (!wsSink.pump()) rcSerial.disarmCapture();   // client gone — stop teeing
   }
+  // Lines the sink refused whole (its admission: the clients have taken nothing for a
+  // while) are said so on USB, at most once a second. Straight to HWCDCSerial: through
+  // Serial the note would be teed back into the same full sink, and refused in its turn.
+  // Only when USB has room, like vlogf(): a USB write must never stall loop().
+  { static uint32_t told = 0, toldAt = 0;
+    const uint32_t dropped = wsDroppedLines;
+    if (dropped != told && (uint32_t)(millis() - toldAt) >= 1000) {
+      char note[112];
+      const int n = snprintf(note, sizeof(note),
+                             "[WS] %lu line(s) dropped whole: the socket(s) took nothing (%u KB queued)\n",
+                             (unsigned long)(dropped - told), (unsigned)(wsTxQueued / 1024));
+      if (n > 0 && HWCDCSerial.availableForWrite() >= n) {
+        HWCDCSerial.write((const uint8_t*)note, (size_t)n);
+        told = dropped; toldAt = millis();
+      }
+    } }
 
   if (!wsQueue) return;
   WsCmd m;
