@@ -47,12 +47,15 @@ Three transports, chosen in the connect modal:
 Transport is auto-detected at connect: the tool pings direct first, then — if nothing answers
 — flips to Via WCB and pings again.
 
-**Each probe phase takes an epoch (`_pongEpoch`), and a PONG only satisfies the epoch it
-arrived in.** A bare boolean cannot tell which phase a reply belongs to, so a board that
-answers *late* (stalled `loop()`, a busy USB host) replies after the direct phase gave up,
-that reply lands during the Via-WCB probe, and the tool concludes it is bridged — reporting
-"Connected via WCB" **with no WCB attached**. That is not cosmetic: Save strips WCB Network
-over the bridge, so a misdetected session silently refuses to write those settings.
+**The link a PONG came over is read from the PONG, not from the phase it lands in.** A
+relayed PONG carries the NaviCore's mesh `id`; a direct one never does (`_pongRelayed`,
+[PROTOCOLS.md §2](PROTOCOLS.md)). Each probe phase still takes an epoch (`_pongEpoch`) so it
+counts only a reply that arrived during it, but a board that answers *late* (stalled
+`loop()`, a busy USB host) replies after the direct phase gave up, during the Via-WCB probe —
+and credited to that phase, the tool concluded it was bridged, reporting "Connected via WCB"
+**with no WCB attached**. That is not cosmetic: Save strips WCB Network over the bridge, so a
+misdetected session silently refuses to write those settings. A direct PONG in the bridge
+phase now returns the session to Direct USB (`nctool.pong_epoch_slow_direct`).
 
 An auto-switch is also announced now, in a toast and the terminal. Changing transport changes
 behaviour, and if the user did not plug in a bridge it is a misdetection they need to see.
@@ -701,6 +704,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **A slow direct board is no longer taken for a bridged one** (§2). The epoch only told which phase a PONG arrived in, so a direct PONG 3.5 s late satisfied the Via-WCB probe; the probe now reads the link from the PONG's shape (`id` = relayed). |
 | 2026-10-04 | _(pending)_ | **Via a WCB writes nothing bare** (§2, D-NC71). `connectSharedPort()` raised `viaWcbActive` after waiting for the hub's port, and the status poll that `setConnected(true)` starts during that wait sent its first `GET_WCB_STATUS` unwrapped, which the WCB broadcast. The flag now goes up before `join()` and comes down on a failed attach. |
 | 2026-10-04 | _(pending)_ | **The Full Wipe texts tell the truth** (D-NC34): the button titles, the Firmware tab notes, the confirm and the completion log said the saved configuration is erased, but `flasher.js` erases only NVS and otadata and `/config.json` lives in LittleFS at 0x3D0000. They now say the config, command library and clips are kept, and point at Restore Defaults + Save for a reset. |
 | 2026-10-04 | _(pending)_ | **A refused Record no longer arms Stop & Save** (§5 Clip backup and restore). `clipRecordToggle` waited for a `[CLIPUL:REC]` marker no firmware prints, timed out, and assumed the START worked; it now waits for the board's `[REC] recording…` / `[REC] busy` line, and asks `?REC,INFO` when there is no answer. |

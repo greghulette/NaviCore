@@ -222,7 +222,7 @@ payload approaches 98 KB and copying it per line is real cost.
 
 | Message | Reply | Notes |
 |---|---|---|
-| `PING` / `{"type":"PING"}` | `{"type":"PONG","version":"<FW_VERSION>"}` | Also clears a stale calibration mute |
+| `PING` / `{"type":"PING"}` | `{"type":"PONG","version":"<FW_VERSION>"}` | Also clears a stale calibration mute. Over the mesh (`rc_telemetry.h`) the answer is `{"sys":1,"type":"PONG","id":<deviceId>,"version":…,"model":…,"mode":…}`. **Only the relayed PONG carries `id`**: the tool's transport auto-detect reads the link a PONG came over from it, so a direct PONG must never gain one |
 | `{"type":"GET_CONFIG"}` | `{"type":"CONFIG","data":{…}}` | Full `rcConfigToJSON()` |
 | `{"type":"SET_CONFIG","data":{…},"saveId":N}` | `{"type":"ACK","of":"SET_CONFIG","ok":bool,"saveId":N}` | Deserialised un-filtered; re-applies bauds, SBUS-out, board profile live. `saveId` is echoed so the tool can tell its own save's ACK from a late or foreign one; the tool sends a random per-tab base plus its own save count (`_saveWireId`) |
 | `{"type":"GET_CMDLIB"}` | `{"type":"CMDLIB","size":N,"hash":H,"data":{…}}` | Command library stored on the droid, opaque to firmware |
@@ -933,6 +933,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | §2 `PING`: the relayed PONG's shape, and the rule the tool now depends on — only a relayed PONG carries `id`, so the transport probe reads the link from the PONG rather than from the phase it lands in (`nctool.pong_epoch_slow_direct`). |
 | 2026-10-04 | _(pending)_ | §3 `?REC`: `EDITBEGIN` takes an optional `<mode>` (1–3) that `editBegin()` makes the resident mode, so an uploaded clip is saved with its own mode. Without it a restored clip took the mode of whatever was loaded last (D-NC33). An older board ignores the argument; an older tool sends none. |
 | 2026-10-04 | _(pending)_ | §2 `SET_CONFIG` row brought up to the wire (`of`, `saveId`). The tool's `saveId` is now a random per-tab base plus the tab's count, and its fragment `sid` starts at random per tab: every tab numbered both from 1, so two tabs on one shared WCB took each other's ACKs (D-NC35, `nctool.multi_tab_save`). |
 | 2026-10-04 | _(pending)_ | §2 `TEST_ACTION`: the tool now reads the ACK. An `ok:false` reached only the raw terminal echo, so a refused ▶ Test looked like one that fired (D-NC20, `nctool.test_action_refusal_shown`). |
