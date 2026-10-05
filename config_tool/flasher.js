@@ -18,7 +18,10 @@
 //  what has to stay stable, not any one version.
 //
 //  Public surface:
-//    flashFirmware(port, callbacks)  → Promise<void>
+//    flashFirmware(port, callbacks)               → Promise<void>
+//    prepareFirmwareFlash(onLog, onStatus)        → Promise<images>
+//      (the network half of flashFirmware, run up front; pass the
+//       result as callbacks.images)
 //
 //  port is a WebSerial SerialPort that MUST be closed before calling.
 // ════════════════════════════════════════════════════════════════
@@ -264,25 +267,49 @@ const _isWindowsPlatform = /Win/i.test(navigator.platform || '');
 //      programming, recovery from a bricked board, or whenever a
 //      factory-fresh config is wanted.
 // ════════════════════════════════════════════════════════════════
-async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = false }) {
-
-  // ── Step 1: load CDN dependencies ──────────────────────────────
+// ── The flash tool (CDN), loaded once ───────────────────────────
+let _flashToolMods = null;
+async function _loadFlashTool(onLog, onStatus) {
+  if (_flashToolMods) return _flashToolMods;
   onStatus('Loading flash tool…');
   onLog('Loading CryptoJS…');
   try { await loadScript(CRYPTOJS_CDN); }
   catch (e) { throw new Error(`Could not load CryptoJS from CDN — are you online?\n${e.message}`); }
 
   onLog('Loading esptool-js…');
-  let ESPLoader, Transport;
-  try { ({ ESPLoader, Transport } = await import(ESPTOOL_CDN)); }
+  let mods;
+  try { mods = await import(ESPTOOL_CDN); }
   catch (e) { throw new Error(`Could not load esptool-js from CDN — are you online?\n${e.message}`); }
   onLog('Flash tool loaded.');
+  _flashToolMods = { ESPLoader: mods.ESPLoader, Transport: mods.Transport };
+  return _flashToolMods;
+}
 
-  // ── Step 2: fetch firmware ──────────────────────────────────────
+// Everything flashFirmware needs from the network — the flash tool and the image
+// set — fetched up front. A caller holding a live config session runs this BEFORE
+// it tears the session down and passes the result as `images`, so a refusal (the
+// CDN unreachable, an incomplete set on GitHub) leaves that session untouched:
+// fetched inside flashFirmware, after the disconnect, it stranded the user
+// disconnected from a board nothing had been written to.
+async function prepareFirmwareFlash(onLog, onStatus) {
+  await _loadFlashTool(onLog, onStatus);
   onStatus('Downloading firmware…');
-  let flashImages;
-  try { flashImages = await fetchFirmwareImages(onLog); }
+  try { return await fetchFirmwareImages(onLog); }
   catch (e) { throw new Error(`Firmware download failed: ${e.message}`); }
+}
+
+async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = false, images = null }) {
+
+  // ── Step 1: load CDN dependencies ──────────────────────────────
+  const { ESPLoader, Transport } = await _loadFlashTool(onLog, onStatus);
+
+  // ── Step 2: fetch firmware (unless prepareFirmwareFlash already did) ──
+  let flashImages = images;
+  if (!flashImages) {
+    onStatus('Downloading firmware…');
+    try { flashImages = await fetchFirmwareImages(onLog); }
+    catch (e) { throw new Error(`Firmware download failed: ${e.message}`); }
+  }
 
   // ── Step 3: connect to ESP bootloader ──────────────────────────
   onStatus('Connecting to bootloader…');
@@ -331,7 +358,8 @@ async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = fal
   // so always writing them costs almost nothing and is reliable on BOTH blank and
   // already-programmed boards. The only difference between Update and Full
   // Wipe is whether we also erase NVS/otadata (Step 3c below) — Update never
-  // touches NVS at 0x9000, so saved config is preserved.
+  // touches NVS at 0x9000. Neither writes the config LittleFS (spiffs, below):
+  // /config.json survives both, so no text may promise a wipe erases it (D-NC34).
   let imagesToFlash = flashImages.slice();
   onLog(eraseNvs
     ? 'Full wipe — flashing bootloader + partitions + app (NVS will be erased).'
@@ -356,8 +384,9 @@ async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = fal
   // OTA-data (the boot selector) is ALWAYS reset to ota_0 on an esptool flash:
   // we always write the app to ota_0, so if a prior OTA had flipped the boot
   // selector to ota_1, leaving otadata alone would make the board boot the stale
-  // (now-overwritten) slot → rollback watchdog → reboot loop. NVS (saved config)
-  // is only wiped on a Full Wipe. Both are written as 0xFF so esptool erases then
+  // (now-overwritten) slot → rollback watchdog → reboot loop. NVS (learned peers,
+  // the legacy pre-LittleFS config copy — not /config.json) is only wiped on a
+  // Full Wipe. Both are written as 0xFF so esptool erases then
   // rewrites the sectors back to factory-fresh.
   {
     const otadataBlank = new ArrayBuffer(0x2000);  // otadata: 8 KB @ 0xE000 (two 4 KB sectors)

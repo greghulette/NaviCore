@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.19:41.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">05.00:48.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2861,7 +2861,7 @@
                    while every readout claims 12/13. Paired with the clamp in rc_config.h. -->
               <input type="number" id="wcb-channel" min="1" max="11" style="width:60px"
                      oninput="config.wcbNetwork.channel = Math.max(1, Math.min(11, +this.value || 1)); updateWcbDirtyBadge()">
-              <small style="color:var(--muted);font-size:10px">1-13 — must match every WCB (?WCBCH)</small>
+              <small style="color:var(--muted);font-size:10px">1-11 — must match every WCB (?WCBCH)</small>
             </div>
             <div class="btn-row" style="margin-top:8px">
               <button class="btn btn-warn" id="btn-wcb-reboot" type="button" disabled
@@ -3205,9 +3205,10 @@
              Firmware tab — over-the-USB flashing of the WCB v3.2 board.
              Pulls the latest .bin from GitHub (greghulette/NaviCore
              on branch main, under /firmware/) and writes it via
-             esptool-js + WebSerial.  NVS (saved config) is preserved
-             on any normal update; only blank or partition-mismatched
-             boards get a full flash.
+             esptool-js + WebSerial.  The saved config is /config.json in
+             the LittleFS partition at 0x3D0000, which NEITHER button
+             writes; Full Wipe erases only NVS (0x9000: learned peers and
+             the legacy pre-LittleFS settings copy) and otadata (D-NC34).
              ════════════════════════════════════════════════════════════ -->
         <section class="cfg-pane" id="cfg-pane-firmware">
           <h2 class="cfg-pane-title">Firmware</h2>
@@ -3233,8 +3234,8 @@
               Flashes the latest NaviCore firmware to a WCB v3.2 (ESP32-S3)
               board. Pulls the binary from
               <code>github.com/greghulette/NaviCore/firmware</code>.
-              Your saved configuration (NVS) is preserved unless the partition
-              layout changed.
+              Your saved configuration is kept by both buttons: it lives in its
+              own flash partition, which the flasher never writes.
             </div>
             <div class="noconn" style="margin-top:4px">
               <b>To enter bootloader mode:</b> hold <b>BOOT</b>, tap <b>RST</b>,
@@ -3243,11 +3244,11 @@
             </div>
             <div class="wcb-send-row" style="margin-top:10px; gap:8px; flex-wrap:wrap">
               <button class="btn btn-blue" id="btn-fw-flash" type="button"
-                      title="Normal update: writes the new firmware while preserving your saved configuration (NVS).">
+                      title="Normal update: writes the new firmware and keeps your saved configuration.">
                 ⬆ Update Firmware
               </button>
               <button class="btn btn-danger" id="btn-fw-wipe" type="button"
-                      title="Full wipe: rewrites bootloader, partitions and app, AND erases the saved configuration (NVS). Use for first-time programming or recovery. Recorded CLIPS are NOT erased — the clips partition (0x400000) is never written by the flasher. Clips are also not in any backup, so that is the only copy you have.">
+                      title="Full wipe: rewrites the bootloader, partition table and app, and erases NVS (learned mesh peers) and the OTA boot data. Use for first-time programming or recovery. Your saved configuration, the command library and recorded clips are NOT erased: the flasher never writes their partitions. To reset the configuration, use Restore Defaults and Save.">
                 ⚠ Full Wipe &amp; Flash
               </button>
               <button class="btn btn-blue" id="btn-fw-ota" type="button"
@@ -3263,10 +3264,12 @@
             <div class="noconn" style="margin-top:6px">
               <b>Update Firmware</b> — keeps your saved config intact. Use this
               for routine firmware updates.<br>
-              <b>Full Wipe &amp; Flash</b> — factory-fresh push. Erases NVS and
-              OTA data along with the firmware. Use for the very first flash on
-              a new board, or to recover from corruption / bad config. <b>You
-              will lose all saved settings.</b>
+              <b>Full Wipe &amp; Flash</b> — rewrites the bootloader and partition
+              table with the firmware, and erases NVS (learned mesh peers) and the
+              OTA data. Use for the very first flash on a new board, or to recover
+              one that will not boot. <b>It does not erase your saved configuration,
+              the command library or recorded clips</b> — to reset the configuration,
+              use Restore Defaults and Save.
             </div>
             <div id="fw-progress-wrap" style="display:none; margin-top:10px">
               <div style="height:8px; background:var(--border); border-radius:4px; overflow:hidden">
@@ -4562,9 +4565,40 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
   // auto-enables with no manual toggle, and if neither answers we revert to
   // direct so no stale Via-WCB flag lingers. (Replaces the old status-text
   // sniff, which a real direct board would set within the first ping.)
-  // Each phase takes its own epoch so a LATE reply from the previous phase can
-  // never satisfy this one — see _pongEpoch. Without that, a slow direct board
-  // is misdetected as a bridged one.
+  //
+  // FIRST, IDENTIFY THE DEVICE — before a byte of JSON goes out (D-NC70). A WCB runs
+  // any console line that starts with neither its function nor its command character
+  // as a BROADCAST (WCB.ino handleSingleCommand): the direct probe's bare JSON PINGs
+  // went out of every one of its serial ports with broadcast output, into whatever
+  // device listens there, and onto the mesh — up to six of them per connect. So the
+  // first line is a '?' line, which a WCB runs locally and broadcasts nothing for:
+  // bare "?REC", read-only on both. A NaviCore answers "[REC] state=…" (and its
+  // unknown-command echo keeps the '?', so "Unknown command: ?REC" counts as one too);
+  // a WCB answers "Unknown command: REC" (it strips the '?') and "Type '? ?' for help".
+  // Firmware older than ?REC (June 2026) answers nothing and gets the PING probe.
+  //   NaviCore → the direct probe below, and no fall-back to Via WCB.
+  //   WCB      → Via WCB at once; nothing is written to it bare, even if NaviCore
+  //              never answers through it.
+  //   silence  → neither spoke (a doorway that forwards only JSON, a board still
+  //              booting): the PING probe decides, from the PONGs' shape.
+  // Skipped when the caller forces Via WCB, and when it forbids bridging
+  // (allowViaWcb=false: the post-flash reconnect to the board just flashed).
+  const identifyDevice = async () => {
+    let verdict = null;
+    _transportProbe = (line) => {
+      if (/^\[REC\] /.test(line) || /^Unknown command: \?REC\b/i.test(line)) verdict = 'navicore';
+      else if (!verdict && (/^Unknown command: REC\b/i.test(line) || line.startsWith("Type '? ?' for help"))) verdict = 'wcb';
+    };
+    try {
+      for (let i = 0; i < 3 && !verdict; i++) {
+        await sendLine('?REC', true);
+        for (let t = 0; t < 10 && !verdict; t++) await new Promise(r => setTimeout(r, 50));
+      }
+    } finally { _transportProbe = null; }
+    return verdict;
+  };
+  // A phase resolves to the LINK its PONG came over — 'direct' or 'relayed', read
+  // from the PONG's shape (see _pongRelayed) — or null when nothing answered in it.
   const pingForPong = async () => {
     const ep = ++_pongEpoch;
     _pongSeen = false;
@@ -4572,15 +4606,37 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
       await sendJSON({ type: 'PING' });
       await new Promise(r => setTimeout(r, 500));
     }
-    return _pongSeenEpoch === ep;
+    return _pongSeenEpoch === ep ? (_pongRelayed ? 'relayed' : 'direct') : null;
   };
   if (forceViaWcb) onViaWcbToggle(true);      // caller KNOWS it's a WCB — start in Via WCB, skip the direct probe
-  let pongOk = await pingForPong();          // try current transport (Direct USB, or forced Via WCB)
-  if (!pongOk && allowViaWcb && !viaWcbActive) {
+  const device = (!viaWcbActive && allowViaWcb) ? await identifyDevice() : null;
+  if (device === 'wcb') {
+    onViaWcbToggle(true);
+    appendTerminalLine('< [link] this port is a WCB — connecting Via WCB', 'rx');
+  }
+  let link   = await pingForPong();           // try current transport (Direct USB, or Via WCB)
+  let pongOk = !!link;
+  if (link === 'relayed' && !viaWcbActive) {
+    // A RELAYED PONG answered a bare PING: this port is a WCB or relay doorway that put
+    // the PING on the mesh, not a NaviCore. Accepting it as a direct link left USB OTA
+    // enabled — and ?OTALOCAL is a '?' command the doorway runs ITSELF, retargeting the
+    // update at the WCB (D-NC30, nctool.doorway_pong_misdetect; Intellex's shim forced
+    // Via WCB after the handshake to get round it). Via WCB from here on, announced.
+    onViaWcbToggle(true);
+    showToast('This port is a WCB, not a NaviCore — switched to Via WCB.', 'warn', 8000);
+    appendTerminalLine('< [link] relayed PONG on the direct probe — this port is a WCB; switched to Via WCB', 'rx');
+  }
+  if (!pongOk && allowViaWcb && !viaWcbActive && device !== 'navicore') {
     console.log('No direct PONG — retrying through a tethered WCB (Via WCB)…');
     onViaWcbToggle(true);                     // wrap PINGs so the WCB relays them
-    pongOk = await pingForPong();             // try the bridge
-    if (!pongOk) {
+    link   = await pingForPong();             // try the bridge
+    pongOk = !!link;
+    if (link === 'direct') {
+      // A DIRECT PONG during the bridge probe: the board is on this port and only
+      // answered late. Back to Direct USB, and nothing to announce.
+      onViaWcbToggle(false);
+      appendTerminalLine('< [link] late direct PONG — staying on Direct USB', 'rx');
+    } else if (!pongOk) {
       onViaWcbToggle(false);                  // neither answered — don't leave a stale flag
       document.getElementById('status-text').textContent = 'Waiting for board…';
     } else {
@@ -4592,6 +4648,11 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
     }
   }
   if (!pongOk) console.warn('PING never received PONG (direct or Via WCB) — proceeding anyway.');
+  if (!pongOk && device === 'wcb') {
+    // Identified as a WCB, so the session stays Via WCB (never bare JSON on a WCB) —
+    // but say that NaviCore has not answered through it rather than "Connected".
+    document.getElementById('status-text').textContent = `WCB connected — no answer from RC #${RC_WCB_DEVICE_ID} yet`;
+  }
 
   await sendJSON({ type: 'GET_CONFIG' });
   await new Promise(r => setTimeout(r, 400));
@@ -4711,6 +4772,12 @@ async function connectSharedPort() {
   }
   _sharedBuf = ''; _sharedDecoder = null;
   if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }   // fresh attempt → drop any stale "couldn't attach" notice
+  // The transport flag goes up BEFORE join(). The hub's state event can open the port
+  // during the wait below, and onSharedState -> setConnected(true) -> startWcbStatusPoll
+  // sends GET_WCB_STATUS at once: with the flag still down, sendJSON wrote it BARE, and
+  // a WCB runs a bare console line as a broadcast out of its serial ports and onto the
+  // mesh (D-NC71, nctool.via_wcb_nothing_bare). The shared port is always a WCB gateway.
+  viaWcbActive = true;
   sharedHub.join();
   sharedActive = true;
   // Wait (bounded) for leader election + the shared port to actually open.
@@ -4723,6 +4790,8 @@ async function connectSharedPort() {
     // hub so we're not left as a broken port-less leader blocking a real one.
     try { sharedHub.leave(); } catch (_) {}   // don't stay a port-less leader blocking a real one (see the lingering-follower squat)
     sharedActive = false;
+    viaWcbActive = false;           // raised before join() above; nothing is bridged after all
+    _updateFirmwareBtnState();      // every site that assigns viaWcbActive re-syncs these (see openPortAndStart)
     setConnected(false);
     // Persistent, visible notice (ms:0 → no auto-dismiss; a fast normal attach never reaches this block).
     // Lead with the primary remedy — share a board in the Wizard — since the hub's conditional-
@@ -4740,8 +4809,7 @@ async function connectSharedPort() {
     appendTerminalLine('· shared: no shared port yet — share a board in the WCB Wizard (or close any other config-tool tab), then reconnect.', 'sys');
     return;
   }
-  viaWcbActive = true;    // set the flag BEFORE setConnected starts the WCB-status poll, so its GET_WCB_STATUS wraps as ;w20 and reaches the RC
-  setConnected(true);
+  setConnected(true);     // viaWcbActive has been up since before join(), so the poll this starts wraps as ;w20
   if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }   // attached → clear any "couldn't attach" notice
   onViaWcbToggle(true);   // the shared port is a WCB gateway → relay ;w20 to the NaviCore (applies UI + 'Connected via WCB' text)
   // Handshake — mirror openPortAndStart's tail (PING for PONG, then config + monitor).
@@ -5356,15 +5424,21 @@ async function sendLine(msg, silent = false) {
 const RC_WCB_DEVICE_ID = 20;
 let viaWcbActive = false;   // false = Direct USB mode; true = bridging via tethered WCB
 let _pongSeen    = false;   // set by the PONG handler — connect uses it to auto-detect the transport
-// Transport auto-detect probes in PHASES (direct first, then Via WCB), and a
-// bare boolean cannot tell which phase a PONG belongs to. A board that answers
-// LATE — stalled loop(), a busy USB host — replies after the direct phase has
-// given up, and that reply then lands during the Via-WCB probe and is credited
-// to it: the tool reports "Connected via WCB" with no WCB attached, and Save
-// silently strips WCB Network because it believes it is bridged.
-// So each probe takes an epoch, and a PONG only satisfies the epoch it arrived in.
+// Transport auto-detect probes in PHASES (direct first, then Via WCB). Each probe
+// takes an epoch so it counts only a PONG that arrived during it — but WHICH LINK
+// the PONG came over is read from the PONG itself, never from the phase it lands
+// in. A relayed PONG carries the NaviCore's mesh "id" (rc_telemetry.h's PING
+// reply); a direct one never does (NaviCore.ino's). A board that answers LATE —
+// stalled loop(), a busy USB host — replies after the direct phase has given up,
+// during the Via-WCB probe: credited to that phase, it made the tool report
+// "Connected via WCB" with no WCB attached, and Save silently strip WCB Network
+// because it believed it was bridged (nctool.pong_epoch_slow_direct).
 let _pongEpoch     = 0;
 let _pongSeenEpoch = -1;
+let _pongRelayed   = false;   // the last PONG's shape: true = relayed through a WCB (it carries "id")
+// While openPortAndStart identifies the device on a fresh port (the "?REC" probe),
+// every received line is offered to this hook first; null otherwise.
+let _transportProbe = null;
 let _rcTrigReleaseTimer = null;   // setTimeout handle for rc_trig auto-release
 // Via WCB: SBUS RECEIVER block freshness tracking.  PWM_UPDATE carries
 // the RC's local SBUS metrics inline (Direct USB path).  Over WCB we
@@ -5505,7 +5579,11 @@ const FRAG_MAX_PARTS_RECV = 512;   // 512 × 80 = 40 KB max fragmented download
 // this is exceeded.  Bail loudly client-side so we notice if the chunk
 // math drifts.
 const FRAG_MAX_ENV_BYTES = 187;
-let   _nextOutSid      = 1;
+// Fragment session id, 1..65535 (0 is the RC's free-slot sentinel). A random start
+// per tab, for the same reason as _saveWireId: two tabs on one shared WCB both
+// counting from 1 would put two concurrent uploads under one sid in NaviCore's
+// reassembly pool (D-NC35).
+let   _nextOutSid      = 1 + Math.floor(Math.random() * 65535);
 
 // Split a string into chunks each <= maxBytes UTF-8 bytes, never cutting a
 // codepoint. Iterating `for..of` walks by code point (surrogate pairs stay
@@ -5589,8 +5667,42 @@ function _fragChunks(str) {
     if (esc + cost > budget && cur) flush();
     cur += ch; esc += cost;
   }
-  flush();
+  // Until nothing is left: a flush can trim the chunk and CARRY its tail, and after the
+  // last one there is no next character to pick that carry up. A single flush() here
+  // returned with the carry still in `cur`, and the input's tail was dropped.
+  // Terminates: every flush() pushes at least one codepoint.
+  while (cur) flush();
   return chunks;
+}
+
+// What a Via-WCB send of `inner` (the serialized message, sys stamp included) takes:
+// its fragment slices, and the reason sendJSON refuses it — null when it fits. The
+// envelope check assumes the widest sid (65535), so a slice that passes here passes
+// with whatever sid the send draws. ONE function for both callers, so they cannot
+// disagree: sendJSON, and saveConfigToBoard, which must know BEFORE it latches the
+// pending save. sendJSON alone found the refusal only after the save was latched,
+// and the tool showed "Saving to NaviCore…" until the 12 s watchdog for a save that
+// never left (nctool.push_refused_not_pending).
+function _bridgedFragPlan(inner) {
+  const chunks = _fragChunks(inner);
+  if (chunks.length > FRAG_MAX_PARTS) {
+    return { chunks, refusal: `Send aborted — payload needs ${chunks.length} fragments (max ${FRAG_MAX_PARTS}). Use Direct USB for a config this large.` };
+  }
+  const enc = new TextEncoder();
+  for (let i = 0; i < chunks.length; i++) {
+    const n = enc.encode(JSON.stringify({ f: i + 1, of: chunks.length, sid: 65535, s: chunks[i] })).length;
+    if (n > FRAG_MAX_ENV_BYTES) {
+      return { chunks, refusal: `Send aborted — fragment ${i + 1}/${chunks.length} needs a ${n} B envelope, over the ${FRAG_MAX_ENV_BYTES} B cap (heavily-escaped value). Use Direct USB.` };
+    }
+  }
+  return { chunks, refusal: null };
+}
+// The refusal a Via-WCB sendJSON(obj) would hit, or null. Builds the line exactly as
+// sendJSON does (sys stamped first); a message that fits one packet is never refused.
+function _bridgedSendRefusal(obj) {
+  const inner = JSON.stringify({ sys: 1, ...obj });
+  if (new TextEncoder().encode(inner).length <= FRAG_MAX_ENV_BYTES) return null;
+  return _bridgedFragPlan(inner).refusal;
 }
 
 // True only while a bridged (Via WCB) MULTI-FRAGMENT send is mid-flight. The
@@ -5614,10 +5726,13 @@ async function sendJSON(obj, silent = false) {
   // trailing `,"sys":1` in the stored library. The firmware side no longer depends
   // on key order, but keeping sys first makes its comment true again — and costs
   // nothing, since every consumer switches on `type`.
+  //
+  // Resolves true once the line (every fragment) is written, false when the send was
+  // refused or abandoned — a caller that latches state on a send checks it.
   obj = { sys: 1, ...obj };
   if (!viaWcbActive) {
     await sendLine(JSON.stringify(obj), silent);
-    return;
+    return true;
   }
   const inner  = JSON.stringify(obj);
   // WCB's local-serial command syntax for "relay this to another WCB" is
@@ -5648,7 +5763,7 @@ async function sendJSON(obj, silent = false) {
   const innerBytes = new TextEncoder().encode(inner).length;
   if (innerBytes <= FRAG_MAX_ENV_BYTES) {
     await sendLine(prefix + inner, silent);
-    return;
+    return true;
   }
 
   // Fragment.  Sender-chosen sid wraps at 65535 → 1 (never 0; the RC uses
@@ -5658,13 +5773,12 @@ async function sendJSON(obj, silent = false) {
   // Chunk on UTF-8 byte budget + codepoint boundaries (not code-unit substring),
   // so a multi-byte character is never split across two fragments — the RC joins
   // the `s` slices, so the reassembled JSON must stay valid UTF-8.
-  const chunks = _fragChunks(inner);
+  const { chunks, refusal } = _bridgedFragPlan(inner);
   const total  = chunks.length;
-  if (total > FRAG_MAX_PARTS) {
-    const msg = `Send aborted — payload needs ${total} fragments (max ${FRAG_MAX_PARTS}). Use Direct USB for a config this large.`;
-    console.error('sendJSON: ' + msg);
-    appendTerminalLine('< [config] ' + msg, 'error');   // surface it, don't fail silently
-    return;
+  if (refusal) {
+    console.error('sendJSON: ' + refusal);
+    appendTerminalLine('< [config] ' + refusal, 'error');   // surface it, don't fail silently
+    return false;
   }
   // Quiesce the background bridged polls for the WHOLE multi-fragment send (see
   // _bridgeUploadInFlight): their single-packet lines otherwise interleave the
@@ -5680,7 +5794,7 @@ async function sendJSON(obj, silent = false) {
     // its 5 s FRAG_TIMEOUT_MS.
     if ((!port && !sharedActive) || disconnecting) {
       console.warn(`sendJSON: port closed mid-send, aborted at fragment ${i + 1}/${total}`);
-      return;
+      return false;
     }
     const slice = chunks[i];
     const env   = JSON.stringify({ f: i + 1, of: total, sid, s: slice });
@@ -5692,7 +5806,7 @@ async function sendJSON(obj, silent = false) {
       const msg = `Send aborted at fragment ${i + 1}/${total} — envelope ${envBytes} B over the ${FRAG_MAX_ENV_BYTES} B cap (heavily-escaped value). Use Direct USB.`;
       console.error('sendJSON: ' + msg);
       appendTerminalLine('< [config] ' + msg, 'error');   // surface it, don't fail silently
-      return;
+      return false;
     }
     await sendLine(prefix + env, silent);
     // Inter-fragment pacing. Two independent floors, take the larger:
@@ -5733,6 +5847,7 @@ async function sendJSON(obj, silent = false) {
   } finally {
     _bridgeUploadInFlight = false;   // resume the background polls
   }
+  return true;
 }
 
 // ── Terminal debug filter ────────────────────────────────────────────────
@@ -6463,13 +6578,28 @@ async function clipRecordToggle() {
     // started — and saveClip persists whatever is in the RAM buffer, which after
     // a ?REC,PLAY is the clip that was just loaded. That silently writes a copy
     // of the played clip over the typed name (saveClip opens with "w", no
-    // clobber guard). Wait for the board's marker instead. Timeout → pre-marker
-    // firmware: fall back to the legacy assume-ok behavior (same pattern as
-    // clipRename above).
-    const startP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:REC'), 1500).catch(() => null);
+    // clobber guard). So wait for the board's own answer to START, which is a
+    // plain line (NaviCore.ino "?REC,START"): "[REC] recording…" or "[REC] busy /
+    // no buffer". This used to wait for a [CLIPUL:REC] marker no firmware prints,
+    // time out, and assume the START worked — so a refused one armed Stop & Save
+    // anyway (nctool.clip_record_refused). No answer at all (a reply lost over the
+    // mesh) is settled by asking for the recorder's state, never by assuming.
+    const isStartReply = t => /^\[REC\] (recording|busy)/.test(t);
+    const startP = _tlWaitForMarker(isStartReply, 3000).catch(() => null);
     if (!(await sendRcCli('?REC,START'))) return;
-    const r = await startP;
-    if (r && r.includes('ERR')) {
+    let r = await startP;
+    if (!r) {
+      const infoP = _tlWaitForMarker(t => t.startsWith('[REC] state='), 3000).catch(() => null);
+      if (await sendRcCli('?REC,INFO')) {
+        const st = await infoP;
+        if (st) r = /state=RECORDING\b/.test(st) ? '[REC] recording' : '[REC] busy';
+      }
+    }
+    if (!r) {
+      alert('No answer from the board to Record, so the panel cannot tell whether it is recording. Check the board, then try again.');
+      return;
+    }
+    if (!/^\[REC\] recording/.test(r)) {
       alert('The board refused to start recording — it is busy (playing, already recording, or editing). Stop that first, then try again.');
       return;
     }
@@ -6831,12 +6961,23 @@ async function clipsDownloadAll(onProgress) {
 // unsafe BY CONSTRUCTION: it would let a month-old backup destroy a clip
 // recorded yesterday, unrecoverably. Callers must resolve collisions first;
 // this function just writes what it is told to write.
+// A clip's recording mode as the EDITBEGIN argument: 1-3 (FunctionSwState), else
+// null — then EDITBEGIN goes without one and the board keeps the resident mode.
+function _clipModeArg(m) {
+  m = +m;
+  return (Number.isInteger(m) && m >= 1 && m <= 3) ? m : null;
+}
 async function clipRestoreOne(clip, destName, onProgress) {
   const events = clip.events || [];
   if (!events.length) throw new Error('clip has no events');
 
+  // EDITBEGIN carries the clip's mode: saveClip stores the RESIDENT mode, and an
+  // EDITBEGIN without one leaves whatever the last loaded or recorded clip had, so a
+  // restored clip took that mode instead of its own (D-NC33). Firmware that predates
+  // the argument ignores it (the ?REC parser hands it over as the unused name).
+  const mode = _clipModeArg(clip.mode);
   const beginP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:BEGIN'));
-  await sendRcCli('?REC,EDITBEGIN', true);
+  await sendRcCli('?REC,EDITBEGIN' + (mode ? ',' + mode : ''), true);
   const begin = await beginP;
   if (!begin.includes('OK')) throw new Error('board rejected EDITBEGIN (busy recording or replaying?)');
 
@@ -7314,7 +7455,9 @@ async function _tlSave() {
   try {
     _tlSetStatus('Saving 0/' + events.length + '…');
     const beginP = _tlWaitForMarker(t => t.startsWith('[CLIPUL:BEGIN'));
-    await sendRcCli('?REC,EDITBEGIN');
+    // The clip's own mode, as clipRestoreOne sends it — not whatever is resident by now.
+    const mode = _clipModeArg(clip.mode);
+    await sendRcCli('?REC,EDITBEGIN' + (mode ? ',' + mode : ''));
     const begin = await beginP;
     if (!begin.includes('OK')) throw new Error('board rejected EDITBEGIN (busy recording/replaying?)');
 
@@ -9028,6 +9171,7 @@ function handleBoardMessage(line) {
   _lastRxKind = _isOwnEcho ? _lastRxKind : line.startsWith('{')
     ? (/"type"\s*:\s*"([A-Za-z0-9_]+)"/.exec(line) || [, 'json'])[1]
     : (line.slice(0, 12).replace(/[^\x20-\x7e]/g, '') || 'text');
+  if (_transportProbe) { try { _transportProbe(line); } catch (_) {} }   // the connect's device probe (openPortAndStart)
   // OTA markers ([OTA:ACK,..]/[OTA:NAK,..]/[OTA:BEGIN,..]/[OTA:END,..]) are not
   // JSON — feed them to the OTA-over-USB orchestrator's marker resolver (when an
   // OTA is active) so it can advance its ACK-paced loop, then echo to the terminal.
@@ -9041,6 +9185,9 @@ function handleBoardMessage(line) {
   // "Timeline editor" section below for _clipDlFeed / _tlFeedMarker.
   if (line.startsWith('[CLIPDL:')) { _clipDlFeed(null, line); return; }
   if (line.startsWith('[CLIPUL:')) { _tlFeedMarker(line); return; }
+  // ?REC's plain replies ("[REC] recording…", "[REC] busy / no buffer", "[REC] state=…")
+  // answer clipRecordToggle's waiter. Fed, not consumed: they still print below.
+  if (line.startsWith('[REC] ')) _tlFeedMarker(line);
   // Maestro 2-way query reply (?MAE,GET/MOVING/ERR): [MAE:<slot>]{…} — route to the
   // Maestro Locations inline readout, not the terminal. Also re-dispatched below inside
   // the [TERM:] unwrap so a Phase-2 remote reply relayed as [TERM:20][MAE:…] still works.
@@ -9059,6 +9206,7 @@ function handleBoardMessage(line) {
       if (_clipListFeed(m[1], m[2])) return;
       if (_clipDlFeed(m[1], m[2])) return;
       if (m[2].startsWith('[CLIPUL:')) { _tlFeedMarker(m[2]); return; }
+      if (m[2].startsWith('[REC] ')) _tlFeedMarker(m[2]);   // as on USB above; still printed
       if (m[2].startsWith('[MAE:')) { _maeReadFeed(m[2]); return; }
       appendTerminalLine((m[1] === String(RC_WCB_DEVICE_ID) ? '' : `[#${m[1]}] `) + m[2], 'rx', 'main');
     } else {
@@ -9514,7 +9662,8 @@ function handleBoardMessage(line) {
 
   if (msg.type === 'PONG') {
     _pongSeen = true;
-    _pongSeenEpoch = _pongEpoch;   // stamp WHICH probe phase this reply belongs to
+    _pongSeenEpoch = _pongEpoch;   // stamp WHICH probe phase this reply arrived in
+    _pongRelayed = msg.id !== undefined;   // and which link it came over (see _pongRelayed)
     document.getElementById('status-text').textContent =
       viaWcbActive ? `Connected via WCB → RC #${RC_WCB_DEVICE_ID}` : 'Connected ✓';
     // The board reports its firmware version (FW_VERSION = base_DTG)
@@ -9591,11 +9740,20 @@ function handleBoardMessage(line) {
   if (msg.type === 'ACK') {
     if (!msg.ok) {
       console.warn('NACK:', msg.msg);
+      // A Test the board refused (▶ Test / the tier test). The raw ACK only echoes into
+      // the terminal, which is usually closed, so without this a refused Test looked
+      // exactly like one that fired: the button flashes either way (D-NC20).
+      if (msg.of === 'TEST_ACTION') {
+        const why = msg.msg ? ` — ${msg.msg}` : '';
+        appendTerminalLine(`< [test] NaviCore refused the test action${why}`, 'rx');
+        showToast(`Test not fired — NaviCore refused it${why}`, 'error');
+        return;
+      }
       // Treat NACK as "save did not apply" — clear pending baseline so
       // the user's subsequent Save will diff against the ORIGINAL
       // baseline (last known good) instead of a baseline that includes
       // the rejected edits.
-      if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _pendingSaveId)) {
+      if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _saveWireId(_pendingSaveId))) {
         appendTerminalLine('< [config] Save NACK\'d by board — baseline NOT advanced', 'rx');
         _pendingSaveBaseline = null;
         if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
@@ -9613,7 +9771,7 @@ function handleBoardMessage(line) {
     // is ignored, so it can't be misattributed to a newer save and advance the
     // baseline to a snapshot the board never stored. (undefined saveId = firmware
     // not yet reflashed → fall back to the old, un-correlated behavior.)
-    if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _pendingSaveId)) {
+    if (msg.of === 'SET_CONFIG' && _pendingSaveBaseline && (msg.saveId === undefined || msg.saveId === _saveWireId(_pendingSaveId))) {
       _configBaseline = _pendingSaveBaseline;
       _pendingSaveBaseline = null;
       if (_pendingSaveTimer) { clearTimeout(_pendingSaveTimer); _pendingSaveTimer = null; }
@@ -14163,7 +14321,7 @@ function _cmdlibUse() {
     const cur = +(document.getElementById(fid + '-target')?.value) || 1;   // keep the row's slot if any
     const skip = !!document.getElementById(fid + '-skiprun')?.checked;
     action = { type: 'maestro', target: String(cur >= 1 && cur <= NUM_MAESTRO_SLOTS ? cur : 1), cmd: wire,
-               ...(skip ? { skipRunning: 1 } : {}) };
+               ...(skip ? { skipRunning: true } : {}) };   // a JSON boolean — see readActionFromFid
   } else if (mode === 'wled') {
     action = { type: 'wled', cmd: wire };
   } else if (mode === 'device') {
@@ -14200,7 +14358,7 @@ function _cmdlibUse() {
   // (the row's checkbox persists it; a fresh pick starts unchecked and is read on Save).
   if (action && (action.type === 'wcb_unicast' || action.type === 'wcb_broadcast')
       && /;M[1-8]/i.test(action.cmd || '') && document.getElementById(fid + '-skiprun')?.checked) {
-    action.skipRunning = 1;
+    action.skipRunning = true;   // a JSON boolean — see readActionFromFid
   }
   // The composer writes action.cmd into the row PROGRAMMATICALLY, and the field's
   // maxLength constrains typing only — so the 95-char store (RC_ACTION_CMD_MAX)
@@ -15079,11 +15237,18 @@ function _appendCommandView(container, action) {
   // (≈5586), and ";s<n>"/";P" are local writes that never route. So
   // ";w3;s4:PP100^;w3;s4:PL5" is delivered correctly and gets no warning.
   const IMPLICIT_ROUTED = /^;\s*(SEQ|[ADHMLC])/i;   // NB: ";s" must not match — hence SEQ spelled out
+  // The hidden destination input (wire mode only), held by REFERENCE. Both refreshers
+  // also run from sync() and the render-time check below while the row is still
+  // detached, where document.getElementById(fid + '-destsel') is null: the field
+  // then opened capped at the full 95 instead of 95 minus the ";W<n>;S<p>" prefix,
+  // and the render-time over-length flag never fired (nctool.command_view_cap_on_open).
+  let destEl = null;
+  const destValue = () => (destEl ? destEl.value : '');
   const chainWarn = document.createElement('div');
   chainWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
   container.appendChild(chainWarn);
   const refreshChainWarn = () => {
-    const dest = document.getElementById(fid + '-destsel')?.value || '';
+    const dest = destValue();
     const cmd  = cmdInput.value || '';
     // sync() writes a bare board number for unicast ('0'/"W<n>S<p>" = broadcast, "S<n>" = local serial).
     const parts = cmd.split('^');
@@ -15106,7 +15271,7 @@ function _appendCommandView(container, action) {
   lenWarn.style.cssText = 'flex-basis:100%;font-size:11px;color:var(--red);display:none';
   container.appendChild(lenWarn);
   const refreshLenWarn = () => {
-    const dest   = document.getElementById(fid + '-destsel')?.value || '';
+    const dest   = destValue();
     const prefix = _rcDestPrefix(dest);
     cmdInput.maxLength = _rcCmdFieldCap(dest);
     // Read-back skips the prefix when the user hand-typed their own ";W…" routing.
@@ -15151,6 +15316,7 @@ function _appendCommandView(container, action) {
     const targetInput = document.createElement('input'); targetInput.type = 'hidden'; targetInput.id = fid + '-target'; targetInput.value = action.target || 1;
     const portInput   = document.createElement('input'); portInput.type   = 'hidden'; portInput.id   = fid + '-port';   portInput.value   = action.port || 'S3';
     const destHidden  = document.createElement('input'); destHidden.type  = 'hidden'; destHidden.id  = fid + '-destsel';
+    destEl = destHidden;   // the refreshers read it by reference (see destValue)
     row1.appendChild(targetInput); row1.appendChild(portInput); row1.appendChild(destHidden);
 
     // Initial (WCB target, serial port) from the action.
@@ -15296,15 +15462,21 @@ function appendActionFields(container, action) {
     const fnSel = document.createElement('select');
     fnSel.id = fid + '-fn';
     fnSel.style.minWidth = '140px';
-    [[14,'PlayWAV'],[16,'StopWAV'],[9,'StopEmote'],[8,'Stop All'],[4,'Stimulate'],
+    const hcrFns = [[14,'PlayWAV'],[16,'StopWAV'],[9,'StopEmote'],[8,'Stop All'],[4,'Stimulate'],
      [3,'Trigger'],[2,'SetEmotion'],[17,'SetVolume'],
      [18,'Volume Up'],[19,'Volume Down'],[12,'Fade In'],[15,'Fade Out'],
      [5,'Overload'],[10,'Override Emotions'],
      [6,'Muse'],[7,'Muse Gap'],[13,'Auto-Muse On/Off'],[11,'ResetEmotions']
-    ].forEach(([v,lbl]) => {
+    ];
+    // A stored fn this list does not name gets an option of its own. Without it no
+    // option matched, the select fell back to its first (PlayWAV), and opening and
+    // applying the action unchanged rewrote its fn to 14 (D-NC32).
+    const curFn = +(action.fn || 14);
+    if (!hcrFns.some(([v]) => v === curFn)) hcrFns.push([curFn, `fn ${curFn}`]);
+    hcrFns.forEach(([v,lbl]) => {
       const o = document.createElement('option');
       o.value = v; o.textContent = lbl;
-      if (v === (action.fn || 14)) o.selected = true;
+      if (v === curFn) o.selected = true;
       fnSel.appendChild(o);
     });
     // Re-render the chan + track widgets whenever the function changes.
@@ -15312,7 +15484,7 @@ function appendActionFields(container, action) {
     container.appendChild(makeFieldGroup('Function', fnSel));
 
     // Initial chan + track fields for the selected fn.
-    renderHcrParamFields(container, +(action.fn || 14), action.chan, action.track);
+    renderHcrParamFields(container, curFn, action.chan, action.track);
     _appendChangeTypeLink(container);
   } else if (type === 'mp3') {
     // LEGACY editor, kept only so existing mp3 actions still load/save unchanged.
@@ -15422,6 +15594,12 @@ function readActionFromUI(tier, ai) {
 // — both render their fields via the SAME appendActionFields(container, action),
 // so reading them back needs to share this too, or the two editors would
 // silently drift apart over time.
+//
+// skipRunning is written as the JSON boolean true, NEVER 1. rcConfigFromJSON reads
+// it as `obj["skipRunning"] | false`, and ArduinoJson 7 returns the default for any
+// value that is not a boolean — so a 1 arrived, was read as false, and every Apply
+// on a gated action quietly cleared the gate on the board (nctool.skip_running_saved).
+// The same holds for every bool the firmware reads with `| false` / `| true`.
 function readActionFromFid(fid, type, extras) {
   if (type === '') return null;
 
@@ -15430,7 +15608,7 @@ function readActionFromFid(fid, type, extras) {
     const cmd    = document.getElementById(fid + '-cmd')?.value || '';
     if (!cmd.trim()) return null;
     const skipRunning = /;M[1-8]/i.test(cmd) && !!document.getElementById(fid + '-skiprun')?.checked;
-    return { type, target: String(target), cmd, ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
+    return { type, target: String(target), cmd, ...(skipRunning ? { skipRunning: true } : {}), ...extras };
   }
   if (type === 'wcb_broadcast') {
     let cmd = document.getElementById(fid + '-cmd')?.value || '';
@@ -15443,7 +15621,7 @@ function readActionFromFid(fid, type, extras) {
     const m = /^W(\d+)S(\d)$/.exec(dv);
     if (m && !/^;W/i.test(cmd)) cmd = `;W${m[1]};S${m[2]}` + cmd;
     const skipRunning = /;M[1-8]/i.test(cmd) && !!document.getElementById(fid + '-skiprun')?.checked;
-    return { type, cmd, ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
+    return { type, cmd, ...(skipRunning ? { skipRunning: true } : {}), ...extras };
   }
   if (type === 'maestro' || type === 'maestro_local' || type === 'maestro_remote') {
     // Authored from the command library (nc-maestro board): the verb string
@@ -15455,7 +15633,7 @@ function readActionFromFid(fid, type, extras) {
     if (!cmd.trim()) return null;
     const skipRunning = !!document.getElementById(fid + '-skiprun')?.checked;        // skip-if-running gate (user toggle)
     return { type: 'maestro', target: String(target), cmd,
-             ...(skipRunning ? { skipRunning: 1 } : {}), ...extras };
+             ...(skipRunning ? { skipRunning: true } : {}), ...extras };
   }
   if (type === 'serial') {
     const port = document.getElementById(fid + '-port')?.value || 'S3';
@@ -16129,23 +16307,32 @@ function saveKnobModal() {
   if (!config.knobs) config.knobs = {};
   syncKnobOutputsFromDom();
   const fn = +document.getElementById('kn-function').value;
-  // Drop maestroCh for HCR Volume outputs (it's unused). For Maestro
-  // Pass-Through, keep all four fields. Applied per mode.
+  // The knob is written in exactly the shape rcConfigToJSON prints it (rc_config.h
+  // rcWriteKnobOuts + the knob loop): target, maestroCh, posMin and posMax always;
+  // midClosed only when true, releaseIdleMs only when non-zero, smoothProfile only
+  // when not -1, easeSwitchOverride only when true. Writing the defaults out instead
+  // made a no-op Apply differ from the board's own copy, so every untouched knob
+  // became a "change" that the next Save shipped (D-NC32, nctool.noop_apply_every_editor).
+  // maestroCh is unused by an HCR Volume output but the firmware prints it (0) all
+  // the same, so it stays. Applied per mode.
   const clean = arr => (arr || []).map(o => {
     if (fn === KF_HCR_VOLUME) {
       // Preserve a genuine Vol-max of 0 (mute): `|| 99` would silently rewrite it.
       // A cleared field arrives as 0 (syncKnobOutputsFromDom coerces), which is the
       // correct 0=mute value; only NaN/undefined falls back to 99.
-      return { target: +o.target || 0, posMin: +o.posMin || 0, posMax: Number.isFinite(+o.posMax) ? +o.posMax : 99 };
+      return { target: +o.target || 0, maestroCh: +o.maestroCh || 0, posMin: +o.posMin || 0,
+               posMax: Number.isFinite(+o.posMax) ? +o.posMax : 99 };
     }
-    return {
+    const out = {
       target:    Math.max(1, Math.min(NUM_MAESTRO_SLOTS, +o.target || 1)),
       maestroCh: +o.maestroCh || 0,
       posMin:    +o.posMin || 0,
       posMax:    +o.posMax || 0,
-      midClosed: !!o.midClosed,
-      releaseIdleMs: Math.max(0, Math.min(60000, +o.releaseIdleMs || 0)),
     };
+    if (o.midClosed) out.midClosed = true;
+    const idle = Math.max(0, Math.min(60000, +o.releaseIdleMs || 0));
+    if (idle) out.releaseIdleMs = idle;
+    return out;
   });
   const modeAware = !!document.getElementById('kn-modeaware')?.checked;
   const byMode = editingKnobDraft.outputsByMode || [editingKnobDraft.outputs, [], []];
@@ -16157,10 +16344,11 @@ function saveKnobModal() {
     reverse:   !!document.getElementById('kn-reverse').checked,
     modeAware: modeAware,
     modeSwitchOverride: (modeAware && modeSrc >= 0 && modeSrc <= 7) ? modeSrc : -1,
-    smoothProfile: (fn === KF_MAESTRO_PASSTHROUGH) ? (+(document.getElementById('kn-smprof')?.value ?? -1)) : -1,
-    easeSwitchOverride: (fn === KF_MAESTRO_PASSTHROUGH) ? !!document.getElementById('kn-easeovr')?.checked : false,
-    outputs:   fn === KF_NONE ? [] : clean(byMode[0]),   // mode 1 (+ all modes when !modeAware)
   };
+  const smProf = (fn === KF_MAESTRO_PASSTHROUGH) ? (+(document.getElementById('kn-smprof')?.value ?? -1)) : -1;
+  if (smProf !== -1) obj.smoothProfile = smProf;                         // -1 = none (omitted, as the firmware prints it)
+  if (fn === KF_MAESTRO_PASSTHROUGH && document.getElementById('kn-easeovr')?.checked) obj.easeSwitchOverride = true;
+  obj.outputs = fn === KF_NONE ? [] : clean(byMode[0]);   // mode 1 (+ all modes when !modeAware)
   if (modeAware && fn !== KF_NONE) {                      // per-mode sets only when opted in
     obj.outputs2 = clean(byMode[1]);
     obj.outputs3 = clean(byMode[2]);
@@ -16480,7 +16668,18 @@ document.querySelectorAll('.mode-tab').forEach(tab => {
 // ════════════════════════════════════════════════════════════════════════════
 //  Top bar buttons
 // ════════════════════════════════════════════════════════════════════════════
-document.getElementById('btn-refresh').addEventListener('click', () => sendJSON({ type: 'GET_CONFIG' }));
+// Refresh re-reads the board's config, and applyConfig replaces `config` with it, so
+// any edit not yet saved is gone the moment the CONFIG lands. Ask first; declined,
+// nothing is re-read (D-NC31, nctool.refresh_overwrites_edits).
+document.getElementById('btn-refresh').addEventListener('click', () => {
+  if (_configUnsaved() && !confirm(
+      'You have unsaved config changes.\n\n' +
+      'Refresh re-reads the config from NaviCore and discards them. Refresh anyway?')) {
+    appendTerminalLine('< [config] Refresh cancelled — unsaved changes kept', 'rx');
+    return;
+  }
+  sendJSON({ type: 'GET_CONFIG' });
+});
 
 // ─── Save guard rails ──────────────────────────────────────────────────────
 // `_configLoaded` flips true the first time a CONFIG response arrives from
@@ -16701,9 +16900,9 @@ function _pushBudgetInfo() {
   const branches = Object.keys(payload);
   if (!branches.length) return { branches, bytes: 0, frags: 0, empty: true };
 
-  // saveId is a small integer whose width can't shift the fragment count; using
-  // the next real one keeps the string byte-identical to what Save would build.
-  const inner = JSON.stringify({ sys: 1, type: 'SET_CONFIG', data: payload, saveId: _saveSeq + 1 });
+  // Use the saveId the next Save will send (_saveWireId), so the string is
+  // byte-identical to the one Save builds and the count cannot be off by a digit.
+  const inner = JSON.stringify({ sys: 1, type: 'SET_CONFIG', data: payload, saveId: _saveWireId(_saveSeq + 1) });
   const bytes = new TextEncoder().encode(inner).length;
   // sendJSON's single-packet fast path: <= FRAG_MAX_ENV_BYTES never enters the
   // fragmenter at all, so it consumes none of the 192-slot pool.
@@ -16931,6 +17130,21 @@ async function saveConfigToBoard() {
   const branches = Object.keys(payload).join(', ');
   console.log(`saveConfigToBoard: sending diff (${branches})`);
 
+  // Refuse a bridged save the fragmenter cannot carry BEFORE latching it as pending.
+  // sendJSON would refuse it too, but only after _pendingSaveBaseline was set and the
+  // "Saving…" toast was up, so the tool waited out the 12 s watchdog for an ACK that
+  // could not come (nctool.push_refused_not_pending). saveId is the one this save
+  // would take, so the line measured is byte-identical to the one sendJSON builds.
+  if (viaWcbActive) {
+    const refusal = _bridgedSendRefusal({ type: 'SET_CONFIG', data: payload, saveId: _saveWireId(_saveSeq + 1) });
+    if (refusal) {
+      console.error('saveConfigToBoard: ' + refusal);
+      appendTerminalLine('< [config] ' + refusal, 'error');
+      showToast('Save refused — this change is too large for the WCB bridge. Connect via USB to save it.', 'error', 10000);
+      return;
+    }
+  }
+
   // Stash the proposed new baseline.  We DO NOT advance _configBaseline
   // until the firmware ACKs the save — see _pendingSaveBaseline /
   // ACK handler.  Otherwise a Save that's silently lost over Via WCB
@@ -16954,7 +17168,7 @@ async function saveConfigToBoard() {
   _dismissToast(_saveToast);
   _saveToast = showToast('Saving to NaviCore…', 'info', 15000);
 
-  await sendJSON({ type: 'SET_CONFIG', data: payload, saveId: _pendingSaveId });
+  await sendJSON({ type: 'SET_CONFIG', data: payload, saveId: _saveWireId(_pendingSaveId) });
   appendTerminalLine(`< [config] Save sent (branches: ${branches}) — awaiting ACK`, 'rx');
 
   // Watchdog: if no ACK in 12 s (longer than the worst-case 40-fragment
@@ -17002,8 +17216,19 @@ let _pendingSaveTimer     = null;
 // ignore any reply whose id isn't the one currently in flight. (Firmware that
 // doesn't yet echo saveId → msg.saveId undefined → we fall back to the old
 // behavior, so this is safe to ship ahead of the reflash.)
+//
+// _pendingSaveId / _saveSeq count THIS tab's saves (1, 2, …). The id on the wire is
+// _saveWireId(n) = a random per-tab base + n. Every tab used to send its count
+// itself, so all of them numbered their saves from 1 — and on one shared WCB (the
+// WcbSerialHub, or any host that fans one port out to several pages) every tab reads
+// every ACK, so a tab took another tab's ACK for its own save, advanced its baseline
+// over an edit the board never stored, and the next Save no longer sent it (D-NC35,
+// nctool.multi_tab_save). The base is a multiple of 1000 so a log still shows the
+// tab's count in the last digits; base + count stays far inside the firmware's long.
 let _pendingSaveId = 0;
 let _saveSeq       = 0;
+const _saveIdBase  = (1 + Math.floor(Math.random() * 1e6)) * 1000;
+function _saveWireId(n) { return _saveIdBase + n; }
 document.getElementById('btn-hwsetup-save').addEventListener('click', saveConfigToBoard);
 
 document.getElementById('btn-defaults').addEventListener('click', async () => {
@@ -17529,10 +17754,16 @@ async function otaUpdateOverUsb() {
       if (cursor > confirmed) {                  // progress
         confirmed = cursor; noAdvance = 0; stalls = 0;
       } else if (nextSend > confirmed) {
-        // Not advancing while chunks are outstanding. After a whole window of that,
-        // the chunk AT the cursor is genuinely lost rather than merely reordered —
-        // a reorder advances first and resets the counter.
-        if (++noAdvance >= WINDOW) { nextSend = confirmed; noAdvance = 0; }
+        // Not advancing while chunks are outstanding: the chunk AT the cursor is
+        // lost (USB keeps lines in order, so this is no reorder). Every chunk sent
+        // after it answers with the same cursor; rewind once ALL of them have —
+        // then no stale NAK is left in flight to rewind again. That is the chunks
+        // in flight minus the lost one: WINDOW - 1 in a full window, fewer at the
+        // image's end. Counting to WINDOW could never be reached, so every loss
+        // waited out the 10 s marker timeout above (nctool.ota_usb_lost_chunk;
+        // otaUpdateOverWcb counts to WINDOW - 1 for the same reason).
+        const behind = Math.ceil((nextSend - confirmed) / CHUNK) - 1;
+        if (++noAdvance >= Math.max(1, behind)) { nextSend = confirmed; noAdvance = 0; }
         if (++stalls > 200) throw new Error(`OTA stalled at ${confirmed} — board not advancing`);
       }
       setProgress(confirmed, size);
@@ -17904,8 +18135,16 @@ async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
 
   let flashPort   = null;
   let resumeAfter = false;   // were we connected before the flash? → auto-reconnect after
+  let images      = null;    // fetched while the session is still live (below)
   try {
     if (port) {
+      // Fetch the flash tool and the image set BEFORE tearing the live session
+      // down. flashFirmware did it after disconnect(), and only a COMPLETED flash
+      // reconnects, so a refused set (incomplete on GitHub) or an unreachable CDN
+      // left the user disconnected from a board nothing had touched
+      // (nctool.fw_refused_flash_keeps_session). A throw here lands in the catch
+      // below with the session still up.
+      images = await prepareFirmwareFlash(appendLog, setStatus);
       // Reuse the port we're ALREADY connected through — no second picker.
       // Capture the SerialPort reference before disconnect() nulls the
       // global, then tear down our read loop / writer and close it (esptool
@@ -17948,13 +18187,14 @@ async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
       onLog:      appendLog,
       onStatus:   setStatus,
       eraseNvs,
+      images,     // null when not connected: flashFirmware downloads them itself
     });
 
     setBar(1, 1);
     sourceBtn.textContent = '✓ Done';
     appendLog('');
     if (eraseNvs) {
-      appendLog('Full wipe complete. Board is factory-fresh — saved config has been erased.');
+      appendLog('Full wipe complete. NVS and the OTA data were erased; the saved config, command library and clips were not touched.');
     } else {
       appendLog('Update complete. Your saved config was preserved.');
     }
@@ -18053,8 +18293,10 @@ function _updateFirmwareBtnState() {
       status.textContent = 'Disabled — Via WCB is on. Switch to Direct USB to flash.';
     }
   } else {
-    btnFlash.title = 'Normal update: writes the new firmware while preserving your saved configuration (NVS).';
-    btnWipe.title  = 'Full wipe: erases EVERYTHING — bootloader, partitions, app, AND saved configuration (NVS). Use for first-time programming or recovery.';
+    btnFlash.title = 'Normal update: writes the new firmware and keeps your saved configuration.';
+    // D-NC34: the config is /config.json in LittleFS (0x3D0000), which flasher.js never
+    // writes — it erases only NVS and otadata. Never let this text promise otherwise.
+    btnWipe.title  = 'Full wipe: rewrites the bootloader, partition table and app, and erases NVS (learned mesh peers) and the OTA boot data. Use for first-time programming or recovery. Your saved configuration, the command library and recorded clips are NOT erased: the flasher never writes their partitions. To reset the configuration, use Restore Defaults and Save.';
     if (status && status.textContent === 'Disabled — Via WCB is on. Switch to Direct USB to flash.') {
       status.textContent = 'Idle.';
     }
@@ -18122,8 +18364,10 @@ document.getElementById('btn-fw-wipe').addEventListener('click', e => {
   // blocks the user gesture only briefly and keeps the call inside the
   // user-activation window so navigator.serial.requestPort() still works.
   const ok = window.confirm(
-    'Full Wipe & Flash will ERASE all saved settings on the board (NVS) ' +
-    'and write a factory-fresh firmware image.\n\n' +
+    'Full Wipe & Flash rewrites the bootloader, partition table and firmware, ' +
+    'and ERASES NVS (learned mesh peers) and the OTA boot data.\n\n' +
+    'It does NOT erase the saved configuration, the command library or ' +
+    'recorded clips. To reset the configuration, use Restore Defaults and Save.\n\n' +
     'Continue?'
   );
   if (!ok) return;
@@ -18237,10 +18481,9 @@ function openCalibrationModal() {
       'channel data at ~30 Hz, giving accurate auto-detection.\n\n' +
       'To calibrate:\n' +
       '  1. Click Disconnect\n' +
-      '  2. Uncheck "Via WCB" in the topbar\n' +
-      '  3. Plug a USB cable into the RC controller\'s OTG port\n' +
-      '  4. Click Connect, then Calibrate again\n\n' +
-      'After calibration you can switch back to Via WCB for normal use.'
+      '  2. Plug a USB cable into the RC controller\'s OTG port\n' +
+      '  3. Click Connect and choose "Connect via USB", then Calibrate again\n\n' +
+      'After calibration you can reconnect "Via a WCB" for normal use.'
     );
     return;
   }
@@ -19092,10 +19335,13 @@ function handleConfigImportFile(event) {
       // board". Without the seed the next Save ships the branch and rc_config.h:1497 /
       // :1520 read the absent tNnote/pNnote key back as "" — every user-typed Action
       // Name gone from the droid and the cheat sheet, with nothing reporting it.
+      // `exclusive` starts false, not absent: rcConfigToJSON prints it on every mapping
+      // (rc_config.h mObj["exclusive"]), so an absent key differs from the baseline and
+      // the CSV's empty "exclusive" cell would turn every mapping into a change.
       const seedMapping = (key) => {
         if (imported.mappings[key]) return imported.mappings[key];
         const prev = (config.mappings || {})[key] || {};
-        const m = {};
+        const m = { exclusive: false };
         for (let t = 1; t <= NUM_TAP_TIERS; t++) if (prev['t' + t + 'note']) m['t' + t + 'note'] = prev['t' + t + 'note'];
         imported.mappings[key] = m;
         return m;
@@ -19424,13 +19670,24 @@ function handleConfigImportFile(event) {
             if (Number.isFinite(mn) && Number.isFinite(mx)) center = Math.round((mn + mx) / 2);
           }
           if (center !== null) {
+            // The CSV carries a band's CENTRE only. Keep the band the tool already
+            // has when that centre is unchanged, and otherwise re-centre it at the
+            // same half-width — ±12, the tool's and the firmware's default
+            // (defaultThresholds, rc_config.h's bands[]), when there is none. A fixed
+            // ±10 here narrowed every band by 2 µs a side on a plain round trip, and
+            // the next Save shipped that to the board (nctool.csv_roundtrip).
+            // A physical button's `control` cell is getBtnLabel(), not its stored
+            // label, so only a logical button's custom name comes from the CSV.
+            const prevT = imported.thresholds[buttonId - 1];
+            const hasPrev = prevT && Number.isFinite(prevT.minPwm) && Number.isFinite(prevT.maxPwm) && prevT.maxPwm > prevT.minPwm;
+            const keep = hasPrev && Math.round((prevT.minPwm + prevT.maxPwm) / 2) === center;
+            const half = hasPrev ? Math.round((prevT.maxPwm - prevT.minPwm) / 2) : 12;
             imported.thresholds[buttonId - 1] = {
               id: buttonId,
-              // Logical buttons carry the user's custom name in the CSV's
-              // `control` column — restore it so names survive a round-trip.
-              label: (buttonId > RC_PHYSICAL_SLOTS && controlName) ? controlName : getBtnLabel(buttonId),
-              minPwm: center - 10,
-              maxPwm: center + 10,
+              label: (buttonId > RC_PHYSICAL_SLOTS && controlName) ? controlName
+                   : ((prevT && prevT.label) || getBtnLabel(buttonId)),
+              minPwm: keep ? prevT.minPwm : center - half,
+              maxPwm: keep ? prevT.maxPwm : center + half,
             };
           }
           const key = String(mode * 100 + buttonId);
@@ -19531,8 +19788,12 @@ function handleConfigImportFile(event) {
       config.wcbProfiles = Array.isArray(config.wcbProfiles)
         ? config.wcbProfiles.filter(Boolean).slice(0, WCB_MAX_PROFILES).map(_normWcbProfile) : [];
       _wcbSelectedProfile = '';   // import isn't "editing" a profile; radio falls back to config-match
-      if (Object.keys(newSwitches).length) config.switches = newSwitches;
-      if (Object.keys(newKnobs).length) config.knobs = newKnobs;
+      // Merged, not replaced: the export writes the switches and knobs of the ACTIVE
+      // transmitter model only (switchDefaults / knobDefaults), so a control the CSV
+      // does not list is one it has no opinion on — replacing the whole object dropped
+      // the bench's S3 and J5 knobs on a plain round trip.
+      if (Object.keys(newSwitches).length) config.switches = { ...(config.switches || {}), ...newSwitches };
+      if (Object.keys(newKnobs).length) config.knobs = { ...(config.knobs || {}), ...newKnobs };
       // Re-apply the transmitter model so activeTxModel + the model SVG, the
       // 3-axis checkbox/body class, and the axes/switch renders reflect the
       // imported txModel/threeAxisGimbals (the render helpers key off the module-
