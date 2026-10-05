@@ -16,7 +16,7 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | Reboots ~a few seconds into boot, repeatedly | `setup()` never completed and the boot guard fired. It is armed first and disarmed last | `bootGuardArm()` / `bootGuardDisarm()` |
 | Crash-loops ~2 s after boot | Heap starvation — classically from raising `FRAG_MAX_PARTS` (384 does this; 192 is stable). The config load needs ~96 KB | `rc_telemetry.h` |
 | Servos twitch at power-on with no SBUS connected | Maestro TX floating before `Serial2.begin()` runs (~2 s in). The pin is driven HIGH at the top of `setup()` to prevent it — check that still happens | `setup()` |
-| Config lost unexpectedly | `⚠ Full Wipe & Flash` erases NVS and OTA data. A routine `⬆ Update Firmware` and any serial app-flash preserve `/config.json` (LittleFS, not NVS) | [BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md) |
+| Config lost unexpectedly | Not the in-browser flasher: neither `⬆ Update Firmware` nor `⚠ Full Wipe & Flash` writes `/config.json` (LittleFS at `0x3D0000`) — Full Wipe erases only NVS and OTA data — and a serial app-flash preserves it too. Look for `[CONFIG] /config.json present but unreadable` (next row), a Restore Defaults followed by a Save, or a flash with a different partition table | [BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md) |
 | `[CONFIG] /config.json present but unreadable` | Parse failure or transient low memory. The file is **kept** and defaults run for that boot — deliberately, so a good config is never overwritten. Retries next boot | `setup()` |
 | `[CLIPS] no clips partition` | Board still on the 4 MB table. Record/replay runs in-RAM only until a full flash with the 16 MB layout | `setup()`, `partitions.csv` |
 
@@ -128,6 +128,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | "Config lost unexpectedly" no longer blames Full Wipe, which never writes `/config.json` (D-NC34). |
 | 2026-10-04 | _(pending)_ | Two tabs on one WCB: the sid row now says why tabs get a random start, and a new row covers a Save confirmed by the other tab's ACK (D-NC35). |
 | 2026-09-28 | `1e15601` | *Build and tooling*: which build a board runs, and decoding a backtrace against the wrong `.elf` — answered by the new `App SHA256` line. |
 | 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |

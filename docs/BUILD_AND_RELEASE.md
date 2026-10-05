@@ -199,7 +199,7 @@ API, so a fresh CI build is available to users the moment the workflow finishes.
 | Button | Effect |
 |---|---|
 | **⬆ Update Firmware** | Routine update. NVS at `0x9000` untouched. Writes bootloader + partition table + app **unconditionally** — there is deliberately no read-back to decide app-only, because `readFlash()` over the S3's native USB wedges the esptool stub and times out the *next* write |
-| **⚠ Full Wipe & Flash** | First-time programming or recovery. Also erases NVS (`0x9000`, 20 KB) and OTA data (`0xE000`, 8 KB). **Erases all saved settings** |
+| **⚠ Full Wipe & Flash** | First-time programming or recovery. Also erases NVS (`0x9000`, 20 KB: learned mesh peers, the legacy pre-LittleFS config copy) and OTA data (`0xE000`, 8 KB). **Does not erase `/config.json`**, the command library or the clips: neither button writes the LittleFS partitions. Resetting the config is Restore Defaults then Save. The tool's texts must say so (D-NC34) |
 
 A serial app-flash preserves `/config.json` (it lives in LittleFS, not NVS). Blank boards
 need the full set including the 16 MB custom bootloader.
@@ -235,6 +235,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | §7 Full Wipe row corrected: it erases NVS and OTA data only — `/config.json`, the command library and the clips survive, and the tool's texts that promised the config is erased now say so (D-NC34). |
 | 2026-09-28 | `703a0e7` | §3: **the HIL hook build** — `-DNAVICORE_HIL_HOOKS=1` through `compiler.cpp.extra_flags` compiles in `navicore_hil.h` (`DBG_WIRE`, `#L90`–`#L93`); CI and releases never define it, and without it the image is the same bytes as with no hook code at all (checked: 71 differing bytes against the pre-hook tree, all version stamp, compile time and hashes). |
 | 2026-09-28 | `1e15601` | §4: the version names a commit, not an image — `App SHA256` (boot banner, `?OTALOCAL,STATUS`) names the image and the `.elf` that decodes its backtraces. §7: how STATUS confirms an OTA. |
 | 2026-09-10 | _(uncommitted)_ | §3: **a local compile of `main` passes again** (1,169,087 B). The sketchbook's `WCB_Client` now matches `greghulette/WCBClient` master — the `diff -rq` is empty. The callout recorded a *state* ("a local compile of current `main` fails"), which went stale without anything saying so; it now gives the check instead. CLAUDE.md's build note likewise. |

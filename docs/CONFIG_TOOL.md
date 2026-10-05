@@ -693,6 +693,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **The Full Wipe texts tell the truth** (D-NC34): the button titles, the Firmware tab notes, the confirm and the completion log said the saved configuration is erased, but `flasher.js` erases only NVS and otadata and `/config.json` lives in LittleFS at 0x3D0000. They now say the config, command library and clips are kept, and point at Restore Defaults + Save for a reset. |
 | 2026-10-04 | _(pending)_ | **A refused Record no longer arms Stop & Save** (§5 Clip backup and restore). `clipRecordToggle` waited for a `[CLIPUL:REC]` marker no firmware prints, timed out, and assumed the START worked; it now waits for the board's `[REC] recording…` / `[REC] busy` line, and asks `?REC,INFO` when there is no answer. |
 | 2026-10-04 | _(pending)_ | **A restored clip keeps its own mode** (§7, D-NC33). `clipRestoreOne` and `_tlSave` send `?REC,EDITBEGIN,<mode>` (needs the matching firmware; an older board ignores it). |
 | 2026-10-04 | _(pending)_ | **A CSV round trip leaves nothing for Save to send** (§9 Export / Import). The importer rebuilt every button band as centre ±10 where the tool's and the firmware's bands are ±12, relabelled the physical buttons with `getBtnLabel()`, wrote `exclusive:false` as an absent key, and replaced `config.knobs`/`config.switches` with only the active model's controls; a Save after Import narrowed every band on the board and dropped two knobs. |

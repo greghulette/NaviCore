@@ -331,7 +331,8 @@ async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = fal
   // so always writing them costs almost nothing and is reliable on BOTH blank and
   // already-programmed boards. The only difference between Update and Full
   // Wipe is whether we also erase NVS/otadata (Step 3c below) — Update never
-  // touches NVS at 0x9000, so saved config is preserved.
+  // touches NVS at 0x9000. Neither writes the config LittleFS (spiffs, below):
+  // /config.json survives both, so no text may promise a wipe erases it (D-NC34).
   let imagesToFlash = flashImages.slice();
   onLog(eraseNvs
     ? 'Full wipe — flashing bootloader + partitions + app (NVS will be erased).'
@@ -356,8 +357,9 @@ async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = fal
   // OTA-data (the boot selector) is ALWAYS reset to ota_0 on an esptool flash:
   // we always write the app to ota_0, so if a prior OTA had flipped the boot
   // selector to ota_1, leaving otadata alone would make the board boot the stale
-  // (now-overwritten) slot → rollback watchdog → reboot loop. NVS (saved config)
-  // is only wiped on a Full Wipe. Both are written as 0xFF so esptool erases then
+  // (now-overwritten) slot → rollback watchdog → reboot loop. NVS (learned peers,
+  // the legacy pre-LittleFS config copy — not /config.json) is only wiped on a
+  // Full Wipe. Both are written as 0xFF so esptool erases then
   // rewrites the sectors back to factory-fresh.
   {
     const otadataBlank = new ArrayBuffer(0x2000);  // otadata: 8 KB @ 0xE000 (two 4 KB sectors)

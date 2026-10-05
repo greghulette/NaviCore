@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:01.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:02.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3205,9 +3205,10 @@
              Firmware tab — over-the-USB flashing of the WCB v3.2 board.
              Pulls the latest .bin from GitHub (greghulette/NaviCore
              on branch main, under /firmware/) and writes it via
-             esptool-js + WebSerial.  NVS (saved config) is preserved
-             on any normal update; only blank or partition-mismatched
-             boards get a full flash.
+             esptool-js + WebSerial.  The saved config is /config.json in
+             the LittleFS partition at 0x3D0000, which NEITHER button
+             writes; Full Wipe erases only NVS (0x9000: learned peers and
+             the legacy pre-LittleFS settings copy) and otadata (D-NC34).
              ════════════════════════════════════════════════════════════ -->
         <section class="cfg-pane" id="cfg-pane-firmware">
           <h2 class="cfg-pane-title">Firmware</h2>
@@ -3233,8 +3234,8 @@
               Flashes the latest NaviCore firmware to a WCB v3.2 (ESP32-S3)
               board. Pulls the binary from
               <code>github.com/greghulette/NaviCore/firmware</code>.
-              Your saved configuration (NVS) is preserved unless the partition
-              layout changed.
+              Your saved configuration is kept by both buttons: it lives in its
+              own flash partition, which the flasher never writes.
             </div>
             <div class="noconn" style="margin-top:4px">
               <b>To enter bootloader mode:</b> hold <b>BOOT</b>, tap <b>RST</b>,
@@ -3243,11 +3244,11 @@
             </div>
             <div class="wcb-send-row" style="margin-top:10px; gap:8px; flex-wrap:wrap">
               <button class="btn btn-blue" id="btn-fw-flash" type="button"
-                      title="Normal update: writes the new firmware while preserving your saved configuration (NVS).">
+                      title="Normal update: writes the new firmware and keeps your saved configuration.">
                 ⬆ Update Firmware
               </button>
               <button class="btn btn-danger" id="btn-fw-wipe" type="button"
-                      title="Full wipe: rewrites bootloader, partitions and app, AND erases the saved configuration (NVS). Use for first-time programming or recovery. Recorded CLIPS are NOT erased — the clips partition (0x400000) is never written by the flasher. Clips are also not in any backup, so that is the only copy you have.">
+                      title="Full wipe: rewrites the bootloader, partition table and app, and erases NVS (learned mesh peers) and the OTA boot data. Use for first-time programming or recovery. Your saved configuration, the command library and recorded clips are NOT erased: the flasher never writes their partitions. To reset the configuration, use Restore Defaults and Save.">
                 ⚠ Full Wipe &amp; Flash
               </button>
               <button class="btn btn-blue" id="btn-fw-ota" type="button"
@@ -3263,10 +3264,12 @@
             <div class="noconn" style="margin-top:6px">
               <b>Update Firmware</b> — keeps your saved config intact. Use this
               for routine firmware updates.<br>
-              <b>Full Wipe &amp; Flash</b> — factory-fresh push. Erases NVS and
-              OTA data along with the firmware. Use for the very first flash on
-              a new board, or to recover from corruption / bad config. <b>You
-              will lose all saved settings.</b>
+              <b>Full Wipe &amp; Flash</b> — rewrites the bootloader and partition
+              table with the firmware, and erases NVS (learned mesh peers) and the
+              OTA data. Use for the very first flash on a new board, or to recover
+              one that will not boot. <b>It does not erase your saved configuration,
+              the command library or recorded clips</b> — to reset the configuration,
+              use Restore Defaults and Save.
             </div>
             <div id="fw-progress-wrap" style="display:none; margin-top:10px">
               <div style="height:8px; background:var(--border); border-radius:4px; overflow:hidden">
@@ -18099,7 +18102,7 @@ async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
     sourceBtn.textContent = '✓ Done';
     appendLog('');
     if (eraseNvs) {
-      appendLog('Full wipe complete. Board is factory-fresh — saved config has been erased.');
+      appendLog('Full wipe complete. NVS and the OTA data were erased; the saved config, command library and clips were not touched.');
     } else {
       appendLog('Update complete. Your saved config was preserved.');
     }
@@ -18198,8 +18201,10 @@ function _updateFirmwareBtnState() {
       status.textContent = 'Disabled — Via WCB is on. Switch to Direct USB to flash.';
     }
   } else {
-    btnFlash.title = 'Normal update: writes the new firmware while preserving your saved configuration (NVS).';
-    btnWipe.title  = 'Full wipe: erases EVERYTHING — bootloader, partitions, app, AND saved configuration (NVS). Use for first-time programming or recovery.';
+    btnFlash.title = 'Normal update: writes the new firmware and keeps your saved configuration.';
+    // D-NC34: the config is /config.json in LittleFS (0x3D0000), which flasher.js never
+    // writes — it erases only NVS and otadata. Never let this text promise otherwise.
+    btnWipe.title  = 'Full wipe: rewrites the bootloader, partition table and app, and erases NVS (learned mesh peers) and the OTA boot data. Use for first-time programming or recovery. Your saved configuration, the command library and recorded clips are NOT erased: the flasher never writes their partitions. To reset the configuration, use Restore Defaults and Save.';
     if (status && status.textContent === 'Disabled — Via WCB is on. Switch to Direct USB to flash.') {
       status.textContent = 'Idle.';
     }
@@ -18267,8 +18272,10 @@ document.getElementById('btn-fw-wipe').addEventListener('click', e => {
   // blocks the user gesture only briefly and keeps the call inside the
   // user-activation window so navigator.serial.requestPort() still works.
   const ok = window.confirm(
-    'Full Wipe & Flash will ERASE all saved settings on the board (NVS) ' +
-    'and write a factory-fresh firmware image.\n\n' +
+    'Full Wipe & Flash rewrites the bootloader, partition table and firmware, ' +
+    'and ERASES NVS (learned mesh peers) and the OTA boot data.\n\n' +
+    'It does NOT erase the saved configuration, the command library or ' +
+    'recorded clips. To reset the configuration, use Restore Defaults and Save.\n\n' +
     'Continue?'
   );
   if (!ok) return;
