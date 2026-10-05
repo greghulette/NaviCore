@@ -232,7 +232,7 @@ payload approaches 98 KB and copying it per line is real cost.
 | `{"type":"STOP_MONITOR"}` | `ACK` | Also force-clears calibration mute |
 | `{"type":"CALIB","on":bool}` | `ACK` | Mutes **all** action dispatch while on |
 | `{"type":"RESET_DEFAULTS"}` | `ACK` | Factory defaults for everything **except the network identity** — `wcbNetwork`, `wcbProfiles`, `boardType` and the `wifi*` fields stay (`rcConfigResetKeepIdentity`). RAM only (the next Save persists it); the live side effects (bauds, SBUS OUT, easing, auto-release) run at once. The bridged form does the same and ACKs `{"of":"RESET_DEFAULTS"}` |
-| `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}` | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects) |
+| `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}`, plus `"msg":"<reason>"` when `ok` is false | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects). `ok` means the executor **fired** it: an action it skips — disabled destination, invalid slot or channel, unconfigured WLED id, bad serial port, busy Maestro — answers `ok:false` with the skip line's text in `msg` (the `dskip()` recorder). The bridged form ACKs the same `msg` |
 | `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | |
 | `{"type":"TRIGGER","mode":M,"btn":B,"tap":T}` | — | Virtual button press. `tap` 1–4; **4 = long press** (tier `t4`), which always dispatches exclusively |
 | `{"type":"WCB_SEND","target":N,"cmd":"…"}` | — | `target` 0 = broadcast |
@@ -937,6 +937,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC20)_ | `TEST_ACTION` answers `ok:false` with a `msg` when the executor skips the action, on both transports, instead of `ok:true` for anything that parsed (HIL `ncengine.test_action_skipped_not_ok`). |
 | 2026-10-04 | _(D-NC18)_ | A bridged `SET_CONFIG` also strips `wcbNetwork.channel` and the `wifi*` fields, so a Save over the mesh can no longer move the board's mesh channel or SoftAP at its next boot (HIL `ncmesh.bridged_set_config_strip`). |
 | 2026-10-04 | _(D-NC16)_ | `RESET_DEFAULTS` keeps the network identity (`wcbNetwork`, `wcbProfiles`, `boardType`, `wifi*`) on both transports, and the USB form now runs the live side effects as the bridged one does (HIL `nccfg.reset_defaults_keeps_identity`, `ncmesh.bridged_reset_keeps_identity`). |
 | 2026-10-04 | _(D-NC17)_ | RTERM, OTA auth/ACKs and WcbMgmt take the mesh password from `g_meshPasswordBoot` (the copy `WCB_Client` got at boot), not the live config field, so an unrebooted password change or reset no longer splits them from the ETM stack (HIL `nccfg.mesh_creds_live_split`). |

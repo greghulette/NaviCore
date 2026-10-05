@@ -517,6 +517,33 @@ static uint32_t g_dbgFlags = 0;
 #define HIL_TAP(p) (p)
 #endif
 
+// ── Dispatch skips: logged AND recorded ─────────────────────────────────────
+// An executor that skips an action - a disabled destination, an invalid slot or
+// channel, an unconfigured WLED id, a bad port, a busy Maestro - says so with
+// dskip() instead of dlog(): the line is logged exactly as before (category-gated),
+// and, while rcTestAction() has the recorder armed around its one dispatch, the
+// FIRST skip's text is kept so TEST_ACTION can answer ok:false with the reason.
+// Before this, TEST_ACTION answered ok:true for any action that parsed, whatever
+// the executor then did with it, and the config tool's Test button reported a
+// skipped action as sent (HIL ncengine.test_action_skipped_not_ok). Recording
+// formats nothing unless armed, so live dispatch pays one bool test. Core 1 only,
+// like every dispatch.
+static bool g_skipArmed  = false;
+static char g_skipWhy[96] = "";
+static void noteDispatchSkip(const char* fmt, ...) {
+  if (!g_skipArmed || g_skipWhy[0]) return;
+  char line[160];
+  va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof(line), fmt, ap); va_end(ap);
+  char* s = line;
+  if (!strncmp(s, "[DISPATCH] ", 11)) s += 11;          // the ACK needs the reason, not the tag
+  for (char* p = s; *p; p++) {                          // one JSON-safe line: no quote, backslash, control
+    if (*p == '\n' || *p == '\r') { *p = '\0'; break; }
+    if (*p == '"' || *p == '\\' || (uint8_t)*p < 0x20) *p = '\'';
+  }
+  cfgStrlcpy(g_skipWhy, s[0] ? s : "skipped", sizeof(g_skipWhy));   // never half a UTF-8 character
+}
+#define dskip(catBit, fmt, ...) do { noteDispatchSkip(fmt, ##__VA_ARGS__); dlog(catBit, fmt, ##__VA_ARGS__); } while (0)
+
 // =============================================================================
 //  Tap detection state
 // =============================================================================
@@ -664,17 +691,17 @@ static inline uint16_t sbusToRangeMidClosed(int sbusVal, uint16_t outMin, uint16
 // yet up) would poison the cache and defeat the self-healing re-apply.
 static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
                          const uint8_t* payload, size_t plen) {
-  if (id < 1 || id > RC_NUM_MAESTROS) return false;
+  if (id < 1 || id > RC_NUM_MAESTROS) { noteDispatchSkip("Maestro %u: no such slot (1-%d)", id, RC_NUM_MAESTROS); return false; }
   const RcMaestroSlot& slot = rcConfig.maestros[id - 1];
-  if (slot.type == 0) return false;    // disabled (expected — not an error)
+  if (slot.type == 0) { noteDispatchSkip("Maestro %u: slot disabled", id); return false; }   // expected - not logged
   if (slot.device > 127) {             // invalid Pololu device # (config error)
-    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u: invalid Pololu device # %u (must be 0-127) — skipped\n",
+    dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: invalid Pololu device # %u (must be 0-127) — skipped\n",
          id, slot.device);
     return false;
   }
 
   Stream* dest = HIL_TAP((slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast);
-  if (!dest) return false;              // remote slot but stream not yet up
+  if (!dest) { noteDispatchSkip("Maestro %u: remote stream not up", id); return false; }
 
   // ;M subroutine-trigger (0xA7) frame bytes now come from the shared WcbCmd library,
   // so the wire frame is one source of truth across the WCB firmware + NaviCore.
@@ -954,7 +981,7 @@ static bool maestroVerbBusy(const char* cmd, uint8_t wcbId) {
 // no-op the user has to debug by guessing the servo/wiring is broken.
 static bool maestroChanOk(uint8_t id, uint8_t ch) {
   if (ch <= 31) return true;
-  dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u: channel %u out of range (0-31) — skipped\n", id, ch);
+  dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: channel %u out of range (0-31) — skipped\n", id, ch);
   return false;
 }
 
@@ -1405,6 +1432,7 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     char* sP = strtok(nullptr, ",");         // parameter 0-16383, pushed on the Maestro's script stack
     if (sN && sP) maestroSubParam(id, (uint8_t)atoi(sN), (uint16_t)atoi(sP));
   }
+  else noteDispatchSkip("Maestro %u: unknown verb '%s'", id, tok);   // writes nothing
 }
 
 // =============================================================================
@@ -1622,7 +1650,7 @@ static void executeHcrAction(const RcAction& a) {
   // section. Refuse here rather than at the port: a disabled device must not
   // emit anything, even if a stale target still names a live serial port.
   if (dest.transport == 2) {
-    dlog(DBG_HCR, "[DISPATCH] HCR is disabled in config — action skipped\n");
+    dskip(DBG_HCR, "[DISPATCH] HCR is disabled in config — action skipped\n");
     return;
   }
 
@@ -1640,13 +1668,13 @@ static void executeHcrAction(const RcAction& a) {
     // command is retried until ACK'd — HCR can't tolerate a miss. Mirrors the
     // MP3-over-WCB pattern (";A,..." → processMP3AudioCommand). Broadcast is
     // unsupported — an HCR vocalizer is a single device at a known WCB.
-    if (!wcb || !wcbReady) { dlog(DBG_HCR, "[DISPATCH] HCR-WCB: WCB not ready — skipped\n"); return; }
+    if (!wcb || !wcbReady) { dskip(DBG_HCR, "[DISPATCH] HCR-WCB: WCB not ready — skipped\n"); return; }
     String cmd;
     if (a.fn == 12 || a.fn == 15) {
       // Fade over the mesh — the WCB runs its own HcrFade. Readable verb (NOT the
       // numeric ;H,FN; the WCB's numeric switch has no fade). A/B channels only.
       if (a.chan != 1 && a.chan != 2) {
-        dlog(DBG_HCR, "[DISPATCH] HCR-WCB: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
+        dskip(DBG_HCR, "[DISPATCH] HCR-WCB: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
         return;
       }
       cmd = String(";H,") + (a.fn == 12 ? "FADEIN" : "FADEOUT") + "," + (char)(a.chan == 1 ? 'A' : 'B') + "," + (int)a.track;
@@ -1654,13 +1682,13 @@ static void executeHcrAction(const RcAction& a) {
       cmd = hcrFormatWcbCommand(a.fn, a.chan, a.track);
     }
     if (cmd.length() == 0) {
-      dlog(DBG_HCR, "[DISPATCH] HCR-WCB: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
+      dskip(DBG_HCR, "[DISPATCH] HCR-WCB: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
             a.fn, a.chan, a.track);
       return;
     }
     uint8_t target = (uint8_t)atoi(dest.target);
     if (target < 1 || target > WCB_MAX_BOARDS) {
-      dlog(DBG_HCR, "[DISPATCH] HCR-WCB: target '%s' invalid — HCR over WCB must be a "
+      dskip(DBG_HCR, "[DISPATCH] HCR-WCB: target '%s' invalid — HCR over WCB must be a "
             "unicast WCB ID 1-%d (broadcast is not supported). Fix the HCR "
             "Destination in the config tool. Not sent.\n",
             dest.target, WCB_MAX_BOARDS);
@@ -1680,14 +1708,14 @@ static void executeHcrAction(const RcAction& a) {
   // port" log below.
   Stream* hcrSerial = hcrLocalSerial();
   if (!hcrSerial) {
-    dlog(DBG_HCR, "[DISPATCH] HCR: unknown serial port '%s' — skipped\n", dest.target);
+    dskip(DBG_HCR, "[DISPATCH] HCR: unknown serial port '%s' — skipped\n", dest.target);
     return;
   }
 
   // ── Fade (fn 12/15): drive the shared HcrFade on THIS board; loop() ticks it. ──
   if (a.fn == 12 || a.fn == 15) {
     if (a.chan != 1 && a.chan != 2) {
-      dlog(DBG_HCR, "[DISPATCH] HCR-Serial: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
+      dskip(DBG_HCR, "[DISPATCH] HCR-Serial: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
       return;
     }
     const int ch = a.chan, sec = a.track;
@@ -1733,7 +1761,7 @@ static void executeHcrAction(const RcAction& a) {
     payload = hcrFormatCommand(a.fn, a.chan, a.track);  // chan 0 = ALL + every other fn (byte-identical to today)
   }
   if (payload.length() == 0) {
-    dlog(DBG_HCR, "[DISPATCH] HCR-Serial: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
+    dskip(DBG_HCR, "[DISPATCH] HCR-Serial: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
           a.fn, a.chan, a.track);
     return;
   }
@@ -1795,7 +1823,7 @@ static void executeMp3Action(const RcAction& a) {
   const RcMp3Dest& dest = rcConfig.mp3Dest;
 
   if (dest.transport == 2) {   // disabled in the tool's Audio section
-    dlog(DBG_MP3, "[DISPATCH] MP3 Trigger is disabled in config — action skipped\n");
+    dskip(DBG_MP3, "[DISPATCH] MP3 Trigger is disabled in config — action skipped\n");
     return;
   }
 
@@ -1806,7 +1834,7 @@ static void executeMp3Action(const RcAction& a) {
     else if (!strcmp(dest.target, "S4")) p = s4;
     else if (!strcmp(dest.target, "S5")) p = s5;   // both boards (v2 GPIO38/47, WCB 3.2 GPIO9/10)
     if (!p) {
-      dlog(DBG_MP3, "[DISPATCH] MP3-local: unknown serial port '%s' — skipped\n", dest.target);
+      dskip(DBG_MP3, "[DISPATCH] MP3-local: unknown serial port '%s' — skipped\n", dest.target);
       return;
     }
     // Format the ;A verb with the shared producer, then let g_mp3.handle() emit
@@ -1814,7 +1842,7 @@ static void executeMp3Action(const RcAction& a) {
     // receive side, so local and over-mesh drive the Trigger identically.
     String cmd = mp3FormatCommand(a.fn, a.track);
     if (cmd.length() == 0) {
-      dlog(DBG_MP3, "[DISPATCH] MP3-local: bad/out-of-range fn=%u arg=%d — skipped\n", a.fn, a.track);
+      dskip(DBG_MP3, "[DISPATCH] MP3-local: bad/out-of-range fn=%u arg=%d — skipped\n", a.fn, a.track);
       return;
     }
     g_mp3.begin(*HIL_TAP(p));                 // rebind — the resolved port can change per action
@@ -1825,15 +1853,15 @@ static void executeMp3Action(const RcAction& a) {
   }
 
   // ── WCB unicast transport ──────────────────────────────────────────────
-  if (!wcb || !wcbReady) { dlog(DBG_MP3, "[DISPATCH] MP3: WCB not ready — skipped\n"); return; }
+  if (!wcb || !wcbReady) { dskip(DBG_MP3, "[DISPATCH] MP3: WCB not ready — skipped\n"); return; }
   String cmd = mp3FormatCommand(a.fn, a.track);
   if (cmd.length() == 0) {
-    dlog(DBG_MP3, "[DISPATCH] MP3: bad fn=%u — skipped\n", a.fn);
+    dskip(DBG_MP3, "[DISPATCH] MP3: bad fn=%u — skipped\n", a.fn);
     return;
   }
   uint8_t target = (uint8_t)atoi(dest.target);
   if (target < 1 || target > WCB_MAX_BOARDS) {
-    dlog(DBG_MP3, "[DISPATCH] MP3: target '%s' invalid — set MP3 Destination to a "
+    dskip(DBG_MP3, "[DISPATCH] MP3: target '%s' invalid — set MP3 Destination to a "
           "WCB ID 1-%d in the config tool. Not sent.\n",
           dest.target, WCB_MAX_BOARDS);
     return;
@@ -1920,7 +1948,7 @@ static void executeDfpAction(const RcAction& a) {
   const RcDfpDest& dest = rcConfig.dfpDest;
 
   if (dest.transport == 2) {   // disabled in the tool's Audio section
-    dlog(DBG_DFP, "[DISPATCH] DFPlayer is disabled in config — action skipped\n");
+    dskip(DBG_DFP, "[DISPATCH] DFPlayer is disabled in config — action skipped\n");
     return;
   }
 
@@ -1931,12 +1959,12 @@ static void executeDfpAction(const RcAction& a) {
     else if (!strcmp(dest.target, "S4")) p = s4;
     else if (!strcmp(dest.target, "S5")) p = s5;
     if (!p) {
-      dlog(DBG_DFP, "[DISPATCH] DFP-local: unknown serial port '%s' — skipped\n", dest.target);
+      dskip(DBG_DFP, "[DISPATCH] DFP-local: unknown serial port '%s' — skipped\n", dest.target);
       return;
     }
     String cmd = dfpFormatCommand(a.fn, a.chan, a.track);
     if (cmd.length() == 0) {
-      dlog(DBG_DFP, "[DISPATCH] DFP-local: bad/out-of-range fn=%u chan=%d track=%d — skipped\n",
+      dskip(DBG_DFP, "[DISPATCH] DFP-local: bad/out-of-range fn=%u chan=%d track=%d — skipped\n",
             a.fn, a.chan, a.track);
       return;
     }
@@ -1948,15 +1976,15 @@ static void executeDfpAction(const RcAction& a) {
   }
 
   // ── WCB unicast transport ──────────────────────────────────────────────
-  if (!wcb || !wcbReady) { dlog(DBG_DFP, "[DISPATCH] DFP: WCB not ready — skipped\n"); return; }
+  if (!wcb || !wcbReady) { dskip(DBG_DFP, "[DISPATCH] DFP: WCB not ready — skipped\n"); return; }
   String cmd = dfpFormatCommand(a.fn, a.chan, a.track);
   if (cmd.length() == 0) {
-    dlog(DBG_DFP, "[DISPATCH] DFP: bad fn=%u — skipped\n", a.fn);
+    dskip(DBG_DFP, "[DISPATCH] DFP: bad fn=%u — skipped\n", a.fn);
     return;
   }
   uint8_t target = (uint8_t)atoi(dest.target);
   if (target < 1 || target > WCB_MAX_BOARDS) {
-    dlog(DBG_DFP, "[DISPATCH] DFP: target '%s' invalid — set DFPlayer Destination to a "
+    dskip(DBG_DFP, "[DISPATCH] DFP: target '%s' invalid — set DFPlayer Destination to a "
           "WCB ID 1-%d in the config tool. Not sent.\n",
           dest.target, WCB_MAX_BOARDS);
     return;
@@ -1981,14 +2009,14 @@ static void executeWledAction(const RcAction& a) {
   while (*s == ' ' || *s == '\t') s++;      // tolerate leading whitespace (matches the WCB's body.trim())
   if (*s == ';') s++;                       // optional leading command char
   if (*s != 'L' && *s != 'l') {
-    dlog(DBG_WLED, "[DISPATCH] WLED: '%s' is not a ;L command — skipped\n", a.cmd);
+    dskip(DBG_WLED, "[DISPATCH] WLED: '%s' is not a ;L command — skipped\n", a.cmd);
     return;
   }
   s++;                                      // past 'L'
   int id = 0;
   while (*s >= '0' && *s <= '9') { if (id < 100) id = id * 10 + (*s - '0'); s++; }  // cap: no int overflow on a corrupt cmd
   if (id > 9) {                             // valid WLED ids are 1-9 (0 = bare) — mirror the WCB's range check
-    dlog(DBG_WLED, "[DISPATCH] WLED: id %d out of range (1-9) — skipped\n", id);
+    dskip(DBG_WLED, "[DISPATCH] WLED: id %d out of range (1-9) — skipped\n", id);
     return;
   }
   if (*s == ',') s++;                       // past the id/verb separator
@@ -2003,11 +2031,11 @@ static void executeWledAction(const RcAction& a) {
       if (w.configured && w.remoteWCB == 0 && w.serialPort >= 3 && w.serialPort <= 5)
         if (slot < 0 || w.wledID < rcConfig.wledSlots[slot].wledID) slot = i;
     }
-    if (slot < 0) { dlog(DBG_WLED, "[DISPATCH] WLED: bare ;L but no LOCAL WLED configured — skipped\n"); return; }
+    if (slot < 0) { dskip(DBG_WLED, "[DISPATCH] WLED: bare ;L but no LOCAL WLED configured — skipped\n"); return; }
   } else {
     for (int i = 0; i < RC_NUM_WLED; i++)
       if (rcConfig.wledSlots[i].configured && rcConfig.wledSlots[i].wledID == (uint8_t)id) { slot = i; break; }
-    if (slot < 0) { dlog(DBG_WLED, "[DISPATCH] WLED %d not configured — skipped\n", id); return; }
+    if (slot < 0) { dskip(DBG_WLED, "[DISPATCH] WLED %d not configured — skipped\n", id); return; }
   }
   const RcWledSlot& w = rcConfig.wledSlots[slot];
 
@@ -2015,7 +2043,7 @@ static void executeWledAction(const RcAction& a) {
   if (w.remoteWCB == 0 && w.serialPort >= 3 && w.serialPort <= 5) {
     Stream* port = (w.serialPort == 3) ? s3 : (w.serialPort == 4) ? s4 : s5;
     if (!port) {
-      dlog(DBG_WLED, "[DISPATCH] WLED %u: local S%u not available on this board — skipped\n", w.wledID, w.serialPort);
+      dskip(DBG_WLED, "[DISPATCH] WLED %u: local S%u not available on this board — skipped\n", w.wledID, w.serialPort);
       return;
     }
     // nullptr diag sink, deliberately: WcbWled's parse-error paths write to the
@@ -2027,11 +2055,11 @@ static void executeWledAction(const RcAction& a) {
     bool ok = WcbWled::emit(*HIL_TAP(port), body, nullptr);   // build ;L verb → WLED JSON, newline-framed
     dlog(DBG_WLED, "[DISPATCH] WLED %u→S%u  %s  %s\n", w.wledID, w.serialPort, body, ok ? "OK" : "no-op");
   } else if (w.remoteWCB >= 1 && w.remoteWCB <= WCB_MAX_BOARDS) {
-    if (!wcb || !wcbReady) { dlog(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
+    if (!wcb || !wcbReady) { dskip(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
     bool ok = wcb->send(w.remoteWCB, a.cmd);          // forward the full ";L<id>,…" string
     dlog(DBG_WLED, "[DISPATCH] WLED %u→WCB%u  %s  %s\n", w.wledID, w.remoteWCB, a.cmd, ok ? "OK" : "FAIL");
   } else {
-    dlog(DBG_WLED, "[DISPATCH] WLED %u: slot has no valid destination — skipped\n", w.wledID);
+    dskip(DBG_WLED, "[DISPATCH] WLED %u: slot has no valid destination — skipped\n", w.wledID);
   }
 }
 
@@ -2072,16 +2100,16 @@ static void rcExecuteActionNow(const RcAction& a) {
     case RA_WCB_UNICAST: {
       uint8_t boardId = (uint8_t)atoi(a.target);
       if (boardId >= 1 && boardId <= WCB_MAX_BOARDS) {
-        if (!wcb || !wcbReady) { dlog(DBG_WCB, "[DISPATCH] WCB→%d skipped — WCB not ready\n", boardId); break; }
-        if (a.skipRunning && maestroVerbBusy(a.cmd, boardId)) { dlog(DBG_MAESTRO, "[DISPATCH] WCB→%d Maestro skipped — already running  %s\n", boardId, a.cmd); break; }
+        if (!wcb || !wcbReady) { dskip(DBG_WCB, "[DISPATCH] WCB→%d skipped — WCB not ready\n", boardId); break; }
+        if (a.skipRunning && maestroVerbBusy(a.cmd, boardId)) { dskip(DBG_MAESTRO, "[DISPATCH] WCB→%d Maestro skipped — already running  %s\n", boardId, a.cmd); break; }
         dlog(DBG_WCB, "[DISPATCH] WCB→%d  %s\n", boardId, a.cmd);
         wcb->send(boardId, a.cmd);
       }
       break;
     }
     case RA_WCB_BROADCAST:
-      if (!wcb || !wcbReady) { dlog(DBG_WCB, "[DISPATCH] WCB broadcast skipped — WCB not ready\n"); break; }
-      if (a.skipRunning && maestroVerbBusy(a.cmd, 0)) { dlog(DBG_MAESTRO, "[DISPATCH] WCB broadcast Maestro skipped — already running  %s\n", a.cmd); break; }
+      if (!wcb || !wcbReady) { dskip(DBG_WCB, "[DISPATCH] WCB broadcast skipped — WCB not ready\n"); break; }
+      if (a.skipRunning && maestroVerbBusy(a.cmd, 0)) { dskip(DBG_MAESTRO, "[DISPATCH] WCB broadcast Maestro skipped — already running  %s\n", a.cmd); break; }
       dlog(DBG_WCB, "[DISPATCH] WCB broadcast  %s\n", a.cmd);
       wcb->broadcast(a.cmd);
       break;
@@ -2091,7 +2119,7 @@ static void rcExecuteActionNow(const RcAction& a) {
       // with old configs.  The location of Maestro 1 (and whether it's
       // actually wired locally) is now defined in the Maestro Locations panel.
       dlog(DBG_MAESTRO, "[DISPATCH] Maestro (legacy local → ID 1)  %s\n", a.cmd);
-      if (a.skipRunning && maestroSequenceBusy(1)) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro 1 skipped — already running\n"); break; }
+      if (a.skipRunning && maestroSequenceBusy(1)) { dskip(DBG_MAESTRO, "[DISPATCH] Maestro 1 skipped — already running\n"); break; }
       executeMaestroCmd(1, a.cmd);
       break;
 
@@ -2101,10 +2129,11 @@ static void rcExecuteActionNow(const RcAction& a) {
       int id = atoi(a.target);
       if (id < 1 || id > RC_NUM_MAESTROS) {
         vlogf("WARN: Maestro action with invalid ID %d (target='%s')\n", id, a.target);
+        noteDispatchSkip("Maestro action with invalid ID %d", id);
         break;
       }
       dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d  %s\n", id, a.cmd);
-      if (a.skipRunning && maestroSequenceBusy((uint8_t)id)) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d skipped — already running\n", id); break; }
+      if (a.skipRunning && maestroSequenceBusy((uint8_t)id)) { dskip(DBG_MAESTRO, "[DISPATCH] Maestro %d skipped — already running\n", id); break; }
       executeMaestroCmd((uint8_t)id, a.cmd);
       break;
     }
@@ -2115,6 +2144,7 @@ static void rcExecuteActionNow(const RcAction& a) {
       if      (!strcmp(a.target, "S3")) writeS3(s);
       else if (!strcmp(a.target, "S4")) writeS4(s);
       else if (!strcmp(a.target, "S5")) writeS5(s);   // both boards (v2 "Serial 3", WCB 3.2 "Serial 5")
+      else noteDispatchSkip("Serial port '%s' is not S3/S4/S5", a.target);
       break;
     }
     case RA_HCR:
@@ -2169,19 +2199,25 @@ void rcExecuteAction(const RcAction& a) {
 // use, then dispatches its effect NOW — bypassing the per-action delay (a test
 // should fire the instant you click) and the calibration gate (you asked for it
 // explicitly). Runs on Core 1 (USB handler / loop drain), so the dispatch's
-// Maestro/ESP-NOW TX is safe. Returns false if the action JSON didn't parse.
-static bool rcTestAction(JsonObject act) {
-  if (act.isNull()) return false;
+// Maestro/ESP-NOW TX is safe. Returns false - with the reason in *why - if the
+// action JSON didn't parse OR the executor skipped it (the dskip recorder).
+static bool rcTestAction(JsonObject act, const char** why) {
+  *why = nullptr;
+  if (act.isNull()) { *why = "no action"; return false; }
   RcAction a{};   // zero-init so any field the parser leaves unset (skipRunning/delayMs/…) is clean
-  if (!actionFromJson(act, a)) return false;
+  if (!actionFromJson(act, a)) { *why = "unknown or malformed action"; return false; }
   // The ok flag must mean 'the action fired', not 'the JSON parsed'. rcExecuteActionNow
   // silently does nothing for a board id outside 1-WCB_MAX_BOARDS, so a Test button on an
   // action pointing at board 0 or 99 reported success for a command that never left.
   if (a.type == RA_WCB_UNICAST) {
     const int boardId = atoi(a.target);
-    if (boardId < 1 || boardId > WCB_MAX_BOARDS) return false;
+    if (boardId < 1 || boardId > WCB_MAX_BOARDS) { *why = "WCB board id out of range"; return false; }
   }
+  g_skipWhy[0] = '\0';
+  g_skipArmed  = true;
   rcExecuteActionNow(a);
+  g_skipArmed  = false;
+  if (g_skipWhy[0]) { *why = g_skipWhy; return false; }   // the executor skipped it - say why
   return true;
 }
 
@@ -2195,12 +2231,14 @@ void drainTestAction() {
   uint8_t sender = 0;
   if (!rcTelemetry::takeTestAction(js, sender)) return;
   bool ok = false;
+  const char* why = "parse failed";
   StaticJsonDocument<640> tdoc;      // one action object is small; 640 B is ample
   if (deserializeJson(tdoc, js) == DeserializationError::Ok)
-    ok = rcTestAction(tdoc["action"].as<JsonObject>());
+    ok = rcTestAction(tdoc["action"].as<JsonObject>(), &why);
   if (sender >= 1 && sender <= WCB_MAX_BOARDS && wcb && wcbReady) {
-    char ack[64];
-    snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}", ok ? "true" : "false");
+    char ack[176];                   // 51 B + a <=95 B reason: well under the 187 B payload cap
+    if (ok || !why) snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}", ok ? "true" : "false");
+    else            snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"%s\"}", why);
     wcb->send(sender, ack);
   }
 }
@@ -4051,8 +4089,10 @@ bool processInputLine(const String& line) {
       if (deserializeJson(tdoc, line) != DeserializationError::Ok) {
         Serial.println("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"parse failed\"}");
       } else {
-        bool ok = rcTestAction(tdoc["action"].as<JsonObject>());
-        Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}\n", ok ? "true" : "false");
+        const char* why = nullptr;
+        bool ok = rcTestAction(tdoc["action"].as<JsonObject>(), &why);
+        if (ok || !why) Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}\n", ok ? "true" : "false");
+        else            Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"%s\"}\n", why);
       }
 
     } else if (strcmp(type,"REBOOT")==0) {
