@@ -74,11 +74,27 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   printed from a Core-0 mesh callback goes to USB and never to a WiFi client. Anything a
   WebSocket client must see goes through a queue to `loop()` first — the relay-OTA
   `[OTA:ACK,…]` token is the case that proved it (§5).
-- Bytes are buffered by the sink and sent **only from `pump()` in `loop()`**, never inside
-  `write()`. A TCP send inside `write()` lands between two halves of an arbitrary
-  `Serial.printf`, on the core that must also service SBUS at ~111 fps. On overflow whole
-  **lines** are dropped, never truncated — half a JSON object fails at the tool's
-  `JSON.parse` and silently freezes a panel, whereas a lost 20 Hz sample is invisible.
+- Bytes are buffered by the sink, never sent inside `write()`: a TCP send there lands
+  between two halves of an arbitrary `Serial.printf`, on the core that must also service
+  SBUS at ~111 fps. A full 2 KB buffer, or `pump()` in `loop()`, moves them as one frame
+  onto **NaviCore's own outbound queue** (`wsTxHead`, PSRAM), which **one** httpd work item
+  at a time (`wsDrainWork`) sends, `WS_DRAIN_BATCH` (8) frames a run, re-queueing itself so
+  httpd serves its sockets between runs. Never one work item per frame: httpd's control
+  socket holds 6 (`CONFIG_LWIP_UDP_RECVMBOX_SIZE`) and drops the rest without an error
+  (`CONFIG_HTTPD_QUEUE_WORK_BLOCKING` is off), so a reply longer than ~6 frames, or anything
+  written while a send was slow, lost frames from its middle and leaked their copies — and
+  holding the bytes back in the 2 KB buffer instead cut GET_CONFIG at 2048 characters.
+  A lost drain item is re-queued after `WS_KICK_LOST_MS` (2 s).
+- **A line goes out whole or not at all.** The sink decides once per line, at its first
+  byte: a line that starts while the queue holds `WS_TX_MAX_QUEUED` (256 KB, ~20 s of the
+  monitor — only clients that take nothing get there) is dropped whole and counted, and
+  `drain()` says so on USB once a second (`[WS] <n> line(s) dropped whole …`, straight to
+  `HWCDCSerial`, never through the tee). Every other line is queued whole, past the cap if
+  need be, so GET_CONFIG, a cmdlib or a clip list always arrives whole on a socket that
+  takes it, however slowly. Half a JSON object fails at the tool's `JSON.parse` and silently
+  freezes a panel, whereas a lost 20 Hz sample is invisible. The one exception is PSRAM
+  running out mid-line: the queued head is then ended with a newline, never glued to the
+  next line.
 
 - Frames are cut at a **UTF-8 character boundary**, never on the raw byte count.
   `pump()` flushes on a byte threshold, but RFC 6455 §8.1 requires every TEXT frame to be
@@ -115,15 +131,13 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   other client for up to `WS_STALL_MS` once, until `wsSendAll` gives up on it. A client whose
   send fails is dropped from the sink **and its socket shut down** (`shutdown()`; httpd's
   `select()` then deletes the session) — dropped alone, it stayed open and deaf, able to send
-  lines that ran but never to receive another — and work items queued meanwhile skip it
+  lines that ran but never to receive another — and frames queued meanwhile skip it
   (`WsSink::has()`). **Never `httpd_sess_trigger_close()`**: it queues the close as a work
-  item on httpd's control socket, which holds 6 (`CONFIG_LWIP_UDP_RECVMBOX_SIZE`) and drops
-  the rest without an error (`CONFIG_HTTPD_QUEUE_WORK_BLOCKING` is off), and that socket is
-  full exactly when a client has stalled the httpd task: the lost close is what left a
-  stalled client deaf. For the same reason `pump()` queues nothing behind a send that has run
-  `WS_LINK_SLOW_MS` (250 ms, `wsSendSince`): lines wait in the 2 KB sink instead, and when it
-  fills, `write()` drops the **whole line** (and ends a head already sent with a newline) —
-  lost lines, never broken ones, and never a store past the end of the buffer.
+  item on httpd's control socket, which drops what it cannot hold without an error: the lost
+  close is what left a stalled client deaf. Lines written while the queue is held this way
+  wait in it, and the clients that are still reading get them all once it moves again. A
+  new session after none discards frames left from the ended one (`wsTxDiscard`), so a
+  newcomer that gets one of its socket numbers back never receives them.
 - **Every emitter a PANEL depends on must fall back to the socket.** The
   `Serial.availableForWrite()` guard is correct and stays — an unguarded USB write
   blocks up to HWCDC's 50 ms tx timeout and starves the SBUS decode in `loop()` — but it
@@ -987,6 +1001,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-05 | _(D-NC62 queue)_ | WebSocket output goes through NaviCore's own PSRAM queue, drained by one httpd work item at a time, instead of one work item per frame or a 2 KB hold behind a slow send; a line is admitted whole at its first byte or dropped whole (over 256 KB queued) with a USB note. The hold cut GET_CONFIG at 2048 characters on a healthy socket — its start time could also read 1 ms in the future (`millis() \| 1`) and wrap to ~4.3e9 ms (HIL `ncwifi.ws_parity`, `ws_utf8_and_latch`, `intellex.wifi_nc_tool`; a regression from `37428e4`). |
 | 2026-10-04 | `37428e4` | A client whose send fails is shut down with `shutdown()`, not `httpd_sess_trigger_close()`, whose queued close was lost in httpd's full control socket and left the stalled client open and deaf (HIL `ncwifi.ws_stalled_client`); `pump()` queues nothing behind a send stalled 250 ms (`WS_LINK_SLOW_MS`). |
 | 2026-10-04 | `2428167` | WebSocket sessions send through `wsSendAll()`: a short write is continued until the frame is out, and only a socket that takes no byte for 5 s (`WS_STALL_MS`) is given up on and shut down. The 1 s `send_wait_timeout` alone cut frames short in a 3 s WiFi stall (lwIP's short count, which httpd takes as success) and closed a healthy client (HIL `ncwifi.ws_ping_soak`, a regression from `2aec189`). |
 | 2026-10-04 | `3df29d0` | `?REC,EDITCANCEL` empties the buffer, and `?REC,CLEAR` answers busy instead of "cleared" when the recorder is not idle (HIL `ncrec.editcancel_empties`). |
