@@ -621,6 +621,12 @@ hosting WCB relays a `:MQR` reply asynchronously, surfaced by `maePumpRemoteEmit
 Timeline-editor transport: `EDITLOAD,<name>` · `EDITBEGIN` · `EDITEV,<idx>,<json>` ·
 `EDITEND,<name>` · `EDITCANCEL`.
 
+A clip asked for while the recorder is busy (recording, replaying, mid-upload) is **busy, not
+missing**: `PLAY,<name>` and `LOAD` answer `[REC] busy (<state>) …`, and `EDITLOAD` of a clip
+not already resident answers `[CLIPDL:ERR]recorder busy (<state>)`, which the tool's ranged
+download raises as an error. `<state>` is `?REC,INFO`'s name (`RECORDING`, `REPLAYING`,
+`EDITING`).
+
 ### Other
 
 | Command | Meaning |
@@ -965,6 +971,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC65)_ | `?REC,PLAY,<name>`, `LOAD` and `EDITLOAD` say the recorder is busy instead of "not found" when it is not idle (HIL `ncrec.busy_load_not_missing`). |
 | 2026-10-04 | _(D-NC46)_ | `WCB_SEQ` names and the `WCB_SEQVAL` key and value are JSON-escaped instead of having `"`, `\` and control characters stripped (HIL `ncmesh.seqval_verbatim`). |
 | 2026-10-04 | _(D-NC26)_ | A relayed CLI line over 199 characters, or a mesh→serial line over 200, is refused with a log line instead of being truncated into its queue slot and run (HIL `ncmesh.long_command_truncation`). |
 | 2026-10-04 | _(D-NC27)_ | A bridged `WCB_SEND` ACKs the library's send result instead of `ok:true` regardless, and its fragmented form is sent and ACKed instead of dropped (HIL `ncmesh.bridged_wcb_send_findings`). |

@@ -1074,10 +1074,16 @@ inline void pollControl() {
   }
 }
 
+// The recorder's state as ?REC,INFO names it - also what a "busy" reply quotes.
+inline const char* stateName() {
+  return _state == ST_RECORDING ? "RECORDING" : _state == ST_REPLAYING ? "REPLAYING" :
+         _state == ST_EDITING   ? "EDITING"   : "idle";
+}
+inline bool busy() { return _state != ST_IDLE; }
+
 inline void info(Print& out) {
   uint32_t durMs = _count ? _buf[_count - 1].tMs : 0;
-  const char* st = _state == ST_RECORDING ? "RECORDING" : _state == ST_REPLAYING ? "REPLAYING" :
-                   _state == ST_EDITING   ? "EDITING"   : "idle";
+  const char* st = stateName();
   out.printf("[REC] state=%s  events=%lu/%lu  dur=%lums  drops=%lu  buf=%s\n",
              st, (unsigned long)_count, (unsigned long)_cap, (unsigned long)durMs,
              (unsigned long)_drops, _buf ? "ok" : "OOM");

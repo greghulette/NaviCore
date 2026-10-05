@@ -3648,6 +3648,10 @@ bool execCliLine(const String& line) {
       else                                          navirec::info(Serial);
     }
     else if (sub.equalsIgnoreCase("PLAY")) {
+      // loadClip() refuses while the recorder is busy with the same false as a missing
+      // clip, so say which it is: a busy recorder is not a missing clip (HIL
+      // ncrec.busy_load_not_missing). Same for LOAD and EDITLOAD below.
+      if (name.length() && navirec::busy()) { Serial.printf("[REC] busy (%s) - '%s' not loaded\n", navirec::stateName(), name.c_str()); return true; }
       if (name.length() && !navirec::loadClip(name.c_str())) { Serial.printf("[REC] clip '%s' not found\n", name.c_str()); return true; }
       if (navirec::startReplay())
         Serial.printf("[REC] replaying %lu events over %lums — ?REC,STOP to abort\n",
@@ -3663,7 +3667,10 @@ bool execCliLine(const String& line) {
       Serial.println(navirec::saveClip(nm) ? (String("[REC] saved clip '") + nm + "'").c_str()
                                            : "[REC] save failed (see reason above)");
     }
-    else if (sub.equalsIgnoreCase("LOAD"))  Serial.println(navirec::loadClip(name.c_str()) ? "[REC] loaded" : "[REC] load failed (not found / no FS)");
+    else if (sub.equalsIgnoreCase("LOAD")) {
+      if (navirec::busy()) Serial.printf("[REC] busy (%s) - not loaded\n", navirec::stateName());   // not "not found": see PLAY
+      else                 Serial.println(navirec::loadClip(name.c_str()) ? "[REC] loaded" : "[REC] load failed (not found / no FS)");
+    }
     else if (sub.equalsIgnoreCase("LS"))    {
       // Report the clips-partition storage first (short marker → survives the WCB
       // RTERM 160-byte wrap), then the per-clip list.
@@ -3730,6 +3737,13 @@ bool execCliLine(const String& line) {
       // far longer than the streaming itself. Fail closed: any buffer mutator
       // clears _loadedName.
       if (strcmp(navirec::_loadedName, cname.c_str()) != 0) {
+        // Busy is not missing (see PLAY): a [CLIPDL:ERR] the tool's ranged download already
+        // raises as an error, where "not found" made a backup taken during a playing
+        // idle-animation wait out its 15 s budget on every other clip and skip it.
+        if (navirec::busy()) {
+          Serial.printf("[CLIPDL:ERR]recorder busy (%s)\n", navirec::stateName());
+          return true;
+        }
         if (!navirec::loadClip(cname.c_str())) {
           // Legacy byte-for-byte on the unranged path — an old tool matches
           // "[CLIPDL:ERR]" by exact prefix and slices a fixed offset.
