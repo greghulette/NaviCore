@@ -305,7 +305,14 @@ inline void stopRecord() {
   drain();                                    // flush in-flight events
   _state = ST_IDLE;
 }
-inline void clearClip() { if (_state == ST_IDLE) { _count = 0; _residencyClear(); } }
+// Empties the buffer - only when idle, and says so: false while recording, replaying or
+// mid-upload. The CLI answered "[REC] cleared" whatever happened, so during a take it
+// claimed a clear that never happened (HIL ncrec.editcancel_empties).
+inline bool clearClip() {
+  if (_state != ST_IDLE) return false;
+  _count = 0; _residencyClear();
+  return true;
+}
 inline uint32_t clipDurationMs() { return _count ? _buf[_count - 1].tMs : 0; }
 inline uint32_t eventCount()     { return _count; }
 
@@ -358,10 +365,18 @@ inline void requestStop() { _pendingCtl = CTL_STOP; }
 // allocate _curveNext before this point.)
 
 // Initial build, called once from startReplay(). Also resets speed/accel (0 =
-// unlimited) on every touched channel — the Maestro's OWN latched limits live
-// device-side and can't be read back, so we force-reset rather than snapshot,
-// else they'd double-smooth our interpolated stream — then eases known-home
-// channels toward their current position (a no-op if nothing drifted).
+// unlimited) on every channel THE CLIP DRIVES — the Maestro's OWN latched limits
+// live device-side and can't be read back, so we force-reset rather than snapshot,
+// else they'd double-smooth our interpolated stream — then eases each of those with
+// a known home toward its current position (a no-op if nothing drifted).
+//
+// ONLY the clip's channels become active: its keyframes activate them below. Every
+// channel with a known position used to start active, so ANY clip - even one with no
+// Maestro event - zeroed the speed/accel of every servo moved since boot and
+// re-sent its stale target: a channel whose limits live in the Maestro's own
+// settings lost them, and one a Maestro script had moved since snapped back at full
+// speed (HIL ncrec.replay_only_clip_channels; RECORD_REPLAY_DESIGN.md §3/§6 always
+// said "every (slot,ch) the clip drives").
 inline void _buildCurveIndex() {
   int16_t lastIdx[8][32];
   for (int s = 0; s < 8; s++) {
@@ -373,7 +388,7 @@ inline void _buildCurveIndex() {
       cv.tPrev = 0;
       cv.firstIdx = cv.nextIdx = -1;
       cv.lastEmitted = cv.pPrev;
-      cv.active = known;
+      cv.active = false;      // a keyframe below activates it - only the clip's channels are touched
       cv.reanchor = !known;   // no known home → the first keyframe snaps instead of easing from 0
     }
   }
@@ -946,8 +961,15 @@ inline const char* editEnd(const char* name) {
 }
 
 // Abort an in-progress upload (browser closed the editor, or a step NAK'd) —
-// discards whatever was staged; nothing was written to flash.
-inline void editCancel() { if (_state == ST_EDITING) _state = ST_IDLE; }
+// discards whatever was staged; nothing was written to flash. DISCARDS means the
+// buffer is emptied: dropping only the state left the staged events in _buf, where
+// ?REC,PLAY played them and ?REC,SAVE saved them (saveClip gates on idle only) - the
+// partial-upload exposure stop()'s comment warns about (HIL ncrec.editcancel_empties).
+inline void editCancel() {
+  if (_state != ST_EDITING) return;
+  _count = 0; _residencyClear();
+  _state = ST_IDLE;
+}
 
 // Emits the clip library as one small "[CLIPITEM]{...}" line per clip, bracketed
 // by "[CLIPLIST:BEGIN]" / "[CLIPLIST:END]", which the config-tool Clips panel
@@ -1066,10 +1088,16 @@ inline void pollControl() {
   }
 }
 
+// The recorder's state as ?REC,INFO names it - also what a "busy" reply quotes.
+inline const char* stateName() {
+  return _state == ST_RECORDING ? "RECORDING" : _state == ST_REPLAYING ? "REPLAYING" :
+         _state == ST_EDITING   ? "EDITING"   : "idle";
+}
+inline bool busy() { return _state != ST_IDLE; }
+
 inline void info(Print& out) {
   uint32_t durMs = _count ? _buf[_count - 1].tMs : 0;
-  const char* st = _state == ST_RECORDING ? "RECORDING" : _state == ST_REPLAYING ? "REPLAYING" :
-                   _state == ST_EDITING   ? "EDITING"   : "idle";
+  const char* st = stateName();
   out.printf("[REC] state=%s  events=%lu/%lu  dur=%lums  drops=%lu  buf=%s\n",
              st, (unsigned long)_count, (unsigned long)_cap, (unsigned long)durMs,
              (unsigned long)_drops, _buf ? "ok" : "OOM");

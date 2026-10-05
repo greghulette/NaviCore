@@ -198,14 +198,16 @@ drainTestAction()              bridged per-action Test button
 navirec::pollControl/drain/checkRecordBackstop/replayTick
 rcTelemetry::tick()            rc_hb 0.5 Hz, rc_ch at chRateHz, outbound fragment pump
 processSbus()                  ← the real-time path
+checkSbusGestureTimeout()      500 ms with no frame cancels a matrix gesture in flight (§9)
 checkDeferredTap()
 updateStatusLed()
 checkPendingActions()          delayed actions
 sendPWMUpdate()                PWM_UPDATE stream (50 ms) when monitoring
 handleSerialInput()            one USB line per pass
 pollAuxSerialRx()              drain S3/S4/S5 RX so their FIFOs never overflow
-drainSerialFwd()               queued mesh→serial writes, a few bytes per pass
+drainSerialFwd()               queued mesh→serial writes and serial actions, a few bytes per pass
 HCR fade tick / maestroIdleReleaseTick() / trackSbusFps() / #L10 live dump
+checkDeferredRestart()         a mesh REBOOT, once ACKed and the queues are quiet (last)
 ```
 
 ---
@@ -283,6 +285,19 @@ SBUS frame ─► SbusReader (auto-detect 25 B / 36 B) ─► sbusValues[24]
                                               or HCR volume
 ```
 
+**Framing.** `SbusReader` trusts a stream only after `LOCK_FRAMES` (3) consecutive
+structurally valid frames of one variant, and decodes whole frames only. Locked on SBUS-24 it
+decodes a 36-byte buffer the moment it ends on `0x00`; a 25-byte buffer is decoded only when
+the byte after it is a header or the line goes quiet. 25 bytes are a byte-for-byte prefix of
+an SBUS-24 frame whose byte 24 is `0x00`, and decoding them eagerly handed `processSbus` a
+misframed frame (flags read from CH17's low byte) on every return from SBUS-16 to SBUS-24.
+A partial frame is dropped once the line has been quiet for `PARTIAL_DROP_US` (6 ms: longer
+than a whole SBUS-24 frame, shorter than a frame period), and the drop breaks the lock, so a
+window spanning a silence is never decoded — a cut frame or a lone header used to be filled by
+the next frame's bytes and decoded as a frame nobody sent. Never drop a partial on the in-loop
+gap: that gap is the loop period, not the line's, and dropping there kept the stream from ever
+locking.
+
 **Modes.** `FunctionSwState` (1/2/3) multiplies every button mapping: `RC_NUM_MAPPINGS =
 108 = 3 modes × 36 slots`.
 
@@ -315,8 +330,11 @@ an ordinary double/triple. A 4-tap flurry still saturates at triple — tier 4 i
 by holding. The hold is opened by the debounced press commit and closed by the debounced
 NEUTRAL (`rcMatrixRelease()`), so a one-frame transient cannot cancel it, and sliding onto a
 neighbouring band cannot fire the wrong button's long press (the threshold test requires
-`decoded == holdBtn`). An SBUS failsafe clears the hold — otherwise `holdActive` would park
-the tap dispatch forever and the button would go dead after recovery.
+`decoded == holdBtn`). An SBUS failsafe frame, or `SBUS_GESTURE_TIMEOUT_MS` (500 ms, the
+status LED's "no signal") with no frame at all, **cancels the whole gesture** — the hold and
+any deferred tap — and re-arms the matrix (`rcMatrixResetGesture()`); the press must be made
+again. Clearing only the hold left the deferred tap to fire during the failsafe, and with no
+frame timeout a press held when the frames stopped resolved as a tap once they returned.
 
 **Switch settle.** A switch position becomes a *candidate* on change and only dispatches
 once it has held for `switchSettleMs` (default 80, `0` = fire immediately). A 3-position
@@ -367,12 +385,12 @@ An `RcAction` is `{type, target[6], cmd[96], delayMs, note[20], skipRunning, fn,
 | `RA_WCB_BROADCAST` (2) | `wcb->broadcast(cmd)` | whole mesh |
 | `RA_MAESTRO_LOCAL` (3) | `executeMaestroCmd` → `maestroWrite` → Serial2 | wired Pololu bus |
 | `RA_MAESTRO_REMOTE` (4) | discrete verbs unicast WCB-native; passthrough/replay streams raw via `WCBStream` | remote Maestro |
-| `RA_SERIAL` (5) | `writeS3/S4/S5` (`\r`-terminated) | aux port named in `target` |
+| `RA_SERIAL` (5) | `queueSerialAction()` → the paced `auxTxPump()` (`\r`-terminated) | aux port named in `target`; clocked out a few bytes per `loop()` pass like a mesh→serial forward, never written whole (a bit-banged S4/S5 write blocks until its last bit is out). The `Serial TX` trace line prints when the line is out |
 | `RA_HCR` (6) | `executeHcrAction` → `hcrFormatCommand` | port or WCB from **global** `hcrDest` |
 | `RA_MP3` (7) | `executeMp3Action` → `;A,…` | **global** `mp3Dest` |
 | `RA_RECORD` (8) / `RA_PLAY` (9) / `RA_STOP` (10) | `navirec` control (deferred to Core 1) | — never captured into a clip |
 | `RA_SMOOTH_OVERRIDE` (11) | global passthrough smoothing latch | runtime only |
-| `RA_WLED` (12) | `executeWledAction` → `;L<id>,<verb>` | per-id routing in `wledSlots` |
+| `RA_WLED` (12) | `executeWledAction` → `;L<id>,<verb>` | per-id routing in `wledSlots`; a remote slot gets `;L<id>,<body>` rebuilt from the parse, so `L1,ON` (no `;`) works remotely as it does locally |
 | `RA_DFPLAYER` (13) | `executeDfpAction` → `;D,…` | **global** `dfpDest` — local aux port or a WCB |
 
 HCR, MP3 and DFPlayer destinations are **global, not per-action** — an action carries only
@@ -420,7 +438,8 @@ droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
   reassembly and dispatch; WCB status/alias/port-label metadata; bulk-transfer sink.
   A saved config is applied identically on both transports: USB `SET_CONFIG` and the bridged
   `_applyReassembled()` both call **`applyConfigSideEffects()`** (in the .ino) for the live
-  re-apply of baud, SBUS-OUT, Maestro easing and auto-release policy. **Any new post-save fixup
+  re-apply of baud, SBUS-OUT, Maestro easing and auto-release policy, and to forget any matrix
+  gesture in progress (`rcMatrixResetGesture()`). **Any new post-save fixup
   belongs in that helper, not in one caller** — the two paths previously drifted, and a Save
   over the mesh silently left the board on its old settings until the next reboot.
 - **`navirec`** — records dispatched actions plus synthesized servo/volume keyframes into a
@@ -443,6 +462,13 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | `aa6ae0a` | §7 lists `checkDeferredRestart()`, last in `loop()`: a mesh `REBOOT` is ACKed from `rcTelemetry::tick()` and restarts once the inbound queues are quiet (HIL `ncboot.mesh_reboot`). |
+| 2026-10-04 | `4833716` | §7, §10: a serial action goes through the paced aux transmitter (`queueSerialAction()` → `auxTxPump()`) instead of one blocking whole-line write (HIL `ncdev.serial_action_paced`). |
+| 2026-10-04 | `42c8a61` | §10: a WLED action to a remote slot forwards `;L<id>,<body>` rebuilt from the parse instead of the text as written (HIL `ncdev.wled_forward_normalised`). |
+| 2026-10-04 | `90c58bc` | §9 "Framing": a partial frame is dropped after 6 ms of real line silence and breaks the lock, so a cut frame can no longer join the next frame's bytes into a decoded phantom (HIL `sbus.truncated_frame_no_phantom`). |
+| 2026-10-04 | `5a648ad` | §9 "Framing": locked on SBUS-16 the reader decodes a 25-byte buffer only on the next header or a silence, never eagerly (HIL `sbus.sbus24_return_no_prefix_decode`); the post-stall eager flush is SBUS-24 only. |
+| 2026-10-04 | `5b894b9` | §7 lists `checkSbusGestureTimeout()`. A failsafe frame, or 500 ms with no SBUS frame (`checkSbusGestureTimeout()`), cancels any matrix gesture in flight — the deferred tap as well as the hold (HIL `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press`). |
+| 2026-10-04 | `6cdaa8a` | §13: `applyConfigSideEffects()` also forgets a parked tap or hold and re-arms the matrix (`rcMatrixResetGesture()`), so every config apply on either transport, `RESET_DEFAULTS` included, drops a gesture in progress (HIL `sbus.reconfig_parked_tap_cleared`). |
 | 2026-09-28 | `703a0e7` | §3 lists `navicore_hil.h`, the HIL hook header compiled only with `-DNAVICORE_HIL_HOOKS=1`; §5 the `/config.json.hil` copy its `#L91` leaves; §7's loop order gains the hook build's `#L90` stall and `kickUsbCdcTx()`, which already ran first. |
 | 2026-09-28 | `1e15601` | §6 step 4: the boot banner now carries `App SHA256: <16 hex>`, the running image's identity (PROTOCOLS.md §3), and the USB RX buffer is 8 KB (`Serial.setRxBufferSize(8192)`; this page said 4 KB). |
 | 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |

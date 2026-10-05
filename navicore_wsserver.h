@@ -79,6 +79,11 @@ struct WsCmd {
 
 inline QueueHandle_t  wsQueue  = nullptr;
 inline httpd_handle_t wsServer = nullptr;
+// True only while drain() runs a line that came in on a socket - the transport a
+// handler can ask about. NOT the capture tee: that stays armed for a client's whole
+// session (below), so it says "a client is connected", never "this line came from one".
+inline bool           wsLineRunning = false;
+inline bool lineFromSocket() { return wsLineRunning; }
 
 // ── Reply sink ──────────────────────────────────────────────────────────────
 // Print sink armed around processInputLine() so everything the command prints to
@@ -137,12 +142,13 @@ class WsSink : public Print {
     // reply the tool comes up with no config at all, which reads as "the droid lost
     // my settings". Only on the transition to live: clearing while another client is
     // already connected would discard output buffered for it this pass.
-    if (!live()) { _len = 0; _dropping = false; }
+    if (!live()) { _len = 0; _dropping = false; _lineStart = 0; _lineHeadSent = false; }
     for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] < 0) { _fds[i] = fd; return; }
     _fds[0] = fd;   // full: evict the oldest rather than refuse the newcomer
   }
   void drop(int fd) { for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] == fd) _fds[i] = -1; }
-  void end() { for (int i = 0; i < WS_MAX_CLIENTS; i++) _fds[i] = -1; _len = 0; _dropping = false; }
+  bool has(int fd) const { for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] == fd) return true; return false; }
+  void end() { for (int i = 0; i < WS_MAX_CLIENTS; i++) _fds[i] = -1; _len = 0; _dropping = false; _lineStart = 0; _lineHeadSent = false; }
   bool live() const {
     for (int i = 0; i < WS_MAX_CLIENTS; i++) if (_fds[i] >= 0) return true;
     return false;
@@ -163,8 +169,23 @@ class WsSink : public Print {
       // the 20 Hz telemetry that motivated the buffering. Losing the config is a
       // hard failure; a few ms of jitter on an explicit user action is not.
       if (!pump()) { _dropping = true; return 1; }   // send failed: client is gone
+      if (_len >= sizeof(_buf)) {
+        // pump() could NOT free room: httpd refused the work item, or there was no
+        // PSRAM for its copy - both happen while a stalled client holds the send task.
+        // Storing anyway wrote past the end of _buf (HIL ncwifi.ws_stalled_client). Drop
+        // this WHOLE line instead, per the policy above: the part of it still buffered
+        // goes too, so no client gets half a line glued to the next one. If its head has
+        // already been sent (a line longer than the buffer), end that head with a newline
+        // so only this one line fails to parse.
+        _len = _lineStart;
+        if (_lineHeadSent && _len < sizeof(_buf)) _buf[_len++] = '\n';
+        _lineStart = _len; _lineHeadSent = false;
+        _dropping = true;
+        return 1;
+      }
     }
     _buf[_len++] = (char)c;
+    if (c == '\n') { _lineStart = _len; _lineHeadSent = false; }
     return 1;
   }
   size_t write(const uint8_t* b, size_t n) override {
@@ -229,6 +250,9 @@ class WsSink : public Print {
     const size_t left = _len - send;
     if (left) memmove(_buf, _buf + send, left);
     _len = left;
+    // Track where the unfinished line starts (write()'s whole-line drop needs it).
+    if (_lineStart > send) _lineStart -= send;
+    else { if (_lineStart < send) _lineHeadSent = true; _lineStart = 0; }
     return live();
   }
 
@@ -254,6 +278,8 @@ class WsSink : public Print {
   int    _fds[WS_MAX_CLIENTS] = { -1, -1, -1 };
   size_t _len      = 0;
   bool   _dropping = false;
+  size_t _lineStart    = 0;      // index in _buf where the unfinished line begins
+  bool   _lineHeadSent = false;  // ...and whether pump() already sent part of that line
   // One PWM_UPDATE is ~640 B and they arrive at ~20 Hz; loop() pumps far faster
   // than that, so this only has to absorb one busy pass, not a backlog.
   char   _buf[2048];
@@ -285,8 +311,20 @@ inline void wsSendWork(void* arg) {
     f.len     = tx->len;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
       if (tx->fds[i] < 0) continue;
-      if (httpd_ws_send_frame_async(wsServer, tx->fds[i], &f) != ESP_OK)
-        wsSink.drop(tx->fds[i]);     // that client is gone; stop writing to it
+      // Skip a client an EARLIER work item already dropped: items queued while it held
+      // the task still list its fd, and each would block on it again for the full send
+      // timeout, holding every other client up behind a socket we know is dead.
+      if (!wsSink.has(tx->fds[i])) continue;
+      if (httpd_ws_send_frame_async(wsServer, tx->fds[i], &f) != ESP_OK) {
+        // That client is gone or stalled: stop writing to it AND close its session. Only
+        // dropping it left the socket open - it could still send lines that ran, and
+        // never received another, since only a handshake adds a client (HIL
+        // ncwifi.ws_stalled_client). Closed, it sees the close and can reconnect.
+        // close_fn (wsClose) releases its accumulator and closes the socket. If the close
+        // cannot be queued, shut the socket down so httpd's select() notices it anyway.
+        wsSink.drop(tx->fds[i]);
+        if (httpd_sess_trigger_close(wsServer, tx->fds[i]) != ESP_OK) shutdown(tx->fds[i], SHUT_RDWR);
+      }
     }
   }
   free(tx->data);
@@ -487,6 +525,13 @@ inline bool begin() {
   // the idle task on Core 0 is watched by the task WDT.
   cfg.max_open_sockets = 3;    // a config channel, not a hotspot
   cfg.lru_purge_enable = true; // a stale client must not permanently consume a slot
+  // Bound how long ONE client can hold the single httpd task. Every socket write is a
+  // work item on that task, sent to each client in turn with a blocking send, and the
+  // default 5 s let a client that stopped reading stall every other client per frame
+  // while the work queue overflowed behind it (HIL ncwifi.ws_stalled_client). 1 s, the
+  // config's floor (whole seconds; 0 means no timeout), still covers a healthy client:
+  // a send blocks only once its TCP window is full, and a 2 KB item drains in ms.
+  cfg.send_wait_timeout = 1;
   // Release the sink slot and the line accumulator the moment a session ends,
   // rather than leaving both to be noticed later, or never. See wsClose().
   cfg.close_fn         = wsClose;
@@ -542,7 +587,17 @@ inline void drain() {
   // CONFIG_SPIRAM_USE_MALLOC=y with CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096, so any
   // allocation over 4 KB is served from PSRAM, not the ~256 KB of internal SRAM.
   // Worth knowing before "optimising" this copy away — it is not on the scarce heap.
-  processInputLine(String(m.line));  // the SAME dispatcher the USB path uses
+  //
+  // TRIMMED, and skipped when that leaves it empty - exactly what handleSerialInput()
+  // does to every USB line. processInputLine() switches on the first character, so an
+  // untrimmed socket line with a leading space or tab was dropped with no reply, and a
+  // trailing one made "?version " an unknown command: the same protocol only if the
+  // framing matches too (HIL ncwifi.ws_line_trim).
+  String line(m.line);
+  line.trim();
+  wsLineRunning = true;                        // lineFromSocket(): this line's transport
+  if (line.length()) processInputLine(line);   // the SAME dispatcher the USB path uses
+  wsLineRunning = false;
 
   // Push the reply now rather than waiting for the next pass, so a command feels
   // immediate instead of picking up one loop() of latency.

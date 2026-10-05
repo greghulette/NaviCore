@@ -350,7 +350,7 @@ inline uint32_t otaCrc32(const String &data) {
 // ── Transport B: ESP-NOW relay OTA ──────────────────────────────────────────
 // Password + addressed-to-us gate shared by the target-side handlers.
 inline bool otaPktAuth(const char *pw, uint8_t targetWCB) {
-  return (strncmp(pw, rcConfig.wcbNetwork.password, sizeof(rcConfig.wcbNetwork.password) - 1) == 0) &&
+  return (strncmp(pw, g_meshPasswordBoot, sizeof(g_meshPasswordBoot) - 1) == 0) &&
          (targetWCB == rcConfig.wcbNetwork.deviceId);
 }
 
@@ -358,7 +358,7 @@ inline bool otaPktAuth(const char *pw, uint8_t targetWCB) {
 inline void sendOtaAck(uint8_t relayWCB, uint16_t sessionId, uint8_t status, uint32_t ackedOffset) {
   if (!wcb || !wcbReady || relayWCB < 1 || relayWCB > WCB_MAX_BOARDS) return;
   espnow_struct_ota_ctrl ack; memset(&ack, 0, sizeof(ack));
-  strncpy(ack.structPassword, rcConfig.wcbNetwork.password, sizeof(ack.structPassword) - 1);
+  strncpy(ack.structPassword, g_meshPasswordBoot, sizeof(ack.structPassword) - 1);
   ack.packetType  = PACKET_TYPE_OTA_ACK;
   ack.targetWCB   = relayWCB;                       // addressed to the relay
   ack.sourceWCB   = rcConfig.wcbNetwork.deviceId;   // us (the target)
@@ -463,7 +463,7 @@ inline void handleOtaAbortPacket(const uint8_t *raw) {
 inline void handleOtaAckRelay(const uint8_t *raw) {
   espnow_struct_ota_ctrl pkt; memcpy(&pkt, raw, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (strncmp(pkt.structPassword, rcConfig.wcbNetwork.password, sizeof(rcConfig.wcbNetwork.password) - 1) != 0) return;
+  if (strncmp(pkt.structPassword, g_meshPasswordBoot, sizeof(g_meshPasswordBoot) - 1) != 0) return;
   if (pkt.targetWCB != rcConfig.wcbNetwork.deviceId) return;   // ACK addressed to us (the relay)
   Serial.printf("[OTA:ACK,%u,%u,%lu,%u]\n", pkt.sourceWCB, pkt.sessionId, (unsigned long)pkt.ackedOffset, pkt.status);
 }
@@ -493,7 +493,7 @@ inline void processOtaRelayCommand(const String &args) {
     uint32_t size   = (uint32_t)((p < 0 ? r3 : r3.substring(0, p)).toInt());
     uint8_t  family = (uint8_t) (p < 0 ? 0 : r3.substring(p + 1).toInt());
     espnow_struct_ota_ctrl pkt; memset(&pkt, 0, sizeof(pkt));
-    strncpy(pkt.structPassword, rcConfig.wcbNetwork.password, sizeof(pkt.structPassword) - 1);
+    strncpy(pkt.structPassword, g_meshPasswordBoot, sizeof(pkt.structPassword) - 1);
     pkt.packetType = PACKET_TYPE_OTA_BEGIN; pkt.targetWCB = target;
     pkt.sourceWCB  = rcConfig.wcbNetwork.deviceId; pkt.chipFamily = family;
     pkt.sessionId  = session; pkt.imageSize = size;
@@ -530,7 +530,7 @@ inline void processOtaRelayCommand(const String &args) {
       }
     }
     espnow_struct_ota_data pkt; memset(&pkt, 0, sizeof(pkt));
-    strncpy(pkt.structPassword, rcConfig.wcbNetwork.password, sizeof(pkt.structPassword) - 1);
+    strncpy(pkt.structPassword, g_meshPasswordBoot, sizeof(pkt.structPassword) - 1);
     pkt.packetType = PACKET_TYPE_OTA_DATA; pkt.targetWCB = target;
     pkt.sourceWCB  = rcConfig.wcbNetwork.deviceId; pkt.sessionId = session; pkt.fragOffset = offset;
     size_t outLen = 0;
@@ -543,7 +543,7 @@ inline void processOtaRelayCommand(const String &args) {
 
   if (sub == "END" || sub == "ABORT") {
     espnow_struct_ota_ctrl pkt; memset(&pkt, 0, sizeof(pkt));
-    strncpy(pkt.structPassword, rcConfig.wcbNetwork.password, sizeof(pkt.structPassword) - 1);
+    strncpy(pkt.structPassword, g_meshPasswordBoot, sizeof(pkt.structPassword) - 1);
     pkt.packetType = (sub == "END") ? PACKET_TYPE_OTA_END : PACKET_TYPE_OTA_ABORT;
     pkt.targetWCB  = target; pkt.sourceWCB = rcConfig.wcbNetwork.deviceId; pkt.sessionId = session;
     wcb->sendRawPacket(target, (const uint8_t *)&pkt, sizeof(pkt));

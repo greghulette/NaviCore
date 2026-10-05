@@ -66,7 +66,7 @@ class CaptureSink : public Print {
     if (_wcb && _relay) {
       espnow_struct_remote_term pkt;
       memset(&pkt, 0, sizeof(pkt));
-      strncpy(pkt.structPassword, rcConfig.wcbNetwork.password,
+      strncpy(pkt.structPassword, g_meshPasswordBoot,
               sizeof(pkt.structPassword) - 1);
       pkt.packetType = PACKET_TYPE_REMOTE_TERM;
       pkt.sourceWCB  = rcConfig.wcbNetwork.deviceId;

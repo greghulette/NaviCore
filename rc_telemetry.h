@@ -90,6 +90,7 @@ void                queueRemoteTrigger(int mode, int btn, uint8_t tap);   // Cor
 void                queueForgetPeer(uint8_t id);   // Core-0 → loop hop for FORGET_PEER; id 0 = all (defined in .ino)
 void                resetModeAwareKnobs();   // re-arm mode-aware knobs on a mode change (defined in .ino)
 bool                applyConfigSideEffects();   // post-save live re-apply, shared with the USB path (defined in .ino)
+void                requestDeferredRestart();   // restart from loop() once the inbound queues are quiet (defined in .ino)
 
 // Forward declarations from rc_config.h — needed for SET_CONFIG / GET_CONFIG
 // fragmentation handlers below.  Both already exist; declared here so
@@ -97,10 +98,12 @@ bool                applyConfigSideEffects();   // post-save live re-apply, shar
 String rcConfigToJSON();
 bool   rcConfigFromJSON(const String& json);
 bool   rcConfigFromJSON(const JsonObject& doc);   // JsonObject overload — skip the double-parse
+void   rcConfigResetKeepIdentity();               // RESET_DEFAULTS: factory defaults minus the network identity
 bool   rcConfigSaveNVS();   // DEAD — nothing calls it; the NVS *load* is the migration source
 bool   rcConfigSaveLFS();   // primary: persist config to /config.json on LittleFS
 void   rcAdvertiseSerialLabels();   // push effective per-port labels to WCB_Client (WDP PORTLABEL) — def in NaviCore.ino
 bool     rcCmdlibSaveLFS(const String& json); // persist the config tool's private command library to /cmdlib.json
+bool     rcCmdlibExtractData(const String& msg, String& lib);   // SET_CMDLIB's "data" value, bracket-matched
 bool     rcCmdlibLoadLFS(String& out);        // read /cmdlib.json (raw JSON) — false if missing/empty
 uint32_t rcCmdlibHash(const String& s);       // FNV-1a signature of the stored library (change-detection)
 
@@ -292,6 +295,7 @@ inline uint8_t _pendingWcbSendTo       = 0;    // relay target: 0 = broadcast, 0
 inline char    _pendingWcbSendCmd[160] = "";   // bridged WCB_SEND is single-packet, so the cmd is well under this
 inline uint8_t _pendingWcbSendFrom     = 0;    // requester to ACK (0 = nothing parked)
 inline uint8_t _pendingResetDefaults   = 0;    // requester to ACK (0 = nothing parked)
+inline uint8_t _pendingRebootFrom      = 0;    // REBOOT requester to ACK before the deferred restart (0 = none)
 
 // ── Stored sequences: inventory + one value ──────────────────────────────────
 //   GET_WCB_SEQ    {wcb}       → WCB_SEQ     — the ?SEQ key NAMES on that board
@@ -333,15 +337,24 @@ inline const char* _seqReplyWhat = "WCB_SEQ";   // label for the fragment-send l
 // forever on a board that is powered off.
 constexpr uint32_t WCB_SEQ_TIMEOUT_MS = 6000;
 
-// Append `n` bytes of EXTERNAL text as a JSON string body (no quotes) — the same
-// JSON-hostile strip buildWcbMeta() applies to port labels. Without it a stray
-// quote or backslash breaks the hand-built JSON and the tool drops the whole line
-// at JSON.parse, which looks exactly like the board never answered.
-inline void _seqAppendJsonSafe(String& s, const char* p, size_t n) {
+// Append `n` bytes of EXTERNAL text as a JSON string body (no quotes), ESCAPED: a quote
+// or backslash gets a backslash, a control character its JSON u-escape. Unescaped, a stray
+// quote broke the hand-built JSON and the tool dropped the whole line at JSON.parse,
+// which looks exactly like the board never answered. Escaped, NOT stripped: stripping
+// (as buildWcbMeta() still does for port labels) handed the tool a sequence other than
+// the one stored - a ;L WLED command's JSON body arrived without its quotes, and saved
+// back it would be stored altered (HIL ncmesh.seqval_verbatim). JSON.parse gives the
+// exact stored bytes back.
+inline void _seqAppendJsonEsc(String& s, const char* p, size_t n) {
   for (size_t k = 0; k < n && p[k]; k++) {
     const char c = p[k];
-    if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;
-    s += c;
+    if (c == '"' || c == '\\') { s += '\\'; s += c; }
+    else if ((unsigned char)c < 0x20) {
+      char u[8];
+      snprintf(u, sizeof(u), "\\u%04x", (unsigned)(unsigned char)c);
+      s += u;
+    }
+    else s += c;
   }
 }
 
@@ -364,7 +377,7 @@ inline String buildWcbSeq(uint8_t board, uint32_t hash, uint16_t count, const ch
       if (!first) s += ',';
       first = false;
       s += '"';
-      _seqAppendJsonSafe(s, p, len < WCB_SEQ_KEY_MAX ? len : WCB_SEQ_KEY_MAX);
+      _seqAppendJsonEsc(s, p, len < WCB_SEQ_KEY_MAX ? len : WCB_SEQ_KEY_MAX);
       s += '"';
     }
     if (!e) break;
@@ -375,19 +388,19 @@ inline String buildWcbSeq(uint8_t board, uint32_t hash, uint16_t count, const ch
 }
 
 // Build the WCB_SEQVAL reply — ONE sequence's contents. The value is passed through
-// verbatim apart from the JSON strip: its '^' delimiters and `***` comments are what
-// the tool renders, so nothing here may reformat it.
+// verbatim, JSON-escaped (_seqAppendJsonEsc): its '^' delimiters and `***` comments
+// are what the tool renders, so nothing here may reformat it.
 inline String buildWcbSeqVal(uint8_t board, const char* key, uint8_t status, const char* value) {
   const char* v = value ? value : "";
   String s; s.reserve(96 + strlen(v));
   s += "{\"sys\":1,\"type\":\"WCB_SEQVAL\",\"ok\":true,\"wcb\":";
   s += (int)board;
   s += ",\"key\":\"";
-  _seqAppendJsonSafe(s, key ? key : "", WCB_SEQ_KEY_MAX);
+  _seqAppendJsonEsc(s, key ? key : "", WCB_SEQ_KEY_MAX);
   s += "\",\"status\":";
   s += (int)status;                        // 0 OK, 1 NOTFOUND, 2 TOOBIG (WCBSeqStatus)
   s += ",\"value\":\"";
-  _seqAppendJsonSafe(s, v, strlen(v));
+  _seqAppendJsonEsc(s, v, strlen(v));
   s += "\"}";
   return s;
 }
@@ -1147,12 +1160,28 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
       if (wnet.containsKey("macOct3"))  wnet.remove("macOct3");
       if (wnet.containsKey("password")) wnet.remove("password");
       if (wnet.containsKey("quantity")) wnet.remove("quantity");
+      // The mesh channel too: a valid other channel would be saved and take this board
+      // off the mesh at its next boot (the tool already strips it; HIL
+      // ncmesh.bridged_set_config_strip).
+      if (wnet.containsKey("channel"))  wnet.remove("channel");
       // If we stripped every field, drop the empty `wcbNetwork: {}` so
       // rcConfigFromJSON's containsKey("wcbNetwork") check short-circuits
       // and we skip the whole "apply each field from JSON with fallback"
       // loop.  Tiny perf win; avoids touching strlcpy(password) etc.
       // with the same values they already hold.
       if (wnet.size() == 0) data.remove("wcbNetwork");
+    }
+    // ...and the SoftAP settings, for the same reason: wifiEnabled / wifiSsid /
+    // wifiPassword are read at boot only, so a bridged Save could switch the AP off,
+    // rename it or change its key for the NEXT boot with nothing visible now - and
+    // the AP is how a WiFi client reaches this board at all. Radio settings change
+    // over USB (or the AP's own socket), never through the mesh.
+    {
+      bool strippedWifi = false;
+      for (const char* k : { "wifiEnabled", "wifiSsid", "wifiPassword" })
+        if (data.containsKey(k)) { data.remove(k); strippedWifi = true; }
+      if (strippedWifi)
+        Serial.println("[RC] SET_CONFIG: ignoring incoming wifi* fields (WCB-transport saves can't change the SoftAP)");
     }
     // Pass the JsonObject directly instead of re-serializing → re-parsing.
     // The old String round-trip allocated 3 KB for `dataJson` AND another
@@ -1202,19 +1231,13 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     return;
   }
   if (!strcmp(type, "SET_CMDLIB")) {
-    // Persist the tool's private command library OPAQUELY. Pull the raw "data"
-    // value by SUBSTRING rather than a second multi-KB parse: the message is
-    // {"type":"SET_CMDLIB","data":<lib>} with data LAST, so the value runs from
-    // after the first `"data":` to the message's final '}'.
+    // Persist the tool's private command library OPAQUELY, extracted exactly as the
+    // USB handler does (rcCmdlibExtractData: bracket-matched, so a key AFTER "data" -
+    // the tool's ,"sys":1 - is never stored with the library).
     bool ok = false;
-    int k = json.indexOf("\"data\":");
-    int end = json.lastIndexOf('}');
     uint32_t h = 0, sz = 0;
-    if (k >= 0 && end > k + 7) {
-      String lib = json.substring(k + 7, end);
-      lib.trim();
-      if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
-    }
+    String lib;
+    if (rcCmdlibExtractData(json, lib)) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
     Serial.printf("[RC] SET_CMDLIB → %s\n", ok ? "saved to LittleFS" : "SAVE FAILED / empty");
     char ack[96];
     snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}",
@@ -1231,6 +1254,22 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     // paths on the SAME queue: we're on Core 1 here (tick(), mutex already released),
     // but dispatch still belongs in drainTestAction alongside the rest of loop().
     queueTestAction(senderID, json.c_str());
+    return;
+  }
+  if (!strcmp(type, "WCB_SEND")) {
+    // A WCB_SEND too long for one packet arrives FRAGMENTED (the tool fragments
+    // anything over 187 B) and lands here, not in handle()'s one-packet branch. It was
+    // dropped as an unexpected type, with no ACK and nothing sent. We are on Core 1
+    // (tick()), so send and ACK right here - same checks and same ACK as the parked
+    // one-packet form, with the library's own answer as ok.
+    const int   target = doc["target"] | -1;
+    const char* cmd    = doc["cmd"]    | "";
+    bool ok = false;
+    if (wcb && target >= 0 && target <= WCB_MAX_BOARDS && cmd[0])
+      ok = (target == 0) ? wcb->broadcast(cmd) : wcb->send((uint8_t)target, cmd);
+    char ack[72];
+    snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"WCB_SEND\",\"ok\":%s}", ok ? "true" : "false");
+    if (wcb) wcb->send(senderID, ack);
     return;
   }
   Serial.printf("[RC] reassembled payload had unexpected type '%s' — dropping\n", type);
@@ -1516,12 +1555,13 @@ inline void tick() {
   if (_pendingWcbSendFrom != 0) {
     const uint8_t from = _pendingWcbSendFrom;
     const uint8_t to   = _pendingWcbSendTo;   // 0 = broadcast, 0xFF = handle() saw a bad target
+    // ok is what the LIBRARY answered, as on USB: send()/broadcast() refuse for real
+    // reasons (no peer for that board, oversize payload, mesh not up), and ok = true
+    // regardless told the tool a refused command had gone out (HIL
+    // ncmesh.bridged_wcb_send_findings).
     bool ok = false;
-    if (to != 0xFF && _pendingWcbSendCmd[0]) {
-      if (to == 0) wcb->broadcast(_pendingWcbSendCmd);
-      else         wcb->send(to, _pendingWcbSendCmd);
-      ok = true;
-    }
+    if (to != 0xFF && _pendingWcbSendCmd[0])
+      ok = (to == 0) ? wcb->broadcast(_pendingWcbSendCmd) : wcb->send(to, _pendingWcbSendCmd);
     _pendingWcbSendCmd[0] = '\0';
     _pendingWcbSendFrom   = 0;   // cleared LAST — a fresh park from Core 0 is then visible
     char ack[72];
@@ -1531,14 +1571,26 @@ inline void tick() {
   }
   // ── RESET_DEFAULTS parked by handle() ────────────────────────────────────────
   // RAM-only, exactly like the USB path — the tool's follow-up Save persists it, so
-  // there is no flash write to keep off this path.  applyConfigSideEffects() is the
-  // shared live re-apply and ends in resetMaestroReleaseState(), which is what the
-  // USB handler calls directly (that one is static to the .ino); a false return only
-  // means boardType changed and the pin profile needs the reboot the GUI prompts for.
+  // there is no flash write to keep off this path.  Both paths run the same two
+  // calls: rcConfigResetKeepIdentity() (factory defaults minus the network identity -
+  // wcbNetwork, wcbProfiles, boardType, the SoftAP fields) and applyConfigSideEffects(),
+  // the shared live re-apply, which ends in resetMaestroReleaseState(). boardType is
+  // kept, so its false return (a pin-profile change) cannot happen here.
+  // ── REBOOT parked by handle() ─────────────────────────────────────────────
+  // ACK first, from here (Core 1): the sender can then tell a restart from a lost
+  // packet. The restart itself is deferred to loop() (requestDeferredRestart), which
+  // waits for the inbound queues to drain and the mesh to go quiet, so nothing queued
+  // behind the REBOOT is thrown away, and gives the ETM ACK time to leave.
+  if (_pendingRebootFrom != 0) {
+    const uint8_t to = _pendingRebootFrom;
+    _pendingRebootFrom = 0;
+    wcb->send(to, "{\"sys\":1,\"type\":\"ACK\",\"of\":\"REBOOT\",\"ok\":true}");
+    requestDeferredRestart();
+  }
   if (_pendingResetDefaults != 0) {
     const uint8_t to = _pendingResetDefaults;
     _pendingResetDefaults = 0;
-    rcConfigLoadDefaults();
+    rcConfigResetKeepIdentity();
     applyConfigSideEffects();
     Serial.printf("[RC] RESET_DEFAULTS from W%u → live config reset to factory defaults (not persisted)\n",
                   (unsigned)to);
@@ -2402,10 +2454,13 @@ inline bool handle(uint8_t senderID, const char* command) {
   }
 
   // ── REBOOT (JSON form — mirror of the ;<id>,r short-form above) ──────
+  // PARK ONLY. This used to wait 100 ms and ESP.restart() right here, on the Core-0
+  // receive callback, with no reply: a tool that sent it could not tell a restart
+  // from a lost packet, and anything queued behind it was lost (HIL ncboot.mesh_reboot;
+  // the WCB's rule 11). tick() ACKs it and loop() restarts once the queues are quiet.
   if (!strcmp(type, "REBOOT")) {
     Serial.println("[RC] Remote REBOOT requested via WCB");
-    delay(100);
-    ESP.restart();
+    _pendingRebootFrom = senderID;   // ACKed from tick() (Core 1), then a deferred restart
     return true;
   }
 
@@ -2442,7 +2497,8 @@ inline bool handle(uint8_t senderID, const char* command) {
 
   // ── RESET_DEFAULTS — factory-reset the LIVE config (RAM only, same as USB;
   //    the tool's follow-up Save is what persists it) ─────────────────────────
-  // PARK ONLY, for the same reason: rcConfigLoadDefaults() rewrites the rcConfig
+  // Factory defaults MINUS the network identity (rcConfigResetKeepIdentity).
+// PARK ONLY, for the same reason: rcConfigResetKeepIdentity() rewrites the rcConfig
   // that Core 1 reads every SBUS frame, and the live re-apply reopens serial ports.
   // Neither belongs on this callback stack.  Until this branch existed the message
   // fell through to "unknown type" while the tool's follow-up GET_CONFIG (which IS

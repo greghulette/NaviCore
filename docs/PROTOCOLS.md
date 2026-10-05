@@ -100,6 +100,16 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   rest were discarded with nothing sent back — the client waits forever for a reply the board
   already threw away. Depth is 8 and the handler now waits `WS_ENQUEUE_WAIT_MS` (50 ms) for
   room. Blocking there is safe: it is the httpd task on Core 0, not `loop()`.
+- **One stalled client must not hold the others.** Every socket write is a work item on the
+  single httpd task, sent to each client in turn with a blocking send. `send_wait_timeout` is
+  **1 s** (the config's floor; the 5 s default let one client that stopped reading hold every
+  other client's replies). A client whose send fails is dropped from the sink **and its
+  session closed** (`httpd_sess_trigger_close`) — dropped alone, it stayed open and deaf, able
+  to send lines that ran but never to receive another — and work items queued meanwhile skip
+  it (`WsSink::has()`). When `pump()` cannot free room in a full sink, `write()` drops the
+  **whole line** (and ends a head already sent with a newline) instead of storing past the end
+  of its 2 KB buffer. Residual: work items queued during that ≤ 1 s stall can still overflow
+  httpd's 6-deep control socket, which loses them (and their PSRAM copies) silently.
 - **Every emitter a PANEL depends on must fall back to the socket.** The
   `Serial.availableForWrite()` guard is correct and stays — an unguarded USB write
   blocks up to HWCDC's 50 ms tx timeout and starves the SBUS decode in `loop()` — but it
@@ -200,7 +210,10 @@ WCB Wizard can mute the tool's chatter when both share a port.
 `handleSerialInput()` reads bytes off `Serial` and assembles lines;
 **`processInputLine(const String&)` is the transport-agnostic dispatcher** and is where every
 message above is actually handled. Anything else that can produce a complete line calls
-`processInputLine()` directly rather than duplicating the dispatch.
+`processInputLine()` directly rather than duplicating the dispatch — and frames like USB does:
+**trim the line, and skip it if that leaves it empty**. `processInputLine()` switches on the
+first character, so an untrimmed leading space drops a line silently and a trailing one makes
+`?version ` an unknown command.
 
 `naviws::drain()` is the second caller (the WebSocket endpoint,
 [`navicore_wsserver.h`](../navicore_wsserver.h)). Its shape is the constraint worth
@@ -227,15 +240,15 @@ payload approaches 98 KB and copying it per line is real cost.
 | `{"type":"SET_CONFIG","data":{…}}` | `{"type":"ACK","ok":true}` | Deserialised un-filtered; re-applies bauds, SBUS-out, board profile live |
 | `{"type":"GET_CMDLIB"}` | `{"type":"CMDLIB","size":N,"hash":H,"data":{…}}` | Command library stored on the droid, opaque to firmware |
 | `{"type":"GET_CMDLIB_META"}` | `{"type":"CMDLIB_META","size":N,"hash":H}` | Cheap change-check so a connect can skip the pull |
-| `{"type":"SET_CMDLIB","data":{…}}` | `ACK` | Raw value pulled by substring, stored verbatim |
+| `{"type":"SET_CMDLIB","data":{…}}` | `ACK` | Raw value pulled by substring, stored verbatim. Its end is found by **bracket matching** (`rcCmdlibExtractData()`, the one extraction USB and the bridge share), so a key after `data` — the tool's `"sys":1` — is never stored with the library |
 | `{"type":"START_MONITOR"}` | streams `PWM_UPDATE` every 50 ms | |
 | `{"type":"STOP_MONITOR"}` | `ACK` | Also force-clears calibration mute |
 | `{"type":"CALIB","on":bool}` | `ACK` | Mutes **all** action dispatch while on |
-| `{"type":"RESET_DEFAULTS"}` | `ACK` | Reloads factory defaults |
-| `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}` | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects) |
-| `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | |
+| `{"type":"RESET_DEFAULTS"}` | `ACK` | Factory defaults for everything **except the network identity** — `wcbNetwork`, `wcbProfiles`, `boardType` and the `wifi*` fields stay (`rcConfigResetKeepIdentity`). RAM only (the next Save persists it); the live side effects (bauds, SBUS OUT, easing, auto-release) run at once. The bridged form does the same and ACKs `{"of":"RESET_DEFAULTS"}` |
+| `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}`, plus `"msg":"<reason>"` when `ok` is false | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects). `ok` means the executor **fired** it: an action it skips — disabled destination, invalid slot or channel, unconfigured WLED id, bad serial port, busy Maestro — answers `ok:false` with the skip line's text in `msg` (the `dskip()` recorder). The bridged form ACKs the same `msg` |
+| `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | Bridged: `tick()` ACKs `{"sys":1,"type":"ACK","of":"REBOOT","ok":true}`, then `loop()` restarts once the inbound queues are empty and no mesh command has arrived for 500 ms (`checkDeferredRestart()`), or 5 s after the request at the latest — never from the receive callback |
 | `{"type":"TRIGGER","mode":M,"btn":B,"tap":T}` | — | Virtual button press. `tap` 1–4; **4 = long press** (tier `t4`), which always dispatches exclusively |
-| `{"type":"WCB_SEND","target":N,"cmd":"…"}` | — | `target` 0 = broadcast |
+| `{"type":"WCB_SEND","target":N,"cmd":"…"}` | `ACK`, `ok` = whether `WCB_Client` sent it | `target` 0 = broadcast. The bridged form ACKs `{"of":"WCB_SEND"}` with the library's answer too, and a fragmented one (over 187 B) is sent and ACKed from the reassembly |
 | `{"type":"FORGET_PEER","id":N}` / `"all":true` | — | id 0 or `all` = drop every learned peer |
 | `{"type":"SET_DEBUG_FLAGS","flags":N}` | — | See the debug bitmask below |
 | `{"type":"GET_WCB_STATUS"}` | `{"type":"WCB_STATUS",…}` | See §4 “Bridged status and metadata” |
@@ -448,6 +461,13 @@ LittleFS each time, stalling `loop()` far longer than the streaming itself.
 The relayed-path size refusal now applies only to the **legacy whole-clip** form — a ranged
 request is the answer to that problem, so it is allowed at any clip size.
 
+"Relayed" is decided by the **transport the line came in on**, never by the capture tee: a
+line `drainRemoteCli()` runs (`g_rtermRelay != 0`) or one a WebSocket client sent
+(`naviws::lineFromSocket()`) gets the paced stream, the 512-event slice cap and the whole-clip
+refusal; a USB line never does, whether or not a socket is open. The tee is armed for a
+socket's whole session, so testing it cut every USB download to 512 events while any client
+was connected.
+
 `rc_trig` goes out on **both** transports because `rcTelemetry::emitTrig()` returns early
 without a ready WCB, so a Direct-USB tool previously saw nothing at all for a local button
 press — no way to distinguish "the tier fired and did nothing visible" from "the tier never
@@ -475,7 +495,9 @@ of its own.
 
 Default 0 — every `[DISPATCH]` log is compiled in but costs nothing until enabled. Log
 sites use `dlog(BIT, fmt, …)`, which wraps `vlogf()` and drops the line rather than block
-when the USB TX buffer is full.
+when the USB TX buffer is full. A dispatch line means the send happened: it is printed
+after the action's checks, and an action that fails one prints a `… — skipped` line with
+the reason instead (`dskip()`, which also feeds `TEST_ACTION`'s `msg`), never the send line.
 
 **`DBG_WIRE` (bit 7, HIL hook builds).** One line per block handed to a device port, 48 bytes
 at most per line:
@@ -499,7 +521,11 @@ shows when a line was lost, which happens because it goes through `vlogf()`. Dev
 ## 3. CLI commands
 
 Typed on the USB console **or** relayed from the tool's terminal over the mesh — both run
-through `execCliLine()`, so behaviour is identical. Case-insensitive.
+through `execCliLine()`, so behaviour is identical. Case-insensitive. A relayed line longer
+than 199 characters (a queue slot, `RemoteCliMsg.cmd[200]`) is **refused with a
+`[WCB] CLI line from WCB<n> is <len> characters … dropped` line, never run cut short**; a
+mesh→serial line over 200 characters (`SerialFwdMsg.text[201]`) likewise. `WCB_Client`
+reassembles a fragmented command whole, so the length is the sender's, not a packet's.
 
 ### Diagnostics
 
@@ -595,6 +621,14 @@ hosting WCB relays a `:MQR` reply asynchronously, surfaced by `maePumpRemoteEmit
 Timeline-editor transport: `EDITLOAD,<name>` · `EDITBEGIN` · `EDITEV,<idx>,<json>` ·
 `EDITEND,<name>` · `EDITCANCEL`.
 
+A clip asked for while the recorder is busy (recording, replaying, mid-upload) is **busy, not
+missing**: `PLAY,<name>` and `LOAD` answer `[REC] busy (<state>) …`, and `EDITLOAD` of a clip
+not already resident answers `[CLIPDL:ERR]recorder busy (<state>)`, which the tool's ranged
+download raises as an error. `<state>` is `?REC,INFO`'s name (`RECORDING`, `REPLAYING`,
+`EDITING`). `CLEAR` likewise answers `[REC] busy (<state>) - not cleared` unless idle, and
+`EDITCANCEL` empties the staged events (they used to stay in the buffer, playable and
+saveable).
+
 ### Other
 
 | Command | Meaning |
@@ -645,6 +679,10 @@ Inbound `rc_*` messages are filtered by `id == 20` so other mesh peers do not bl
 
 `SET_CONFIG` and `GET_CONFIG` **do** work over the bridge via fragmentation, but a
 very large config or command library still needs Direct USB (see the caps below).
+A bridged `SET_CONFIG` can never change this board's radio settings: `_applyReassembled()`
+strips `wcbNetwork.deviceId`, `macOct2`, `macOct3`, `password`, `quantity` and `channel`,
+and the top-level `wifiEnabled`, `wifiSsid` and `wifiPassword`, before applying. Those
+change over USB or the SoftAP's own socket only.
 
 ### Fragmentation
 
@@ -794,7 +832,9 @@ board), **2** TOOBIG (the stored value exceeds what one reply can carry). The ta
 distinguishes these explicitly rather than answering with silence — silence is what makes
 the config-pull path unusable. The `value` is passed through verbatim: its `^`
 delimiters and `***` comments are what the consumer renders, so nothing in the firmware
-may reformat it.
+may reformat it. It and the names are **JSON-escaped, never stripped**
+(`_seqAppendJsonEsc()`), so a value holding JSON — a `;L` command's body — parses back to
+exactly the bytes the WCB stores.
 
 Four things about it are load-bearing:
 
@@ -864,8 +904,12 @@ Sizes already claimed elsewhere in the ecosystem: **43, 204, 226, 230, 249, 252*
 [`navicore_rterm.h`](../navicore_rterm.h) fail the build if a struct drifts — **do not
 suppress them**; pick a different size instead.
 
-Every packet begins with `char structPassword[40]`, matched against
-`rcConfig.wcbNetwork.password`.
+Every packet begins with `char structPassword[40]`, filled from and matched against
+`g_meshPasswordBoot` — the password `WCB_Client` was constructed with at boot, **not** the
+live `rcConfig.wcbNetwork.password`. The library keeps that boot copy for every ETM packet,
+so a hand-built packet reading the live field split the board after an unrebooted password
+change or reset: ETM traffic on one password, RTERM/OTA/WcbMgmt on the other. A credential
+change takes effect at the reboot it already requires, for every packet at once.
 
 **OTA safety model.** Writes always target the inactive slot
 (`esp_ota_get_next_update_partition`); the image is SHA-verified by `esp_ota_end` *before*
@@ -929,6 +973,21 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | `3df29d0` | `?REC,EDITCANCEL` empties the buffer, and `?REC,CLEAR` answers busy instead of "cleared" when the recorder is not idle (HIL `ncrec.editcancel_empties`). |
+| 2026-10-04 | `a35249a` | `?REC,PLAY,<name>`, `LOAD` and `EDITLOAD` say the recorder is busy instead of "not found" when it is not idle (HIL `ncrec.busy_load_not_missing`). |
+| 2026-10-04 | `cb314f6` | `WCB_SEQ` names and the `WCB_SEQVAL` key and value are JSON-escaped instead of having `"`, `\` and control characters stripped (HIL `ncmesh.seqval_verbatim`). |
+| 2026-10-04 | `539c986` | A relayed CLI line over 199 characters, or a mesh→serial line over 200, is refused with a log line instead of being truncated into its queue slot and run (HIL `ncmesh.long_command_truncation`). |
+| 2026-10-04 | `8ab539f` | A bridged `WCB_SEND` ACKs the library's send result instead of `ok:true` regardless, and its fragmented form is sent and ACKed instead of dropped (HIL `ncmesh.bridged_wcb_send_findings`). |
+| 2026-10-04 | `8e36d81` | The bridged `SET_CMDLIB` uses the USB path's bracket-matched extraction (`rcCmdlibExtractData()`), not "everything up to the message's last `}`" (HIL `ncmesh.bridged_cmdlib_keys_after_data`). |
+| 2026-10-04 | `0e20c23` | `?REC,EDITLOAD` decides "relayed" from the line's transport (`g_rtermRelay`, `naviws::lineFromSocket()`), not `rcSerial.captureArmed()`, so a USB download is no longer cut to 512 events while a WebSocket client is connected (HIL `ncwifi.usb_editload_with_socket`). |
+| 2026-10-04 | `2aec189` | WebSocket: a client whose send fails has its session closed and later work items skip it; `send_wait_timeout` is 1 s; a full sink drops the whole line instead of writing past its buffer (HIL `ncwifi.ws_stalled_client`). |
+| 2026-10-04 | `18578b6` | WebSocket lines are trimmed (and skipped when empty) before `processInputLine()`, as USB lines always were (HIL `ncwifi.ws_line_trim`). |
+| 2026-10-04 | `aa6ae0a` | A bridged `REBOOT` is ACKed (`"of":"REBOOT"`) and the restart deferred to `loop()` until the queues are quiet, instead of a silent `ESP.restart()` on the Core-0 receive callback (HIL `ncboot.mesh_reboot`). |
+| 2026-10-04 | `f50bc10` | The dispatch trace prints a send line only for a send that happens: a serial action to a port other than S3-S5 (or one this board lacks) prints `[DISPATCH] Serial port '<p>' is not S3/S4/S5 — skipped`, and the Maestro line follows the skip-if-running gate (HIL `ncengine.skip_not_traced_as_sent`). |
+| 2026-10-04 | `27e3351` | `TEST_ACTION` answers `ok:false` with a `msg` when the executor skips the action, on both transports, instead of `ok:true` for anything that parsed (HIL `ncengine.test_action_skipped_not_ok`). |
+| 2026-10-04 | `7f47f3c` | A bridged `SET_CONFIG` also strips `wcbNetwork.channel` and the `wifi*` fields, so a Save over the mesh can no longer move the board's mesh channel or SoftAP at its next boot (HIL `ncmesh.bridged_set_config_strip`). |
+| 2026-10-04 | `df12629` | `RESET_DEFAULTS` keeps the network identity (`wcbNetwork`, `wcbProfiles`, `boardType`, `wifi*`) on both transports, and the USB form now runs the live side effects as the bridged one does (HIL `nccfg.reset_defaults_keeps_identity`, `ncmesh.bridged_reset_keeps_identity`). |
+| 2026-10-04 | `0169cb9` | RTERM, OTA auth/ACKs and WcbMgmt take the mesh password from `g_meshPasswordBoot` (the copy `WCB_Client` got at boot), not the live config field, so an unrebooted password change or reset no longer splits them from the ETM stack (HIL `nccfg.mesh_creds_live_split`). |
 | 2026-09-28 | `703a0e7` | **HIL test hooks, `NAVICORE_HIL_HOOKS` builds only** (the WCB repo's HIL plan INF9 b): `DBG_WIRE` = debug bit 7, a `[WIRE] <port> <offset>/<length>: <hex>` line per block written to S3/S4/S5/Serial2/the WCBStream; §3's new table: `#L90,<ms>` (stall `loop()`), `#L91` / `#L91,R` (cut `/config.json`, keeping `/config.json.hil`; put it back), `#L92` (the next GET_CONFIG overflows), `#L93` (the next config save fails). Every other image answers them `Unknown #L code`, whose `Valid:` list is unchanged in both. |
 | 2026-09-28 | `1e15601` | **`App SHA256: <16 hex>` in `?OTALOCAL,STATUS` and the boot banner**: the running image's ELF SHA-256 (first 8 bytes), so two builds of one commit, which report the same `FW_VERSION`, can be told apart, and a backtrace is decoded against the right `.elf`. §3 now lists the STATUS block. Read from the app descriptor because `esp_app_get_elf_sha256()` stops at 9 hex digits in core 3.3.4. |
 | 2026-09-24 | _(uncommitted)_ | `?MGMT,PULL,<target>,P`: through WCB_Client's `WCB_Mgmt.h`, a config over 2912 characters is relayed as `[MGMT:CFGPART,<n>]` parts and a refusal as `[MGMT:CFGERR,<n>]` (WCB F13). Each line is one `printf` from `service()`, so it reaches the WebSocket (only loop-task output does). |

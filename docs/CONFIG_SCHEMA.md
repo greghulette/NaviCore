@@ -26,6 +26,11 @@ Size discipline matters: `RcAction::cmd[96]` is multiplied by
 `RC_NUM_MAPPINGS × RC_NUM_TAP_TIERS × RC_ACTIONS_PER_TIER = 108 × 4 × 5 = 2160` action slots.
 Widening a field in `RcAction` costs kilobytes per byte.
 
+Every string field is a fixed `char[]`, and a value longer than its field is cut silently at
+the field's size in bytes — but never through a UTF-8 character: every copy in `rc_config.h`
+goes through `cfgStrlcpy()`, which drops an incomplete last character. A plain `strlcpy` cut
+kept half a character, and the tool's next save wrote U+FFFD back.
+
 ---
 
 ## 2. Capacity constants
@@ -59,8 +64,8 @@ Widening a field in `RcAction` costs kilobytes per byte.
 | `wifiEnabled` | `bool` | Raise a SoftAP + comms endpoint for wireless access. **Defaults false, and false means the bring-up code never runs** — not "runs idle". Read at boot only: changing it needs a Save *and* a reboot. NVS key `wifien`. Deserialised with `\| false` so a config or backup predating the field can never enable the radio. The AP must be raised on `wcbNetwork.channel` — one radio, so any other channel takes the droid off its own mesh. **No visible UI**: the toggle lives in the cloud-backup modal, itself behind the 4×-wordmark gesture ([CONFIG_TOOL.md](CONFIG_TOOL.md)) |
 | `wifiSsid` | `char[33]` | SoftAP SSID. 32 bytes is the 802.11 max, +1 NUL. **Empty = derive `NaviCore-<deviceId>` at bring-up**, so a droid always has a distinguishable name without the user inventing one |
 | `wifiPassword` | `char[64]` | SoftAP WPA2 passphrase, 8–63 chars +1 NUL. **Empty or <8 must refuse to raise the AP — fail closed, never fall back to an open network.** `WiFi.softAP()` will happily create an open AP on an empty password, and this command surface has no per-command auth (`RESET_DEFAULTS`/`REBOOT` dispatch on a bare `type`), so an open AP is an unauthenticated command channel to the whole mesh. **Never reuse `wcbNetwork.password`** — that one rides in cleartext in every ESP-NOW packet the droid emits and is public by construction. NVS key `wifi` (a JSON blob, kept separate from `wcb` so mesh and AP credentials cannot be confused) |
-| `boardType` | `uint8_t` | 0 = NaviCore v2 PCB, 1 = WCB HW 3.2 — selects the pin profile |
-| `tapWindowMs` | `int` | Multi-tap detection window |
+| `boardType` | `uint8_t` | 0 = NaviCore v2 PCB, 1 = WCB HW 3.2 — selects the pin profile. Any other value is ignored on input (the stored one stays, with a `[CFG] boardType … ignored` line), never clamped onto 1, whose pins differ |
+| `tapWindowMs` | `int` | Multi-tap detection window, 100–4900 ms: below 100 reads as 500, above 4900 is capped to 4900 so `holdMs` can stay above it |
 | `holdMs` | `int` | Long-press (tier `t4`) threshold, default 750. **Must exceed `tapWindowMs`** — the tap dispatch is deferred by `tapWindowMs` and would fire first. Both sides clamp a too-small value to `tapWindowMs + 250`, and 5000 ms is the ceiling |
 | `switchSettleMs` | `uint16_t` | A switch position must hold this long before its tier fires, default 80, clamped 0–1000. **0 = fire immediately (pre-settle behaviour).** Without it, a 3-position switch swept end-to-end fires the *middle* tier in full on the way past |
 | `chRateHz` | `uint8_t` | `rc_ch` broadcast rate, 1–20 (default 5). High rates flood the mesh |
@@ -84,7 +89,7 @@ Widening a field in `RcAction` costs kilobytes per byte.
 | `serialBcastOut[3]` / `serialBcastIn[3]` | `bool` | Per-aux-port mesh bridging, indexed like `auxBaud` (`[0]`=S3, `[1]`=S4, `[2]`=S5). JSON key `serialBcast`, keyed `"S3"/"S4"/"S5"` with `{out,in}`. Both default **off** — a port only joins the broadcast domain when asked; targeted `;s<n>` writes need neither flag. See [ROADMAP.md §1](ROADMAP.md) |
 | `maeGateMs` | `uint16_t` | Remote Maestro busy-gate validity (default 250; fails **open**) |
 | `smoothProfiles[6]` | `RcSmoothProfile` | ~4.6 KB of per-mode/per-channel speed+accel |
-| `peerNewActions` | `RcTier` | Up to 5 actions fired when a new mesh peer appears |
+| `peerNewActions` | `RcTier` | Up to 5 actions fired when a new mesh peer appears — once per board per session, and never for a board already online when the 8 s boot grace ends (`drainPeerEvents()` records those silently), so a restart does not re-fire them for the fleet |
 | `peerAlert` | `bool` | Also flash the LED and print a terminal line |
 | `modeReport` | `RcModeReport` | `{enabled, wcb, tmpl[48], cmds[3][48]}` — optional: send the mode-select position to one WCB on every change and every 60 s. `{mode}` in `tmpl` → the position; a non-empty `cmds[mode-1]` overrides it |
 | `statsReport` | `RcStatsReport` | `{enabled, wcb}` — `enabled` states that this droid uses mesh stats (drives the tool's default view); `wcb` is an **optional** collector, 0 = collect/display only. See below |
@@ -175,7 +180,9 @@ over from an earlier setup cannot leak output.
 
 The stored `port`/`target` is preserved while disabled, so re-enabling a device puts it back
 where it was rather than on a default. An existing stored config is unaffected: it carries an
-explicit `transport`, so upgrading does not silently switch a working device off.
+explicit `transport`, so upgrading does not silently switch a working device off. A
+destination sent as `null` or `{}` reads as disabled (`rcDestBlank`), never as the
+transport's default, and leaves the stored `port`/`target` as it was.
 
 All three live in the config tool's single **Audio** tab, as the first entry in each device's
 **Via:** dropdown.
@@ -228,6 +235,9 @@ path caps at ~15 KB (see [PROTOCOLS.md §4](PROTOCOLS.md#4-the-via-wcb-bridge)).
 `applySerialBauds()` (only ports whose baud actually changed re-open, so an unrelated save
 does not blip a live port), `applySbusOut()`, and a board-profile change check. Mesh
 credentials are the exception — `WCB_Client` is constructed once, so those need a reboot.
+Every apply — either transport, and `RESET_DEFAULTS` — also forgets any matrix gesture in
+progress (`rcMatrixResetGesture()`): a tap parked on a held button is dropped, never fired
+against the new mapping, and the matrix fires again only after a confirmed neutral.
 
 ---
 
@@ -320,6 +330,12 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | `073bfc2` | `peerNewActions` / the new-peer alert no longer fire for boards already online when the boot grace ends (HIL `ncboot.new_peer_after_boot`). |
+| 2026-10-04 | `6cdaa8a` | Every config apply (both `SET_CONFIG` paths, both `RESET_DEFAULTS` paths) forgets a parked tap or hold and re-arms the matrix (HIL `sbus.reconfig_parked_tap_cleared`). |
+| 2026-10-04 | `2ebcc42` | `boardType` accepts only 0 and 1; another value is ignored instead of stored, where it booted the v2 pins under a "WCB 3.2" advert (HIL `ncboot.boardtype2_mismatch`). |
+| 2026-10-04 | `a10589f` | A `hcrDest`/`mp3Dest`/`dfpDest` sent as `null` or `{}` reads as disabled instead of enabling the device on its default transport (HIL `nccfg.dest_null_hazard`). |
+| 2026-10-04 | `62b6cf3` | `tapWindowMs` is capped at 4900 on input, so `holdMs` (ceiling 5000) always clears it by 100 (HIL `nccfg.hold_exceeds_tap_window`). |
+| 2026-10-04 | `7274eca` | String fields are cut back to a whole UTF-8 character (`cfgStrlcpy`) when the value is longer than the field (HIL `nccfg.string_truncation_utf8`). |
 | 2026-09-28 | `703a0e7` | §6: debug bit 7 is `DBG_WIRE` in a HIL hook build (PROTOCOLS.md §2), so the tool never sends it and a new debug category takes bit 8. |
 | 2026-08-30 | _(uncommitted)_ | Recorded the OTA END discriminator as a cross-file invariant (§6). The firmware has always sent the END ACK with offset 0 — deliberately, with a comment in `navicore_ota.h` forbidding anyone to "improve" it — but the tool's `otaSendAwaitAck()` matched only session+src, so a duplicate DATA cursor ACK still in flight satisfied the END wait and reported **Verified** for an image the target never verified. The tool now checks the offset. |
 | 2026-08-28 | _(uncommitted)_ | `wifiEnabled` is now **live** — `setup()` raises the SoftAP before `wcb->begin()`, which is what lets WCB_Client detect it and select WIFI_AP_STA instead of forcing STA and tearing the AP down. The channel is passed explicitly from `wcbNetwork.channel`: `softAP()`s 3rd parameter defaults to 1, and once an AP owns the radio WCB_Client only warns on a mismatch, so a defaulted channel would be a silent total mesh blackout. An empty or under-8-char password refuses to start the AP rather than falling back to an open network. Every path logs a `[WIFI]` line. |

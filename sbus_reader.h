@@ -32,6 +32,12 @@ public:
   static constexpr int     FRAME_LEN_24      = 36;
   static constexpr int     MAX_CHANNELS      = 24;
   static constexpr unsigned long INTER_FRAME_GAP_US = 1500;   // 1.5 ms — comfortably less than typical 3 ms gap, more than intra-frame byte spacing
+  // How long the line must stay quiet before a PARTIAL frame is dropped (see the
+  // closing flush in read()). Longer than a whole SBUS-24 frame on the wire (36 bytes
+  // x 120 us = 4.32 ms) plus the UART's RX timeout, so the rest of a frame the UART
+  // delivered in two pieces always arrives first; shorter than the shortest frame
+  // period (~7 ms), so a cut frame is gone before the next frame's bytes could join it.
+  static constexpr unsigned long PARTIAL_DROP_US = 6000;
 
   uint16_t channels[MAX_CHANNELS];
   uint8_t  detectedChCount = 0;   // 16 or 24 after first valid frame; 0 if none yet
@@ -75,6 +81,7 @@ public:
     if (!uart_) return false;
     unsigned long nowUs = micros();
     bool gotFrame = false;
+    bool readAny  = false;
 
     while (uart_->available()) {
       uint8_t b = uart_->read();
@@ -84,6 +91,20 @@ public:
       // sink allows. SoftwareSerial.write() is blocking at 100k baud (~110 µs
       // per byte) which naturally rate-limits us to the SBUS line speed.
       if (sink_) sink_->write(b);
+
+      // The closing-flush drop below needs a pass that finds the UART empty, which a
+      // slow loop() pass may never give it: the next frame can be delivered before
+      // read() runs again. So also restart at a header: the FIRST byte of a pass that
+      // began PARTIAL_DROP_US or more after the last drain ended, found with a partial
+      // buffered, is taken as the start of the next frame when it is a header (the
+      // partial dropped, the lock broken), never appended to the partial. A UART-split
+      // frame whose continuation happens to start with 0x0F, read that late, loses
+      // that one frame - the price of never decoding a window across a silence.
+      if (!readAny && inFrame_ && b == SBUS_HEADER && !bufIsCompleteFrame() &&
+          (nowUs - lastRxEndUs_) > PARTIAL_DROP_US) {
+        tryParseAndReset();   // malformed branch: drop + break the lock; b starts a frame below
+      }
+      readAny = true;
 
       unsigned long sinceLastByte = nowUs - lastByteUs_;
       lastByteUs_ = nowUs;
@@ -108,8 +129,8 @@ public:
       // next (slow) pass — knocking a confirmed 24-lock down to streak 1 and
       // freezing every channel for ~4 frames. The byte in hand IS the byte that
       // follows the 25 buffered ones, and after a REAL 16-frame that is always
-      // the next frame's header — the same test pendingLen16Check_ makes below,
-      // just applied synchronously. Do NOT gate on lockVariant_/detectedFrameLen
+      // the next frame's header — the same test the 16-lock flush below makes
+      // without a gap. Do NOT gate on lockVariant_/detectedFrameLen
       // instead: a receiver swapped 24→16 while powered would then never produce
       // a parse at all, so the stale 24 lock could never be broken.
       if (inFrame_ && sinceLastByte > INTER_FRAME_GAP_US && bufIsCompleteFrame() &&
@@ -117,29 +138,29 @@ public:
         gotFrame = tryParseAndReset() || gotFrame;
       }
 
+      // Locked on SBUS-16, a whole 25-byte buffer is decoded on the byte AFTER it,
+      // and only if that byte is the next frame's header - the same test the gap
+      // flush above makes, without needing a gap, so a post-stall backlog of SBUS-16
+      // frames still splits on frame boundaries. A 25-byte SBUS-16 frame is a byte-
+      // for-byte PREFIX of a 36-byte SBUS-24 frame whose byte 24 is 0x00 (ch17 < 256
+      // and ch18 a multiple of 32, e.g. a switch parked at an endpoint). Decoding it
+      // the moment its 25th byte landed, as an eager length flush did, handed
+      // processSbus a misframed frame - ch17-24 pinned to 992 and frame[23], ch17's
+      // low bits, read as flags (a phantom failsafe) - on every return from SBUS-16 to
+      // SBUS-24, the receiver swap the 24->16 note above is about (HIL
+      // sbus.sbus24_return_no_prefix_decode). Now a non-header 26th byte simply keeps
+      // the buffer growing: the 36-byte frame parses as SBUS-24 at the next silence,
+      // which starts a 24 streak and so breaks the 16 lock without decoding anything.
+      // A 25-byte buffer the line goes quiet after is still a genuine SBUS-16 frame
+      // (the closing flush below). Residual: an SBUS-24 frame whose byte 25 is 0x0F
+      // (ch18 == 480 with ch19's low bits 0) still passes the header test.
+      if (inFrame_ && bufIdx_ == FRAME_LEN_16 && b == SBUS_HEADER &&
+          lockVariant_ == 16 && lockStreak_ >= LOCK_FRAMES && bufIsCompleteFrame()) {
+        gotFrame = tryParseAndReset() || gotFrame;   // inFrame_ now false: b starts the next frame below
+      }
+
       // Frame must start with the SBUS header byte.
       if (!inFrame_) {
-        // Prefix check for the eager 25-byte flush above. The byte immediately
-        // after a REAL SBUS-16 frame is always the next frame's header; anything
-        // else means we truncated a longer 24-ch frame at its 25-byte prefix.
-        // That truncated parse RE-CONFIRMS the 16 lock, so without this the
-        // reader wedges into 16 for as long as data byte 24 keeps landing on
-        // 0x00 (i.e. ch17 < 256 and ch18 a multiple of 32, e.g. a switch parked
-        // at the 172 endpoint): channels 17-24 are silently pinned to 992, and
-        // frame[23] — ch17's low bits, not the flags byte — is decoded as flags,
-        // which can assert a phantom failsafe and freeze ALL dispatch while the
-        // status LED still reads "receiving". Drop the lock so the 24-variant
-        // re-detects. Do NOT fold this into the gap-based flushes: a real gap
-        // after 25 bytes IS a genuine 16-frame.
-        if (pendingLen16Check_) {
-          pendingLen16Check_ = false;
-          if (b != SBUS_HEADER) {
-            lockStreak_      = 0;
-            lockVariant_     = 0;
-            detectedFrameLen = 0;
-            detectedChCount  = 0;
-          }
-        }
         if (b == SBUS_HEADER) {
           buf_[0] = b;
           bufIdx_ = 1;
@@ -158,17 +179,12 @@ public:
       // them. Once the stream is LOCKED we know the exact frame length, so flush
       // the instant a full frame's worth of bytes ends on a footer, splitting the
       // backlog on frame boundaries instead of overflowing (which would discard
-      // both). Gated on a confirmed lock + the DETECTED length — but that gate is
-      // NOT sufficient on its own: a 25-byte SBUS-16 frame is a byte-for-byte
-      // PREFIX of a 36-byte SBUS-24 frame, so a 16-lock DOES misfire here on a
-      // 24-ch stream whose data byte 24 happens to be 0x00. The prefix check
-      // armed below is what catches that. Pre-lock/noisy streams fall through to
-      // the unchanged gap-based path.
-      if (lockStreak_ >= LOCK_FRAMES && detectedFrameLen &&
-          bufIdx_ == detectedFrameLen && buf_[detectedFrameLen - 1] == SBUS_FOOTER) {
-        // Arm the prefix check only for the ambiguous 25-byte flush: 25 is a
-        // prefix of 36, 36 is a prefix of nothing.
-        pendingLen16Check_ = (detectedFrameLen == FRAME_LEN_16);
+      // both). SBUS-24 ONLY: 36 bytes are a prefix of nothing, while 25 are the
+      // prefix of an SBUS-24 frame - a 16-lock decodes on the byte after instead
+      // (the header test above). Pre-lock/noisy streams fall through to the
+      // unchanged gap-based path.
+      if (lockStreak_ >= LOCK_FRAMES && detectedFrameLen == FRAME_LEN_24 &&
+          bufIdx_ == FRAME_LEN_24 && buf_[FRAME_LEN_24 - 1] == SBUS_FOOTER) {
         gotFrame = tryParseAndReset() || gotFrame;
         continue;
       }
@@ -181,11 +197,31 @@ public:
       }
     }
 
+    if (readAny) lastRxEndUs_ = micros();   // when the drain ENDED: the UART was empty here
+
     // Also flush at end if a COMPLETE frame is sitting in the buffer and we
     // haven't seen more bytes within the gap window. Same complete-frame gate as
-    // the mid-loop flush above — never flush a partial (it would reset the lock).
+    // the mid-loop flush above.
     if (inFrame_ && bufIsCompleteFrame() && (micros() - lastByteUs_) > INTER_FRAME_GAP_US) {
       gotFrame = tryParseAndReset() || gotFrame;
+    }
+    // A PARTIAL frame is dropped once the line has been quiet for PARTIAL_DROP_US,
+    // and the drop breaks the lock streak (tryParseAndReset's malformed branch), as
+    // the lock comment below says a malformed frame must. Never decode a window that
+    // spans a silence: a partial left buffered - a frame cut short, or a lone 0x0F
+    // between frames - was filled by the NEXT frame's bytes, and a locked reader
+    // decoded the 36-byte window the moment it ended on 0x00, the next frame's flags
+    // byte from a healthy transmitter: every channel shifted garbage and its flags
+    // another channel's bits, read as failsafe or handed to the knobs (HIL
+    // sbus.truncated_frame_no_phantom). The quiet is measured from the END of the last
+    // drain (lastRxEndUs_), never from nowUs: nowUs is sampled once per call, and with
+    // the SBUS OUT tee a drain takes ~110 us a byte, so a long drain would read as
+    // silence. And only on a pass that read nothing, with the UART re-checked after the
+    // time sample, so bytes that landed meanwhile keep the partial alive. Do NOT drop a
+    // partial on the in-loop gap above: that gap is the LOOP period, not the line's.
+    else if (inFrame_ && !bufIsCompleteFrame() && !readAny &&
+             (micros() - lastRxEndUs_) > PARTIAL_DROP_US && !uart_->available()) {
+      tryParseAndReset();
     }
 
     return gotFrame;
@@ -198,11 +234,13 @@ private:
   int      bufIdx_ = 0;
   bool     inFrame_ = false;
   unsigned long lastByteUs_ = 0;
+  unsigned long lastRxEndUs_ = 0;       // micros() when the last drain that read a byte ended
 
   // True when buf_ currently holds a structurally complete frame (exact length +
   // header + footer) of either variant. The gap / post-loop flushes gate on this
-  // so a partial buffer is never flushed (which would reset the lock streak); a
-  // partial simply keeps accumulating across read() calls until it completes.
+  // so a partial buffer is never PARSED on a loop gap; a partial keeps accumulating
+  // across read() calls until it completes, or until the line has really been quiet
+  // for PARTIAL_DROP_US, when read() drops it and breaks the lock.
   bool bufIsCompleteFrame() const {
     return (bufIdx_ == FRAME_LEN_16 && buf_[0] == SBUS_HEADER && buf_[FRAME_LEN_16 - 1] == SBUS_FOOTER) ||
            (bufIdx_ == FRAME_LEN_24 && buf_[0] == SBUS_HEADER && buf_[FRAME_LEN_24 - 1] == SBUS_FOOTER);
@@ -222,10 +260,6 @@ private:
   uint8_t  lockStreak_  = 0;   // consecutive same-variant valid frames seen
   int      lockVariant_ = 0;   // 16 or 24 — the variant currently being confirmed
 
-  // Armed by the eager 25-byte flush in read(), consumed by the next byte read
-  // outside a frame — the only thing that distinguishes a real SBUS-16 frame
-  // from the 25-byte prefix of an SBUS-24 frame once the bytes are in the FIFO.
-  bool     pendingLen16Check_ = false;
 
   // Returns true on a CONFIRMED frame (passes structure AND the lock streak),
   // resets framing state regardless.

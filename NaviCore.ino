@@ -22,7 +22,7 @@
 //    {"type":"SET_CONFIG","data":{...}} → {"type":"ACK","ok":true}
 //    {"type":"START_MONITOR"}    → streams PWM_UPDATE every 50 ms until STOP_MONITOR
 //    {"type":"STOP_MONITOR"}     → {"type":"ACK","ok":true}
-//    {"type":"RESET_DEFAULTS"}   → reloads factory defaults, replies ACK
+//    {"type":"RESET_DEFAULTS"}   → factory defaults minus the network identity, replies ACK
 //    {"type":"REBOOT"}           → ACKs then restarts the board after 250 ms
 //    {"type":"TRIGGER","mode":1,"btn":3,"tap":1} → fires virtual button press
 //    {"type":"WCB_SEND","target":2,"cmd":":PP100"} → manually fires WCB command
@@ -517,6 +517,33 @@ static uint32_t g_dbgFlags = 0;
 #define HIL_TAP(p) (p)
 #endif
 
+// ── Dispatch skips: logged AND recorded ─────────────────────────────────────
+// An executor that skips an action - a disabled destination, an invalid slot or
+// channel, an unconfigured WLED id, a bad port, a busy Maestro - says so with
+// dskip() instead of dlog(): the line is logged exactly as before (category-gated),
+// and, while rcTestAction() has the recorder armed around its one dispatch, the
+// FIRST skip's text is kept so TEST_ACTION can answer ok:false with the reason.
+// Before this, TEST_ACTION answered ok:true for any action that parsed, whatever
+// the executor then did with it, and the config tool's Test button reported a
+// skipped action as sent (HIL ncengine.test_action_skipped_not_ok). Recording
+// formats nothing unless armed, so live dispatch pays one bool test. Core 1 only,
+// like every dispatch.
+static bool g_skipArmed  = false;
+static char g_skipWhy[96] = "";
+static void noteDispatchSkip(const char* fmt, ...) {
+  if (!g_skipArmed || g_skipWhy[0]) return;
+  char line[160];
+  va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof(line), fmt, ap); va_end(ap);
+  char* s = line;
+  if (!strncmp(s, "[DISPATCH] ", 11)) s += 11;          // the ACK needs the reason, not the tag
+  for (char* p = s; *p; p++) {                          // one JSON-safe line: no quote, backslash, control
+    if (*p == '\n' || *p == '\r') { *p = '\0'; break; }
+    if (*p == '"' || *p == '\\' || (uint8_t)*p < 0x20) *p = '\'';
+  }
+  cfgStrlcpy(g_skipWhy, s[0] ? s : "skipped", sizeof(g_skipWhy));   // never half a UTF-8 character
+}
+#define dskip(catBit, fmt, ...) do { noteDispatchSkip(fmt, ##__VA_ARGS__); dlog(catBit, fmt, ##__VA_ARGS__); } while (0)
+
 // =============================================================================
 //  Tap detection state
 // =============================================================================
@@ -539,6 +566,24 @@ struct TapState {
   bool          holdFired       = false;  // tier 4 already dispatched for this hold
 };
 TapState tapState;
+
+// Forget any matrix gesture in progress - a deferred tap, a hold, the tap count - and
+// require a CONFIRMED neutral, then a fresh press, before the matrix fires again.
+// Called by every config apply (applyConfigSideEffects, which both SET_CONFIG paths
+// and both RESET_DEFAULTS paths run). Two reasons, both seen on the bench:
+//  - the deferred tap is dispatched against the mapping as it is WHEN IT FIRES, so a
+//    press parked across a save fired the new mapping, or a save's own leftovers acted:
+//    defaults whose matrix band covered the held value registered a press nobody made
+//    (HIL sbus.reconfig_parked_tap_cleared);
+//  - the save blocks loop() for 100+ ms (flash write, port re-opens), and a debounce
+//    frozen across that gap could manufacture an edge when loop() resumes.
+static void rcMatrixResetGesture() {
+  matrixArmed        = false;
+  matrixCandidate    = 0;
+  matrixCandCount    = 0;
+  matrixNeutralCount = 0;
+  tapState           = TapState{};
+}
 
 // Last-seen switch positions for change detection
 int switchPrevPos[RC_NUM_SWITCHES];
@@ -646,17 +691,17 @@ static inline uint16_t sbusToRangeMidClosed(int sbusVal, uint16_t outMin, uint16
 // yet up) would poison the cache and defeat the self-healing re-apply.
 static bool maestroWrite(uint8_t id, uint8_t cmd_compact,
                          const uint8_t* payload, size_t plen) {
-  if (id < 1 || id > RC_NUM_MAESTROS) return false;
+  if (id < 1 || id > RC_NUM_MAESTROS) { noteDispatchSkip("Maestro %u: no such slot (1-%d)", id, RC_NUM_MAESTROS); return false; }
   const RcMaestroSlot& slot = rcConfig.maestros[id - 1];
-  if (slot.type == 0) return false;    // disabled (expected — not an error)
+  if (slot.type == 0) { noteDispatchSkip("Maestro %u: slot disabled", id); return false; }   // expected - not logged
   if (slot.device > 127) {             // invalid Pololu device # (config error)
-    dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u: invalid Pololu device # %u (must be 0-127) — skipped\n",
+    dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: invalid Pololu device # %u (must be 0-127) — skipped\n",
          id, slot.device);
     return false;
   }
 
   Stream* dest = HIL_TAP((slot.type == 1) ? (Stream*)&Serial2 : (Stream*)maestroBroadcast);
-  if (!dest) return false;              // remote slot but stream not yet up
+  if (!dest) { noteDispatchSkip("Maestro %u: remote stream not up", id); return false; }
 
   // ;M subroutine-trigger (0xA7) frame bytes now come from the shared WcbCmd library,
   // so the wire frame is one source of truth across the WCB firmware + NaviCore.
@@ -936,7 +981,7 @@ static bool maestroVerbBusy(const char* cmd, uint8_t wcbId) {
 // no-op the user has to debug by guessing the servo/wiring is broken.
 static bool maestroChanOk(uint8_t id, uint8_t ch) {
   if (ch <= 31) return true;
-  dlog(DBG_MAESTRO, "[DISPATCH] Maestro %u: channel %u out of range (0-31) — skipped\n", id, ch);
+  dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: channel %u out of range (0-31) — skipped\n", id, ch);
   return false;
 }
 
@@ -1082,7 +1127,19 @@ static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
 }
 static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); maeGateInvalidateSlot(id); maeReleaseArmSlot(id); }
 static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); maeSmoothInvalidateSlot(id); maeGateInvalidateSlot(id); maeReleaseArmSlot(id); }
+// Subroutine numbers are 0-127 on the wire: every byte after a Pololu frame's command
+// byte must have its top bit clear, and a subroutine of 128-255 written as-is is read by
+// the Maestro as the START of a new (compact-protocol) command, not as data (HIL
+// ncdev.mae_subroutine_msb). WcbCmd's buildSubroutineFrame does not mask it, and an
+// inbound ;M frame can carry up to 255, so both writers refuse it HERE, the one place
+// every caller passes through. (executeMaestroCmd already refuses it before the cast.)
+static bool maeSubOk(uint8_t id, uint8_t sub) {
+  if (sub <= 127) return true;
+  dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: subroutine %u out of range (0-127) — skipped\n", id, sub);
+  return false;
+}
 static void maestroRestartScript(uint8_t id, uint8_t sub) {
+  if (!maeSubOk(id, sub)) return;
   maestroWrite(id, 0xA7, &sub, 1);
   maeSmoothInvalidateSlot(id);   // a device-side script may change speed/accel we can't see — re-apply on next stick move
   maeGateInvalidateSlot(id);     // the slot is (re)started — the skip-if-running gate must re-ask
@@ -1091,6 +1148,7 @@ static void maestroRestartScript(uint8_t id, uint8_t sub) {
 // the Maestro's script stack. Shared by the local ";M<id>,subParam" action and the
 // inbound-mesh handler so there is ONE implementation of the frame.
 static void maestroSubParam(uint8_t id, uint8_t sub, uint16_t param) {
+  if (!maeSubOk(id, sub)) return;   // 0-127 only - see maeSubOk
   if (param > 16383) param = 16383;
   uint8_t p[3] = { sub, (uint8_t)(param & 0x7F), (uint8_t)((param >> 7) & 0x7F) };
   maestroWrite(id, 0xA8, p, 3);  // 0xA8 & 0x7F = 0x28 → {0xAA,dev,0x28,sub,pl,ph} == WcbMaestro::buildSubParam
@@ -1304,33 +1362,69 @@ static void seedSwitchEasingFromTier(const RcTier& tier) {
 //   restartScript: "pN" = the action's OWN easing (wins by default); ",o" = allow the
 //   switch's active easing to override it. No pN = follow the switch; nothing = leave
 //   as-is. (Legacy "applyProfile,<spec>" and "snappy,<state>" still parse → setEasing.)
+// A Maestro action's numbers are parsed into a long and checked BEFORE any cast. The
+// verbs used to cast atoi() straight to uint8_t/uint16_t, so an out-of-range number
+// wrapped onto a VALID one for something else: setTarget,261 moved channel 5, accel 300
+// sent 44, target 70000 sent 4464 (under the clamp that exists so a value is capped, not
+// wrapped), speed 65537 sent 1, restartScript,300 ran subroutine 44 (HIL
+// ncdev.mae_verb_no_alias). A channel (0-31), accel (0-255) or subroutine (0-127) out of
+// range is refused with a line; a target, speed or parameter over 16383 is clamped; a
+// negative number is refused - clamping it to 0 would mean "release the servo" or
+// "unlimited speed". The skip lines go through dskip(), so TEST_ACTION reports them.
+static bool maeArgInRange(uint8_t id, const char* s, long hi, const char* what, long& out) {
+  const long v = strtol(s, nullptr, 10);
+  if (v < 0 || v > hi) {
+    dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: %s %ld out of range (0-%ld) — skipped\n", id, what, v, hi);
+    return false;
+  }
+  out = v;
+  return true;
+}
+static bool maeArg14(uint8_t id, const char* s, const char* what, long& out) {
+  out = strtol(s, nullptr, 10);           // saturates at LONG_MAX, so a huge number clamps below too
+  if (out < 0) {
+    dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: %s %ld is negative — skipped\n", id, what, out);
+    return false;
+  }
+  if (out > 16383) out = 16383;           // 14-bit: clamped, never wrapped
+  return true;
+}
+
 static void executeMaestroCmd(uint8_t id, const char* cmd) {
   char buf[36];
   strlcpy(buf, cmd, sizeof(buf));
   char* tok = strtok(buf, ",");
   if (!tok) return;
+  long ch = 0, v = 0, acc = 0;
   if      (strcmp(tok, "goHome")        == 0) maestroGoHome(id);
   else if (strcmp(tok, "stopScript")    == 0) maestroStopScript(id);
   else if (strcmp(tok, "setTarget")     == 0) {
     char* sCh = strtok(nullptr, ","); char* sPos = strtok(nullptr, ",");
-    if (sCh && sPos) maestroSetTarget(id, (uint8_t)atoi(sCh), (uint16_t)atoi(sPos));
+    if (!sCh || !sPos) noteDispatchSkip("Maestro %u: setTarget needs <ch>,<pos>", id);
+    else if (maeArgInRange(id, sCh, 31, "channel", ch) && maeArg14(id, sPos, "target", v))
+      maestroSetTarget(id, (uint8_t)ch, (uint16_t)v);
   }
   else if (strcmp(tok, "setSpeed")      == 0) {
     char* sCh = strtok(nullptr, ","); char* sSpd = strtok(nullptr, ",");
-    if (sCh && sSpd) maestroSetSpeed(id, (uint8_t)atoi(sCh), (uint16_t)atoi(sSpd));
+    if (!sCh || !sSpd) noteDispatchSkip("Maestro %u: setSpeed needs <ch>,<speed>", id);
+    else if (maeArgInRange(id, sCh, 31, "channel", ch) && maeArg14(id, sSpd, "speed", v))
+      maestroSetSpeed(id, (uint8_t)ch, (uint16_t)v);
   }
   else if (strcmp(tok, "setAccel")      == 0) {
     char* sCh = strtok(nullptr, ","); char* sAcc = strtok(nullptr, ",");
-    if (sCh && sAcc) maestroSetAccel(id, (uint8_t)atoi(sCh), (uint8_t)atoi(sAcc));
+    if (!sCh || !sAcc) noteDispatchSkip("Maestro %u: setAccel needs <ch>,<accel>", id);
+    else if (maeArgInRange(id, sCh, 31, "channel", ch) && maeArgInRange(id, sAcc, 255, "accel", acc))
+      maestroSetAccel(id, (uint8_t)ch, (uint8_t)acc);
   }
   else if (strcmp(tok, "setSpeedAccel") == 0) {   // both in one action (smoothing)
     char* sCh  = strtok(nullptr, ",");
     char* sSpd = strtok(nullptr, ",");
     char* sAcc = strtok(nullptr, ",");
-    if (sCh && sSpd && sAcc) {
-      uint8_t ch = (uint8_t)atoi(sCh);
-      maestroSetSpeed(id, ch, (uint16_t)atoi(sSpd));
-      maestroSetAccel(id, ch, (uint8_t) atoi(sAcc));
+    if (!sCh || !sSpd || !sAcc) noteDispatchSkip("Maestro %u: setSpeedAccel needs <ch>,<speed>,<accel>", id);
+    else if (maeArgInRange(id, sCh, 31, "channel", ch) && maeArg14(id, sSpd, "speed", v) &&
+             maeArgInRange(id, sAcc, 255, "accel", acc)) {   // all checked before either is sent
+      maestroSetSpeed(id, (uint8_t)ch, (uint16_t)v);
+      maestroSetAccel(id, (uint8_t)ch, (uint8_t)acc);
     }
   }
   else if (strcmp(tok, "setEasing") == 0) {       // the SWITCH sets this Maestro's active easing (the fallback)
@@ -1369,7 +1463,8 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     char* sN    = strtok(nullptr, ",");
     char* sSpec = strtok(nullptr, ",");   // optional "p<N>" = the ACTION's OWN easing (local — wins by default)
     char* sOvr  = strtok(nullptr, ",");   // optional "o"    = allow the switch's active easing to override the action's
-    uint8_t sub = sN ? (uint8_t)atoi(sN) : 0;
+    long sub = 0;                         // no number = subroutine 0, as before
+    if (sN && !maeArgInRange(id, sN, 127, "subroutine", sub)) return;   // before any easing is loaded
     // PRIORITY (mirrors the joystick rule): the action's own easing wins; the switch's
     // active easing is the fallback when the action has none — or overrides when the
     // action opts in (",o"). Nothing set anywhere = leave the channels as-is.
@@ -1380,13 +1475,16 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     const int8_t use = (local >= 0) ? ((allowOvr && sw != EASE_RELEASED) ? sw : local)   // has local: local wins unless override
                                     : sw;                                                // no local: follow the switch
     applyScriptEasing(id, use);
-    maestroRestartScript(id, sub);
+    maestroRestartScript(id, (uint8_t)sub);
   }
   else if (strcmp(tok, "subParam") == 0) {   // Restart Script at Subroutine WITH parameter (Pololu 0x28)
     char* sN = strtok(nullptr, ",");         // subroutine 0-127
     char* sP = strtok(nullptr, ",");         // parameter 0-16383, pushed on the Maestro's script stack
-    if (sN && sP) maestroSubParam(id, (uint8_t)atoi(sN), (uint16_t)atoi(sP));
+    if (!sN || !sP) noteDispatchSkip("Maestro %u: subParam needs <sub>,<param>", id);
+    else if (maeArgInRange(id, sN, 127, "subroutine", ch) && maeArg14(id, sP, "parameter", v))
+      maestroSubParam(id, (uint8_t)ch, (uint16_t)v);
   }
+  else noteDispatchSkip("Maestro %u: unknown verb '%s'", id, tok);   // writes nothing
 }
 
 // =============================================================================
@@ -1604,7 +1702,7 @@ static void executeHcrAction(const RcAction& a) {
   // section. Refuse here rather than at the port: a disabled device must not
   // emit anything, even if a stale target still names a live serial port.
   if (dest.transport == 2) {
-    dlog(DBG_HCR, "[DISPATCH] HCR is disabled in config — action skipped\n");
+    dskip(DBG_HCR, "[DISPATCH] HCR is disabled in config — action skipped\n");
     return;
   }
 
@@ -1622,13 +1720,13 @@ static void executeHcrAction(const RcAction& a) {
     // command is retried until ACK'd — HCR can't tolerate a miss. Mirrors the
     // MP3-over-WCB pattern (";A,..." → processMP3AudioCommand). Broadcast is
     // unsupported — an HCR vocalizer is a single device at a known WCB.
-    if (!wcb || !wcbReady) { dlog(DBG_HCR, "[DISPATCH] HCR-WCB: WCB not ready — skipped\n"); return; }
+    if (!wcb || !wcbReady) { dskip(DBG_HCR, "[DISPATCH] HCR-WCB: WCB not ready — skipped\n"); return; }
     String cmd;
     if (a.fn == 12 || a.fn == 15) {
       // Fade over the mesh — the WCB runs its own HcrFade. Readable verb (NOT the
       // numeric ;H,FN; the WCB's numeric switch has no fade). A/B channels only.
       if (a.chan != 1 && a.chan != 2) {
-        dlog(DBG_HCR, "[DISPATCH] HCR-WCB: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
+        dskip(DBG_HCR, "[DISPATCH] HCR-WCB: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
         return;
       }
       cmd = String(";H,") + (a.fn == 12 ? "FADEIN" : "FADEOUT") + "," + (char)(a.chan == 1 ? 'A' : 'B') + "," + (int)a.track;
@@ -1636,13 +1734,13 @@ static void executeHcrAction(const RcAction& a) {
       cmd = hcrFormatWcbCommand(a.fn, a.chan, a.track);
     }
     if (cmd.length() == 0) {
-      dlog(DBG_HCR, "[DISPATCH] HCR-WCB: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
+      dskip(DBG_HCR, "[DISPATCH] HCR-WCB: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
             a.fn, a.chan, a.track);
       return;
     }
     uint8_t target = (uint8_t)atoi(dest.target);
     if (target < 1 || target > WCB_MAX_BOARDS) {
-      dlog(DBG_HCR, "[DISPATCH] HCR-WCB: target '%s' invalid — HCR over WCB must be a "
+      dskip(DBG_HCR, "[DISPATCH] HCR-WCB: target '%s' invalid — HCR over WCB must be a "
             "unicast WCB ID 1-%d (broadcast is not supported). Fix the HCR "
             "Destination in the config tool. Not sent.\n",
             dest.target, WCB_MAX_BOARDS);
@@ -1662,14 +1760,14 @@ static void executeHcrAction(const RcAction& a) {
   // port" log below.
   Stream* hcrSerial = hcrLocalSerial();
   if (!hcrSerial) {
-    dlog(DBG_HCR, "[DISPATCH] HCR: unknown serial port '%s' — skipped\n", dest.target);
+    dskip(DBG_HCR, "[DISPATCH] HCR: unknown serial port '%s' — skipped\n", dest.target);
     return;
   }
 
   // ── Fade (fn 12/15): drive the shared HcrFade on THIS board; loop() ticks it. ──
   if (a.fn == 12 || a.fn == 15) {
     if (a.chan != 1 && a.chan != 2) {
-      dlog(DBG_HCR, "[DISPATCH] HCR-Serial: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
+      dskip(DBG_HCR, "[DISPATCH] HCR-Serial: fade chan must be A(1)/B(2), got %d — skipped\n", a.chan);
       return;
     }
     const int ch = a.chan, sec = a.track;
@@ -1715,7 +1813,7 @@ static void executeHcrAction(const RcAction& a) {
     payload = hcrFormatCommand(a.fn, a.chan, a.track);  // chan 0 = ALL + every other fn (byte-identical to today)
   }
   if (payload.length() == 0) {
-    dlog(DBG_HCR, "[DISPATCH] HCR-Serial: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
+    dskip(DBG_HCR, "[DISPATCH] HCR-Serial: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
           a.fn, a.chan, a.track);
     return;
   }
@@ -1777,7 +1875,7 @@ static void executeMp3Action(const RcAction& a) {
   const RcMp3Dest& dest = rcConfig.mp3Dest;
 
   if (dest.transport == 2) {   // disabled in the tool's Audio section
-    dlog(DBG_MP3, "[DISPATCH] MP3 Trigger is disabled in config — action skipped\n");
+    dskip(DBG_MP3, "[DISPATCH] MP3 Trigger is disabled in config — action skipped\n");
     return;
   }
 
@@ -1788,7 +1886,7 @@ static void executeMp3Action(const RcAction& a) {
     else if (!strcmp(dest.target, "S4")) p = s4;
     else if (!strcmp(dest.target, "S5")) p = s5;   // both boards (v2 GPIO38/47, WCB 3.2 GPIO9/10)
     if (!p) {
-      dlog(DBG_MP3, "[DISPATCH] MP3-local: unknown serial port '%s' — skipped\n", dest.target);
+      dskip(DBG_MP3, "[DISPATCH] MP3-local: unknown serial port '%s' — skipped\n", dest.target);
       return;
     }
     // Format the ;A verb with the shared producer, then let g_mp3.handle() emit
@@ -1796,7 +1894,7 @@ static void executeMp3Action(const RcAction& a) {
     // receive side, so local and over-mesh drive the Trigger identically.
     String cmd = mp3FormatCommand(a.fn, a.track);
     if (cmd.length() == 0) {
-      dlog(DBG_MP3, "[DISPATCH] MP3-local: bad/out-of-range fn=%u arg=%d — skipped\n", a.fn, a.track);
+      dskip(DBG_MP3, "[DISPATCH] MP3-local: bad/out-of-range fn=%u arg=%d — skipped\n", a.fn, a.track);
       return;
     }
     g_mp3.begin(*HIL_TAP(p));                 // rebind — the resolved port can change per action
@@ -1807,15 +1905,15 @@ static void executeMp3Action(const RcAction& a) {
   }
 
   // ── WCB unicast transport ──────────────────────────────────────────────
-  if (!wcb || !wcbReady) { dlog(DBG_MP3, "[DISPATCH] MP3: WCB not ready — skipped\n"); return; }
+  if (!wcb || !wcbReady) { dskip(DBG_MP3, "[DISPATCH] MP3: WCB not ready — skipped\n"); return; }
   String cmd = mp3FormatCommand(a.fn, a.track);
   if (cmd.length() == 0) {
-    dlog(DBG_MP3, "[DISPATCH] MP3: bad fn=%u — skipped\n", a.fn);
+    dskip(DBG_MP3, "[DISPATCH] MP3: bad fn=%u — skipped\n", a.fn);
     return;
   }
   uint8_t target = (uint8_t)atoi(dest.target);
   if (target < 1 || target > WCB_MAX_BOARDS) {
-    dlog(DBG_MP3, "[DISPATCH] MP3: target '%s' invalid — set MP3 Destination to a "
+    dskip(DBG_MP3, "[DISPATCH] MP3: target '%s' invalid — set MP3 Destination to a "
           "WCB ID 1-%d in the config tool. Not sent.\n",
           dest.target, WCB_MAX_BOARDS);
     return;
@@ -1902,7 +2000,7 @@ static void executeDfpAction(const RcAction& a) {
   const RcDfpDest& dest = rcConfig.dfpDest;
 
   if (dest.transport == 2) {   // disabled in the tool's Audio section
-    dlog(DBG_DFP, "[DISPATCH] DFPlayer is disabled in config — action skipped\n");
+    dskip(DBG_DFP, "[DISPATCH] DFPlayer is disabled in config — action skipped\n");
     return;
   }
 
@@ -1913,12 +2011,12 @@ static void executeDfpAction(const RcAction& a) {
     else if (!strcmp(dest.target, "S4")) p = s4;
     else if (!strcmp(dest.target, "S5")) p = s5;
     if (!p) {
-      dlog(DBG_DFP, "[DISPATCH] DFP-local: unknown serial port '%s' — skipped\n", dest.target);
+      dskip(DBG_DFP, "[DISPATCH] DFP-local: unknown serial port '%s' — skipped\n", dest.target);
       return;
     }
     String cmd = dfpFormatCommand(a.fn, a.chan, a.track);
     if (cmd.length() == 0) {
-      dlog(DBG_DFP, "[DISPATCH] DFP-local: bad/out-of-range fn=%u chan=%d track=%d — skipped\n",
+      dskip(DBG_DFP, "[DISPATCH] DFP-local: bad/out-of-range fn=%u chan=%d track=%d — skipped\n",
             a.fn, a.chan, a.track);
       return;
     }
@@ -1930,15 +2028,15 @@ static void executeDfpAction(const RcAction& a) {
   }
 
   // ── WCB unicast transport ──────────────────────────────────────────────
-  if (!wcb || !wcbReady) { dlog(DBG_DFP, "[DISPATCH] DFP: WCB not ready — skipped\n"); return; }
+  if (!wcb || !wcbReady) { dskip(DBG_DFP, "[DISPATCH] DFP: WCB not ready — skipped\n"); return; }
   String cmd = dfpFormatCommand(a.fn, a.chan, a.track);
   if (cmd.length() == 0) {
-    dlog(DBG_DFP, "[DISPATCH] DFP: bad fn=%u — skipped\n", a.fn);
+    dskip(DBG_DFP, "[DISPATCH] DFP: bad fn=%u — skipped\n", a.fn);
     return;
   }
   uint8_t target = (uint8_t)atoi(dest.target);
   if (target < 1 || target > WCB_MAX_BOARDS) {
-    dlog(DBG_DFP, "[DISPATCH] DFP: target '%s' invalid — set DFPlayer Destination to a "
+    dskip(DBG_DFP, "[DISPATCH] DFP: target '%s' invalid — set DFPlayer Destination to a "
           "WCB ID 1-%d in the config tool. Not sent.\n",
           dest.target, WCB_MAX_BOARDS);
     return;
@@ -1955,22 +2053,23 @@ static void executeDfpAction(const RcAction& a) {
 //   • local slot (serialPort 3/4/5) → WcbWled::emit(port, verb-body) — the SAME
 //                                     shared translator a WCB runs, so a WLED on a
 //                                     NaviCore aux port sees byte-identical JSON
-//   • remote slot (remoteWCB 1-20)  → wcb->send(remoteWCB, full ";L<id>,…"); the
-//                                     host WCB's own router drives its WLED
+//   • remote slot (remoteWCB 1-20)  → wcb->send(remoteWCB, ";L<id>,<body>") REBUILT
+//                                     from what was parsed; the host WCB's own
+//                                     router drives its WLED
 static void executeWledAction(const RcAction& a) {
   // ── Parse the id: digits immediately after 'L' (";L3,PS,2"→3; ";L,ON"→0) ──
   const char* s = a.cmd;
   while (*s == ' ' || *s == '\t') s++;      // tolerate leading whitespace (matches the WCB's body.trim())
   if (*s == ';') s++;                       // optional leading command char
   if (*s != 'L' && *s != 'l') {
-    dlog(DBG_WLED, "[DISPATCH] WLED: '%s' is not a ;L command — skipped\n", a.cmd);
+    dskip(DBG_WLED, "[DISPATCH] WLED: '%s' is not a ;L command — skipped\n", a.cmd);
     return;
   }
   s++;                                      // past 'L'
   int id = 0;
   while (*s >= '0' && *s <= '9') { if (id < 100) id = id * 10 + (*s - '0'); s++; }  // cap: no int overflow on a corrupt cmd
   if (id > 9) {                             // valid WLED ids are 1-9 (0 = bare) — mirror the WCB's range check
-    dlog(DBG_WLED, "[DISPATCH] WLED: id %d out of range (1-9) — skipped\n", id);
+    dskip(DBG_WLED, "[DISPATCH] WLED: id %d out of range (1-9) — skipped\n", id);
     return;
   }
   if (*s == ',') s++;                       // past the id/verb separator
@@ -1985,11 +2084,11 @@ static void executeWledAction(const RcAction& a) {
       if (w.configured && w.remoteWCB == 0 && w.serialPort >= 3 && w.serialPort <= 5)
         if (slot < 0 || w.wledID < rcConfig.wledSlots[slot].wledID) slot = i;
     }
-    if (slot < 0) { dlog(DBG_WLED, "[DISPATCH] WLED: bare ;L but no LOCAL WLED configured — skipped\n"); return; }
+    if (slot < 0) { dskip(DBG_WLED, "[DISPATCH] WLED: bare ;L but no LOCAL WLED configured — skipped\n"); return; }
   } else {
     for (int i = 0; i < RC_NUM_WLED; i++)
       if (rcConfig.wledSlots[i].configured && rcConfig.wledSlots[i].wledID == (uint8_t)id) { slot = i; break; }
-    if (slot < 0) { dlog(DBG_WLED, "[DISPATCH] WLED %d not configured — skipped\n", id); return; }
+    if (slot < 0) { dskip(DBG_WLED, "[DISPATCH] WLED %d not configured — skipped\n", id); return; }
   }
   const RcWledSlot& w = rcConfig.wledSlots[slot];
 
@@ -1997,7 +2096,7 @@ static void executeWledAction(const RcAction& a) {
   if (w.remoteWCB == 0 && w.serialPort >= 3 && w.serialPort <= 5) {
     Stream* port = (w.serialPort == 3) ? s3 : (w.serialPort == 4) ? s4 : s5;
     if (!port) {
-      dlog(DBG_WLED, "[DISPATCH] WLED %u: local S%u not available on this board — skipped\n", w.wledID, w.serialPort);
+      dskip(DBG_WLED, "[DISPATCH] WLED %u: local S%u not available on this board — skipped\n", w.wledID, w.serialPort);
       return;
     }
     // nullptr diag sink, deliberately: WcbWled's parse-error paths write to the
@@ -2009,11 +2108,20 @@ static void executeWledAction(const RcAction& a) {
     bool ok = WcbWled::emit(*HIL_TAP(port), body, nullptr);   // build ;L verb → WLED JSON, newline-framed
     dlog(DBG_WLED, "[DISPATCH] WLED %u→S%u  %s  %s\n", w.wledID, w.serialPort, body, ok ? "OK" : "no-op");
   } else if (w.remoteWCB >= 1 && w.remoteWCB <= WCB_MAX_BOARDS) {
-    if (!wcb || !wcbReady) { dlog(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
-    bool ok = wcb->send(w.remoteWCB, a.cmd);          // forward the full ";L<id>,…" string
-    dlog(DBG_WLED, "[DISPATCH] WLED %u→WCB%u  %s  %s\n", w.wledID, w.remoteWCB, a.cmd, ok ? "OK" : "FAIL");
+    if (!wcb || !wcbReady) { dskip(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
+    // Forward the command REBUILT from what was parsed, not as written. The parse above
+    // tolerates a missing ';' (and leading blanks), so "L1,ON" routes like ";L1,ON" - but
+    // forwarded verbatim, a WCB runs a unicast without its command character as plain
+    // broadcast text: its WLED got nothing and "L1,ON" went out every port with broadcast
+    // output on, so the same saved action worked locally and failed remotely (HIL
+    // ncdev.wled_forward_normalised). A well-formed ";L<id>,<body>" is unchanged.
+    char fwd[sizeof(a.cmd) + 8];
+    if (*body) snprintf(fwd, sizeof(fwd), ";L%u,%s", (unsigned)w.wledID, body);
+    else       snprintf(fwd, sizeof(fwd), ";L%u", (unsigned)w.wledID);
+    bool ok = wcb->send(w.remoteWCB, fwd);
+    dlog(DBG_WLED, "[DISPATCH] WLED %u→WCB%u  %s  %s\n", w.wledID, w.remoteWCB, fwd, ok ? "OK" : "FAIL");
   } else {
-    dlog(DBG_WLED, "[DISPATCH] WLED %u: slot has no valid destination — skipped\n", w.wledID);
+    dskip(DBG_WLED, "[DISPATCH] WLED %u: slot has no valid destination — skipped\n", w.wledID);
   }
 }
 
@@ -2039,6 +2147,22 @@ static void scheduleAction(const RcAction& action, unsigned long delayMs) {
   rcExecuteActionNow(action);
 }
 
+// A serial action goes out through the same paced transmitter as a mesh->serial forward
+// (serialFwdQueue -> drainSerialFwd -> auxTxPump): a few bytes per loop() pass, not the
+// whole line at once. S4/S5 are bit-banged and a write returns only when its last bit is
+// out, so a 95-character action at 9600 held loop() ~100 ms - past the ~96 ms of SBUS-24
+// that Serial1 buffers (HIL ncdev.serial_action_paced). Same bytes on the wire (the text
+// plus the CR drainSerialFwd adds), in order with the mesh forwards to the same port.
+// NEVER dropped: when the 4-deep queue is full, the pump runs until there is room, which
+// holds loop() only for that overflow - the whole-line write every action used to make.
+void drainSerialFwd();
+static void queueSerialAction(uint8_t fwPort, const char* text) {
+  SerialFwdMsg m;
+  m.fwPort = fwPort;
+  strlcpy(m.text, text, sizeof(m.text));
+  while (xQueueSend(serialFwdQueue, &m, 0) != pdTRUE) { drainSerialFwd(); yield(); }
+}
+
 // Dispatch an action's EFFECT immediately — no delay handling, no calibration
 // gate (callers handle those). Split out from rcExecuteAction so the delayed
 // path fires WITHOUT re-entering the delay check: previously checkPendingActions
@@ -2054,16 +2178,16 @@ static void rcExecuteActionNow(const RcAction& a) {
     case RA_WCB_UNICAST: {
       uint8_t boardId = (uint8_t)atoi(a.target);
       if (boardId >= 1 && boardId <= WCB_MAX_BOARDS) {
-        if (!wcb || !wcbReady) { dlog(DBG_WCB, "[DISPATCH] WCB→%d skipped — WCB not ready\n", boardId); break; }
-        if (a.skipRunning && maestroVerbBusy(a.cmd, boardId)) { dlog(DBG_MAESTRO, "[DISPATCH] WCB→%d Maestro skipped — already running  %s\n", boardId, a.cmd); break; }
+        if (!wcb || !wcbReady) { dskip(DBG_WCB, "[DISPATCH] WCB→%d skipped — WCB not ready\n", boardId); break; }
+        if (a.skipRunning && maestroVerbBusy(a.cmd, boardId)) { dskip(DBG_MAESTRO, "[DISPATCH] WCB→%d Maestro skipped — already running  %s\n", boardId, a.cmd); break; }
         dlog(DBG_WCB, "[DISPATCH] WCB→%d  %s\n", boardId, a.cmd);
         wcb->send(boardId, a.cmd);
       }
       break;
     }
     case RA_WCB_BROADCAST:
-      if (!wcb || !wcbReady) { dlog(DBG_WCB, "[DISPATCH] WCB broadcast skipped — WCB not ready\n"); break; }
-      if (a.skipRunning && maestroVerbBusy(a.cmd, 0)) { dlog(DBG_MAESTRO, "[DISPATCH] WCB broadcast Maestro skipped — already running  %s\n", a.cmd); break; }
+      if (!wcb || !wcbReady) { dskip(DBG_WCB, "[DISPATCH] WCB broadcast skipped — WCB not ready\n"); break; }
+      if (a.skipRunning && maestroVerbBusy(a.cmd, 0)) { dskip(DBG_MAESTRO, "[DISPATCH] WCB broadcast Maestro skipped — already running  %s\n", a.cmd); break; }
       dlog(DBG_WCB, "[DISPATCH] WCB broadcast  %s\n", a.cmd);
       wcb->broadcast(a.cmd);
       break;
@@ -2072,8 +2196,10 @@ static void rcExecuteActionNow(const RcAction& a) {
       // Legacy "local Maestro" — treat as Maestro ID 1 for backward compat
       // with old configs.  The location of Maestro 1 (and whether it's
       // actually wired locally) is now defined in the Maestro Locations panel.
+      // The dispatch line comes AFTER the skip gate, as on every other action type: printed
+      // first, a skipped action read as sent until the next line (HIL ncengine.skip_not_traced_as_sent).
+      if (a.skipRunning && maestroSequenceBusy(1)) { dskip(DBG_MAESTRO, "[DISPATCH] Maestro 1 skipped — already running\n"); break; }
       dlog(DBG_MAESTRO, "[DISPATCH] Maestro (legacy local → ID 1)  %s\n", a.cmd);
-      if (a.skipRunning && maestroSequenceBusy(1)) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro 1 skipped — already running\n"); break; }
       executeMaestroCmd(1, a.cmd);
       break;
 
@@ -2083,20 +2209,35 @@ static void rcExecuteActionNow(const RcAction& a) {
       int id = atoi(a.target);
       if (id < 1 || id > RC_NUM_MAESTROS) {
         vlogf("WARN: Maestro action with invalid ID %d (target='%s')\n", id, a.target);
+        noteDispatchSkip("Maestro action with invalid ID %d", id);
         break;
       }
-      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d  %s\n", id, a.cmd);
-      if (a.skipRunning && maestroSequenceBusy((uint8_t)id)) { dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d skipped — already running\n", id); break; }
+      if (a.skipRunning && maestroSequenceBusy((uint8_t)id)) { dskip(DBG_MAESTRO, "[DISPATCH] Maestro %d skipped — already running\n", id); break; }
+      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d  %s\n", id, a.cmd);   // after the gate - see RA_MAESTRO_LOCAL
       executeMaestroCmd((uint8_t)id, a.cmd);
       break;
     }
     case RA_SERIAL: {
-      String s(a.cmd);
-      { int _pi = (a.target[0] == 'S' && a.target[1] >= '3' && a.target[1] <= '5') ? (a.target[1] - '3') : -1;
-        dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", (_pi >= 0) ? auxPortLabel(_pi) : a.target, a.cmd); }
-      if      (!strcmp(a.target, "S3")) writeS3(s);
-      else if (!strcmp(a.target, "S4")) writeS4(s);
-      else if (!strcmp(a.target, "S5")) writeS5(s);   // both boards (v2 "Serial 3", WCB 3.2 "Serial 5")
+      // Check the port BEFORE tracing the send. The trace used to come first, so a port
+      // other than S3-S5 printed "[DISPATCH] Serial TX [S9] ..." and then wrote nothing
+      // and said nothing (HIL ncengine.skip_not_traced_as_sent).
+      const int pi = (a.target[0] == 'S' && a.target[1] >= '3' && a.target[1] <= '5' && !a.target[2])
+                       ? (a.target[1] - '3') : -1;
+      Stream* port = (pi == 0) ? s3 : (pi == 1) ? s4 : (pi == 2) ? s5 : nullptr;   // S5 on both boards
+      if (pi < 0)  { dskip(DBG_SERIAL, "[DISPATCH] Serial port '%s' is not S3/S4/S5 — skipped\n", a.target); break; }
+      if (!port)   { dskip(DBG_SERIAL, "[DISPATCH] Serial port %s not available on this board — skipped\n", a.target); break; }
+      if (serialFwdQueue) {
+        // Paced (queueSerialAction): auxTxPump prints the Serial TX line once the line is out.
+        queueSerialAction((uint8_t)(pi + 3), a.cmd);
+      } else {
+        // No queue (WCB_Client failed at boot, so setup() never made it): the whole-line
+        // write this always was.
+        dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", auxPortLabel(pi), a.cmd);
+        String s(a.cmd);
+        if      (pi == 0) writeS3(s);
+        else if (pi == 1) writeS4(s);
+        else              writeS5(s);
+      }
       break;
     }
     case RA_HCR:
@@ -2151,19 +2292,25 @@ void rcExecuteAction(const RcAction& a) {
 // use, then dispatches its effect NOW — bypassing the per-action delay (a test
 // should fire the instant you click) and the calibration gate (you asked for it
 // explicitly). Runs on Core 1 (USB handler / loop drain), so the dispatch's
-// Maestro/ESP-NOW TX is safe. Returns false if the action JSON didn't parse.
-static bool rcTestAction(JsonObject act) {
-  if (act.isNull()) return false;
+// Maestro/ESP-NOW TX is safe. Returns false - with the reason in *why - if the
+// action JSON didn't parse OR the executor skipped it (the dskip recorder).
+static bool rcTestAction(JsonObject act, const char** why) {
+  *why = nullptr;
+  if (act.isNull()) { *why = "no action"; return false; }
   RcAction a{};   // zero-init so any field the parser leaves unset (skipRunning/delayMs/…) is clean
-  if (!actionFromJson(act, a)) return false;
+  if (!actionFromJson(act, a)) { *why = "unknown or malformed action"; return false; }
   // The ok flag must mean 'the action fired', not 'the JSON parsed'. rcExecuteActionNow
   // silently does nothing for a board id outside 1-WCB_MAX_BOARDS, so a Test button on an
   // action pointing at board 0 or 99 reported success for a command that never left.
   if (a.type == RA_WCB_UNICAST) {
     const int boardId = atoi(a.target);
-    if (boardId < 1 || boardId > WCB_MAX_BOARDS) return false;
+    if (boardId < 1 || boardId > WCB_MAX_BOARDS) { *why = "WCB board id out of range"; return false; }
   }
+  g_skipWhy[0] = '\0';
+  g_skipArmed  = true;
   rcExecuteActionNow(a);
+  g_skipArmed  = false;
+  if (g_skipWhy[0]) { *why = g_skipWhy; return false; }   // the executor skipped it - say why
   return true;
 }
 
@@ -2177,12 +2324,14 @@ void drainTestAction() {
   uint8_t sender = 0;
   if (!rcTelemetry::takeTestAction(js, sender)) return;
   bool ok = false;
+  const char* why = "parse failed";
   StaticJsonDocument<640> tdoc;      // one action object is small; 640 B is ample
   if (deserializeJson(tdoc, js) == DeserializationError::Ok)
-    ok = rcTestAction(tdoc["action"].as<JsonObject>());
+    ok = rcTestAction(tdoc["action"].as<JsonObject>(), &why);
   if (sender >= 1 && sender <= WCB_MAX_BOARDS && wcb && wcbReady) {
-    char ack[64];
-    snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}", ok ? "true" : "false");
+    char ack[176];                   // 51 B + a <=95 B reason: well under the 187 B payload cap
+    if (ok || !why) snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}", ok ? "true" : "false");
+    else            snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"%s\"}", why);
     wcb->send(sender, ack);
   }
 }
@@ -2399,6 +2548,23 @@ static void rcMatrixRelease() {
   unsigned long now = millis();
   tapState.lastTapMs = now;
   if (tapState.deferredPending) tapState.deferredFireAt = now + rcConfig.tapWindowMs;
+}
+
+// Frame loss cancels a matrix gesture in flight, exactly as a failsafe frame does
+// (processSbus's failsafe gate). With no frame nothing reaches processSbus - there is
+// no other frame timeout - so a press held when the frames stopped stayed parked
+// through any outage, and the first neutral frames after it were its release: it fired
+// tapWindowMs after the link came back, for a button let go seconds before (HIL
+// sbus.frame_stop_held_press). "No frames" is the status LED's definition, 500 ms
+// (SBUS_LED_TIMEOUT_MS). Only a gesture in flight is cancelled; called from loop()
+// right after processSbus(), which has drained any frames a stalled pass left queued,
+// so a slow loop() pass cannot read as an outage.
+#define SBUS_GESTURE_TIMEOUT_MS 500
+static void checkSbusGestureTimeout() {
+  if (!tapState.deferredPending && !tapState.holdActive) return;   // nothing in flight
+  if (sbusLastFrameMs == 0) return;                                 // no stream yet
+  if ((uint32_t)(millis() - sbusLastFrameMs) < SBUS_GESTURE_TIMEOUT_MS) return;
+  rcMatrixResetGesture();
 }
 
 void checkDeferredTap() {
@@ -2780,16 +2946,13 @@ void processSbus() {
   // NOTE: this gates on `failsafe` only, NOT `lostFrame` — lostFrame is a
   // single-frame transient and gating on it would make control feel laggy.
   if (sbusRx.failsafe) {
-    matrixArmed        = false;   // require a confirmed neutral to re-arm post-recovery
-    matrixCandidate    = 0;
-    matrixCandCount    = 0;
-    matrixNeutralCount = 0;
-    // Abandon any hold in progress. The link dropped mid-press, so we never saw
-    // the release edge that would normally close it — left set, holdActive would
-    // park checkDeferredTap() forever and the button would go dead after recovery.
-    tapState.holdActive = false;
-    tapState.holdFired  = false;
-    tapState.holdBtn    = 0;
+    // Require a confirmed neutral to re-arm post-recovery, and CANCEL any gesture in
+    // flight: the hold (whose release edge we will never see) AND the deferred tap.
+    // Clearing only the hold left the tap pending, and checkDeferredTap() runs from
+    // loop() whatever the frames say - a tap released just before the failsafe fired
+    // during it, and a press held into it fired sooner, since holdActive was the only
+    // thing parking it (HIL sbus.failsafe_deferred_tap). The press must be made again.
+    rcMatrixResetGesture();
     return;
   }
 
@@ -2924,6 +3087,16 @@ void dumpSbusState() {
 // _fragClear() in rc_telemetry.h.)
 static void __attribute__((noinline)) queueRemoteCli(uint8_t relay, const char* command) {
   RemoteCliMsg m;
+  // REFUSE an over-long line, never truncate it. WCB_Client reassembles a fragmented
+  // command whole (up to 16 x 179 characters), and strlcpy into cmd[200] silently ran
+  // its first 199 characters as if that were the command (HIL
+  // ncmesh.long_command_truncation). Same rule as queueMaestroCmd and queueSerialFwd.
+  const size_t n = strlen(command);
+  if (n >= sizeof(m.cmd)) {
+    Serial.printf("[WCB] CLI line from WCB%u is %u characters, over the %u a queue slot holds - dropped, not run cut short\n",
+                  relay, (unsigned)n, (unsigned)(sizeof(m.cmd) - 1));
+    return;
+  }
   m.relay = relay;
   strlcpy(m.cmd, command, sizeof(m.cmd));
   xQueueSend(remoteCliQueue, &m, 0);   // non-blocking; drop under load
@@ -2937,6 +3110,14 @@ static void __attribute__((noinline)) queueRemoteCli(uint8_t relay, const char* 
 static void __attribute__((noinline)) queueSerialFwd(uint8_t fwPort, const char* text) {
   if (!serialFwdQueue || !text || !text[0]) return;
   SerialFwdMsg m;
+  // Refused, never truncated (see queueRemoteCli): a cut line would put a different
+  // command on the device's wire than the one sent.
+  const size_t n = strlen(text);
+  if (n >= sizeof(m.text)) {
+    Serial.printf("[WCB] mesh->serial line for port %u is %u characters, over the %u a queue slot holds - dropped\n",
+                  fwPort, (unsigned)n, (unsigned)(sizeof(m.text) - 1));
+    return;
+  }
   m.fwPort = fwPort;
   strlcpy(m.text, text, sizeof(m.text));
   xQueueSend(serialFwdQueue, &m, 0);   // non-blocking; drop under load
@@ -3331,6 +3512,7 @@ static void applySbusOut(bool initial) {
 // OLD board's pins.  Everything pin-dependent defers to the reboot the GUI
 // already prompts for after a board change; the caller reports that its own way.
 bool applyConfigSideEffects() {
+  rcMatrixResetGesture();    // first, whatever the return below - see rcMatrixResetGesture()
   if (rcConfig.boardType != appliedBoardType) return false;
   applySerialBauds(false);   // HCR / MP3 / Maestro pick up a new rate immediately
   applySbusOut(false);       // apply a flipped SBUS-OUT toggle live
@@ -3466,6 +3648,10 @@ bool execCliLine(const String& line) {
       else                                          navirec::info(Serial);
     }
     else if (sub.equalsIgnoreCase("PLAY")) {
+      // loadClip() refuses while the recorder is busy with the same false as a missing
+      // clip, so say which it is: a busy recorder is not a missing clip (HIL
+      // ncrec.busy_load_not_missing). Same for LOAD and EDITLOAD below.
+      if (name.length() && navirec::busy()) { Serial.printf("[REC] busy (%s) - '%s' not loaded\n", navirec::stateName(), name.c_str()); return true; }
       if (name.length() && !navirec::loadClip(name.c_str())) { Serial.printf("[REC] clip '%s' not found\n", name.c_str()); return true; }
       if (navirec::startReplay())
         Serial.printf("[REC] replaying %lu events over %lums — ?REC,STOP to abort\n",
@@ -3481,7 +3667,10 @@ bool execCliLine(const String& line) {
       Serial.println(navirec::saveClip(nm) ? (String("[REC] saved clip '") + nm + "'").c_str()
                                            : "[REC] save failed (see reason above)");
     }
-    else if (sub.equalsIgnoreCase("LOAD"))  Serial.println(navirec::loadClip(name.c_str()) ? "[REC] loaded" : "[REC] load failed (not found / no FS)");
+    else if (sub.equalsIgnoreCase("LOAD")) {
+      if (navirec::busy()) Serial.printf("[REC] busy (%s) - not loaded\n", navirec::stateName());   // not "not found": see PLAY
+      else                 Serial.println(navirec::loadClip(name.c_str()) ? "[REC] loaded" : "[REC] load failed (not found / no FS)");
+    }
     else if (sub.equalsIgnoreCase("LS"))    {
       // Report the clips-partition storage first (short marker → survives the WCB
       // RTERM 160-byte wrap), then the per-clip list.
@@ -3548,6 +3737,13 @@ bool execCliLine(const String& line) {
       // far longer than the streaming itself. Fail closed: any buffer mutator
       // clears _loadedName.
       if (strcmp(navirec::_loadedName, cname.c_str()) != 0) {
+        // Busy is not missing (see PLAY): a [CLIPDL:ERR] the tool's ranged download already
+        // raises as an error, where "not found" made a backup taken during a playing
+        // idle-animation wait out its 15 s budget on every other clip and skip it.
+        if (navirec::busy()) {
+          Serial.printf("[CLIPDL:ERR]recorder busy (%s)\n", navirec::stateName());
+          return true;
+        }
         if (!navirec::loadClip(cname.c_str())) {
           // Legacy byte-for-byte on the unranged path — an old tool matches
           // "[CLIPDL:ERR]" by exact prefix and slices a fixed offset.
@@ -3556,12 +3752,21 @@ bool execCliLine(const String& line) {
         }
       }
 
-      // Via-WCB (capture sink armed): every [CLIPDL:EV] line is an RTERM packet
-      // and editStream runs in loop(), so a dense capture streamed whole would
-      // stall SBUS/WCB servicing for tens of seconds. A RANGED request is the
-      // answer to that — the caller asks for a bounded slice — so the size
-      // refusal applies only to the legacy whole-clip form.
-      const bool relayed = rcSerial.captureArmed();
+      // Via-WCB: every [CLIPDL:EV] line is an RTERM packet and editStream runs in
+      // loop(), so a dense capture streamed whole would stall SBUS/WCB servicing for
+      // tens of seconds. A RANGED request is the answer to that — the caller asks for
+      // a bounded slice — so the size refusal applies only to the legacy whole-clip
+      // form. A WebSocket line is paced and bounded the same way (its sink is 2 KB).
+      //
+      // "Relayed" is the TRANSPORT this line came in on: g_rtermRelay is set only while
+      // drainRemoteCli() runs a mesh-relayed line, and lineFromSocket() only while
+      // naviws::drain() runs a socket's. It was rcSerial.captureArmed(), which meant a
+      // relayed line until the WebSocket tee became a standing arrangement for a
+      // client's whole session: with any socket open, a USB download was cut to 512
+      // events a range, a whole clip over 3000 refused with "connect over USB" to a
+      // client on USB, and the wait for USB room skipped (HIL
+      // ncwifi.usb_editload_with_socket).
+      const bool relayed = (g_rtermRelay != 0) || naviws::lineFromSocket();
       // BOUND THE SLICE ON THE BOARD, not in the caller. `ranged` is true as soon
       // as one extra comma is present, and `want` stays 0xFFFFFFFF when no count
       // is supplied — so "?REC,EDITLOAD,<name>,0" is a ranged request for the
@@ -3602,7 +3807,10 @@ bool execCliLine(const String& line) {
       else     Serial.println("[CLIPUL:END,OK]");
     }
     else if (sub.equalsIgnoreCase("EDITCANCEL")) { navirec::editCancel(); Serial.println("[CLIPUL:CANCEL,OK]"); }
-    else if (sub.equalsIgnoreCase("CLEAR")) { navirec::clearClip(); Serial.println("[REC] cleared"); }
+    else if (sub.equalsIgnoreCase("CLEAR")) {
+      if (navirec::clearClip()) Serial.println("[REC] cleared");
+      else Serial.printf("[REC] busy (%s) - not cleared\n", navirec::stateName());   // never "cleared" for a clear that did not happen
+    }
     else                                    navirec::info(Serial);   // bare "?REC" or "?REC,INFO"
     return true;
   }
@@ -3909,31 +4117,10 @@ bool processInputLine(const String& line) {
       // library, so /cmdlib.json wasn't valid JSON on its own and its
       // size/hash covered bytes that were not library content (which then
       // read as "different library" against a mesh-saved copy).
+      // (rcCmdlibExtractData, rc_config.h - the ONE extraction both transports use.)
       bool ok = false; unsigned h = 0, sz = 0;
-      int k = line.indexOf("\"data\":");
-      if (k >= 0) {
-        int s = k + 7, blen = (int)line.length();
-        while (s < blen && isspace((unsigned char)line[s])) s++;
-        int end = -1;
-        if (s < blen && (line[s] == '{' || line[s] == '[')) {
-          const char open  = line[s];
-          const char close = (open == '{') ? '}' : ']';
-          int depth = 0; bool inStr = false, esc = false;
-          for (int i = s; i < blen; i++) {
-            char c = line[i];
-            if (esc)      { esc = false;  continue; }
-            if (inStr)    { if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
-            if (c == '"') { inStr = true; continue; }
-            if (c == open)  { depth++; continue; }
-            if (c == close) { if (--depth == 0) { end = i + 1; break; } }
-          }
-        }
-        if (end > s) {
-          String lib = line.substring(s, end);
-          lib.trim();
-          if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
-        }
-      }
+      String lib;
+      if (rcCmdlibExtractData(line, lib)) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
       Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}\n",
                     ok ? "true" : "false", sz, h);
 
@@ -3960,19 +4147,10 @@ bool processInputLine(const String& line) {
           rcAdvertiseSerialLabels();   // a changed port label / HCR/MP3/WLED dest → re-advertise over WDP
           // Live re-apply of baud / SBUS-OUT / easing / auto-release. Shared with the
           // Via-WCB save path — see applyConfigSideEffects().
+          // It also re-arms the matrix and forgets any parked tap (rcMatrixResetGesture),
+          // so the save's 100+ ms block cannot manufacture a button event.
           if (!applyConfigSideEffects())
             Serial.println("{\"type\":\"INFO\",\"msg\":\"boardType changed — reboot to apply the new pin profile\"}");
-          // rcConfigSaveLFS() (flash write) + applySerialBauds()
-          // block loop() for 100+ ms, during which processSbus() can't
-          // run.  If the operator was holding a matrix button across
-          // that gap, the frozen debounce state could produce a phantom
-          // edge when loop() resumes.  Reset the matrix state machine to
-          // a clean "must see a confirmed neutral, then a fresh press"
-          // condition so the save can't manufacture a button event.
-          matrixArmed        = false;
-          matrixCandidate    = 0;
-          matrixCandCount    = 0;
-          matrixNeutralCount = 0;
           if (saved) Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":true,\"saveId\":%ld}\n", saveId);
           else       Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CONFIG\",\"ok\":false,\"msg\":\"applied to RAM but could not be saved to flash (LittleFS write error)\",\"saveId\":%ld}\n", saveId);
         } else {
@@ -4010,8 +4188,13 @@ bool processInputLine(const String& line) {
       Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
     } else if (strcmp(type,"RESET_DEFAULTS")==0) {
-      rcConfigLoadDefaults();
-      resetMaestroReleaseState();   // clear stale auto-release state so defaults take effect live
+      // Factory defaults minus the network identity (rcConfigResetKeepIdentity), then
+      // the same live re-apply as every config apply - ports, SBUS OUT, easing, and the
+      // auto-release state - exactly as the Via-WCB path does in rcTelemetry::tick().
+      // This path used to load the defaults and reset only the auto-release state, so a
+      // USB reset left the old bauds and SBUS OUT running until a reboot. RAM only.
+      rcConfigResetKeepIdentity();
+      applyConfigSideEffects();     // ends in resetMaestroReleaseState()
       Serial.println("{\"type\":\"ACK\",\"ok\":true}");
 
     } else if (strcmp(type,"TEST_ACTION")==0) {
@@ -4022,8 +4205,10 @@ bool processInputLine(const String& line) {
       if (deserializeJson(tdoc, line) != DeserializationError::Ok) {
         Serial.println("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"parse failed\"}");
       } else {
-        bool ok = rcTestAction(tdoc["action"].as<JsonObject>());
-        Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}\n", ok ? "true" : "false");
+        const char* why = nullptr;
+        bool ok = rcTestAction(tdoc["action"].as<JsonObject>(), &why);
+        if (ok || !why) Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":%s}\n", ok ? "true" : "false");
+        else            Serial.printf("{\"type\":\"ACK\",\"of\":\"TEST_ACTION\",\"ok\":false,\"msg\":\"%s\"}\n", why);
       }
 
     } else if (strcmp(type,"REBOOT")==0) {
@@ -4797,10 +4982,13 @@ void setup() {
   // enabled it runs WIFI_AP_STA and shares that AP's channel; with it off (the
   // default) this is ESP-NOW only, exactly as before. Credentials come from NVS
   // (editable via the GUI's "WCB Network" sidebar); a reboot is required
-  // for credential changes to take effect.
+  // for credential changes to take effect. The password goes in through
+  // g_meshPasswordBoot, which every hand-built packet (RTERM, OTA, WcbMgmt) also
+  // reads, so a later unrebooted change cannot split them from the ETM stack.
+  strlcpy(g_meshPasswordBoot, rcConfig.wcbNetwork.password, sizeof(g_meshPasswordBoot));
   wcb = new WCB_Client(rcConfig.wcbNetwork.macOct2,
                       rcConfig.wcbNetwork.macOct3,
-                      rcConfig.wcbNetwork.password,
+                      g_meshPasswordBoot,
                       rcConfig.wcbNetwork.quantity,
                       rcConfig.wcbNetwork.deviceId);
   // Pin the ESP-NOW radio to the mesh channel every WCB is on BEFORE begin() — the
@@ -4874,7 +5062,7 @@ void setup() {
       id.deviceId       = rcConfig.wcbNetwork.deviceId;
       id.alias          = "NaviCore";
       id.fw             = FW_VERSION;
-      id.meshPassword   = rcConfig.wcbNetwork.password;
+      id.meshPassword   = g_meshPasswordBoot;   // the boot copy WCB_Client uses - never the live field
       id.hwVer          = 32;          // 32 = "not a real WCB", same as a MgmtRelay
       id.macOct2        = rcConfig.wcbNetwork.macOct2;
       id.macOct3        = rcConfig.wcbNetwork.macOct3;
@@ -5120,7 +5308,12 @@ static void maeInboundActuate(uint8_t id, const uint8_t* frame, size_t n) {
     // (HIL navicore.maestro_skip_not_logged_as_dispatch). The guard prints its own "skipped" line.
     case WcbMaestro::CMD_SET_TARGET:  if (!maestroChanOk(id, frame[3])) return; maestroSetTarget(id, frame[3], arg14);          break;
     case WcbMaestro::CMD_SET_SPEED:   if (!maestroChanOk(id, frame[3])) return; maestroSetSpeed (id, frame[3], arg14);          break;
-    case WcbMaestro::CMD_SET_ACCEL:   if (!maestroChanOk(id, frame[3])) return; maestroSetAccel (id, frame[3], (uint8_t)arg14); break;
+    case WcbMaestro::CMD_SET_ACCEL:   if (!maestroChanOk(id, frame[3])) return;
+                                      if (arg14 > 255) {   // accel is 0-255: refuse, never wrap (300 sent 44) - see maeArgInRange
+                                        dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: accel %u out of range (0-255) — skipped\n", id, arg14);
+                                        return;
+                                      }
+                                      maestroSetAccel (id, frame[3], (uint8_t)arg14); break;
     case WcbMaestro::CMD_GO_HOME:     maestroGoHome(id);                                break;
     case WcbMaestro::CMD_STOP_SCRIPT: maestroStopScript(id);                            break;
     // Straight to maestroRestartScript, NOT via executeMaestroCmd's "restartScript"
@@ -5292,6 +5485,19 @@ void onWcbNeighbor(const WCBNeighbor& nb) {
 // action tier + the passive alert. Fires at most once per board per session.
 void drainPeerEvents() {
   if (!peerEventQueue) return;
+  // The grace window alone cannot hold the boot fleet: it is 8 s, and a WCB advertises
+  // every 60 s, so most boards' first advert of the session lands after it and every WCB
+  // that never left fired the new-peer alert and the user's peer actions after each
+  // NaviCore restart (HIL ncboot.new_peer_after_boot). So the moment the grace ends, every
+  // board ALREADY ONLINE in the ETM table (its heartbeats reach us within seconds of boot)
+  // is recorded as seen, silently. One shot; a board that appears later still fires.
+  static bool graceClosed = false;
+  if (!graceClosed && (int32_t)(millis() - g_peerGraceUntil) >= 0) {
+    graceClosed = true;
+    if (wcb && wcbReady)
+      for (uint8_t b = 1; b <= WCB_MAX_BOARDS; b++)
+        if (wcb->isOnline(b)) g_peerSeenMask |= 1UL << (b - 1);
+  }
   uint8_t id;
   while (xQueueReceive(peerEventQueue, &id, 0) == pdTRUE) {
     if (id < 1 || id > WCB_MAX_BOARDS) continue;
@@ -5409,6 +5615,50 @@ static void kickUsbCdcTx() {
 }
 #endif
 
+// ── Deferred restart (a mesh-relayed REBOOT) ────────────────────────────────
+// Never restart from a receive callback or a command handler: a REBOOT that arrives
+// mid-stream would discard every command queued behind it. rcTelemetry::tick() ACKs the
+// REBOOT and calls requestDeferredRestart(); this restarts from loop() once every
+// inbound queue and aux-port transmission is empty AND no mesh command has arrived for
+// RESTART_QUIET_MS - quiet matters, because a paced sender empties the queues between
+// every pair of commands - or, failing that, once the request is RESTART_MAX_DEFER_MS
+// old, so a chatty mesh cannot hold a requested restart off for good. The quiet window
+// also gives the ETM ACK time to leave before the radio goes down.
+#define RESTART_QUIET_MS      500
+#define RESTART_MAX_DEFER_MS  5000
+static uint32_t g_restartReqMs     = 0;   // millis() of the request; 0 = none pending
+static uint32_t g_restartQuietFrom = 0;   // millis() the current quiet window began
+static uint32_t g_restartRxSeen    = 0;   // g_meshRxCount when that window began
+void requestDeferredRestart() {
+  if (g_restartReqMs) return;              // already pending
+  g_restartReqMs     = millis() | 1u;      // never 0 - 0 means "none"
+  g_restartQuietFrom = millis();
+  g_restartRxSeen    = g_meshRxCount;
+}
+static bool inboundWorkPending() {
+  QueueHandle_t qs[] = { remoteTriggerQueue, remoteCliQueue, serialFwdQueue, maestroCmdQueue, forgetPeerQueue };
+  for (QueueHandle_t q : qs) if (q && uxQueueMessagesWaiting(q)) return true;
+  for (int i = 0; i < 3; i++) if (auxTx[i].len) return true;   // a serial line still clocking out
+  return false;
+}
+static void checkDeferredRestart() {
+  if (!g_restartReqMs) return;
+  const uint32_t now = millis();
+  if (g_meshRxCount != g_restartRxSeen || inboundWorkPending()) {   // traffic or work: the quiet window restarts
+    g_restartRxSeen    = g_meshRxCount;
+    g_restartQuietFrom = now;
+  }
+  const bool quiet   = (uint32_t)(now - g_restartQuietFrom) >= RESTART_QUIET_MS;
+  const bool overdue = (uint32_t)(now - g_restartReqMs)     >= RESTART_MAX_DEFER_MS;
+  if (!quiet && !overdue) return;
+  Serial.println(overdue ? "[RC] restarting (remote REBOOT; the mesh never went quiet)"
+                         : "[RC] restarting (remote REBOOT)");
+  Serial.flush();
+  naviota::otaFarewellAP();   // deauth SoftAP clients first, as every other restart path does
+  delay(250);
+  ESP.restart();
+}
+
 void loop() {
 #ifdef NAVICORE_HIL_HOOKS
   navihil::loopStall();   // #L90 (HIL builds only): a requested stall, before anything else this pass
@@ -5497,6 +5747,7 @@ void loop() {
 
   // SBUS
   processSbus();
+  checkSbusGestureTimeout();   // frame loss cancels a gesture in flight, as failsafe does
   checkDeferredTap();
 
   // Re-send any owed easing repeats (cheap no-op when none are pending).
@@ -5567,4 +5818,7 @@ void loop() {
     sbusLiveDumpLastMs = millis();
     dumpSbusState();
   }
+
+  // A mesh REBOOT, once the queues are quiet (last, after this pass drained them).
+  checkDeferredRestart();
 }
