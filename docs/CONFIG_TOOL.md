@@ -60,9 +60,17 @@ behaviour, and if the user did not plug in a bridge it is a misdetection they ne
 Transport is **UI state as well as protocol state**. `viaWcbActive` gates which of the four
 firmware buttons are enabled — flash, wipe and USB OTA need a direct link; relay OTA needs the
 bridge — so **every site that assigns the flag must call `_updateFirmwareBtnState()`**. There are
-three: `openPortAndStart()`, the disconnect path, and `onViaWcbToggle()`. Only the last used to,
-and a *successful* direct-USB auto-detect never calls the toggle at all, so a USB reconnect after
-a Via-WCB session kept the dead session's buttons: "Update over WCB" as the only enabled option.
+four: `openPortAndStart()`, `connectSharedPort()` (its failed-attach path), the disconnect path,
+and `onViaWcbToggle()`. Only the last used to, and a *successful* direct-USB auto-detect never
+calls the toggle at all, so a USB reconnect after a Via-WCB session kept the dead session's
+buttons: "Update over WCB" as the only enabled option.
+
+**On a WCB every line the tool writes must be `;w20,`-wrapped or a `?` line.** A WCB runs any
+other console line as a broadcast — out of each serial port with broadcast output, and onto
+the mesh. So "Via a WCB" raises `viaWcbActive` **before** `sharedHub.join()`: the hub's state
+event can open the port during the attach wait, and `onSharedState()` → `setConnected(true)` →
+`startWcbStatusPoll()` sends its first `GET_WCB_STATUS` at once, which went out bare when the
+flag was raised only after the wait (D-NC71, `nctool.via_wcb_nothing_bare`).
 
 **`WcbSerialHub`** (`serial-hub.js`) exists because a Web Serial port can be open in exactly
 one browsing context. One tab wins a Web Lock and becomes leader, owning the physical port;
@@ -693,6 +701,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | **Via a WCB writes nothing bare** (§2, D-NC71). `connectSharedPort()` raised `viaWcbActive` after waiting for the hub's port, and the status poll that `setConnected(true)` starts during that wait sent its first `GET_WCB_STATUS` unwrapped, which the WCB broadcast. The flag now goes up before `join()` and comes down on a failed attach. |
 | 2026-10-04 | _(pending)_ | **The Full Wipe texts tell the truth** (D-NC34): the button titles, the Firmware tab notes, the confirm and the completion log said the saved configuration is erased, but `flasher.js` erases only NVS and otadata and `/config.json` lives in LittleFS at 0x3D0000. They now say the config, command library and clips are kept, and point at Restore Defaults + Save for a reset. |
 | 2026-10-04 | _(pending)_ | **A refused Record no longer arms Stop & Save** (§5 Clip backup and restore). `clipRecordToggle` waited for a `[CLIPUL:REC]` marker no firmware prints, timed out, and assumed the START worked; it now waits for the board's `[REC] recording…` / `[REC] busy` line, and asks `?REC,INFO` when there is no answer. |
 | 2026-10-04 | _(pending)_ | **A restored clip keeps its own mode** (§7, D-NC33). `clipRestoreOne` and `_tlSave` send `?REC,EDITBEGIN,<mode>` (needs the matching firmware; an older board ignores it). |

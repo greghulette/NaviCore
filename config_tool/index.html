@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:08.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:10.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4714,6 +4714,12 @@ async function connectSharedPort() {
   }
   _sharedBuf = ''; _sharedDecoder = null;
   if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }   // fresh attempt → drop any stale "couldn't attach" notice
+  // The transport flag goes up BEFORE join(). The hub's state event can open the port
+  // during the wait below, and onSharedState -> setConnected(true) -> startWcbStatusPoll
+  // sends GET_WCB_STATUS at once: with the flag still down, sendJSON wrote it BARE, and
+  // a WCB runs a bare console line as a broadcast out of its serial ports and onto the
+  // mesh (D-NC71, nctool.via_wcb_nothing_bare). The shared port is always a WCB gateway.
+  viaWcbActive = true;
   sharedHub.join();
   sharedActive = true;
   // Wait (bounded) for leader election + the shared port to actually open.
@@ -4726,6 +4732,8 @@ async function connectSharedPort() {
     // hub so we're not left as a broken port-less leader blocking a real one.
     try { sharedHub.leave(); } catch (_) {}   // don't stay a port-less leader blocking a real one (see the lingering-follower squat)
     sharedActive = false;
+    viaWcbActive = false;           // raised before join() above; nothing is bridged after all
+    _updateFirmwareBtnState();      // every site that assigns viaWcbActive re-syncs these (see openPortAndStart)
     setConnected(false);
     // Persistent, visible notice (ms:0 → no auto-dismiss; a fast normal attach never reaches this block).
     // Lead with the primary remedy — share a board in the Wizard — since the hub's conditional-
@@ -4743,8 +4751,7 @@ async function connectSharedPort() {
     appendTerminalLine('· shared: no shared port yet — share a board in the WCB Wizard (or close any other config-tool tab), then reconnect.', 'sys');
     return;
   }
-  viaWcbActive = true;    // set the flag BEFORE setConnected starts the WCB-status poll, so its GET_WCB_STATUS wraps as ;w20 and reaches the RC
-  setConnected(true);
+  setConnected(true);     // viaWcbActive has been up since before join(), so the poll this starts wraps as ;w20
   if (_shareWaitToast) { _dismissToast(_shareWaitToast); _shareWaitToast = null; }   // attached → clear any "couldn't attach" notice
   onViaWcbToggle(true);   // the shared port is a WCB gateway → relay ;w20 to the NaviCore (applies UI + 'Connected via WCB' text)
   // Handshake — mirror openPortAndStart's tail (PING for PONG, then config + monitor).
