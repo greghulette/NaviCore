@@ -32,6 +32,12 @@ public:
   static constexpr int     FRAME_LEN_24      = 36;
   static constexpr int     MAX_CHANNELS      = 24;
   static constexpr unsigned long INTER_FRAME_GAP_US = 1500;   // 1.5 ms — comfortably less than typical 3 ms gap, more than intra-frame byte spacing
+  // How long the line must stay quiet before a PARTIAL frame is dropped (see the
+  // closing flush in read()). Longer than a whole SBUS-24 frame on the wire (36 bytes
+  // x 120 us = 4.32 ms) plus the UART's RX timeout, so the rest of a frame the UART
+  // delivered in two pieces always arrives first; shorter than the shortest frame
+  // period (~7 ms), so a cut frame is gone before the next frame's bytes could join it.
+  static constexpr unsigned long PARTIAL_DROP_US = 6000;
 
   uint16_t channels[MAX_CHANNELS];
   uint8_t  detectedChCount = 0;   // 16 or 24 after first valid frame; 0 if none yet
@@ -75,6 +81,7 @@ public:
     if (!uart_) return false;
     unsigned long nowUs = micros();
     bool gotFrame = false;
+    bool readAny  = false;
 
     while (uart_->available()) {
       uint8_t b = uart_->read();
@@ -84,6 +91,20 @@ public:
       // sink allows. SoftwareSerial.write() is blocking at 100k baud (~110 µs
       // per byte) which naturally rate-limits us to the SBUS line speed.
       if (sink_) sink_->write(b);
+
+      // The closing-flush drop below needs a pass that finds the UART empty, which a
+      // slow loop() pass may never give it: the next frame can be delivered before
+      // read() runs again. So also restart at a header: the FIRST byte of a pass that
+      // began PARTIAL_DROP_US or more after the last drain ended, found with a partial
+      // buffered, is taken as the start of the next frame when it is a header (the
+      // partial dropped, the lock broken), never appended to the partial. A UART-split
+      // frame whose continuation happens to start with 0x0F, read that late, loses
+      // that one frame - the price of never decoding a window across a silence.
+      if (!readAny && inFrame_ && b == SBUS_HEADER && !bufIsCompleteFrame() &&
+          (nowUs - lastRxEndUs_) > PARTIAL_DROP_US) {
+        tryParseAndReset();   // malformed branch: drop + break the lock; b starts a frame below
+      }
+      readAny = true;
 
       unsigned long sinceLastByte = nowUs - lastByteUs_;
       lastByteUs_ = nowUs;
@@ -176,11 +197,31 @@ public:
       }
     }
 
+    if (readAny) lastRxEndUs_ = micros();   // when the drain ENDED: the UART was empty here
+
     // Also flush at end if a COMPLETE frame is sitting in the buffer and we
     // haven't seen more bytes within the gap window. Same complete-frame gate as
-    // the mid-loop flush above — never flush a partial (it would reset the lock).
+    // the mid-loop flush above.
     if (inFrame_ && bufIsCompleteFrame() && (micros() - lastByteUs_) > INTER_FRAME_GAP_US) {
       gotFrame = tryParseAndReset() || gotFrame;
+    }
+    // A PARTIAL frame is dropped once the line has been quiet for PARTIAL_DROP_US,
+    // and the drop breaks the lock streak (tryParseAndReset's malformed branch), as
+    // the lock comment below says a malformed frame must. Never decode a window that
+    // spans a silence: a partial left buffered - a frame cut short, or a lone 0x0F
+    // between frames - was filled by the NEXT frame's bytes, and a locked reader
+    // decoded the 36-byte window the moment it ended on 0x00, the next frame's flags
+    // byte from a healthy transmitter: every channel shifted garbage and its flags
+    // another channel's bits, read as failsafe or handed to the knobs (HIL
+    // sbus.truncated_frame_no_phantom). The quiet is measured from the END of the last
+    // drain (lastRxEndUs_), never from nowUs: nowUs is sampled once per call, and with
+    // the SBUS OUT tee a drain takes ~110 us a byte, so a long drain would read as
+    // silence. And only on a pass that read nothing, with the UART re-checked after the
+    // time sample, so bytes that landed meanwhile keep the partial alive. Do NOT drop a
+    // partial on the in-loop gap above: that gap is the LOOP period, not the line's.
+    else if (inFrame_ && !bufIsCompleteFrame() && !readAny &&
+             (micros() - lastRxEndUs_) > PARTIAL_DROP_US && !uart_->available()) {
+      tryParseAndReset();
     }
 
     return gotFrame;
@@ -193,11 +234,13 @@ private:
   int      bufIdx_ = 0;
   bool     inFrame_ = false;
   unsigned long lastByteUs_ = 0;
+  unsigned long lastRxEndUs_ = 0;       // micros() when the last drain that read a byte ended
 
   // True when buf_ currently holds a structurally complete frame (exact length +
   // header + footer) of either variant. The gap / post-loop flushes gate on this
-  // so a partial buffer is never flushed (which would reset the lock streak); a
-  // partial simply keeps accumulating across read() calls until it completes.
+  // so a partial buffer is never PARSED on a loop gap; a partial keeps accumulating
+  // across read() calls until it completes, or until the line has really been quiet
+  // for PARTIAL_DROP_US, when read() drops it and breaks the lock.
   bool bufIsCompleteFrame() const {
     return (bufIdx_ == FRAME_LEN_16 && buf_[0] == SBUS_HEADER && buf_[FRAME_LEN_16 - 1] == SBUS_FOOTER) ||
            (bufIdx_ == FRAME_LEN_24 && buf_[0] == SBUS_HEADER && buf_[FRAME_LEN_24 - 1] == SBUS_FOOTER);
