@@ -233,7 +233,7 @@ payload approaches 98 KB and copying it per line is real cost.
 | `{"type":"CALIB","on":bool}` | `ACK` | Mutes **all** action dispatch while on |
 | `{"type":"RESET_DEFAULTS"}` | `ACK` | Factory defaults for everything **except the network identity** — `wcbNetwork`, `wcbProfiles`, `boardType` and the `wifi*` fields stay (`rcConfigResetKeepIdentity`). RAM only (the next Save persists it); the live side effects (bauds, SBUS OUT, easing, auto-release) run at once. The bridged form does the same and ACKs `{"of":"RESET_DEFAULTS"}` |
 | `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}`, plus `"msg":"<reason>"` when `ok` is false | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects). `ok` means the executor **fired** it: an action it skips — disabled destination, invalid slot or channel, unconfigured WLED id, bad serial port, busy Maestro — answers `ok:false` with the skip line's text in `msg` (the `dskip()` recorder). The bridged form ACKs the same `msg` |
-| `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | |
+| `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | Bridged: `tick()` ACKs `{"sys":1,"type":"ACK","of":"REBOOT","ok":true}`, then `loop()` restarts once the inbound queues are empty and no mesh command has arrived for 500 ms (`checkDeferredRestart()`), or 5 s after the request at the latest — never from the receive callback |
 | `{"type":"TRIGGER","mode":M,"btn":B,"tap":T}` | — | Virtual button press. `tap` 1–4; **4 = long press** (tier `t4`), which always dispatches exclusively |
 | `{"type":"WCB_SEND","target":N,"cmd":"…"}` | — | `target` 0 = broadcast |
 | `{"type":"FORGET_PEER","id":N}` / `"all":true` | — | id 0 or `all` = drop every learned peer |
@@ -939,6 +939,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC29)_ | A bridged `REBOOT` is ACKed (`"of":"REBOOT"`) and the restart deferred to `loop()` until the queues are quiet, instead of a silent `ESP.restart()` on the Core-0 receive callback (HIL `ncboot.mesh_reboot`). |
 | 2026-10-04 | _(D-NC45)_ | The dispatch trace prints a send line only for a send that happens: a serial action to a port other than S3-S5 (or one this board lacks) prints `[DISPATCH] Serial port '<p>' is not S3/S4/S5 — skipped`, and the Maestro line follows the skip-if-running gate (HIL `ncengine.skip_not_traced_as_sent`). |
 | 2026-10-04 | _(D-NC20)_ | `TEST_ACTION` answers `ok:false` with a `msg` when the executor skips the action, on both transports, instead of `ok:true` for anything that parsed (HIL `ncengine.test_action_skipped_not_ok`). |
 | 2026-10-04 | _(D-NC18)_ | A bridged `SET_CONFIG` also strips `wcbNetwork.channel` and the `wifi*` fields, so a Save over the mesh can no longer move the board's mesh channel or SoftAP at its next boot (HIL `ncmesh.bridged_set_config_strip`). |

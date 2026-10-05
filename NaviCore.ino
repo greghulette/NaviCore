@@ -5592,6 +5592,50 @@ static void kickUsbCdcTx() {
 }
 #endif
 
+// ── Deferred restart (a mesh-relayed REBOOT) ────────────────────────────────
+// Never restart from a receive callback or a command handler: a REBOOT that arrives
+// mid-stream would discard every command queued behind it. rcTelemetry::tick() ACKs the
+// REBOOT and calls requestDeferredRestart(); this restarts from loop() once every
+// inbound queue and aux-port transmission is empty AND no mesh command has arrived for
+// RESTART_QUIET_MS - quiet matters, because a paced sender empties the queues between
+// every pair of commands - or, failing that, once the request is RESTART_MAX_DEFER_MS
+// old, so a chatty mesh cannot hold a requested restart off for good. The quiet window
+// also gives the ETM ACK time to leave before the radio goes down.
+#define RESTART_QUIET_MS      500
+#define RESTART_MAX_DEFER_MS  5000
+static uint32_t g_restartReqMs     = 0;   // millis() of the request; 0 = none pending
+static uint32_t g_restartQuietFrom = 0;   // millis() the current quiet window began
+static uint32_t g_restartRxSeen    = 0;   // g_meshRxCount when that window began
+void requestDeferredRestart() {
+  if (g_restartReqMs) return;              // already pending
+  g_restartReqMs     = millis() | 1u;      // never 0 - 0 means "none"
+  g_restartQuietFrom = millis();
+  g_restartRxSeen    = g_meshRxCount;
+}
+static bool inboundWorkPending() {
+  QueueHandle_t qs[] = { remoteTriggerQueue, remoteCliQueue, serialFwdQueue, maestroCmdQueue, forgetPeerQueue };
+  for (QueueHandle_t q : qs) if (q && uxQueueMessagesWaiting(q)) return true;
+  for (int i = 0; i < 3; i++) if (auxTx[i].len) return true;   // a serial line still clocking out
+  return false;
+}
+static void checkDeferredRestart() {
+  if (!g_restartReqMs) return;
+  const uint32_t now = millis();
+  if (g_meshRxCount != g_restartRxSeen || inboundWorkPending()) {   // traffic or work: the quiet window restarts
+    g_restartRxSeen    = g_meshRxCount;
+    g_restartQuietFrom = now;
+  }
+  const bool quiet   = (uint32_t)(now - g_restartQuietFrom) >= RESTART_QUIET_MS;
+  const bool overdue = (uint32_t)(now - g_restartReqMs)     >= RESTART_MAX_DEFER_MS;
+  if (!quiet && !overdue) return;
+  Serial.println(overdue ? "[RC] restarting (remote REBOOT; the mesh never went quiet)"
+                         : "[RC] restarting (remote REBOOT)");
+  Serial.flush();
+  naviota::otaFarewellAP();   // deauth SoftAP clients first, as every other restart path does
+  delay(250);
+  ESP.restart();
+}
+
 void loop() {
 #ifdef NAVICORE_HIL_HOOKS
   navihil::loopStall();   // #L90 (HIL builds only): a requested stall, before anything else this pass
@@ -5751,4 +5795,7 @@ void loop() {
     sbusLiveDumpLastMs = millis();
     dumpSbusState();
   }
+
+  // A mesh REBOOT, once the queues are quiet (last, after this pass drained them).
+  checkDeferredRestart();
 }

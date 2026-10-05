@@ -207,6 +207,7 @@ handleSerialInput()            one USB line per pass
 pollAuxSerialRx()              drain S3/S4/S5 RX so their FIFOs never overflow
 drainSerialFwd()               queued mesh→serial writes and serial actions, a few bytes per pass
 HCR fade tick / maestroIdleReleaseTick() / trackSbusFps() / #L10 live dump
+checkDeferredRestart()         a mesh REBOOT, once ACKed and the queues are quiet (last)
 ```
 
 ---
@@ -461,6 +462,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC29)_ | §7 lists `checkDeferredRestart()`, last in `loop()`: a mesh `REBOOT` is ACKed from `rcTelemetry::tick()` and restarts once the inbound queues are quiet (HIL `ncboot.mesh_reboot`). |
 | 2026-10-04 | _(D-NC58)_ | §7, §10: a serial action goes through the paced aux transmitter (`queueSerialAction()` → `auxTxPump()`) instead of one blocking whole-line write (HIL `ncdev.serial_action_paced`). |
 | 2026-10-04 | _(D-NC60)_ | §10: a WLED action to a remote slot forwards `;L<id>,<body>` rebuilt from the parse instead of the text as written (HIL `ncdev.wled_forward_normalised`). |
 | 2026-10-04 | _(D-NC72)_ | §9 "Framing": a partial frame is dropped after 6 ms of real line silence and breaks the lock, so a cut frame can no longer join the next frame's bytes into a decoded phantom (HIL `sbus.truncated_frame_no_phantom`). |

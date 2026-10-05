@@ -90,6 +90,7 @@ void                queueRemoteTrigger(int mode, int btn, uint8_t tap);   // Cor
 void                queueForgetPeer(uint8_t id);   // Core-0 → loop hop for FORGET_PEER; id 0 = all (defined in .ino)
 void                resetModeAwareKnobs();   // re-arm mode-aware knobs on a mode change (defined in .ino)
 bool                applyConfigSideEffects();   // post-save live re-apply, shared with the USB path (defined in .ino)
+void                requestDeferredRestart();   // restart from loop() once the inbound queues are quiet (defined in .ino)
 
 // Forward declarations from rc_config.h — needed for SET_CONFIG / GET_CONFIG
 // fragmentation handlers below.  Both already exist; declared here so
@@ -293,6 +294,7 @@ inline uint8_t _pendingWcbSendTo       = 0;    // relay target: 0 = broadcast, 0
 inline char    _pendingWcbSendCmd[160] = "";   // bridged WCB_SEND is single-packet, so the cmd is well under this
 inline uint8_t _pendingWcbSendFrom     = 0;    // requester to ACK (0 = nothing parked)
 inline uint8_t _pendingResetDefaults   = 0;    // requester to ACK (0 = nothing parked)
+inline uint8_t _pendingRebootFrom      = 0;    // REBOOT requester to ACK before the deferred restart (0 = none)
 
 // ── Stored sequences: inventory + one value ──────────────────────────────────
 //   GET_WCB_SEQ    {wcb}       → WCB_SEQ     — the ?SEQ key NAMES on that board
@@ -1553,6 +1555,17 @@ inline void tick() {
   // wcbNetwork, wcbProfiles, boardType, the SoftAP fields) and applyConfigSideEffects(),
   // the shared live re-apply, which ends in resetMaestroReleaseState(). boardType is
   // kept, so its false return (a pin-profile change) cannot happen here.
+  // ── REBOOT parked by handle() ─────────────────────────────────────────────
+  // ACK first, from here (Core 1): the sender can then tell a restart from a lost
+  // packet. The restart itself is deferred to loop() (requestDeferredRestart), which
+  // waits for the inbound queues to drain and the mesh to go quiet, so nothing queued
+  // behind the REBOOT is thrown away, and gives the ETM ACK time to leave.
+  if (_pendingRebootFrom != 0) {
+    const uint8_t to = _pendingRebootFrom;
+    _pendingRebootFrom = 0;
+    wcb->send(to, "{\"sys\":1,\"type\":\"ACK\",\"of\":\"REBOOT\",\"ok\":true}");
+    requestDeferredRestart();
+  }
   if (_pendingResetDefaults != 0) {
     const uint8_t to = _pendingResetDefaults;
     _pendingResetDefaults = 0;
@@ -2420,10 +2433,13 @@ inline bool handle(uint8_t senderID, const char* command) {
   }
 
   // ── REBOOT (JSON form — mirror of the ;<id>,r short-form above) ──────
+  // PARK ONLY. This used to wait 100 ms and ESP.restart() right here, on the Core-0
+  // receive callback, with no reply: a tool that sent it could not tell a restart
+  // from a lost packet, and anything queued behind it was lost (HIL ncboot.mesh_reboot;
+  // the WCB's rule 11). tick() ACKs it and loop() restarts once the queues are quiet.
   if (!strcmp(type, "REBOOT")) {
     Serial.println("[RC] Remote REBOOT requested via WCB");
-    delay(100);
-    ESP.restart();
+    _pendingRebootFrom = senderID;   // ACKed from tick() (Core 1), then a deferred restart
     return true;
   }
 
