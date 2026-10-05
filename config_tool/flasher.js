@@ -18,7 +18,10 @@
 //  what has to stay stable, not any one version.
 //
 //  Public surface:
-//    flashFirmware(port, callbacks)  → Promise<void>
+//    flashFirmware(port, callbacks)               → Promise<void>
+//    prepareFirmwareFlash(onLog, onStatus)        → Promise<images>
+//      (the network half of flashFirmware, run up front; pass the
+//       result as callbacks.images)
 //
 //  port is a WebSerial SerialPort that MUST be closed before calling.
 // ════════════════════════════════════════════════════════════════
@@ -264,25 +267,49 @@ const _isWindowsPlatform = /Win/i.test(navigator.platform || '');
 //      programming, recovery from a bricked board, or whenever a
 //      factory-fresh config is wanted.
 // ════════════════════════════════════════════════════════════════
-async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = false }) {
-
-  // ── Step 1: load CDN dependencies ──────────────────────────────
+// ── The flash tool (CDN), loaded once ───────────────────────────
+let _flashToolMods = null;
+async function _loadFlashTool(onLog, onStatus) {
+  if (_flashToolMods) return _flashToolMods;
   onStatus('Loading flash tool…');
   onLog('Loading CryptoJS…');
   try { await loadScript(CRYPTOJS_CDN); }
   catch (e) { throw new Error(`Could not load CryptoJS from CDN — are you online?\n${e.message}`); }
 
   onLog('Loading esptool-js…');
-  let ESPLoader, Transport;
-  try { ({ ESPLoader, Transport } = await import(ESPTOOL_CDN)); }
+  let mods;
+  try { mods = await import(ESPTOOL_CDN); }
   catch (e) { throw new Error(`Could not load esptool-js from CDN — are you online?\n${e.message}`); }
   onLog('Flash tool loaded.');
+  _flashToolMods = { ESPLoader: mods.ESPLoader, Transport: mods.Transport };
+  return _flashToolMods;
+}
 
-  // ── Step 2: fetch firmware ──────────────────────────────────────
+// Everything flashFirmware needs from the network — the flash tool and the image
+// set — fetched up front. A caller holding a live config session runs this BEFORE
+// it tears the session down and passes the result as `images`, so a refusal (the
+// CDN unreachable, an incomplete set on GitHub) leaves that session untouched:
+// fetched inside flashFirmware, after the disconnect, it stranded the user
+// disconnected from a board nothing had been written to.
+async function prepareFirmwareFlash(onLog, onStatus) {
+  await _loadFlashTool(onLog, onStatus);
   onStatus('Downloading firmware…');
-  let flashImages;
-  try { flashImages = await fetchFirmwareImages(onLog); }
+  try { return await fetchFirmwareImages(onLog); }
   catch (e) { throw new Error(`Firmware download failed: ${e.message}`); }
+}
+
+async function flashFirmware(port, { onProgress, onLog, onStatus, eraseNvs = false, images = null }) {
+
+  // ── Step 1: load CDN dependencies ──────────────────────────────
+  const { ESPLoader, Transport } = await _loadFlashTool(onLog, onStatus);
+
+  // ── Step 2: fetch firmware (unless prepareFirmwareFlash already did) ──
+  let flashImages = images;
+  if (!flashImages) {
+    onStatus('Downloading firmware…');
+    try { flashImages = await fetchFirmwareImages(onLog); }
+    catch (e) { throw new Error(`Firmware download failed: ${e.message}`); }
+  }
 
   // ── Step 3: connect to ESP bootloader ──────────────────────────
   onStatus('Connecting to bootloader…');

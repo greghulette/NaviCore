@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:02.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:06.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -18052,8 +18052,16 @@ async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
 
   let flashPort   = null;
   let resumeAfter = false;   // were we connected before the flash? → auto-reconnect after
+  let images      = null;    // fetched while the session is still live (below)
   try {
     if (port) {
+      // Fetch the flash tool and the image set BEFORE tearing the live session
+      // down. flashFirmware did it after disconnect(), and only a COMPLETED flash
+      // reconnects, so a refused set (incomplete on GitHub) or an unreachable CDN
+      // left the user disconnected from a board nothing had touched
+      // (nctool.fw_refused_flash_keeps_session). A throw here lands in the catch
+      // below with the session still up.
+      images = await prepareFirmwareFlash(appendLog, setStatus);
       // Reuse the port we're ALREADY connected through — no second picker.
       // Capture the SerialPort reference before disconnect() nulls the
       // global, then tear down our read loop / writer and close it (esptool
@@ -18096,6 +18104,7 @@ async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
       onLog:      appendLog,
       onStatus:   setStatus,
       eraseNvs,
+      images,     // null when not connected: flashFirmware downloads them itself
     });
 
     setBar(1, 1);

@@ -204,6 +204,13 @@ API, so a fresh CI build is available to users the moment the workflow finishes.
 A serial app-flash preserves `/config.json` (it lives in LittleFS, not NVS). Blank boards
 need the full set including the 16 MB custom bootloader.
 
+From a live session, the tool fetches everything the flash needs from the network first —
+esptool-js and CryptoJS, and the image set it checks (`prepareFirmwareFlash()` in
+`flasher.js`) — and only then releases the port to esptool-js. A refusal at that stage (an
+incomplete set on GitHub, an unreachable CDN) leaves the session connected; only a completed
+flash reconnects on its own, so a refusal after the teardown would strand the user
+disconnected from a board nothing had touched.
+
 **OTA.** `?OTALOCAL,*` over USB, or `?OTA,*` relayed through a tethered board over the mesh
 (windowed/pipelined, roughly 3 minutes per MB). After the restart, `?OTALOCAL,STATUS` confirms
 the flash: `Running` is the slot that was `Next`, and `App SHA256` starts the new build's ELF
@@ -235,6 +242,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(pending)_ | §7: a flash from a live session fetches the flash tool and the image set before the teardown (`prepareFirmwareFlash()`), so a refused set no longer leaves the session disconnected (`nctool.fw_refused_flash_keeps_session`). |
 | 2026-10-04 | _(pending)_ | §7 Full Wipe row corrected: it erases NVS and OTA data only — `/config.json`, the command library and the clips survive, and the tool's texts that promised the config is erased now say so (D-NC34). |
 | 2026-09-28 | `703a0e7` | §3: **the HIL hook build** — `-DNAVICORE_HIL_HOOKS=1` through `compiler.cpp.extra_flags` compiles in `navicore_hil.h` (`DBG_WIRE`, `#L90`–`#L93`); CI and releases never define it, and without it the image is the same bytes as with no hook code at all (checked: 71 differing bytes against the pre-hook tree, all version stamp, compile time and hashes). |
 | 2026-09-28 | `1e15601` | §4: the version names a commit, not an image — `App SHA256` (boot banner, `?OTALOCAL,STATUS`) names the image and the `.elf` that decodes its backtraces. §7: how STATUS confirms an OTA. |
