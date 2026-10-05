@@ -2147,6 +2147,22 @@ static void scheduleAction(const RcAction& action, unsigned long delayMs) {
   rcExecuteActionNow(action);
 }
 
+// A serial action goes out through the same paced transmitter as a mesh->serial forward
+// (serialFwdQueue -> drainSerialFwd -> auxTxPump): a few bytes per loop() pass, not the
+// whole line at once. S4/S5 are bit-banged and a write returns only when its last bit is
+// out, so a 95-character action at 9600 held loop() ~100 ms - past the ~96 ms of SBUS-24
+// that Serial1 buffers (HIL ncdev.serial_action_paced). Same bytes on the wire (the text
+// plus the CR drainSerialFwd adds), in order with the mesh forwards to the same port.
+// NEVER dropped: when the 4-deep queue is full, the pump runs until there is room, which
+// holds loop() only for that overflow - the whole-line write every action used to make.
+void drainSerialFwd();
+static void queueSerialAction(uint8_t fwPort, const char* text) {
+  SerialFwdMsg m;
+  m.fwPort = fwPort;
+  strlcpy(m.text, text, sizeof(m.text));
+  while (xQueueSend(serialFwdQueue, &m, 0) != pdTRUE) { drainSerialFwd(); yield(); }
+}
+
 // Dispatch an action's EFFECT immediately — no delay handling, no calibration
 // gate (callers handle those). Split out from rcExecuteAction so the delayed
 // path fires WITHOUT re-entering the delay check: previously checkPendingActions
@@ -2210,11 +2226,18 @@ static void rcExecuteActionNow(const RcAction& a) {
       Stream* port = (pi == 0) ? s3 : (pi == 1) ? s4 : (pi == 2) ? s5 : nullptr;   // S5 on both boards
       if (pi < 0)  { dskip(DBG_SERIAL, "[DISPATCH] Serial port '%s' is not S3/S4/S5 — skipped\n", a.target); break; }
       if (!port)   { dskip(DBG_SERIAL, "[DISPATCH] Serial port %s not available on this board — skipped\n", a.target); break; }
-      dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", auxPortLabel(pi), a.cmd);
-      String s(a.cmd);
-      if      (pi == 0) writeS3(s);
-      else if (pi == 1) writeS4(s);
-      else              writeS5(s);
+      if (serialFwdQueue) {
+        // Paced (queueSerialAction): auxTxPump prints the Serial TX line once the line is out.
+        queueSerialAction((uint8_t)(pi + 3), a.cmd);
+      } else {
+        // No queue (WCB_Client failed at boot, so setup() never made it): the whole-line
+        // write this always was.
+        dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", auxPortLabel(pi), a.cmd);
+        String s(a.cmd);
+        if      (pi == 0) writeS3(s);
+        else if (pi == 1) writeS4(s);
+        else              writeS5(s);
+      }
       break;
     }
     case RA_HCR:

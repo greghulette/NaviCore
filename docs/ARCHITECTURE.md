@@ -205,7 +205,7 @@ checkPendingActions()          delayed actions
 sendPWMUpdate()                PWM_UPDATE stream (50 ms) when monitoring
 handleSerialInput()            one USB line per pass
 pollAuxSerialRx()              drain S3/S4/S5 RX so their FIFOs never overflow
-drainSerialFwd()               queued mesh→serial writes, a few bytes per pass
+drainSerialFwd()               queued mesh→serial writes and serial actions, a few bytes per pass
 HCR fade tick / maestroIdleReleaseTick() / trackSbusFps() / #L10 live dump
 ```
 
@@ -384,7 +384,7 @@ An `RcAction` is `{type, target[6], cmd[96], delayMs, note[20], skipRunning, fn,
 | `RA_WCB_BROADCAST` (2) | `wcb->broadcast(cmd)` | whole mesh |
 | `RA_MAESTRO_LOCAL` (3) | `executeMaestroCmd` → `maestroWrite` → Serial2 | wired Pololu bus |
 | `RA_MAESTRO_REMOTE` (4) | discrete verbs unicast WCB-native; passthrough/replay streams raw via `WCBStream` | remote Maestro |
-| `RA_SERIAL` (5) | `writeS3/S4/S5` (`\r`-terminated) | aux port named in `target` |
+| `RA_SERIAL` (5) | `queueSerialAction()` → the paced `auxTxPump()` (`\r`-terminated) | aux port named in `target`; clocked out a few bytes per `loop()` pass like a mesh→serial forward, never written whole (a bit-banged S4/S5 write blocks until its last bit is out). The `Serial TX` trace line prints when the line is out |
 | `RA_HCR` (6) | `executeHcrAction` → `hcrFormatCommand` | port or WCB from **global** `hcrDest` |
 | `RA_MP3` (7) | `executeMp3Action` → `;A,…` | **global** `mp3Dest` |
 | `RA_RECORD` (8) / `RA_PLAY` (9) / `RA_STOP` (10) | `navirec` control (deferred to Core 1) | — never captured into a clip |
@@ -461,6 +461,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC58)_ | §7, §10: a serial action goes through the paced aux transmitter (`queueSerialAction()` → `auxTxPump()`) instead of one blocking whole-line write (HIL `ncdev.serial_action_paced`). |
 | 2026-10-04 | _(D-NC60)_ | §10: a WLED action to a remote slot forwards `;L<id>,<body>` rebuilt from the parse instead of the text as written (HIL `ncdev.wled_forward_normalised`). |
 | 2026-10-04 | _(D-NC72)_ | §9 "Framing": a partial frame is dropped after 6 ms of real line silence and breaks the lock, so a cut frame can no longer join the next frame's bytes into a decoded phantom (HIL `sbus.truncated_frame_no_phantom`). |
 | 2026-10-04 | _(D-NC73)_ | §9 "Framing": locked on SBUS-16 the reader decodes a 25-byte buffer only on the next header or a silence, never eagerly (HIL `sbus.sbus24_return_no_prefix_decode`); the post-stall eager flush is SBUS-24 only. |
