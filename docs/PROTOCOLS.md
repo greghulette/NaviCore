@@ -235,9 +235,9 @@ payload approaches 98 KB and copying it per line is real cost.
 
 | Message | Reply | Notes |
 |---|---|---|
-| `PING` / `{"type":"PING"}` | `{"type":"PONG","version":"<FW_VERSION>"}` | Also clears a stale calibration mute |
+| `PING` / `{"type":"PING"}` | `{"type":"PONG","version":"<FW_VERSION>"}` | Also clears a stale calibration mute. Over the mesh (`rc_telemetry.h`) the answer is `{"sys":1,"type":"PONG","id":<deviceId>,"version":…,"model":…,"mode":…}`. **Only the relayed PONG carries `id`**: the tool's transport auto-detect reads the link a PONG came over from it, so a direct PONG must never gain one |
 | `{"type":"GET_CONFIG"}` | `{"type":"CONFIG","data":{…}}` | Full `rcConfigToJSON()` |
-| `{"type":"SET_CONFIG","data":{…}}` | `{"type":"ACK","ok":true}` | Deserialised un-filtered; re-applies bauds, SBUS-out, board profile live |
+| `{"type":"SET_CONFIG","data":{…},"saveId":N}` | `{"type":"ACK","of":"SET_CONFIG","ok":bool,"saveId":N}` | Deserialised un-filtered; re-applies bauds, SBUS-out, board profile live. `saveId` is echoed so the tool can tell its own save's ACK from a late or foreign one; the tool sends a random per-tab base plus its own save count (`_saveWireId`) |
 | `{"type":"GET_CMDLIB"}` | `{"type":"CMDLIB","size":N,"hash":H,"data":{…}}` | Command library stored on the droid, opaque to firmware |
 | `{"type":"GET_CMDLIB_META"}` | `{"type":"CMDLIB_META","size":N,"hash":H}` | Cheap change-check so a connect can skip the pull |
 | `{"type":"SET_CMDLIB","data":{…}}` | `ACK` | Raw value pulled by substring, stored verbatim. Its end is found by **bracket matching** (`rcCmdlibExtractData()`, the one extraction USB and the bridge share), so a key after `data` — the tool's `"sys":1` — is never stored with the library |
@@ -245,7 +245,7 @@ payload approaches 98 KB and copying it per line is real cost.
 | `{"type":"STOP_MONITOR"}` | `ACK` | Also force-clears calibration mute |
 | `{"type":"CALIB","on":bool}` | `ACK` | Mutes **all** action dispatch while on |
 | `{"type":"RESET_DEFAULTS"}` | `ACK` | Factory defaults for everything **except the network identity** — `wcbNetwork`, `wcbProfiles`, `boardType` and the `wifi*` fields stay (`rcConfigResetKeepIdentity`). RAM only (the next Save persists it); the live side effects (bauds, SBUS OUT, easing, auto-release) run at once. The bridged form does the same and ACKs `{"of":"RESET_DEFAULTS"}` |
-| `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}`, plus `"msg":"<reason>"` when `ok` is false | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects). `ok` means the executor **fired** it: an action it skips — disabled destination, invalid slot or channel, unconfigured WLED id, bad serial port, busy Maestro — answers `ok:false` with the skip line's text in `msg` (the `dskip()` recorder). The bridged form ACKs the same `msg` |
+| `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}`, plus `"msg":"<reason>"` when `ok` is false | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects). `ok` means the executor **fired** it: an action it skips — disabled destination, invalid slot or channel, unconfigured WLED id, bad serial port, busy Maestro — answers `ok:false` with the skip line's text in `msg` (the `dskip()` recorder). The bridged form ACKs the same `msg`. The tool shows an `ok:false` (and its `msg`, if any) as an error toast |
 | `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | Bridged: `tick()` ACKs `{"sys":1,"type":"ACK","of":"REBOOT","ok":true}`, then `loop()` restarts once the inbound queues are empty and no mesh command has arrived for 500 ms (`checkDeferredRestart()`), or 5 s after the request at the latest — never from the receive callback |
 | `{"type":"TRIGGER","mode":M,"btn":B,"tap":T}` | — | Virtual button press. `tap` 1–4; **4 = long press** (tier `t4`), which always dispatches exclusively |
 | `{"type":"WCB_SEND","target":N,"cmd":"…"}` | `ACK`, `ok` = whether `WCB_Client` sent it | `target` 0 = broadcast. The bridged form ACKs `{"of":"WCB_SEND"}` with the library's answer too, and a fragmented one (over 187 B) is sent and ACKed from the reassembly |
@@ -618,8 +618,10 @@ hosting WCB relays a `:MQR` reply asynchronously, surfaced by `maePumpRemoteEmit
 `START` · `STOP` · `PLAY[,name]` · `SAVE[,name]` · `LOAD,name` · `LS` · `RM,name` ·
 `RENAME,from,to` · `CLEAR` · `INFO` (bare `?REC` = INFO).
 
-Timeline-editor transport: `EDITLOAD,<name>` · `EDITBEGIN` · `EDITEV,<idx>,<json>` ·
-`EDITEND,<name>` · `EDITCANCEL`.
+Timeline-editor transport: `EDITLOAD,<name>` · `EDITBEGIN[,<mode>]` · `EDITEV,<idx>,<json>` ·
+`EDITEND,<name>` · `EDITCANCEL`. `<mode>` (1–3) is the clip's recording mode, which `EDITEND`
+saves into its header; without it the board keeps the resident mode — that of whatever clip was
+loaded or recorded last. The tool sends it on every upload (a restore, a timeline save).
 
 A clip asked for while the recorder is busy (recording, replaying, mid-upload) is **busy, not
 missing**: `PLAY,<name>` and `LOAD` answer `[REC] busy (<state>) …`, and `EDITLOAD` of a clip
@@ -737,7 +739,9 @@ Rules baked into the implementation, each for a reason that cost real debugging:
 - **Slices split on UTF-8 codepoint boundaries.** The receiver concatenates raw slices, so
   a split multi-byte character corrupts the JSON.
 - **`sid` never 0** — 0 is the free-slot sentinel. It wraps 65535 → 1.
-- **Sessions key on `(sid, senderID)`** — two tools both start at `sid = 1`.
+- **Sessions key on `(sid, senderID)`** — two tools behind different WCBs may hold the same
+  sid. Tabs sharing ONE WCB share its senderID, so the tool starts each tab's sid at random
+  (`_nextOutSid`).
 - **Expired slots are reclaimed before the sid match**, so a wrapped sid cannot merge into
   stale parts.
 - **Receive pool is static DRAM.** Raising `FRAG_MAX_PARTS` to 384 crash-loops the board
@@ -988,6 +992,10 @@ as the code. Page body stays present-tense; history lives here.
 | 2026-10-04 | `7f47f3c` | A bridged `SET_CONFIG` also strips `wcbNetwork.channel` and the `wifi*` fields, so a Save over the mesh can no longer move the board's mesh channel or SoftAP at its next boot (HIL `ncmesh.bridged_set_config_strip`). |
 | 2026-10-04 | `df12629` | `RESET_DEFAULTS` keeps the network identity (`wcbNetwork`, `wcbProfiles`, `boardType`, `wifi*`) on both transports, and the USB form now runs the live side effects as the bridged one does (HIL `nccfg.reset_defaults_keeps_identity`, `ncmesh.bridged_reset_keeps_identity`). |
 | 2026-10-04 | `0169cb9` | RTERM, OTA auth/ACKs and WcbMgmt take the mesh password from `g_meshPasswordBoot` (the copy `WCB_Client` got at boot), not the live config field, so an unrebooted password change or reset no longer splits them from the ETM stack (HIL `nccfg.mesh_creds_live_split`). |
+| 2026-10-04 | `12e6da6` | §2 `PING`: the relayed PONG's shape, and the rule the tool now depends on — only a relayed PONG carries `id`, so the transport probe reads the link from the PONG rather than from the phase it lands in (`nctool.pong_epoch_slow_direct`). |
+| 2026-10-04 | `a754e76` | §3 `?REC`: `EDITBEGIN` takes an optional `<mode>` (1–3) that `editBegin()` makes the resident mode, so an uploaded clip is saved with its own mode. Without it a restored clip took the mode of whatever was loaded last (D-NC33). An older board ignores the argument; an older tool sends none. |
+| 2026-10-04 | `941a782` | §2 `SET_CONFIG` row brought up to the wire (`of`, `saveId`). The tool's `saveId` is now a random per-tab base plus the tab's count, and its fragment `sid` starts at random per tab: every tab numbered both from 1, so two tabs on one shared WCB took each other's ACKs (D-NC35, `nctool.multi_tab_save`). |
+| 2026-10-04 | `2621c60` | §2 `TEST_ACTION`: the tool now reads the ACK. An `ok:false` reached only the raw terminal echo, so a refused ▶ Test looked like one that fired (D-NC20, `nctool.test_action_refusal_shown`). |
 | 2026-09-28 | `703a0e7` | **HIL test hooks, `NAVICORE_HIL_HOOKS` builds only** (the WCB repo's HIL plan INF9 b): `DBG_WIRE` = debug bit 7, a `[WIRE] <port> <offset>/<length>: <hex>` line per block written to S3/S4/S5/Serial2/the WCBStream; §3's new table: `#L90,<ms>` (stall `loop()`), `#L91` / `#L91,R` (cut `/config.json`, keeping `/config.json.hil`; put it back), `#L92` (the next GET_CONFIG overflows), `#L93` (the next config save fails). Every other image answers them `Unknown #L code`, whose `Valid:` list is unchanged in both. |
 | 2026-09-28 | `1e15601` | **`App SHA256: <16 hex>` in `?OTALOCAL,STATUS` and the boot banner**: the running image's ELF SHA-256 (first 8 bytes), so two builds of one commit, which report the same `FW_VERSION`, can be told apart, and a backtrace is decoded against the right `.elf`. §3 now lists the STATUS block. Read from the app descriptor because `esp_app_get_elf_sha256()` stops at 9 hex digits in core 3.3.4. |
 | 2026-09-24 | _(uncommitted)_ | `?MGMT,PULL,<target>,P`: through WCB_Client's `WCB_Mgmt.h`, a config over 2912 characters is relayed as `[MGMT:CFGPART,<n>]` parts and a refusal as `[MGMT:CFGERR,<n>]` (WCB F13). Each line is one `printf` from `service()`, so it reaches the WebSocket (only loop-task output does). |

@@ -3787,7 +3787,10 @@ bool execCliLine(const String& line) {
       navirec::editStream(Serial, relayed, from, want, ranged, batch);
     }
     else if (sub.equalsIgnoreCase("EDITBEGIN")) {
-      Serial.println(navirec::editBegin() ? "[CLIPUL:BEGIN,OK]" : "[CLIPUL:BEGIN,ERR,busy]");
+      // "EDITBEGIN[,<mode>]": the optional clip mode (1-3) arrives as `name`. Absent or
+      // out of range it passes 0, and editBegin() keeps the resident mode.
+      const long m = name.toInt();
+      Serial.println(navirec::editBegin((m >= 1 && m <= 3) ? (uint8_t)m : 0) ? "[CLIPUL:BEGIN,OK]" : "[CLIPUL:BEGIN,ERR,busy]");
     }
     else if (sub.equalsIgnoreCase("EDITEV")) {
       // `name` here is "<idx>,<event json>" — the SUB/name comma split above

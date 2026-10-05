@@ -44,15 +44,32 @@ Three transports, chosen in the connect modal:
 | **Via WCB** | `connectViaWcbOpt()` | A tethered bridge WCB that relays to NaviCore at slot 20 |
 | **Shared port** | `connectSharedPort()` | A port already owned by another same-origin tab |
 
-Transport is auto-detected at connect: the tool pings direct first, then — if nothing answers
-— flips to Via WCB and pings again.
+Transport is auto-detected at connect. **The first line on a fresh port is `?REC`, never JSON**
+(`openPortAndStart()`, `identifyDevice`): a WCB runs any console line that starts with neither
+`?` nor `;` as a broadcast out of its serial ports and onto the mesh, so the old direct probe's
+bare JSON PINGs reached whatever device sat on a tethered WCB's ports (D-NC70,
+`nctool.board_usb_probe_no_broadcast`). Bare `?REC` is read-only on both: a NaviCore answers
+`[REC] state=…` (its unknown-command echo keeps the `?`, so `Unknown command: ?REC` counts as
+one too), a WCB `Unknown command: REC` — it strips the `?` — and `Type '? ?' for help`. A
+NaviCore older than `?REC` answers nothing. A NaviCore gets the direct PING
+probe and no fall-back to Via WCB; a WCB goes Via WCB at once and stays there even if NaviCore
+never answers through it; a port where neither spoke (a doorway forwarding only JSON, a board
+still booting) gets the PING probe below. The probe is skipped when the caller forces Via WCB
+or forbids bridging (the post-flash reconnect).
 
-**Each probe phase takes an epoch (`_pongEpoch`), and a PONG only satisfies the epoch it
-arrived in.** A bare boolean cannot tell which phase a reply belongs to, so a board that
-answers *late* (stalled `loop()`, a busy USB host) replies after the direct phase gave up,
-that reply lands during the Via-WCB probe, and the tool concludes it is bridged — reporting
-"Connected via WCB" **with no WCB attached**. That is not cosmetic: Save strips WCB Network
-over the bridge, so a misdetected session silently refuses to write those settings.
+**The link a PONG came over is read from the PONG, not from the phase it lands in.** A
+relayed PONG carries the NaviCore's mesh `id`; a direct one never does (`_pongRelayed`,
+[PROTOCOLS.md §2](PROTOCOLS.md)). Each probe phase still takes an epoch (`_pongEpoch`) so it
+counts only a reply that arrived during it, but a board that answers *late* (stalled
+`loop()`, a busy USB host) replies after the direct phase gave up, during the Via-WCB probe —
+and credited to that phase, the tool concluded it was bridged, reporting "Connected via WCB"
+**with no WCB attached**. That is not cosmetic: Save strips WCB Network over the bridge, so a
+misdetected session silently refuses to write those settings. A direct PONG in the bridge
+phase now returns the session to Direct USB (`nctool.pong_epoch_slow_direct`). The other way
+round, a **relayed** PONG answering the *direct* probe means the port is a WCB or relay
+doorway that put the bare PING on the mesh: the tool switches to Via WCB, which also gates
+USB OTA — `?OTALOCAL` is a `?` command a doorway runs itself, so an OTA "to the NaviCore"
+would have targeted the WCB (D-NC30, `nctool.doorway_pong_misdetect`).
 
 An auto-switch is also announced now, in a toast and the terminal. Changing transport changes
 behaviour, and if the user did not plug in a bridge it is a misdetection they need to see.
@@ -60,9 +77,17 @@ behaviour, and if the user did not plug in a bridge it is a misdetection they ne
 Transport is **UI state as well as protocol state**. `viaWcbActive` gates which of the four
 firmware buttons are enabled — flash, wipe and USB OTA need a direct link; relay OTA needs the
 bridge — so **every site that assigns the flag must call `_updateFirmwareBtnState()`**. There are
-three: `openPortAndStart()`, the disconnect path, and `onViaWcbToggle()`. Only the last used to,
-and a *successful* direct-USB auto-detect never calls the toggle at all, so a USB reconnect after
-a Via-WCB session kept the dead session's buttons: "Update over WCB" as the only enabled option.
+four: `openPortAndStart()`, `connectSharedPort()` (its failed-attach path), the disconnect path,
+and `onViaWcbToggle()`. Only the last used to, and a *successful* direct-USB auto-detect never
+calls the toggle at all, so a USB reconnect after a Via-WCB session kept the dead session's
+buttons: "Update over WCB" as the only enabled option.
+
+**On a WCB every line the tool writes must be `;w20,`-wrapped or a `?` line.** A WCB runs any
+other console line as a broadcast — out of each serial port with broadcast output, and onto
+the mesh. So "Via a WCB" raises `viaWcbActive` **before** `sharedHub.join()`: the hub's state
+event can open the port during the attach wait, and `onSharedState()` → `setConnected(true)` →
+`startWcbStatusPoll()` sends its first `GET_WCB_STATUS` at once, which went out bare when the
+flag was raised only after the wait (D-NC71, `nctool.via_wcb_nothing_bare`).
 
 **`WcbSerialHub`** (`serial-hub.js`) exists because a Web Serial port can be open in exactly
 one browsing context. One tab wins a Web Lock and becomes leader, owning the physical port;
@@ -160,6 +185,21 @@ Saving is diff-based, and the guard rails exist because each failure mode actual
 6. **`_postFlashReload`** re-snapshots after a flash reconnect for the same reason.
 7. The result is reported by a **toast driven by the board's actual ACK**, not by a
    terminal line the user never reads.
+8. **An editor's Apply writes the object in the shape `rcConfigToJSON` prints it**: a
+   field the firmware omits at its default is omitted (a knob's `smoothProfile` -1,
+   `easeSwitchOverride` false, an output's `midClosed` false and `releaseIdleMs` 0), every
+   field it always prints is written (an output's `maestroCh`, HCR Volume included),
+   booleans are `true`, and a stored value the editor has no option for (an HCR `fn` it does
+   not list) keeps an option of its own. Otherwise opening an editor and applying it
+   unchanged differs from the baseline, and the next Save ships that branch
+   (`nctool.noop_apply_every_editor`).
+9. **Refresh asks before it discards unsaved edits** (`_configUnsaved()`): the `CONFIG` it
+   pulls replaces `config` wholesale. Declined, nothing is sent.
+10. **Each save carries a `saveId` that the ACK echoes**, and an ACK for any other id is
+    ignored. On the wire it is `_saveWireId(n)`: a random per-tab base plus the tab's own
+    count `n` (`_pendingSaveId`). Every tab reads every ACK on a shared WCB, so ids that
+    counted from 1 in each tab let one tab's ACK confirm another tab's save
+    (`nctool.multi_tab_save`).
 
 ### Verified clip download
 
@@ -224,6 +264,13 @@ Backup-all warns with real numbers before starting — clip count, bytes, and a 
 from the measured mesh ceiling (~150 events/s over the bridge). Uploads are ACK-gated per
 event with the index echoed, so a retry after a lost ACK cannot duplicate.
 
+**● Record arms Stop & Save only on the board's yes.** The board answers `?REC,START` with a
+plain line, `[REC] recording…` or `[REC] busy / no buffer` (it refuses unless idle), which the
+line dispatch feeds to the marker waiters while still printing it. `clipRecordToggle` waits
+for that answer; with none (a reply lost on the mesh) it asks `?REC,INFO` for the state rather
+than assume. Arming on a refused START is how the Stop & Save after it SAVEd the clip that was
+replaying under the typed name (`nctool.clip_record_refused`).
+
 ### Live trigger flash
 
 `flashAssignmentTier(mode, btn, tap)` lights the exact tier row in the assignment cards when
@@ -243,10 +290,17 @@ it snap on and fade off — a pulse, not a swell.
 ### Push-budget readout
 
 A Via-WCB `SET_CONFIG` is fragmented, and the board's reassembly pool is
-`FRAG_MAX_PARTS` (192) **static** `String` slots — a payload needing more is refused by
-`sendJSON()` with *"Use Direct USB for a config this large."* `updatePushBudget()` shows that
-same fragment count live in the Config modal footer so the ceiling is visible on approach
-rather than at Save time.
+`FRAG_MAX_PARTS` (192) **static** `String` slots — a payload needing more is refused with
+*"Use Direct USB for a config this large."* `updatePushBudget()` shows that same fragment count
+live in the Config modal footer so the ceiling is visible on approach rather than at Save time.
+
+Both refusals below live in one function, `_bridgedFragPlan()`, which `sendJSON()` and
+`saveConfigToBoard()` share (the latter through `_bridgedSendRefusal()`). **Save asks it before
+it latches the save as pending**: a refused bridged Save prints the abort line, shows an error
+toast and leaves no pending save behind. Refusing only inside `sendJSON()` came too late —
+`_pendingSaveBaseline` and the "Saving…" toast were already up, so the tool waited out the 12 s
+watchdog for an ACK that could not come (`nctool.push_refused_not_pending`). `sendJSON()`
+resolves `false` when it refuses or abandons a send.
 
 `_pushBudgetInfo()` **must mirror `saveConfigToBoard()`'s payload construction exactly**, and
 three transforms are easy to miss — each alone makes the number wrong by a large factor:
@@ -457,8 +511,10 @@ RDP-based smoothing, easing insertion, undo history, and **live preview** that d
 real servos to the cursor position via `?MAE` writes.
 
 Transport is `?REC,EDITLOAD` down (`[CLIPDL:*]` lines) and
-`EDITBEGIN` / `EDITEV,<idx>,<json>` / `EDITEND` up, with indexed ACKs so a timeout retry
-cannot duplicate an event. It can also export a clip as Maestro **script source**.
+`EDITBEGIN,<mode>` / `EDITEV,<idx>,<json>` / `EDITEND` up, with indexed ACKs so a timeout retry
+cannot duplicate an event. `EDITBEGIN` carries the clip's own mode (`_clipModeArg`), here and in
+the clip restore, because the board saves the resident mode. It can also export a clip as
+Maestro **script source**.
 
 ---
 
@@ -575,6 +631,13 @@ takes the lossless JSON path (`_cfgExtractConfig` → `applyConfig`, left unsave
 otherwise it falls back to the legacy **CSV** parser. `exportConfigCsv` still exists but is a
 **partial, human-editable spreadsheet** export — it cannot represent the variable-length knob
 output lists (per-mode passthrough), `peerEvent` actions, etc., so it is **not** a full backup.
+What the CSV cannot carry, its importer keeps from the config already in the tool, so a CSV
+exported and imported straight back leaves nothing for Save to send (`nctool.csv_roundtrip`):
+a button row carries a band's **centre** only, so the band is kept when the centre is
+unchanged and otherwise re-centred at its existing half-width (±12 when there is none); a
+physical button keeps its stored label; a mapping's `exclusive` is `false`, never absent (the
+firmware prints it on every mapping); and switches and knobs the CSV does not list — it lists
+the active transmitter model's only — are kept, not dropped.
 
 **Cloud config backup.** There is **no visible button** — click the "NaviCore" wordmark
 four times quickly to open it. A **username + password** pair (independent of the WCB
@@ -636,6 +699,11 @@ will not reappear on their own.
    fragmentation or bulk transfer.
 5. Keep firmware/tool constant pairs in sync —
    [CONFIG_SCHEMA.md §6](CONFIG_SCHEMA.md#6-cross-file-invariants).
+6. An action row (`appendActionFields` and the views it calls) is **built detached** and
+   attached afterwards, so anything it reads while rendering must be held by reference:
+   `document.getElementById` finds none of the row's own controls until then. Reading the
+   destination by id is how a command stored with a `;W<n>;S<p>` prefix opened capped at
+   95 instead of 95 minus the prefix (`nctool.command_view_cap_on_open`).
 6. Syntax-check: `node C:\Users\ghulette\tools\jscheck.js config_tool/index.html`.
 7. Push — the Pages workflow deploys `main` to `/config_tool` and any other branch to
    `/dev/<branch>/config_tool` automatically.
@@ -650,6 +718,19 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | `255161d` | **Connect via USB identifies the device with `?REC` before any JSON** (§2, D-NC70). On a tethered WCB the direct probe's up to six bare JSON PINGs were broadcast out of the WCB's serial ports and onto the mesh; a WCB is now recognised by its answer and connected Via WCB with nothing bare written. |
+| 2026-10-04 | `6b0f3fe` | **A WCB doorway is no longer taken for a direct NaviCore** (§2, D-NC30). Any PONG satisfied the direct probe, so a relayed one left the session "direct" with USB OTA enabled against the WCB; a relayed PONG on the direct probe now switches to Via WCB, announced. |
+| 2026-10-04 | `12e6da6` | **A slow direct board is no longer taken for a bridged one** (§2). The epoch only told which phase a PONG arrived in, so a direct PONG 3.5 s late satisfied the Via-WCB probe; the probe now reads the link from the PONG's shape (`id` = relayed). |
+| 2026-10-04 | `6986e3b` | **Via a WCB writes nothing bare** (§2, D-NC71). `connectSharedPort()` raised `viaWcbActive` after waiting for the hub's port, and the status poll that `setConnected(true)` starts during that wait sent its first `GET_WCB_STATUS` unwrapped, which the WCB broadcast. The flag now goes up before `join()` and comes down on a failed attach. |
+| 2026-10-04 | `a72459b` | **The Full Wipe texts tell the truth** (D-NC34): the button titles, the Firmware tab notes, the confirm and the completion log said the saved configuration is erased, but `flasher.js` erases only NVS and otadata and `/config.json` lives in LittleFS at 0x3D0000. They now say the config, command library and clips are kept, and point at Restore Defaults + Save for a reset. |
+| 2026-10-04 | `0bab9ad` | **A refused Record no longer arms Stop & Save** (§5 Clip backup and restore). `clipRecordToggle` waited for a `[CLIPUL:REC]` marker no firmware prints, timed out, and assumed the START worked; it now waits for the board's `[REC] recording…` / `[REC] busy` line, and asks `?REC,INFO` when there is no answer. |
+| 2026-10-04 | `a754e76` | **A restored clip keeps its own mode** (§7, D-NC33). `clipRestoreOne` and `_tlSave` send `?REC,EDITBEGIN,<mode>` (needs the matching firmware; an older board ignores it). |
+| 2026-10-04 | `6954f5f` | **A CSV round trip leaves nothing for Save to send** (§9 Export / Import). The importer rebuilt every button band as centre ±10 where the tool's and the firmware's bands are ±12, relabelled the physical buttons with `getBtnLabel()`, wrote `exclusive:false` as an absent key, and replaced `config.knobs`/`config.switches` with only the active model's controls; a Save after Import narrowed every band on the board and dropped two knobs. |
+| 2026-10-04 | `941a782` | **Two tabs on one WCB no longer take each other's save ACKs** (§5 item 10, D-NC35). The `saveId` on the wire is a random per-tab base plus the tab's count (`_saveWireId`), and the fragment `sid` starts at random per tab (`_nextOutSid`); both counted from 1 in every tab. |
+| 2026-10-04 | `51f8a9c` | **Refresh asks before discarding unsaved edits** (§5 item 9, D-NC31). It sent `GET_CONFIG` at once, and `applyConfig` replaced the unsaved edit without a word. |
+| 2026-10-04 | `005609d` | **A bridged Save the fragmenter cannot carry is refused before it is latched** (§5 Push-budget readout). The refusal (over 192 fragments, or a slice whose envelope is over 187 B) moved into `_bridgedFragPlan()`, shared by `sendJSON()` and `saveConfigToBoard()`; Save asks first, so it no longer shows "Saving…" for 12 s and leaves `_pendingSaveBaseline` set for a save that never left. `sendJSON()` now resolves `true`/`false`. |
+| 2026-10-04 | `e07926b` | **A stored `;W<n>;S<p>` command opens with the prefix reserved in its field cap** (§10 item 6). `_appendCommandView`'s length and chain refreshers read the destination by id, and both run from `sync()` and the render-time check while the row is still detached, so the cap opened at 95 and the render-time over-length flag never fired. They read the hidden destination input by reference now. |
+| 2026-10-04 | `40005e3` | **A no-op Apply changes nothing** (§5 item 8, D-NC32). `saveKnobModal` wrote every knob with its defaults spelled out (`smoothProfile: -1`, `easeSwitchOverride: false`, `midClosed: false`, `releaseIdleMs: 0`) and dropped an HCR Volume output's `maestroCh`, and the legacy HCR editor had no option for an `fn` it does not list, so its select fell back to PlayWAV and rewrote the action. Each untouched editor became a diff the next Save shipped. |
 | 2026-08-28 | _(uncommitted)_ | The hidden WiFi block gained **AP name + password fields** with a show/hide eye, next to the toggle. The inline note restates the pending state on every edit and turns red on a password under 8 characters, because the firmware fails closed there — without the warning the user saves, reboots, finds no AP, and has only an unwatched serial line to go on. |
 | 2026-08-28 | _(uncommitted)_ | **The relay chip now shows its mesh-stats line.** The bridging WCB is deliberately kept out of the roster arrays (so the bridged `WCB_STATUS` fits one packet) and is drawn as its own chip — but that chip was built by hand and never called `_meshStatsChipLine()`, so the busiest link on the mesh was the one link with no numbers. Every command to and from the RC crosses it: with a MgmtRelay bridging, the detail modal showed 2275 sent / 4 retries against 89 and 46 for the two real boards, while the sidebar showed nothing. Data was always present — `_meshStatsPeerRow()` is a plain id lookup with no roster filter, and the code at `_meshStatsChipLine` already states the line is drawn for temporary peers such as a mgmt relay. Purely a missing call. |
 | 2026-08-28 | _(uncommitted)_ | **Upload fragments are filled adaptively** (`_fragChunks`), replacing the fixed `FRAG_CHUNK_BYTES` split at both call sites — the SET_CONFIG sender and `_pushBudgetInfo`, which must agree or the budget readout mispredicts. Each chunk grows while the *measured* escaped envelope stays inside `FRAG_ENV_TARGET_BYTES` (180 B), then is verified against the real serialized envelope and shrunk if needed, so an oversized fragment cannot ship. Two wins: **1.46×** fewer fragments on a realistic config (288 → 197), which is both faster and buys headroom against the RC's 192-fragment receive cap; and it **fixes a latent overflow** — the fixed 80 produced envelopes over the 187 B cap on escape-heavy content (75 of 76 for quote-dense input, worst 195 B; 25 of 25 for control chars, worst 515 B), which the client-side check turned into a refused save. A quote typed into a note field is escaped once by the config JSON and again by the envelope, so that was reachable. Verified by extracting the shipped functions and round-tripping realistic config, all-quotes, ASCII, CJK, surrogate pairs and control chars — every envelope ≤187 B, every round-trip byte-exact. |

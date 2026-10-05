@@ -227,6 +227,11 @@ its auto-derived default.
 | struct → JSON | `rcConfigToJSON()` | 64 KB document — sized for 6 smoothing profiles |
 | JSON → struct | `rcConfigFromJSON(JsonObject)` / `(String)` | Tolerant of missing keys; absent field = leave default |
 
+**A boolean travels as JSON `true`/`false`, never `1`/`0`.** `rcConfigFromJSON` reads a bool
+as `obj["key"] | false`, and ArduinoJson 7 returns the default for any value that is not a
+boolean: a `1` is read as `false`, with no error. The tool once sent `skipRunning: 1`, so every
+Apply on a gated Maestro action cleared the gate on the board.
+
 Serialisation is **sparse** where it pays: empty serial-label overrides, all-zero Maestro
 channel metadata, and unused slots are omitted. That matters because the bridged upload
 path caps at ~15 KB (see [PROTOCOLS.md §4](PROTOCOLS.md#4-the-via-wcb-bridge)).
@@ -336,6 +341,7 @@ as the code. Page body stays present-tense; history lives here.
 | 2026-10-04 | `a10589f` | A `hcrDest`/`mp3Dest`/`dfpDest` sent as `null` or `{}` reads as disabled instead of enabling the device on its default transport (HIL `nccfg.dest_null_hazard`). |
 | 2026-10-04 | `62b6cf3` | `tapWindowMs` is capped at 4900 on input, so `holdMs` (ceiling 5000) always clears it by 100 (HIL `nccfg.hold_exceeds_tap_window`). |
 | 2026-10-04 | `7274eca` | String fields are cut back to a whole UTF-8 character (`cfgStrlcpy`) when the value is longer than the field (HIL `nccfg.string_truncation_utf8`). |
+| 2026-10-04 | `9a0865f` | §4: a boolean travels as JSON `true`, never `1` — ArduinoJson 7's `\| false` reads a non-boolean as the default. The tool's `readActionFromFid` and `_cmdlibUse` wrote `skipRunning: 1`, so an Apply cleared the gate on the board; they write `true` now (`nctool.skip_running_saved`). |
 | 2026-09-28 | `703a0e7` | §6: debug bit 7 is `DBG_WIRE` in a HIL hook build (PROTOCOLS.md §2), so the tool never sends it and a new debug category takes bit 8. |
 | 2026-08-30 | _(uncommitted)_ | Recorded the OTA END discriminator as a cross-file invariant (§6). The firmware has always sent the END ACK with offset 0 — deliberately, with a comment in `navicore_ota.h` forbidding anyone to "improve" it — but the tool's `otaSendAwaitAck()` matched only session+src, so a duplicate DATA cursor ACK still in flight satisfied the END wait and reported **Verified** for an image the target never verified. The tool now checks the offset. |
 | 2026-08-28 | _(uncommitted)_ | `wifiEnabled` is now **live** — `setup()` raises the SoftAP before `wcb->begin()`, which is what lets WCB_Client detect it and select WIFI_AP_STA instead of forcing STA and tearing the AP down. The channel is passed explicitly from `wcbNetwork.channel`: `softAP()`s 3rd parameter defaults to 1, and once an AP owns the radio WCB_Client only warns on a mismatch, so a defaulted channel would be a silent total mesh blackout. An empty or under-8-char password refuses to start the AP rather than falling back to an open network. Every path logs a `[WIFI]` line. |
