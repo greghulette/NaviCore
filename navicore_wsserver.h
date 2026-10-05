@@ -79,6 +79,9 @@ static const uint8_t  WS_MAX_CLIENTS = 3;
 // soak always survived; it is also short enough that one stalled client holds the httpd
 // task (and so every other client) about 5 s once, then never again.
 static const uint32_t WS_STALL_MS    = 5000;
+// How long one send may run before pump() stops queueing work behind it (wsSendSince).
+// A healthy link takes a 2 KB item in a few ms, so this only ever trips on a stall.
+static const uint32_t WS_LINK_SLOW_MS = 250;
 
 struct WsCmd {
   int   fd;      // client socket, for the async reply
@@ -87,6 +90,9 @@ struct WsCmd {
 
 inline QueueHandle_t  wsQueue  = nullptr;
 inline httpd_handle_t wsServer = nullptr;
+// millis() (never 0) at which the send wsSendAll is running began; 0 while none runs.
+// Written on the httpd task, read by pump() on the loop task (one aligned word).
+inline volatile uint32_t wsSendSince = 0;
 // True only while drain() runs a line that came in on a socket - the transport a
 // handler can ask about. NOT the capture tee: that stays armed for a client's whole
 // session (below), so it says "a client is connected", never "this line came from one".
@@ -224,6 +230,14 @@ class WsSink : public Print {
   // socket (ours and the server's own control frames) is issued by one task.
   bool pump() {
     if (!_len || !wsServer) return live();
+    // DON'T QUEUE BEHIND A STALLED SEND. While the httpd task is stuck in one (a client
+    // not reading, a WiFi stall: up to WS_STALL_MS), a work item queued now cannot run,
+    // and httpd's control socket holds only 6: the rest are dropped without an error, a
+    // chunk of the stream lost for every client and its PSRAM copy leaked, and httpd's own
+    // control messages lost with them. So hold the bytes until the send ends; if the
+    // buffer fills meanwhile, write() drops whole lines - lost lines, never broken ones.
+    { const uint32_t s = wsSendSince;
+      if (s && (uint32_t)(millis() - s) >= WS_LINK_SLOW_MS) return live(); }
     // NEVER CUT THROUGH A UTF-8 SEQUENCE. This is a TEXT frame, and RFC 6455 8.1
     // requires each one to be valid UTF-8 on its own. The buffer is flushed on a
     // BYTE count (write() at _len >= sizeof(_buf), and flushHook at arbitrary
@@ -324,14 +338,20 @@ inline void wsSendWork(void* arg) {
       // timeout, holding every other client up behind a socket we know is dead.
       if (!wsSink.has(tx->fds[i])) continue;
       if (httpd_ws_send_frame_async(wsServer, tx->fds[i], &f) != ESP_OK) {
-        // That client is gone or stalled: stop writing to it AND close its session. Only
+        // That client is gone or stalled: stop writing to it AND end its session. Only
         // dropping it left the socket open - it could still send lines that ran, and
-        // never received another, since only a handshake adds a client (HIL
-        // ncwifi.ws_stalled_client). Closed, it sees the close and can reconnect.
-        // close_fn (wsClose) releases its accumulator and closes the socket. If the close
-        // cannot be queued, shut the socket down so httpd's select() notices it anyway.
+        // never received another, since only a handshake adds a client. Ended, it sees
+        // its connection close and can reconnect. wsSendAll has already shut a stalled
+        // socket down; a send that failed any other way is shut down here.
+        //
+        // shutdown(), NEVER httpd_sess_trigger_close(). That queues the close as a work
+        // item on httpd's control socket, which holds 6 and drops the rest without an
+        // error - and it is full exactly when a client has stalled the httpd task. The
+        // lost close left the stalled client open and deaf: its lines ran, and no reply
+        // ever reached it (HIL ncwifi.ws_stalled_client, run 20261004-213430). httpd's
+        // select() sees the shut socket and deletes the session (close_fn = wsClose).
         wsSink.drop(tx->fds[i]);
-        if (httpd_sess_trigger_close(wsServer, tx->fds[i]) != ESP_OK) shutdown(tx->fds[i], SHUT_RDWR);
+        shutdown(tx->fds[i], SHUT_RDWR);
       }
     }
   }
@@ -452,6 +472,7 @@ inline int wsSendAll(httpd_handle_t hd, int sockfd, const char* buf, size_t len,
   if (!buf) return HTTPD_SOCK_ERR_INVALID;
   size_t   done     = 0;
   uint32_t lastByte = millis();
+  wsSendSince = lastByte | 1u;                                     // pump() holds while this runs long
   while (done < len) {
     const int n = send(sockfd, buf + done, len - done, flags);   // returns within send_wait_timeout
     if (n > 0) { done += (size_t)n; lastByte = millis(); continue; }
@@ -459,10 +480,12 @@ inline int wsSendAll(httpd_handle_t hd, int sockfd, const char* buf, size_t len,
     const bool retry = (n == 0) || e == EAGAIN || e == EWOULDBLOCK || e == EINTR || e == ENOMEM;
     if (!retry || (uint32_t)(millis() - lastByte) >= WS_STALL_MS) {
       shutdown(sockfd, SHUT_RDWR);
+      wsSendSince = 0;
       return retry ? HTTPD_SOCK_ERR_TIMEOUT : HTTPD_SOCK_ERR_FAIL;
     }
     if (n == 0) vTaskDelay(1);   // a send() that returns at once with nothing done must not spin
   }
+  wsSendSince = 0;
   return (int)len;
 }
 
