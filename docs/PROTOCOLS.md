@@ -100,6 +100,16 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   rest were discarded with nothing sent back — the client waits forever for a reply the board
   already threw away. Depth is 8 and the handler now waits `WS_ENQUEUE_WAIT_MS` (50 ms) for
   room. Blocking there is safe: it is the httpd task on Core 0, not `loop()`.
+- **One stalled client must not hold the others.** Every socket write is a work item on the
+  single httpd task, sent to each client in turn with a blocking send. `send_wait_timeout` is
+  **1 s** (the config's floor; the 5 s default let one client that stopped reading hold every
+  other client's replies). A client whose send fails is dropped from the sink **and its
+  session closed** (`httpd_sess_trigger_close`) — dropped alone, it stayed open and deaf, able
+  to send lines that ran but never to receive another — and work items queued meanwhile skip
+  it (`WsSink::has()`). When `pump()` cannot free room in a full sink, `write()` drops the
+  **whole line** (and ends a head already sent with a newline) instead of storing past the end
+  of its 2 KB buffer. Residual: work items queued during that ≤ 1 s stall can still overflow
+  httpd's 6-deep control socket, which loses them (and their PSRAM copies) silently.
 - **Every emitter a PANEL depends on must fall back to the socket.** The
   `Serial.availableForWrite()` guard is correct and stays — an unguarded USB write
   blocks up to HWCDC's 50 ms tx timeout and starves the SBUS decode in `loop()` — but it
@@ -942,6 +952,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC62)_ | WebSocket: a client whose send fails has its session closed and later work items skip it; `send_wait_timeout` is 1 s; a full sink drops the whole line instead of writing past its buffer (HIL `ncwifi.ws_stalled_client`). |
 | 2026-10-04 | _(D-NC61)_ | WebSocket lines are trimmed (and skipped when empty) before `processInputLine()`, as USB lines always were (HIL `ncwifi.ws_line_trim`). |
 | 2026-10-04 | _(D-NC29)_ | A bridged `REBOOT` is ACKed (`"of":"REBOOT"`) and the restart deferred to `loop()` until the queues are quiet, instead of a silent `ESP.restart()` on the Core-0 receive callback (HIL `ncboot.mesh_reboot`). |
 | 2026-10-04 | _(D-NC45)_ | The dispatch trace prints a send line only for a send that happens: a serial action to a port other than S3-S5 (or one this board lacks) prints `[DISPATCH] Serial port '<p>' is not S3/S4/S5 — skipped`, and the Maestro line follows the skip-if-running gate (HIL `ncengine.skip_not_traced_as_sent`). |
