@@ -49,8 +49,9 @@ Transport is auto-detected at connect. **The first line on a fresh port is `?REC
 `?` nor `;` as a broadcast out of its serial ports and onto the mesh, so the old direct probe's
 bare JSON PINGs reached whatever device sat on a tethered WCB's ports (D-NC70,
 `nctool.board_usb_probe_no_broadcast`). Bare `?REC` is read-only on both: a NaviCore answers
-`[REC] state=…` (a firmware too old for `?REC`: `Unknown command: ?REC`), a WCB `Unknown
-command: REC` — it strips the `?` — and `Type '? ?' for help`. A NaviCore gets the direct PING
+`[REC] state=…` (its unknown-command echo keeps the `?`, so `Unknown command: ?REC` counts as
+one too), a WCB `Unknown command: REC` — it strips the `?` — and `Type '? ?' for help`. A
+NaviCore older than `?REC` answers nothing. A NaviCore gets the direct PING
 probe and no fall-back to Via WCB; a WCB goes Via WCB at once and stays there even if NaviCore
 never answers through it; a port where neither spoke (a doorway forwarding only JSON, a board
 still booting) gets the PING probe below. The probe is skipped when the caller forces Via WCB

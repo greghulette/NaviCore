@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:22.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.20:25.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4572,9 +4572,10 @@ async function openPortAndStart(p, settleMs = 4000, allowViaWcb = true, forceVia
   // went out of every one of its serial ports with broadcast output, into whatever
   // device listens there, and onto the mesh — up to six of them per connect. So the
   // first line is a '?' line, which a WCB runs locally and broadcasts nothing for:
-  // bare "?REC", read-only on both. A NaviCore answers "[REC] state=…" (a firmware
-  // too old for ?REC: "Unknown command: ?REC", the '?' kept); a WCB answers
-  // "Unknown command: REC" (it strips the '?') and "Type '? ?' for help".
+  // bare "?REC", read-only on both. A NaviCore answers "[REC] state=…" (and its
+  // unknown-command echo keeps the '?', so "Unknown command: ?REC" counts as one too);
+  // a WCB answers "Unknown command: REC" (it strips the '?') and "Type '? ?' for help".
+  // Firmware older than ?REC (June 2026) answers nothing and gets the PING probe.
   //   NaviCore → the direct probe below, and no fall-back to Via WCB.
   //   WCB      → Via WCB at once; nothing is written to it bare, even if NaviCore
   //              never answers through it.
