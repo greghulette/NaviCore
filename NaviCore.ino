@@ -1349,33 +1349,69 @@ static void seedSwitchEasingFromTier(const RcTier& tier) {
 //   restartScript: "pN" = the action's OWN easing (wins by default); ",o" = allow the
 //   switch's active easing to override it. No pN = follow the switch; nothing = leave
 //   as-is. (Legacy "applyProfile,<spec>" and "snappy,<state>" still parse → setEasing.)
+// A Maestro action's numbers are parsed into a long and checked BEFORE any cast. The
+// verbs used to cast atoi() straight to uint8_t/uint16_t, so an out-of-range number
+// wrapped onto a VALID one for something else: setTarget,261 moved channel 5, accel 300
+// sent 44, target 70000 sent 4464 (under the clamp that exists so a value is capped, not
+// wrapped), speed 65537 sent 1, restartScript,300 ran subroutine 44 (HIL
+// ncdev.mae_verb_no_alias). A channel (0-31), accel (0-255) or subroutine (0-127) out of
+// range is refused with a line; a target, speed or parameter over 16383 is clamped; a
+// negative number is refused - clamping it to 0 would mean "release the servo" or
+// "unlimited speed". The skip lines go through dskip(), so TEST_ACTION reports them.
+static bool maeArgInRange(uint8_t id, const char* s, long hi, const char* what, long& out) {
+  const long v = strtol(s, nullptr, 10);
+  if (v < 0 || v > hi) {
+    dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: %s %ld out of range (0-%ld) — skipped\n", id, what, v, hi);
+    return false;
+  }
+  out = v;
+  return true;
+}
+static bool maeArg14(uint8_t id, const char* s, const char* what, long& out) {
+  out = strtol(s, nullptr, 10);           // saturates at LONG_MAX, so a huge number clamps below too
+  if (out < 0) {
+    dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: %s %ld is negative — skipped\n", id, what, out);
+    return false;
+  }
+  if (out > 16383) out = 16383;           // 14-bit: clamped, never wrapped
+  return true;
+}
+
 static void executeMaestroCmd(uint8_t id, const char* cmd) {
   char buf[36];
   strlcpy(buf, cmd, sizeof(buf));
   char* tok = strtok(buf, ",");
   if (!tok) return;
+  long ch = 0, v = 0, acc = 0;
   if      (strcmp(tok, "goHome")        == 0) maestroGoHome(id);
   else if (strcmp(tok, "stopScript")    == 0) maestroStopScript(id);
   else if (strcmp(tok, "setTarget")     == 0) {
     char* sCh = strtok(nullptr, ","); char* sPos = strtok(nullptr, ",");
-    if (sCh && sPos) maestroSetTarget(id, (uint8_t)atoi(sCh), (uint16_t)atoi(sPos));
+    if (!sCh || !sPos) noteDispatchSkip("Maestro %u: setTarget needs <ch>,<pos>", id);
+    else if (maeArgInRange(id, sCh, 31, "channel", ch) && maeArg14(id, sPos, "target", v))
+      maestroSetTarget(id, (uint8_t)ch, (uint16_t)v);
   }
   else if (strcmp(tok, "setSpeed")      == 0) {
     char* sCh = strtok(nullptr, ","); char* sSpd = strtok(nullptr, ",");
-    if (sCh && sSpd) maestroSetSpeed(id, (uint8_t)atoi(sCh), (uint16_t)atoi(sSpd));
+    if (!sCh || !sSpd) noteDispatchSkip("Maestro %u: setSpeed needs <ch>,<speed>", id);
+    else if (maeArgInRange(id, sCh, 31, "channel", ch) && maeArg14(id, sSpd, "speed", v))
+      maestroSetSpeed(id, (uint8_t)ch, (uint16_t)v);
   }
   else if (strcmp(tok, "setAccel")      == 0) {
     char* sCh = strtok(nullptr, ","); char* sAcc = strtok(nullptr, ",");
-    if (sCh && sAcc) maestroSetAccel(id, (uint8_t)atoi(sCh), (uint8_t)atoi(sAcc));
+    if (!sCh || !sAcc) noteDispatchSkip("Maestro %u: setAccel needs <ch>,<accel>", id);
+    else if (maeArgInRange(id, sCh, 31, "channel", ch) && maeArgInRange(id, sAcc, 255, "accel", acc))
+      maestroSetAccel(id, (uint8_t)ch, (uint8_t)acc);
   }
   else if (strcmp(tok, "setSpeedAccel") == 0) {   // both in one action (smoothing)
     char* sCh  = strtok(nullptr, ",");
     char* sSpd = strtok(nullptr, ",");
     char* sAcc = strtok(nullptr, ",");
-    if (sCh && sSpd && sAcc) {
-      uint8_t ch = (uint8_t)atoi(sCh);
-      maestroSetSpeed(id, ch, (uint16_t)atoi(sSpd));
-      maestroSetAccel(id, ch, (uint8_t) atoi(sAcc));
+    if (!sCh || !sSpd || !sAcc) noteDispatchSkip("Maestro %u: setSpeedAccel needs <ch>,<speed>,<accel>", id);
+    else if (maeArgInRange(id, sCh, 31, "channel", ch) && maeArg14(id, sSpd, "speed", v) &&
+             maeArgInRange(id, sAcc, 255, "accel", acc)) {   // all checked before either is sent
+      maestroSetSpeed(id, (uint8_t)ch, (uint16_t)v);
+      maestroSetAccel(id, (uint8_t)ch, (uint8_t)acc);
     }
   }
   else if (strcmp(tok, "setEasing") == 0) {       // the SWITCH sets this Maestro's active easing (the fallback)
@@ -1414,7 +1450,8 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     char* sN    = strtok(nullptr, ",");
     char* sSpec = strtok(nullptr, ",");   // optional "p<N>" = the ACTION's OWN easing (local — wins by default)
     char* sOvr  = strtok(nullptr, ",");   // optional "o"    = allow the switch's active easing to override the action's
-    uint8_t sub = sN ? (uint8_t)atoi(sN) : 0;
+    long sub = 0;                         // no number = subroutine 0, as before
+    if (sN && !maeArgInRange(id, sN, 127, "subroutine", sub)) return;   // before any easing is loaded
     // PRIORITY (mirrors the joystick rule): the action's own easing wins; the switch's
     // active easing is the fallback when the action has none — or overrides when the
     // action opts in (",o"). Nothing set anywhere = leave the channels as-is.
@@ -1425,12 +1462,14 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
     const int8_t use = (local >= 0) ? ((allowOvr && sw != EASE_RELEASED) ? sw : local)   // has local: local wins unless override
                                     : sw;                                                // no local: follow the switch
     applyScriptEasing(id, use);
-    maestroRestartScript(id, sub);
+    maestroRestartScript(id, (uint8_t)sub);
   }
   else if (strcmp(tok, "subParam") == 0) {   // Restart Script at Subroutine WITH parameter (Pololu 0x28)
     char* sN = strtok(nullptr, ",");         // subroutine 0-127
     char* sP = strtok(nullptr, ",");         // parameter 0-16383, pushed on the Maestro's script stack
-    if (sN && sP) maestroSubParam(id, (uint8_t)atoi(sN), (uint16_t)atoi(sP));
+    if (!sN || !sP) noteDispatchSkip("Maestro %u: subParam needs <sub>,<param>", id);
+    else if (maeArgInRange(id, sN, 127, "subroutine", ch) && maeArg14(id, sP, "parameter", v))
+      maestroSubParam(id, (uint8_t)ch, (uint16_t)v);
   }
   else noteDispatchSkip("Maestro %u: unknown verb '%s'", id, tok);   // writes nothing
 }
@@ -5200,7 +5239,12 @@ static void maeInboundActuate(uint8_t id, const uint8_t* frame, size_t n) {
     // (HIL navicore.maestro_skip_not_logged_as_dispatch). The guard prints its own "skipped" line.
     case WcbMaestro::CMD_SET_TARGET:  if (!maestroChanOk(id, frame[3])) return; maestroSetTarget(id, frame[3], arg14);          break;
     case WcbMaestro::CMD_SET_SPEED:   if (!maestroChanOk(id, frame[3])) return; maestroSetSpeed (id, frame[3], arg14);          break;
-    case WcbMaestro::CMD_SET_ACCEL:   if (!maestroChanOk(id, frame[3])) return; maestroSetAccel (id, frame[3], (uint8_t)arg14); break;
+    case WcbMaestro::CMD_SET_ACCEL:   if (!maestroChanOk(id, frame[3])) return;
+                                      if (arg14 > 255) {   // accel is 0-255: refuse, never wrap (300 sent 44) - see maeArgInRange
+                                        dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: accel %u out of range (0-255) — skipped\n", id, arg14);
+                                        return;
+                                      }
+                                      maestroSetAccel (id, frame[3], (uint8_t)arg14); break;
     case WcbMaestro::CMD_GO_HOME:     maestroGoHome(id);                                break;
     case WcbMaestro::CMD_STOP_SCRIPT: maestroStopScript(id);                            break;
     // Straight to maestroRestartScript, NOT via executeMaestroCmd's "restartScript"
