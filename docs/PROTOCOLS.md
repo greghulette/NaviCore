@@ -248,7 +248,7 @@ payload approaches 98 KB and copying it per line is real cost.
 | `{"type":"TEST_ACTION","action":{…}}` | `{"type":"ACK","of":"TEST_ACTION","ok":bool}`, plus `"msg":"<reason>"` when `ok` is false | Fires one action without saving it. `action` is re-parsed from the raw line (the header filter strips nested objects). `ok` means the executor **fired** it: an action it skips — disabled destination, invalid slot or channel, unconfigured WLED id, bad serial port, busy Maestro — answers `ok:false` with the skip line's text in `msg` (the `dskip()` recorder). The bridged form ACKs the same `msg` |
 | `{"type":"REBOOT"}` | `ACK`, restart after 250 ms | Bridged: `tick()` ACKs `{"sys":1,"type":"ACK","of":"REBOOT","ok":true}`, then `loop()` restarts once the inbound queues are empty and no mesh command has arrived for 500 ms (`checkDeferredRestart()`), or 5 s after the request at the latest — never from the receive callback |
 | `{"type":"TRIGGER","mode":M,"btn":B,"tap":T}` | — | Virtual button press. `tap` 1–4; **4 = long press** (tier `t4`), which always dispatches exclusively |
-| `{"type":"WCB_SEND","target":N,"cmd":"…"}` | — | `target` 0 = broadcast |
+| `{"type":"WCB_SEND","target":N,"cmd":"…"}` | `ACK`, `ok` = whether `WCB_Client` sent it | `target` 0 = broadcast. The bridged form ACKs `{"of":"WCB_SEND"}` with the library's answer too, and a fragmented one (over 187 B) is sent and ACKed from the reassembly |
 | `{"type":"FORGET_PEER","id":N}` / `"all":true` | — | id 0 or `all` = drop every learned peer |
 | `{"type":"SET_DEBUG_FLAGS","flags":N}` | — | See the debug bitmask below |
 | `{"type":"GET_WCB_STATUS"}` | `{"type":"WCB_STATUS",…}` | See §4 “Bridged status and metadata” |
@@ -959,6 +959,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC27)_ | A bridged `WCB_SEND` ACKs the library's send result instead of `ok:true` regardless, and its fragmented form is sent and ACKed instead of dropped (HIL `ncmesh.bridged_wcb_send_findings`). |
 | 2026-10-04 | _(D-NC47)_ | The bridged `SET_CMDLIB` uses the USB path's bracket-matched extraction (`rcCmdlibExtractData()`), not "everything up to the message's last `}`" (HIL `ncmesh.bridged_cmdlib_keys_after_data`). |
 | 2026-10-04 | _(D-NC63)_ | `?REC,EDITLOAD` decides "relayed" from the line's transport (`g_rtermRelay`, `naviws::lineFromSocket()`), not `rcSerial.captureArmed()`, so a USB download is no longer cut to 512 events while a WebSocket client is connected (HIL `ncwifi.usb_editload_with_socket`). |
 | 2026-10-04 | _(D-NC62)_ | WebSocket: a client whose send fails has its session closed and later work items skip it; `send_wait_timeout` is 1 s; a full sink drops the whole line instead of writing past its buffer (HIL `ncwifi.ws_stalled_client`). |

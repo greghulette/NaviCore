@@ -1247,6 +1247,22 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     queueTestAction(senderID, json.c_str());
     return;
   }
+  if (!strcmp(type, "WCB_SEND")) {
+    // A WCB_SEND too long for one packet arrives FRAGMENTED (the tool fragments
+    // anything over 187 B) and lands here, not in handle()'s one-packet branch. It was
+    // dropped as an unexpected type, with no ACK and nothing sent. We are on Core 1
+    // (tick()), so send and ACK right here - same checks and same ACK as the parked
+    // one-packet form, with the library's own answer as ok.
+    const int   target = doc["target"] | -1;
+    const char* cmd    = doc["cmd"]    | "";
+    bool ok = false;
+    if (wcb && target >= 0 && target <= WCB_MAX_BOARDS && cmd[0])
+      ok = (target == 0) ? wcb->broadcast(cmd) : wcb->send((uint8_t)target, cmd);
+    char ack[72];
+    snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"WCB_SEND\",\"ok\":%s}", ok ? "true" : "false");
+    if (wcb) wcb->send(senderID, ack);
+    return;
+  }
   Serial.printf("[RC] reassembled payload had unexpected type '%s' — dropping\n", type);
 }
 
@@ -1530,12 +1546,13 @@ inline void tick() {
   if (_pendingWcbSendFrom != 0) {
     const uint8_t from = _pendingWcbSendFrom;
     const uint8_t to   = _pendingWcbSendTo;   // 0 = broadcast, 0xFF = handle() saw a bad target
+    // ok is what the LIBRARY answered, as on USB: send()/broadcast() refuse for real
+    // reasons (no peer for that board, oversize payload, mesh not up), and ok = true
+    // regardless told the tool a refused command had gone out (HIL
+    // ncmesh.bridged_wcb_send_findings).
     bool ok = false;
-    if (to != 0xFF && _pendingWcbSendCmd[0]) {
-      if (to == 0) wcb->broadcast(_pendingWcbSendCmd);
-      else         wcb->send(to, _pendingWcbSendCmd);
-      ok = true;
-    }
+    if (to != 0xFF && _pendingWcbSendCmd[0])
+      ok = (to == 0) ? wcb->broadcast(_pendingWcbSendCmd) : wcb->send(to, _pendingWcbSendCmd);
     _pendingWcbSendCmd[0] = '\0';
     _pendingWcbSendFrom   = 0;   // cleared LAST — a fresh park from Core 0 is then visible
     char ack[72];
