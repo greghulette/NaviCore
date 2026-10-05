@@ -337,15 +337,24 @@ inline const char* _seqReplyWhat = "WCB_SEQ";   // label for the fragment-send l
 // forever on a board that is powered off.
 constexpr uint32_t WCB_SEQ_TIMEOUT_MS = 6000;
 
-// Append `n` bytes of EXTERNAL text as a JSON string body (no quotes) — the same
-// JSON-hostile strip buildWcbMeta() applies to port labels. Without it a stray
-// quote or backslash breaks the hand-built JSON and the tool drops the whole line
-// at JSON.parse, which looks exactly like the board never answered.
-inline void _seqAppendJsonSafe(String& s, const char* p, size_t n) {
+// Append `n` bytes of EXTERNAL text as a JSON string body (no quotes), ESCAPED: a quote
+// or backslash gets a backslash, a control character its JSON u-escape. Unescaped, a stray
+// quote broke the hand-built JSON and the tool dropped the whole line at JSON.parse,
+// which looks exactly like the board never answered. Escaped, NOT stripped: stripping
+// (as buildWcbMeta() still does for port labels) handed the tool a sequence other than
+// the one stored - a ;L WLED command's JSON body arrived without its quotes, and saved
+// back it would be stored altered (HIL ncmesh.seqval_verbatim). JSON.parse gives the
+// exact stored bytes back.
+inline void _seqAppendJsonEsc(String& s, const char* p, size_t n) {
   for (size_t k = 0; k < n && p[k]; k++) {
     const char c = p[k];
-    if (c == '"' || c == '\\' || (unsigned char)c < 0x20) continue;
-    s += c;
+    if (c == '"' || c == '\\') { s += '\\'; s += c; }
+    else if ((unsigned char)c < 0x20) {
+      char u[8];
+      snprintf(u, sizeof(u), "\\u%04x", (unsigned)(unsigned char)c);
+      s += u;
+    }
+    else s += c;
   }
 }
 
@@ -368,7 +377,7 @@ inline String buildWcbSeq(uint8_t board, uint32_t hash, uint16_t count, const ch
       if (!first) s += ',';
       first = false;
       s += '"';
-      _seqAppendJsonSafe(s, p, len < WCB_SEQ_KEY_MAX ? len : WCB_SEQ_KEY_MAX);
+      _seqAppendJsonEsc(s, p, len < WCB_SEQ_KEY_MAX ? len : WCB_SEQ_KEY_MAX);
       s += '"';
     }
     if (!e) break;
@@ -379,19 +388,19 @@ inline String buildWcbSeq(uint8_t board, uint32_t hash, uint16_t count, const ch
 }
 
 // Build the WCB_SEQVAL reply — ONE sequence's contents. The value is passed through
-// verbatim apart from the JSON strip: its '^' delimiters and `***` comments are what
-// the tool renders, so nothing here may reformat it.
+// verbatim, JSON-escaped (_seqAppendJsonEsc): its '^' delimiters and `***` comments
+// are what the tool renders, so nothing here may reformat it.
 inline String buildWcbSeqVal(uint8_t board, const char* key, uint8_t status, const char* value) {
   const char* v = value ? value : "";
   String s; s.reserve(96 + strlen(v));
   s += "{\"sys\":1,\"type\":\"WCB_SEQVAL\",\"ok\":true,\"wcb\":";
   s += (int)board;
   s += ",\"key\":\"";
-  _seqAppendJsonSafe(s, key ? key : "", WCB_SEQ_KEY_MAX);
+  _seqAppendJsonEsc(s, key ? key : "", WCB_SEQ_KEY_MAX);
   s += "\",\"status\":";
   s += (int)status;                        // 0 OK, 1 NOTFOUND, 2 TOOBIG (WCBSeqStatus)
   s += ",\"value\":\"";
-  _seqAppendJsonSafe(s, v, strlen(v));
+  _seqAppendJsonEsc(s, v, strlen(v));
   s += "\"}";
   return s;
 }

@@ -824,7 +824,9 @@ board), **2** TOOBIG (the stored value exceeds what one reply can carry). The ta
 distinguishes these explicitly rather than answering with silence — silence is what makes
 the config-pull path unusable. The `value` is passed through verbatim: its `^`
 delimiters and `***` comments are what the consumer renders, so nothing in the firmware
-may reformat it.
+may reformat it. It and the names are **JSON-escaped, never stripped**
+(`_seqAppendJsonEsc()`), so a value holding JSON — a `;L` command's body — parses back to
+exactly the bytes the WCB stores.
 
 Four things about it are load-bearing:
 
@@ -963,6 +965,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC46)_ | `WCB_SEQ` names and the `WCB_SEQVAL` key and value are JSON-escaped instead of having `"`, `\` and control characters stripped (HIL `ncmesh.seqval_verbatim`). |
 | 2026-10-04 | _(D-NC26)_ | A relayed CLI line over 199 characters, or a mesh→serial line over 200, is refused with a log line instead of being truncated into its queue slot and run (HIL `ncmesh.long_command_truncation`). |
 | 2026-10-04 | _(D-NC27)_ | A bridged `WCB_SEND` ACKs the library's send result instead of `ok:true` regardless, and its fragmented form is sent and ACKed instead of dropped (HIL `ncmesh.bridged_wcb_send_findings`). |
 | 2026-10-04 | _(D-NC47)_ | The bridged `SET_CMDLIB` uses the USB path's bracket-matched extraction (`rcCmdlibExtractData()`), not "everything up to the message's last `}`" (HIL `ncmesh.bridged_cmdlib_keys_after_data`). |
