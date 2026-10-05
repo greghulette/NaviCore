@@ -374,7 +374,7 @@ as edited.
 
 ## 12. Changelog
 
-- **EDITBEGIN carries the clip mode (2026-10-04, firmware + tool; reflash required):** `editBegin(mode)`
+- **EDITBEGIN carries the clip mode (2026-10-04, `a754e76`, firmware + tool; reflash required):** `editBegin(mode)`
   makes `?REC,EDITBEGIN,<mode>` (1–3) the resident `_mode`. `editBegin()` used to leave `_mode` as it
   was, so every upload — a restore, a timeline save — was saved with the mode of whatever clip had
   been loaded or recorded last (D-NC33). The tool sends the clip's mode; an older board ignores the

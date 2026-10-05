@@ -128,8 +128,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-04 | _(pending)_ | "Config lost unexpectedly" no longer blames Full Wipe, which never writes `/config.json` (D-NC34). |
-| 2026-10-04 | _(pending)_ | Two tabs on one WCB: the sid row now says why tabs get a random start, and a new row covers a Save confirmed by the other tab's ACK (D-NC35). |
+| 2026-10-04 | `a72459b` | "Config lost unexpectedly" no longer blames Full Wipe, which never writes `/config.json` (D-NC34). |
+| 2026-10-04 | `941a782` | Two tabs on one WCB: the sid row now says why tabs get a random start, and a new row covers a Save confirmed by the other tab's ACK (D-NC35). |
 | 2026-09-28 | `1e15601` | *Build and tooling*: which build a board runs, and decoding a backtrace against the wrong `.elf` — answered by the new `App SHA256` line. |
 | 2026-09-22 | _(pending)_ | `kickUsbCdcTx()` in `loop()`: flushes the USB-Serial/JTAG TX FIFO and re-arms IN_EMPTY every 20 ms, so output the HWCDC core stopped sending after a brief host stall (its `connected` flag only comes back on host input) is delivered without waiting for the next command. Found by the WCB HIL bench: ~2 % of back-to-back commands lost their reply; 0 of 800 after. |
 | 2026-09-10 | _(uncommitted)_ | Added a *Mesh / Via WCB* row for the Wizard's *"no response from WCB<n> via relay"* through NaviCore over WiFi: before this change every relay OTA over WiFi failed that way, because the relayed ACK was printed on Core 0 and never reached the WebSocket; now it means the target really did not answer. |

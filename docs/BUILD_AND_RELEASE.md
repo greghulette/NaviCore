@@ -248,9 +248,9 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-04 | _(pending)_ | §7 OTA: the USB sender rewinds once every chunk behind a lost one has answered; it counted to a whole window (8), which one loss can never produce, so each lost chunk cost a 10 s stall (`nctool.ota_usb_lost_chunk`). |
-| 2026-10-04 | _(pending)_ | §7: a flash from a live session fetches the flash tool and the image set before the teardown (`prepareFirmwareFlash()`), so a refused set no longer leaves the session disconnected (`nctool.fw_refused_flash_keeps_session`). |
-| 2026-10-04 | _(pending)_ | §7 Full Wipe row corrected: it erases NVS and OTA data only — `/config.json`, the command library and the clips survive, and the tool's texts that promised the config is erased now say so (D-NC34). |
+| 2026-10-04 | `b525a94` | §7 OTA: the USB sender rewinds once every chunk behind a lost one has answered; it counted to a whole window (8), which one loss can never produce, so each lost chunk cost a 10 s stall (`nctool.ota_usb_lost_chunk`). |
+| 2026-10-04 | `d3af2d1` | §7: a flash from a live session fetches the flash tool and the image set before the teardown (`prepareFirmwareFlash()`), so a refused set no longer leaves the session disconnected (`nctool.fw_refused_flash_keeps_session`). |
+| 2026-10-04 | `a72459b` | §7 Full Wipe row corrected: it erases NVS and OTA data only — `/config.json`, the command library and the clips survive, and the tool's texts that promised the config is erased now say so (D-NC34). |
 | 2026-09-28 | `703a0e7` | §3: **the HIL hook build** — `-DNAVICORE_HIL_HOOKS=1` through `compiler.cpp.extra_flags` compiles in `navicore_hil.h` (`DBG_WIRE`, `#L90`–`#L93`); CI and releases never define it, and without it the image is the same bytes as with no hook code at all (checked: 71 differing bytes against the pre-hook tree, all version stamp, compile time and hashes). |
 | 2026-09-28 | `1e15601` | §4: the version names a commit, not an image — `App SHA256` (boot banner, `?OTALOCAL,STATUS`) names the image and the `.elf` that decodes its backtraces. §7: how STATUS confirms an OTA. |
 | 2026-09-10 | _(uncommitted)_ | §3: **a local compile of `main` passes again** (1,169,087 B). The sketchbook's `WCB_Client` now matches `greghulette/WCBClient` master — the `diff -rq` is empty. The callout recorded a *state* ("a local compile of current `main` fails"), which went stale without anything saying so; it now gives the check instead. CLAUDE.md's build note likewise. |
