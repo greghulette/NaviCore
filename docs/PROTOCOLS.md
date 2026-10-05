@@ -475,7 +475,9 @@ of its own.
 
 Default 0 — every `[DISPATCH]` log is compiled in but costs nothing until enabled. Log
 sites use `dlog(BIT, fmt, …)`, which wraps `vlogf()` and drops the line rather than block
-when the USB TX buffer is full.
+when the USB TX buffer is full. A dispatch line means the send happened: it is printed
+after the action's checks, and an action that fails one prints a `… — skipped` line with
+the reason instead (`dskip()`, which also feeds `TEST_ACTION`'s `msg`), never the send line.
 
 **`DBG_WIRE` (bit 7, HIL hook builds).** One line per block handed to a device port, 48 bytes
 at most per line:
@@ -937,6 +939,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC45)_ | The dispatch trace prints a send line only for a send that happens: a serial action to a port other than S3-S5 (or one this board lacks) prints `[DISPATCH] Serial port '<p>' is not S3/S4/S5 — skipped`, and the Maestro line follows the skip-if-running gate (HIL `ncengine.skip_not_traced_as_sent`). |
 | 2026-10-04 | _(D-NC20)_ | `TEST_ACTION` answers `ok:false` with a `msg` when the executor skips the action, on both transports, instead of `ok:true` for anything that parsed (HIL `ncengine.test_action_skipped_not_ok`). |
 | 2026-10-04 | _(D-NC18)_ | A bridged `SET_CONFIG` also strips `wcbNetwork.channel` and the `wifi*` fields, so a Save over the mesh can no longer move the board's mesh channel or SoftAP at its next boot (HIL `ncmesh.bridged_set_config_strip`). |
 | 2026-10-04 | _(D-NC16)_ | `RESET_DEFAULTS` keeps the network identity (`wcbNetwork`, `wcbProfiles`, `boardType`, `wifi*`) on both transports, and the USB form now runs the live side effects as the bridged one does (HIL `nccfg.reset_defaults_keeps_identity`, `ncmesh.bridged_reset_keeps_identity`). |

@@ -2118,8 +2118,10 @@ static void rcExecuteActionNow(const RcAction& a) {
       // Legacy "local Maestro" — treat as Maestro ID 1 for backward compat
       // with old configs.  The location of Maestro 1 (and whether it's
       // actually wired locally) is now defined in the Maestro Locations panel.
-      dlog(DBG_MAESTRO, "[DISPATCH] Maestro (legacy local → ID 1)  %s\n", a.cmd);
+      // The dispatch line comes AFTER the skip gate, as on every other action type: printed
+      // first, a skipped action read as sent until the next line (HIL ncengine.skip_not_traced_as_sent).
       if (a.skipRunning && maestroSequenceBusy(1)) { dskip(DBG_MAESTRO, "[DISPATCH] Maestro 1 skipped — already running\n"); break; }
+      dlog(DBG_MAESTRO, "[DISPATCH] Maestro (legacy local → ID 1)  %s\n", a.cmd);
       executeMaestroCmd(1, a.cmd);
       break;
 
@@ -2132,19 +2134,25 @@ static void rcExecuteActionNow(const RcAction& a) {
         noteDispatchSkip("Maestro action with invalid ID %d", id);
         break;
       }
-      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d  %s\n", id, a.cmd);
       if (a.skipRunning && maestroSequenceBusy((uint8_t)id)) { dskip(DBG_MAESTRO, "[DISPATCH] Maestro %d skipped — already running\n", id); break; }
+      dlog(DBG_MAESTRO, "[DISPATCH] Maestro %d  %s\n", id, a.cmd);   // after the gate - see RA_MAESTRO_LOCAL
       executeMaestroCmd((uint8_t)id, a.cmd);
       break;
     }
     case RA_SERIAL: {
+      // Check the port BEFORE tracing the send. The trace used to come first, so a port
+      // other than S3-S5 printed "[DISPATCH] Serial TX [S9] ..." and then wrote nothing
+      // and said nothing (HIL ncengine.skip_not_traced_as_sent).
+      const int pi = (a.target[0] == 'S' && a.target[1] >= '3' && a.target[1] <= '5' && !a.target[2])
+                       ? (a.target[1] - '3') : -1;
+      Stream* port = (pi == 0) ? s3 : (pi == 1) ? s4 : (pi == 2) ? s5 : nullptr;   // S5 on both boards
+      if (pi < 0)  { dskip(DBG_SERIAL, "[DISPATCH] Serial port '%s' is not S3/S4/S5 — skipped\n", a.target); break; }
+      if (!port)   { dskip(DBG_SERIAL, "[DISPATCH] Serial port %s not available on this board — skipped\n", a.target); break; }
+      dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", auxPortLabel(pi), a.cmd);
       String s(a.cmd);
-      { int _pi = (a.target[0] == 'S' && a.target[1] >= '3' && a.target[1] <= '5') ? (a.target[1] - '3') : -1;
-        dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", (_pi >= 0) ? auxPortLabel(_pi) : a.target, a.cmd); }
-      if      (!strcmp(a.target, "S3")) writeS3(s);
-      else if (!strcmp(a.target, "S4")) writeS4(s);
-      else if (!strcmp(a.target, "S5")) writeS5(s);   // both boards (v2 "Serial 3", WCB 3.2 "Serial 5")
-      else noteDispatchSkip("Serial port '%s' is not S3/S4/S5", a.target);
+      if      (pi == 0) writeS3(s);
+      else if (pi == 1) writeS4(s);
+      else              writeS5(s);
       break;
     }
     case RA_HCR:
