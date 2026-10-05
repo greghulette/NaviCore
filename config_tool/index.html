@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.22:00.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">04.22:09.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2861,7 +2861,7 @@
                    while every readout claims 12/13. Paired with the clamp in rc_config.h. -->
               <input type="number" id="wcb-channel" min="1" max="11" style="width:60px"
                      oninput="config.wcbNetwork.channel = Math.max(1, Math.min(11, +this.value || 1)); updateWcbDirtyBadge()">
-              <small style="color:var(--muted);font-size:10px">1-13 — must match every WCB (?WCBCH)</small>
+              <small style="color:var(--muted);font-size:10px">1-11 — must match every WCB (?WCBCH)</small>
             </div>
             <div class="btn-row" style="margin-top:8px">
               <button class="btn btn-warn" id="btn-wcb-reboot" type="button" disabled
@@ -18481,10 +18481,9 @@ function openCalibrationModal() {
       'channel data at ~30 Hz, giving accurate auto-detection.\n\n' +
       'To calibrate:\n' +
       '  1. Click Disconnect\n' +
-      '  2. Uncheck "Via WCB" in the topbar\n' +
-      '  3. Plug a USB cable into the RC controller\'s OTG port\n' +
-      '  4. Click Connect, then Calibrate again\n\n' +
-      'After calibration you can switch back to Via WCB for normal use.'
+      '  2. Plug a USB cable into the RC controller\'s OTG port\n' +
+      '  3. Click Connect and choose "Connect via USB", then Calibrate again\n\n' +
+      'After calibration you can reconnect "Via a WCB" for normal use.'
     );
     return;
   }
