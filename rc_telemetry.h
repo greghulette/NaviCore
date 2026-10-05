@@ -103,6 +103,7 @@ bool   rcConfigSaveNVS();   // DEAD — nothing calls it; the NVS *load* is the 
 bool   rcConfigSaveLFS();   // primary: persist config to /config.json on LittleFS
 void   rcAdvertiseSerialLabels();   // push effective per-port labels to WCB_Client (WDP PORTLABEL) — def in NaviCore.ino
 bool     rcCmdlibSaveLFS(const String& json); // persist the config tool's private command library to /cmdlib.json
+bool     rcCmdlibExtractData(const String& msg, String& lib);   // SET_CMDLIB's "data" value, bracket-matched
 bool     rcCmdlibLoadLFS(String& out);        // read /cmdlib.json (raw JSON) — false if missing/empty
 uint32_t rcCmdlibHash(const String& s);       // FNV-1a signature of the stored library (change-detection)
 
@@ -1221,19 +1222,13 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     return;
   }
   if (!strcmp(type, "SET_CMDLIB")) {
-    // Persist the tool's private command library OPAQUELY. Pull the raw "data"
-    // value by SUBSTRING rather than a second multi-KB parse: the message is
-    // {"type":"SET_CMDLIB","data":<lib>} with data LAST, so the value runs from
-    // after the first `"data":` to the message's final '}'.
+    // Persist the tool's private command library OPAQUELY, extracted exactly as the
+    // USB handler does (rcCmdlibExtractData: bracket-matched, so a key AFTER "data" -
+    // the tool's ,"sys":1 - is never stored with the library).
     bool ok = false;
-    int k = json.indexOf("\"data\":");
-    int end = json.lastIndexOf('}');
     uint32_t h = 0, sz = 0;
-    if (k >= 0 && end > k + 7) {
-      String lib = json.substring(k + 7, end);
-      lib.trim();
-      if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
-    }
+    String lib;
+    if (rcCmdlibExtractData(json, lib)) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
     Serial.printf("[RC] SET_CMDLIB → %s\n", ok ? "saved to LittleFS" : "SAVE FAILED / empty");
     char ack[96];
     snprintf(ack, sizeof(ack), "{\"sys\":1,\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}",

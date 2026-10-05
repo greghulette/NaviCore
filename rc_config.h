@@ -2234,6 +2234,41 @@ static const char* RC_CMDLIB_BULK_TMP  = "/cmdlib.json.bulk.tmp";
 // String on the RC (O(1) send). Overwritten each pull; cleaned at boot.
 static const char* RC_CMDLIB_SEND_TMP  = "/cmdlib.send.tmp";
 
+// The raw "data" value of a SET_CMDLIB message, for BOTH transports (the USB handler
+// and rcTelemetry's bridged _applyReassembled). Pulled by substring - it can be many
+// KB, so no second big parse - but its END is found by MATCHING BRACKETS (strings and
+// escapes respected), never by taking the message's last '}'. `data` is not guaranteed
+// to be the last key: the naive lastIndexOf('}') once stored a trailing `,"sys":1` in
+// the library, so /cmdlib.json was not valid JSON on its own and its size/hash covered
+// bytes that were not library content. The bridged path kept that naive form after the
+// USB one was fixed (HIL ncmesh.bridged_cmdlib_keys_after_data). Returns false (lib
+// left empty) when there is no object/array value to take.
+bool rcCmdlibExtractData(const String& msg, String& lib) {
+  lib = "";
+  const int k = msg.indexOf("\"data\":");
+  if (k < 0) return false;
+  int s = k + 7;
+  const int blen = (int)msg.length();
+  while (s < blen && isspace((unsigned char)msg[s])) s++;
+  if (s >= blen || (msg[s] != '{' && msg[s] != '[')) return false;
+  const char open  = msg[s];
+  const char close = (open == '{') ? '}' : ']';
+  int depth = 0, end = -1;
+  bool inStr = false, esc = false;
+  for (int i = s; i < blen; i++) {
+    const char c = msg[i];
+    if (esc)      { esc = false;  continue; }
+    if (inStr)    { if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
+    if (c == '"') { inStr = true; continue; }
+    if (c == open)  { depth++; continue; }
+    if (c == close) { if (--depth == 0) { end = i + 1; break; } }
+  }
+  if (end <= s) return false;
+  lib = msg.substring(s, end);
+  lib.trim();
+  return lib.length() > 0;
+}
+
 // Atomic write (tmp + rename + on-flash size verify), same discipline as the
 // config save so a power loss can't corrupt the live file. `json` is the raw
 // library JSON (the tool's {schema,enums,boards} object). Returns false on any

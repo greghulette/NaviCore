@@ -240,7 +240,7 @@ payload approaches 98 KB and copying it per line is real cost.
 | `{"type":"SET_CONFIG","data":{…}}` | `{"type":"ACK","ok":true}` | Deserialised un-filtered; re-applies bauds, SBUS-out, board profile live |
 | `{"type":"GET_CMDLIB"}` | `{"type":"CMDLIB","size":N,"hash":H,"data":{…}}` | Command library stored on the droid, opaque to firmware |
 | `{"type":"GET_CMDLIB_META"}` | `{"type":"CMDLIB_META","size":N,"hash":H}` | Cheap change-check so a connect can skip the pull |
-| `{"type":"SET_CMDLIB","data":{…}}` | `ACK` | Raw value pulled by substring, stored verbatim |
+| `{"type":"SET_CMDLIB","data":{…}}` | `ACK` | Raw value pulled by substring, stored verbatim. Its end is found by **bracket matching** (`rcCmdlibExtractData()`, the one extraction USB and the bridge share), so a key after `data` — the tool's `"sys":1` — is never stored with the library |
 | `{"type":"START_MONITOR"}` | streams `PWM_UPDATE` every 50 ms | |
 | `{"type":"STOP_MONITOR"}` | `ACK` | Also force-clears calibration mute |
 | `{"type":"CALIB","on":bool}` | `ACK` | Mutes **all** action dispatch while on |
@@ -959,6 +959,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC47)_ | The bridged `SET_CMDLIB` uses the USB path's bracket-matched extraction (`rcCmdlibExtractData()`), not "everything up to the message's last `}`" (HIL `ncmesh.bridged_cmdlib_keys_after_data`). |
 | 2026-10-04 | _(D-NC63)_ | `?REC,EDITLOAD` decides "relayed" from the line's transport (`g_rtermRelay`, `naviws::lineFromSocket()`), not `rcSerial.captureArmed()`, so a USB download is no longer cut to 512 events while a WebSocket client is connected (HIL `ncwifi.usb_editload_with_socket`). |
 | 2026-10-04 | _(D-NC62)_ | WebSocket: a client whose send fails has its session closed and later work items skip it; `send_wait_timeout` is 1 s; a full sink drops the whole line instead of writing past its buffer (HIL `ncwifi.ws_stalled_client`). |
 | 2026-10-04 | _(D-NC61)_ | WebSocket lines are trimmed (and skipped when empty) before `processInputLine()`, as USB lines always were (HIL `ncwifi.ws_line_trim`). |

@@ -4082,31 +4082,10 @@ bool processInputLine(const String& line) {
       // library, so /cmdlib.json wasn't valid JSON on its own and its
       // size/hash covered bytes that were not library content (which then
       // read as "different library" against a mesh-saved copy).
+      // (rcCmdlibExtractData, rc_config.h - the ONE extraction both transports use.)
       bool ok = false; unsigned h = 0, sz = 0;
-      int k = line.indexOf("\"data\":");
-      if (k >= 0) {
-        int s = k + 7, blen = (int)line.length();
-        while (s < blen && isspace((unsigned char)line[s])) s++;
-        int end = -1;
-        if (s < blen && (line[s] == '{' || line[s] == '[')) {
-          const char open  = line[s];
-          const char close = (open == '{') ? '}' : ']';
-          int depth = 0; bool inStr = false, esc = false;
-          for (int i = s; i < blen; i++) {
-            char c = line[i];
-            if (esc)      { esc = false;  continue; }
-            if (inStr)    { if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
-            if (c == '"') { inStr = true; continue; }
-            if (c == open)  { depth++; continue; }
-            if (c == close) { if (--depth == 0) { end = i + 1; break; } }
-          }
-        }
-        if (end > s) {
-          String lib = line.substring(s, end);
-          lib.trim();
-          if (lib.length() > 0) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
-        }
-      }
+      String lib;
+      if (rcCmdlibExtractData(line, lib)) { ok = rcCmdlibSaveLFS(lib); if (ok) { h = rcCmdlibHash(lib); sz = lib.length(); } }
       Serial.printf("{\"type\":\"ACK\",\"of\":\"SET_CMDLIB\",\"ok\":%s,\"size\":%u,\"hash\":%u}\n",
                     ok ? "true" : "false", sz, h);
 
