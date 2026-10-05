@@ -461,6 +461,13 @@ LittleFS each time, stalling `loop()` far longer than the streaming itself.
 The relayed-path size refusal now applies only to the **legacy whole-clip** form — a ranged
 request is the answer to that problem, so it is allowed at any clip size.
 
+"Relayed" is decided by the **transport the line came in on**, never by the capture tee: a
+line `drainRemoteCli()` runs (`g_rtermRelay != 0`) or one a WebSocket client sent
+(`naviws::lineFromSocket()`) gets the paced stream, the 512-event slice cap and the whole-clip
+refusal; a USB line never does, whether or not a socket is open. The tee is armed for a
+socket's whole session, so testing it cut every USB download to 512 events while any client
+was connected.
+
 `rc_trig` goes out on **both** transports because `rcTelemetry::emitTrig()` returns early
 without a ready WCB, so a Direct-USB tool previously saw nothing at all for a local button
 press — no way to distinguish "the tier fired and did nothing visible" from "the tier never
@@ -952,6 +959,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC63)_ | `?REC,EDITLOAD` decides "relayed" from the line's transport (`g_rtermRelay`, `naviws::lineFromSocket()`), not `rcSerial.captureArmed()`, so a USB download is no longer cut to 512 events while a WebSocket client is connected (HIL `ncwifi.usb_editload_with_socket`). |
 | 2026-10-04 | _(D-NC62)_ | WebSocket: a client whose send fails has its session closed and later work items skip it; `send_wait_timeout` is 1 s; a full sink drops the whole line instead of writing past its buffer (HIL `ncwifi.ws_stalled_client`). |
 | 2026-10-04 | _(D-NC61)_ | WebSocket lines are trimmed (and skipped when empty) before `processInputLine()`, as USB lines always were (HIL `ncwifi.ws_line_trim`). |
 | 2026-10-04 | _(D-NC29)_ | A bridged `REBOOT` is ACKed (`"of":"REBOOT"`) and the restart deferred to `loop()` until the queues are quiet, instead of a silent `ESP.restart()` on the Core-0 receive callback (HIL `ncboot.mesh_reboot`). |

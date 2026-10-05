@@ -79,6 +79,11 @@ struct WsCmd {
 
 inline QueueHandle_t  wsQueue  = nullptr;
 inline httpd_handle_t wsServer = nullptr;
+// True only while drain() runs a line that came in on a socket - the transport a
+// handler can ask about. NOT the capture tee: that stays armed for a client's whole
+// session (below), so it says "a client is connected", never "this line came from one".
+inline bool           wsLineRunning = false;
+inline bool lineFromSocket() { return wsLineRunning; }
 
 // ── Reply sink ──────────────────────────────────────────────────────────────
 // Print sink armed around processInputLine() so everything the command prints to
@@ -590,7 +595,9 @@ inline void drain() {
   // framing matches too (HIL ncwifi.ws_line_trim).
   String line(m.line);
   line.trim();
+  wsLineRunning = true;                        // lineFromSocket(): this line's transport
   if (line.length()) processInputLine(line);   // the SAME dispatcher the USB path uses
+  wsLineRunning = false;
 
   // Push the reply now rather than waiting for the next pass, so a command feels
   // immediate instead of picking up one loop() of latency.

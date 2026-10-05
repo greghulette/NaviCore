@@ -3720,12 +3720,21 @@ bool execCliLine(const String& line) {
         }
       }
 
-      // Via-WCB (capture sink armed): every [CLIPDL:EV] line is an RTERM packet
-      // and editStream runs in loop(), so a dense capture streamed whole would
-      // stall SBUS/WCB servicing for tens of seconds. A RANGED request is the
-      // answer to that — the caller asks for a bounded slice — so the size
-      // refusal applies only to the legacy whole-clip form.
-      const bool relayed = rcSerial.captureArmed();
+      // Via-WCB: every [CLIPDL:EV] line is an RTERM packet and editStream runs in
+      // loop(), so a dense capture streamed whole would stall SBUS/WCB servicing for
+      // tens of seconds. A RANGED request is the answer to that — the caller asks for
+      // a bounded slice — so the size refusal applies only to the legacy whole-clip
+      // form. A WebSocket line is paced and bounded the same way (its sink is 2 KB).
+      //
+      // "Relayed" is the TRANSPORT this line came in on: g_rtermRelay is set only while
+      // drainRemoteCli() runs a mesh-relayed line, and lineFromSocket() only while
+      // naviws::drain() runs a socket's. It was rcSerial.captureArmed(), which meant a
+      // relayed line until the WebSocket tee became a standing arrangement for a
+      // client's whole session: with any socket open, a USB download was cut to 512
+      // events a range, a whole clip over 3000 refused with "connect over USB" to a
+      // client on USB, and the wait for USB room skipped (HIL
+      // ncwifi.usb_editload_with_socket).
+      const bool relayed = (g_rtermRelay != 0) || naviws::lineFromSocket();
       // BOUND THE SLICE ON THE BOARD, not in the caller. `ranged` is true as soon
       // as one extra comma is present, and `want` stays 0xFFFFFFFF when no count
       // is supplied — so "?REC,EDITLOAD,<name>,0" is a ranged request for the
