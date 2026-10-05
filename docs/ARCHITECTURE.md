@@ -284,6 +284,13 @@ SBUS frame ─► SbusReader (auto-detect 25 B / 36 B) ─► sbusValues[24]
                                               or HCR volume
 ```
 
+**Framing.** `SbusReader` trusts a stream only after `LOCK_FRAMES` (3) consecutive
+structurally valid frames of one variant, and decodes whole frames only. Locked on SBUS-24 it
+decodes a 36-byte buffer the moment it ends on `0x00`; a 25-byte buffer is decoded only when
+the byte after it is a header or the line goes quiet. 25 bytes are a byte-for-byte prefix of
+an SBUS-24 frame whose byte 24 is `0x00`, and decoding them eagerly handed `processSbus` a
+misframed frame (flags read from CH17's low byte) on every return from SBUS-16 to SBUS-24.
+
 **Modes.** `FunctionSwState` (1/2/3) multiplies every button mapping: `RC_NUM_MAPPINGS =
 108 = 3 modes × 36 slots`.
 
@@ -448,6 +455,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-04 | _(D-NC73)_ | §9 "Framing": locked on SBUS-16 the reader decodes a 25-byte buffer only on the next header or a silence, never eagerly (HIL `sbus.sbus24_return_no_prefix_decode`); the post-stall eager flush is SBUS-24 only. |
 | 2026-10-04 | _(D-NC21)_ | §7 lists `checkSbusGestureTimeout()`. A failsafe frame, or 500 ms with no SBUS frame (`checkSbusGestureTimeout()`), cancels any matrix gesture in flight — the deferred tap as well as the hold (HIL `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press`). |
 | 2026-10-04 | _(D-NC44)_ | §13: `applyConfigSideEffects()` also forgets a parked tap or hold and re-arms the matrix (`rcMatrixResetGesture()`), so every config apply on either transport, `RESET_DEFAULTS` included, drops a gesture in progress (HIL `sbus.reconfig_parked_tap_cleared`). |
 | 2026-09-28 | `703a0e7` | §3 lists `navicore_hil.h`, the HIL hook header compiled only with `-DNAVICORE_HIL_HOOKS=1`; §5 the `/config.json.hil` copy its `#L91` leaves; §7's loop order gains the hook build's `#L90` stall and `kickUsbCdcTx()`, which already ran first. |
