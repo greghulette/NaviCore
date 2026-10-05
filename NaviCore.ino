@@ -1127,7 +1127,19 @@ static void maestroSetAccel(uint8_t id, uint8_t ch, uint8_t accel) {
 }
 static void maestroGoHome(uint8_t id)        { maestroWrite(id, 0xA2, nullptr, 0); navirec::shadowInvalidateSlot(id); maeGateInvalidateSlot(id); maeReleaseArmSlot(id); }
 static void maestroStopScript(uint8_t id)    { maestroWrite(id, 0xA4, nullptr, 0); navirec::shadowInvalidateSlot(id); maeSmoothInvalidateSlot(id); maeGateInvalidateSlot(id); maeReleaseArmSlot(id); }
+// Subroutine numbers are 0-127 on the wire: every byte after a Pololu frame's command
+// byte must have its top bit clear, and a subroutine of 128-255 written as-is is read by
+// the Maestro as the START of a new (compact-protocol) command, not as data (HIL
+// ncdev.mae_subroutine_msb). WcbCmd's buildSubroutineFrame does not mask it, and an
+// inbound ;M frame can carry up to 255, so both writers refuse it HERE, the one place
+// every caller passes through. (executeMaestroCmd already refuses it before the cast.)
+static bool maeSubOk(uint8_t id, uint8_t sub) {
+  if (sub <= 127) return true;
+  dskip(DBG_MAESTRO, "[DISPATCH] Maestro %u: subroutine %u out of range (0-127) — skipped\n", id, sub);
+  return false;
+}
 static void maestroRestartScript(uint8_t id, uint8_t sub) {
+  if (!maeSubOk(id, sub)) return;
   maestroWrite(id, 0xA7, &sub, 1);
   maeSmoothInvalidateSlot(id);   // a device-side script may change speed/accel we can't see — re-apply on next stick move
   maeGateInvalidateSlot(id);     // the slot is (re)started — the skip-if-running gate must re-ask
@@ -1136,6 +1148,7 @@ static void maestroRestartScript(uint8_t id, uint8_t sub) {
 // the Maestro's script stack. Shared by the local ";M<id>,subParam" action and the
 // inbound-mesh handler so there is ONE implementation of the frame.
 static void maestroSubParam(uint8_t id, uint8_t sub, uint16_t param) {
+  if (!maeSubOk(id, sub)) return;   // 0-127 only - see maeSubOk
   if (param > 16383) param = 16383;
   uint8_t p[3] = { sub, (uint8_t)(param & 0x7F), (uint8_t)((param >> 7) & 0x7F) };
   maestroWrite(id, 0xA8, p, 3);  // 0xA8 & 0x7F = 0x28 → {0xAA,dev,0x28,sub,pl,ph} == WcbMaestro::buildSubParam
