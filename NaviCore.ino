@@ -333,6 +333,10 @@ static inline Stream* auxStreamFor(int fwPort) {
 // cap), so a forwarded command is never truncated in transit.
 struct SerialFwdMsg { uint8_t fwPort; char text[201]; };
 QueueHandle_t serialFwdQueue = nullptr;
+// The paced transmitter's one in-flight line per aux port (0=S3, 1=S4, 2=S5) — see
+// auxTxPump(). Declared here because the device-write gate (auxDev) checks them too.
+struct SerialFwdTx { char text[202]; uint8_t len; uint8_t sent; };   // len 0 = idle
+static SerialFwdTx auxTx[3];
 
 // =============================================================================
 //  Mesh → local Maestro  (inbound ";M")
@@ -523,6 +527,70 @@ static uint32_t g_dbgFlags = 0;
 #else
 #define HIL_TAP(p) (p)
 #endif
+
+// ── A device write waits for the paced line in flight ────────────────────────
+// auxTxPump() owns a port for a whole line — a serial action or a mesh forward, ~100 ms
+// for 95 characters at 9600 — while loop() runs everything else. A device write (an HCR
+// action or fade step, an MP3 Trigger, DFPlayer or WLED command, #L20/#L21) used to go
+// straight to the port, so its bytes landed inside the line, and the device and whatever
+// read the line both got a broken command (HIL ncwire.tx_interleave: #L21's frames 11
+// bytes into a 95-character line on S4). Every device writer reaches S3/S4/S5 through
+// auxDev(). While a line is in flight there, or device bytes are still held behind one,
+// its bytes join that port's hold buffer, which auxTxPump() sends, in order and paced
+// like a line, after the line's CR and before the next line starts. An idle port is
+// written at once, as before. Reads pass straight through: the codecs that read replies
+// (g_mp3, g_dfp) poll() without waiting, so a held command's reply simply comes later.
+// Loop task only, like every aux-port writer.
+#define AUX_HOLD_BYTES 512   // device bytes held behind one line; a write past it finishes the line at once
+struct AuxHold { uint8_t buf[AUX_HOLD_BYTES]; uint16_t len; uint16_t sent; };
+static AuxHold auxHold[3];
+static inline bool auxHeld(int idx) { return auxHold[idx].sent < auxHold[idx].len; }
+static void auxTxFinish(int idx);   // the line in flight and the bytes held behind it, out now (auxTxPump's section)
+
+class AuxDevPort : public Stream {
+ public:
+  explicit AuxDevPort(int idx) : _idx(idx) {}
+  AuxDevPort* over(Stream* s) { _s = s; return this; }
+  using Print::write;
+  size_t write(uint8_t b) override { return write(&b, 1); }
+  size_t write(const uint8_t* buf, size_t len) override {
+    if (len == 0) return 0;
+    if (auxTx[_idx].len == 0 && !auxHeld(_idx)) return HIL_TAP(_s)->write(buf, len);   // idle: at once
+    AuxHold& h = auxHold[_idx];
+    if (!auxHeld(_idx)) h.len = h.sent = 0;            // drained: start the buffer over
+    if (h.len + len > AUX_HOLD_BYTES) {                // no room: what is ahead goes out now, then this
+      auxTxFinish(_idx);
+      return HIL_TAP(_s)->write(buf, len);
+    }
+    memcpy(h.buf + h.len, buf, len);
+    h.len += len;
+    return len;
+  }
+  int  availableForWrite() override { return _s->availableForWrite(); }
+  void flush() override {                              // nothing calls it today; keep its meaning
+    if (auxTx[_idx].len || auxHeld(_idx)) auxTxFinish(_idx);
+    _s->flush();
+  }
+  int  available() override { return _s->available(); }
+  int  read() override      { return _s->read(); }
+  int  peek() override      { return _s->peek(); }
+
+ private:
+  const int _idx;
+  Stream*   _s = nullptr;
+};
+static AuxDevPort auxDevPort[3] = { AuxDevPort(0), AuxDevPort(1), AuxDevPort(2) };
+
+// The Stream a device writer uses for port `p`: the gate for S3/S4/S5, HIL_TAP's for any
+// other (Serial2, the Maestro WCBStream). nullptr stays nullptr, so a caller's own null
+// check still means what it did. s3/s4/s5 are bound once at boot and never move.
+static Stream* auxDev(Stream* p) {
+  if (!p) return p;
+  if (p == s3) return auxDevPort[0].over(p);
+  if (p == s4) return auxDevPort[1].over(p);
+  if (p == s5) return auxDevPort[2].over(p);
+  return HIL_TAP(p);
+}
 
 // ── Dispatch skips: logged AND recorded ─────────────────────────────────────
 // An executor that skips an action - a disabled destination, an invalid slot or
@@ -1786,8 +1854,8 @@ static void executeHcrAction(const RcAction& a) {
     const int base = (g_hcrFade.active(ch) && g_hcrPreFade[ch] >= 0)
                    ? (int)g_hcrPreFade[ch] : g_hcr.getVol(ch);
     g_hcrPreFade[ch] = (int8_t)base;                        // survives this fade being superseded
-    if (a.fn == 12) g_hcrFade.start(g_hcr, *HIL_TAP(hcrSerial), ch, 0, base, sec, false, 0);   // FadeIn: 0 → pre-fade level
-    else { const int cur = g_hcr.getVol(ch); g_hcrFade.start(g_hcr, *HIL_TAP(hcrSerial), ch, cur, 0, sec, true, base); }  // FadeOut: cur → 0, StopWAV, restore pre-fade level
+    if (a.fn == 12) g_hcrFade.start(g_hcr, *auxDev(hcrSerial), ch, 0, base, sec, false, 0);   // FadeIn: 0 → pre-fade level
+    else { const int cur = g_hcr.getVol(ch); g_hcrFade.start(g_hcr, *auxDev(hcrSerial), ch, cur, 0, sec, true, base); }  // FadeOut: cur → 0, StopWAV, restore pre-fade level
     dlog(DBG_HCR, "[DISPATCH] HCR→%s  Fade%s ch=%d %ds\n", dest.target, a.fn == 12 ? "In" : "Out", a.chan, sec);
     return;
   }
@@ -1826,7 +1894,7 @@ static void executeHcrAction(const RcAction& a) {
   }
   dlog(DBG_HCR, "[DISPATCH] HCR→%s  fn=%u chan=%d track=%d  %s",
         dest.target, a.fn, a.chan, a.track, payload.c_str());
-  HIL_TAP(hcrSerial)->print(payload);
+  auxDev(hcrSerial)->print(payload);
 }
 
 // Build the ";A,<CMD>" MP3 verb for an RA_MP3 action — the SINGLE producer for
@@ -1904,7 +1972,7 @@ static void executeMp3Action(const RcAction& a) {
       dskip(DBG_MP3, "[DISPATCH] MP3-local: bad/out-of-range fn=%u arg=%d — skipped\n", a.fn, a.track);
       return;
     }
-    g_mp3.begin(*HIL_TAP(p));                 // rebind — the resolved port can change per action
+    g_mp3.begin(*auxDev(p));                  // rebind — the resolved port can change per action
     bool ok = g_mp3.handle(cmd.c_str() + 1);  // skip leading ';' (handle tolerates the 'A' verb)
     dlog(DBG_MP3, "[DISPATCH] MP3→%s  fn=%u arg=%d vol=%u  %s\n",
           dest.target, a.fn, a.track, g_mp3.volume(), ok ? "OK" : "FAIL");
@@ -2027,7 +2095,7 @@ static void executeDfpAction(const RcAction& a) {
             a.fn, a.chan, a.track);
       return;
     }
-    g_dfp.begin(*HIL_TAP(p));                 // rebind — the resolved port can change per action
+    g_dfp.begin(*auxDev(p));                  // rebind — the resolved port can change per action
     bool ok = g_dfp.handle(cmd.c_str() + 1);  // skip leading ';' (handle tolerates the 'D' verb)
     dlog(DBG_DFP, "[DISPATCH] DFP→%s  fn=%u chan=%d track=%d vol=%u  %s\n",
           dest.target, a.fn, a.chan, a.track, g_dfp.volume(), ok ? "OK" : "FAIL");
@@ -2112,7 +2180,7 @@ static void executeWledAction(const RcAction& a) {
     // pattern vlogf() exists to prevent. The dlog() below already reports the
     // no-op through the non-blocking, category-gated path. (Matches g_mp3/g_dfp,
     // which both take the default diag = nullptr.)
-    bool ok = WcbWled::emit(*HIL_TAP(port), body, nullptr);   // build ;L verb → WLED JSON, newline-framed
+    bool ok = WcbWled::emit(*auxDev(port), body, nullptr);    // build ;L verb → WLED JSON, newline-framed
     dlog(DBG_WLED, "[DISPATCH] WLED %u→S%u  %s  %s\n", w.wledID, w.serialPort, body, ok ? "OK" : "no-op");
   } else if (w.remoteWCB >= 1 && w.remoteWCB <= WCB_MAX_BOARDS) {
     if (!wcb || !wcbReady) { dskip(DBG_WLED, "[DISPATCH] WLED %u: WCB not ready — skipped\n", w.wledID); return; }
@@ -2156,9 +2224,9 @@ static void scheduleAction(const RcAction& action, unsigned long delayMs) {
 
 // A serial action goes out through the same paced transmitter as a mesh->serial forward
 // (serialFwdQueue -> drainSerialFwd -> auxTxPump): a few bytes per loop() pass, not the
-// whole line at once. S4/S5 are bit-banged and a write returns only when its last bit is
-// out, so a 95-character action at 9600 held loop() ~100 ms - past the ~96 ms of SBUS-24
-// that Serial1 buffers (HIL ncdev.serial_action_paced). Same bytes on the wire (the text
+// whole line at once. A write to S4/S5 returns only when its last bit is out, so a
+// 95-character action at 9600 held loop() ~100 ms - past the ~96 ms of SBUS-24 that
+// Serial1 buffers (HIL ncdev.serial_action_paced). Same bytes on the wire (the text
 // plus the CR drainSerialFwd adds), in order with the mesh forwards to the same port.
 // NEVER dropped: when the 4-deep queue is full, the pump runs until there is room, which
 // holds loop() only for that overflow - the whole-line write every action used to make.
@@ -3901,7 +3969,7 @@ bool execCliLine(const String& line) {
         // (TX/RX swap, ground, 3V3 vs 5V) or the EspSoftwareSerial port.
         case 20:
         case 21: {
-          Stream*     h  = HIL_TAP((fn == 20) ? s3 : s4);
+          Stream*     h  = auxDev((fn == 20) ? s3 : s4);
           const char* pn = (fn == 20) ? "S3" : "S4";
           Serial.printf("[HCR TEST] -> %s : SetEmotion(HAPPY,80) via hcrFormatCommand + raw frame\n", pn);
           // Send the SetEmotion(HAPPY,80) payload we'd normally dispatch
@@ -5252,8 +5320,7 @@ void drainRemoteCli() {
 // one mid-message. Messages for a port that's still busy stay in serialFwdQueue —
 // see drainSerialFwd for the head-of-line note.
 #define AUX_TX_BUDGET_US 500      // max blocking per port per loop() pass (~1/18 of an SBUS frame)
-struct SerialFwdTx { char text[202]; uint8_t len; uint8_t sent; };   // len 0 = idle
-static SerialFwdTx auxTx[3];
+// (The slots, struct SerialFwdTx / auxTx[], are declared beside SerialFwdMsg.)
 
 // How many bytes port `idx` (0=S3, 1=S4, 2=S5) may take this pass.
 static int auxTxBudget(int idx) {
@@ -5272,40 +5339,61 @@ static int auxTxBudget(int idx) {
   return n < 1 ? 1 : n;
 }
 
+// One port's share of a pass: the line in flight, else the device bytes held behind it
+// (auxDev), at most `budget` bytes, as ONE write (one RMT transaction on S4/S5; and one
+// DBG_WIRE block). A pass that ends a line leaves the held bytes for the next pass.
+static void auxTxPumpPort(int i, int budget) {
+  SerialFwdTx& t = auxTx[i];
+  AuxHold&     h = auxHold[i];
+  Stream* p = auxStreamFor(i + 3);
+  if (!p) { t.len = 0; h.len = h.sent = 0; return; }   // port vanished (board profile) — drop it
+  const uint8_t* from;
+  int n;
+  if (t.len) { from = (const uint8_t*)t.text + t.sent; n = t.len - t.sent; }
+  else       { from = h.buf + h.sent;                  n = h.len - h.sent; }
+  if (n > budget) n = budget;
+  if (n > 0) {
+    const size_t w = p->write(from, n);
+#ifdef NAVICORE_HIL_HOOKS
+    navihil::wire(i == 0 ? "S3" : i == 1 ? "S4" : "S5", from, w);
+#else
+    (void)w;
+#endif
+    // Advance by what was handed over whatever the port answered, as the byte-at-a-time
+    // pump always did: a port that refuses must not wedge its line forever.
+    if (t.len) t.sent += n; else h.sent += n;
+  }
+  if (t.len && t.sent >= t.len) {
+    t.text[t.len - 1] = '\0';   // drop the framing CR — logging it would yank the terminal cursor
+    t.len = 0;
+    dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", auxPortLabel(i), t.text);
+  }
+}
+
 // Clock out whatever each port has pending, within its budget. Called every loop().
 static void auxTxPump() {
-  for (int i = 0; i < 3; i++) {
-    SerialFwdTx& t = auxTx[i];
-    if (t.len == 0) continue;
-    Stream* p = auxStreamFor(i + 3);
-    if (!p) { t.len = 0; continue; }               // port vanished (board profile) — drop it
-    int budget = auxTxBudget(i);
-#ifdef NAVICORE_HIL_HOOKS
-    const uint8_t hilFrom = t.sent;   // DBG_WIRE: this pass's bytes as ONE block, not a line per byte
-#endif
-    while (budget-- > 0 && t.sent < t.len) p->write((uint8_t)t.text[t.sent++]);
-#ifdef NAVICORE_HIL_HOOKS
-    navihil::wire(i == 0 ? "S3" : i == 1 ? "S4" : "S5", (const uint8_t*)t.text + hilFrom, t.sent - hilFrom);
-#endif
-    if (t.sent >= t.len) {
-      t.text[t.len - 1] = '\0';   // drop the framing CR — logging it would yank the terminal cursor
-      t.len = 0;
-      dlog(DBG_SERIAL, "[DISPATCH] Serial TX [%s]  %s\n", auxPortLabel(i), t.text);
-    }
-  }
+  for (int i = 0; i < 3; i++)
+    if (auxTx[i].len || auxHeld(i)) auxTxPumpPort(i, auxTxBudget(i));
+}
+
+// The line in flight on port idx and the device bytes held behind it, out now — loop()
+// waits for them. Only for a device write that does not fit the hold buffer (auxDev).
+static void auxTxFinish(int idx) {
+  while (auxTx[idx].len || auxHeld(idx)) auxTxPumpPort(idx, 1 << 14);
 }
 
 // Move queued mesh→serial writes into the per-port TX slots. Takes the head only
 // when its port is free: a message whose port is still transmitting stays queued
 // (and briefly blocks messages behind it — acceptable, since each one clears in
-// milliseconds and ordering per port is preserved either way).
+// milliseconds and ordering per port is preserved either way). Then pumps — every
+// loop(), with or without the queue, since the device bytes auxDev() holds drain here.
 void drainSerialFwd() {
-  if (!serialFwdQueue) return;
   SerialFwdMsg m;
-  while (xQueuePeek(serialFwdQueue, &m, 0) == pdTRUE) {
+  while (serialFwdQueue && xQueuePeek(serialFwdQueue, &m, 0) == pdTRUE) {
     int idx = (int)m.fwPort - 3;
     if (idx < 0 || idx > 2) { xQueueReceive(serialFwdQueue, &m, 0); continue; }   // bad port — discard
-    if (auxTx[idx].len != 0) break;                // port busy — leave it queued
+    // Port busy — a line, or device bytes held behind one (they go first) — leave it queued.
+    if (auxTx[idx].len != 0 || auxHeld(idx)) break;
     xQueueReceive(serialFwdQueue, &m, 0);
     size_t n = strlcpy(auxTx[idx].text, m.text, sizeof(auxTx[idx].text) - 1);
     if (n > sizeof(auxTx[idx].text) - 2) n = sizeof(auxTx[idx].text) - 2;
@@ -5664,7 +5752,7 @@ void requestDeferredRestart() {
 static bool inboundWorkPending() {
   QueueHandle_t qs[] = { remoteTriggerQueue, remoteCliQueue, serialFwdQueue, maestroCmdQueue, forgetPeerQueue };
   for (QueueHandle_t q : qs) if (q && uxQueueMessagesWaiting(q)) return true;
-  for (int i = 0; i < 3; i++) if (auxTx[i].len) return true;   // a serial line still clocking out
+  for (int i = 0; i < 3; i++) if (auxTx[i].len || auxHeld(i)) return true;   // a serial line (or device bytes held behind one) still clocking out
   return false;
 }
 static void checkDeferredRestart() {
@@ -5816,7 +5904,7 @@ void loop() {
   if (rcConfig.hcrDest.transport == 0) {
     Stream* hp = hcrLocalSerial();
     if (hp) {
-      g_hcrFade.tick(g_hcr, *HIL_TAP(hp));
+      g_hcrFade.tick(g_hcr, *auxDev(hp));
     } else if (g_hcrFade.active(0) || g_hcrFade.active(1) || g_hcrFade.active(2)) {
       // Local transport but no resolvable serial port (e.g. an out-of-range dest) —
       // can't tick, so cancel any in-flight fade rather than freeze the ramp.

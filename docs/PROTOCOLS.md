@@ -537,9 +537,10 @@ at most per line:
 ```
 
 A block is one `write()`/`print()` call on the port, so a Maestro frame arrives as its
-3-byte header and then its payload, and an MP3 Trigger command a byte at a time; the one
-exception is the aux TX pump (mesh → serial forwards), which writes a byte per call and is
-logged once per pass. Join a port's lines in order to get its byte stream; `offset/length`
+3-byte header and then its payload, and an MP3 Trigger command a byte at a time. The aux TX
+pump (serial actions and mesh → serial forwards) writes one block per `loop()` pass, and so
+does the hold buffer behind a line: a device write made while a line is going out on that
+port waits there (`auxDev()`, ARCHITECTURE.md §10) and is logged when the pump sends it. Join a port's lines in order to get its byte stream; `offset/length`
 shows when a line was lost, which happens because it goes through `vlogf()`. Device codecs
 (MP3, DFPlayer, WLED, HCR fades) are covered because they are handed a pass-through
 `Stream` (`HIL_TAP`, `navicore_hil.h`) instead of the port.
@@ -1005,6 +1006,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | `DBG_WIRE`: the aux TX pump writes (and logs) one block per pass; a device write held behind a line is logged when it goes out (HIL `ncwire.tx_interleave`). |
 | 2026-10-05 | `bb0dda6` | WebSocket output goes through NaviCore's own PSRAM queue, drained by one httpd work item at a time, instead of one work item per frame or a 2 KB hold behind a slow send; a line is admitted whole at its first byte or dropped whole (over 256 KB queued) with a USB note. The hold cut GET_CONFIG at 2048 characters on a healthy socket — its start time could also read 1 ms in the future (`millis() \| 1`) and wrap to ~4.3e9 ms (HIL `ncwifi.ws_parity`, `ws_utf8_and_latch`, `intellex.wifi_nc_tool`; a regression from `37428e4`). |
 | 2026-10-04 | `37428e4` | A client whose send fails is shut down with `shutdown()`, not `httpd_sess_trigger_close()`, whose queued close was lost in httpd's full control socket and left the stalled client open and deaf (HIL `ncwifi.ws_stalled_client`); `pump()` queues nothing behind a send stalled 250 ms (`WS_LINK_SLOW_MS`). |
 | 2026-10-04 | `2428167` | WebSocket sessions send through `wsSendAll()`: a short write is continued until the frame is out, and only a socket that takes no byte for 5 s (`WS_STALL_MS`) is given up on and shut down. The 1 s `send_wait_timeout` alone cut frames short in a 3 s WiFi stall (lwIP's short count, which httpd takes as success) and closed a healthy client (HIL `ncwifi.ws_ping_soak`, a regression from `2aec189`). |

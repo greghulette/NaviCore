@@ -51,8 +51,9 @@ namespace navihil {
 //   hex     upper-case pairs, space-separated, e.g. [WIRE] S4 0/6: AA 04 04 05 70 2E
 // A block is one write() or print() call on the port — a Maestro frame arrives as
 // its 3-byte header and then its payload, an MP3 Trigger command as one byte at a
-// time — except the aux TX pump (auxTxPump), which hands a queued mesh→serial line
-// over a byte per call and is logged once per pass. So a reader joins the lines of a
+// time — the aux TX pump (auxTxPump) hands a line, and the device bytes auxDev() held
+// behind one, over in one write per pass, logged as that block (the held bytes when
+// they go out, not when a codec wrote them). So a reader joins the lines of a
 // port in order; offset/length show when one of them was lost. 48 bytes keep a line
 // (at most ~175 characters) inside vlogf()'s 192-byte buffer, and vlogf() drops a
 // whole line rather than block when the USB TX ring is short.

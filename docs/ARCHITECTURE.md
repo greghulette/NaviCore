@@ -402,13 +402,22 @@ An `RcAction` is `{type, target[6], cmd[96], delayMs, note[20], skipRunning, fn,
 | `RA_WCB_BROADCAST` (2) | `wcb->broadcast(cmd)` | whole mesh |
 | `RA_MAESTRO_LOCAL` (3) | `executeMaestroCmd` → `maestroWrite` → Serial2 | wired Pololu bus |
 | `RA_MAESTRO_REMOTE` (4) | discrete verbs unicast WCB-native; passthrough/replay streams raw via `WCBStream` | remote Maestro |
-| `RA_SERIAL` (5) | `queueSerialAction()` → the paced `auxTxPump()` (`\r`-terminated) | aux port named in `target`; clocked out a few bytes per `loop()` pass like a mesh→serial forward, never written whole (a bit-banged S4/S5 write blocks until its last bit is out). The `Serial TX` trace line prints when the line is out |
+| `RA_SERIAL` (5) | `queueSerialAction()` → the paced `auxTxPump()` (`\r`-terminated) | aux port named in `target`; clocked out a few bytes per `loop()` pass like a mesh→serial forward, never written whole (an S4/S5 write returns only once its last bit is out). The `Serial TX` trace line prints when the line is out |
 | `RA_HCR` (6) | `executeHcrAction` → `hcrFormatCommand` | port or WCB from **global** `hcrDest` |
 | `RA_MP3` (7) | `executeMp3Action` → `;A,…` | **global** `mp3Dest` |
 | `RA_RECORD` (8) / `RA_PLAY` (9) / `RA_STOP` (10) | `navirec` control (deferred to Core 1) | — never captured into a clip |
 | `RA_SMOOTH_OVERRIDE` (11) | global passthrough smoothing latch | runtime only |
 | `RA_WLED` (12) | `executeWledAction` → `;L<id>,<verb>` | per-id routing in `wledSlots`; a remote slot gets `;L<id>,<body>` rebuilt from the parse, so `L1,ON` (no `;`) works remotely as it does locally |
 | `RA_DFPLAYER` (13) | `executeDfpAction` → `;D,…` | **global** `dfpDest` — local aux port or a WCB |
+
+**Device writes never cut into a paced line.** Every device writer — an HCR action or fade
+step, the MP3 Trigger, DFPlayer and WLED codecs, `#L20`/`#L21` — reaches S3/S4/S5 through
+`auxDev()`, never the port itself. While `auxTxPump()` has a line in flight on that port (or
+device bytes are already held behind one), the bytes go into the port's 512-byte hold buffer,
+which the pump sends after the line's CR and before it takes the next queued line; an idle
+port is written at once. A write that would overflow the buffer finishes the line in
+`loop()` first (`auxTxFinish()`). Without this a device's bytes landed inside the line, and
+both it and the line's reader got a broken command (HIL `ncwire.tx_interleave`).
 
 HCR, MP3 and DFPlayer destinations are **global, not per-action** — an action carries only
 `fn`/`chan`/`track`. Maestro slots 1–8 are logical: each slot stores `{type, device,
@@ -479,6 +488,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | §10: device writes reach S3/S4/S5 through `auxDev()`, which holds them behind a paced line in flight, so they never land inside one (HIL `ncwire.tx_interleave`). |
 | 2026-10-06 | _(pending)_ | §4 UART allocation, §8, §11: S4/S5 are `NcSoftSerial` — RMT transmit, EspSoftwareSerial receive with the GPIO ISR service at level 3 and the `rxBits()` race closed (WCB repo HIL `ncwire.soft_tx_integrity`, D-NC24; `ncwire.rx_monitor_bcast_in`). |
 | 2026-10-05 | `bb0dda6` | §8: WebSocket output is a Core 1 → httpd-task hand-off through NaviCore's own PSRAM queue under `wsTxMux`, one `wsDrainWork` at a time. |
 | 2026-10-04 | `aa6ae0a` | §7 lists `checkDeferredRestart()`, last in `loop()`: a mesh `REBOOT` is ACKed from `rcTelemetry::tick()` and restarts once the inbound queues are quiet (HIL `ncboot.mesh_reboot`). |
