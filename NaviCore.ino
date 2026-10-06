@@ -1765,6 +1765,43 @@ static void vlogf(const char* fmt, ...) {
   // and on overflow the sink drops whole lines rather than truncating one.
 }
 
+// ── UART0 is aux port S3: the console stays off it ──────────────────────────
+// The core's prebuilt sdkconfig keeps UART0 as the ESP-IDF console
+// (CONFIG_ESP_CONSOLE_UART_NUM 0; the USB-Serial/JTAG is only the secondary one), and
+// applySerialBauds() routes UART0's TX to S3's pin. So every IDF log line ("E (n)
+// wifi: ..."), every ROM-printf line, and at each software restart the ROM's boot
+// banner went out S3, into whatever device is wired there (an HCR at 115200 reads
+// it as a command stream). The WCB repo's HIL ncwire.s3_console_quiet caught the
+// banner: 260 bytes, "ESP-ROM:esp32s3-20210327 ... entry 0x403c88b8", across a
+// REBOOT — a CPU reset keeps the GPIO matrix, so UART0's TX is still on S3's pin when
+// the ROM prints. Power-on is not affected: the matrix resets, and the ROM prints on
+// UART0's own pin (GPIO43). What is left: a panic's backtrace (the panic handler
+// writes the console UART directly) and a watchdog (RTC) reset's banner.
+//
+// IDF log lines come from any task (the WiFi task's most of all), so they go to USB
+// only when it has room for the whole line, and are dropped otherwise — vlogf()'s
+// rule: a USB write without a host blocks up to HWCDC's 50 ms TX timeout.
+static int idfLogToUsb(const char* fmt, va_list ap) {
+  char buf[192];
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  if (n <= 0) return n;
+  if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+  if (HWCDCSerial.availableForWrite() >= n) HWCDCSerial.write((const uint8_t*)buf, (size_t)n);
+  return n;
+}
+
+static void consoleOffUart0() {
+  // The ROM printf channel (ets_printf, ESP_EARLY_LOG) to USB; this also uninstalls
+  // UART0's (HWCDC::setDebugOutput, HWCDC.cpp).
+  HWCDCSerial.setDebugOutput(true);
+  esp_log_set_vprintf(idfLogToUsb);   // IDF ESP_LOGx lines
+  // The ROM skips its banner at the next software restart (or panic reset): a flag in
+  // RTC_CNTL_STORE4, which a CPU reset keeps and the clock init preserves
+  // (clk_ll_xtal_store_freq_mhz). Set on every boot; a power-on clears it. The
+  // banner is gone from USB too — setup()'s "Reset reason:" line reports the cause.
+  rtc_suppress_rom_log();
+}
+
 // Dispatch an HCR action.
 //
 // The destination is GLOBAL — pulled from rcConfig.hcrDest rather than from
@@ -4815,6 +4852,7 @@ void setup() {
 #if ARDUINO_USB_CDC_ON_BOOT
   Serial.setTxTimeoutMs(50);
 #endif
+  consoleOffUart0();   // before applySerialBauds() puts UART0's TX on S3's pin — see the function
   delay(1500);
   Serial.println("\n\n=== NaviCore ===");   // active board profile logged at boot by applyBoardProfile()
   // The exact image (FW_VERSION changes only per commit) — see naviota::otaAppSha16().

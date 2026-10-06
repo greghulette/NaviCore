@@ -83,6 +83,8 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | Garbled input above ~57600 baud on S4/S5 | S4/S5 receive in software (EspSoftwareSerial, a GPIO interrupt per edge). Their transmit is RMT and exact at any rate. Only S3 (hardware UART0) receives reliably higher | `applySerialBauds()` |
 | Garbled or lost bytes out S4/S5 under load | The port transmits bit-banged: boot printed `[AUX] TX GPIO<n>: no RMT channel` (all 4 S3 RMT TX channels taken, or a port begun other than 8N1). Find what else took a channel | `NcSoftSerial::begin()` |
 | WLED unreliable | It wants 115200, so it needs S3 | `RcWledSlot` |
+| The device on S3 reacts to a restart, or reads text it was never sent | Console output on UART0, which is S3's UART. `consoleOffUart0()` keeps IDF logs, ROM printf and a software restart's ROM banner off it; a panic's backtrace and a watchdog reset's banner still go out S3 | `consoleOffUart0()` |
+| No `ESP-ROM:` banner on USB after a restart | Expected: the ROM log is off for software restarts so it cannot reach S3. `Reset reason:` (setup()) names the cause; a power-on still prints the banner | `consoleOffUart0()` |
 | A live port blips on an unrelated save | Only ports whose baud actually changed are re-opened — verify the guard still holds | `applySerialBauds()` |
 
 ## Build and tooling
@@ -129,6 +131,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | Serial peripherals: console output on S3 (UART0) and the missing ROM banner after a restart (`consoleOffUart0()`, HIL `ncwire.s3_console_quiet`). |
 | 2026-10-06 | _(pending)_ | Serial peripherals: S4/S5 transmit through RMT (`NcSoftSerial`), so only their receive limits the baud; a row for the `no RMT channel` fallback. |
 | 2026-10-04 | `a72459b` | "Config lost unexpectedly" no longer blames Full Wipe, which never writes `/config.json` (D-NC34). |
 | 2026-10-04 | `941a782` | Two tabs on one WCB: the sid row now says why tabs get a random start, and a new row covers a Save confirmed by the other tab's ACK (D-NC35). |

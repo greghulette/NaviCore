@@ -107,6 +107,16 @@ without one (or not 8N1) transmits bit-banged and prints `[AUX] TX GPIO<n>: no R
 A `sbusSharedUart = false` fallback (SBUS OUT on its own UART0, S3 bit-banged) exists in
 the code but no current board uses it.
 
+**UART0 carries S3 only.** The core's prebuilt sdkconfig keeps UART0 as the ESP-IDF console
+(`CONFIG_ESP_CONSOLE_UART_NUM 0`, the USB-Serial/JTAG secondary), and `applySerialBauds()`
+routes UART0's TX to S3's pin, so console output would go out S3 into its device.
+`consoleOffUart0()`, early in `setup()`, sends the ROM printf channel and IDF log lines to USB
+(a log line is dropped, not waited for, when USB has no room) and sets the ROM's log-off flag,
+so a software restart prints no `ESP-ROM:` banner — on USB either; the `Reset reason:` line
+reports the cause. A CPU reset keeps the GPIO matrix, which is why the banner reached S3; at
+power-on it goes out UART0's own pin (GPIO43) instead. Still on S3: a panic's backtrace (the
+panic handler writes the console UART directly) and the banner after a watchdog (RTC) reset.
+
 **Silkscreen vs. firmware names.** The NaviCore v2 PCB labels its aux headers
 *Serial 1 / 2 / 3*; the firmware calls the same ports **S3 / S4 / S5** (inherited from
 WCB numbering). Any user-facing text must translate — and the **mesh-facing** names already
@@ -149,7 +159,8 @@ reformat — the config filesystem.
 3. Drive `MAESTRO_TX_PIN` high — a floating command line makes servos twitch before
    `Serial2.begin()` runs ~2 s later.
 4. USB-CDC: 8 KB RX buffer, 8 KB TX buffer, 50 ms TX timeout — all **before**
-   `Serial.begin()`. Then 1.5 s for a host to attach, and the boot banner: `=== NaviCore ===`,
+   `Serial.begin()`. Then `consoleOffUart0()` (§4, "UART0 carries S3 only"), 1.5 s for a
+   host to attach, and the boot banner: `=== NaviCore ===`,
    `App SHA256: <16 hex>` (which image this is — [PROTOCOLS.md §3](PROTOCOLS.md#other)), the
    bootloader line, the reset reason and the boot-attempt count.
    `loop()` also calls `kickUsbCdcTx()` every 20 ms, which flushes the USB-Serial/JTAG TX FIFO and re-arms
@@ -488,6 +499,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | §4 "UART0 carries S3 only", §6 step 4: `consoleOffUart0()` keeps IDF logs, ROM printf and the software-restart ROM banner off UART0 (HIL `ncwire.s3_console_quiet`). |
 | 2026-10-06 | _(pending)_ | §10: device writes reach S3/S4/S5 through `auxDev()`, which holds them behind a paced line in flight, so they never land inside one (HIL `ncwire.tx_interleave`). |
 | 2026-10-06 | _(pending)_ | §4 UART allocation, §8, §11: S4/S5 are `NcSoftSerial` — RMT transmit, EspSoftwareSerial receive with the GPIO ISR service at level 3 and the `rxBits()` race closed (WCB repo HIL `ncwire.soft_tx_integrity`, D-NC24; `ncwire.rx_monitor_bcast_in`). |
 | 2026-10-05 | `bb0dda6` | §8: WebSocket output is a Core 1 → httpd-task hand-off through NaviCore's own PSRAM queue under `wsTxMux`, one `wsDrainWork` at a time. |
