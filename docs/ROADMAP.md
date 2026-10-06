@@ -122,7 +122,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-06 | _(pending)_ | §1 mesh ↔ serial bridge: S4/S5 transmit through RMT (`NcSoftSerial`); why writes still go through `serialFwdQueue`. |
+| 2026-10-06 | `2c698c6` | §1 mesh ↔ serial bridge: S4/S5 transmit through RMT (`NcSoftSerial`); why writes still go through `serialFwdQueue`. |
 | 2026-08-18 | _(uncommitted)_ | §1 rewritten as **shipped** — the mesh↔serial bridge (S1-S3 → firmware S3/S4/S5 numbering, always-on targeted `;s<n>` writes, per-port broadcast in/out, the `serialFwdQueue` Core-1 hop) is built in firmware and tool; the answered open questions are carried forward as constraints. §5: corrected the cloud-backup row — backups are keyed on an independent **username + password** pair, not the WCB password; the no-per-install-discriminator rationale still stands. |
 | 2026-08-13 | _(uncommitted)_ | Recorded the decision NOT to port the WCB `?ETM,CHAR` network test to NaviCore, with the reasoning — chiefly that `ETM_RETRY_INTERVAL_MS` has no setter, so the recommended timeout it produces cannot be applied. Relaying `?MGMT,ETM,CHAR` is the cheap path if it is ever wanted. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

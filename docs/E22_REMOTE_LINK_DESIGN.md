@@ -498,5 +498,5 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-06 | _(pending)_ | §8.2: S4/S5 transmit through RMT and receive at level 3 (`NcSoftSerial`); what that leaves of the SPI concern. |
+| 2026-10-06 | `2c698c6` | §8.2: S4/S5 transmit through RMT and receive at level 3 (`NcSoftSerial`); what that leaves of the SPI concern. |
 | 2026-08-11 | _(uncommitted)_ | Initial version. Feasibility established against the current code: the `sbusValues[24]` single-writer seam, the existing `boardType` profile mechanism, and the measured ~860 KB flash headroom. Records that NaviHiltCore's pin map equals boardType 0 minus S5, that the E22 driver is new work but `Droid_Remote`/`Droid_Gateway` are protocol prior art (including the ~250 ms inline-TX starvation failure), and that link failsafe (§6) — not CPU or memory — is the real risk. |

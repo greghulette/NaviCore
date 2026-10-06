@@ -499,9 +499,9 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-06 | _(pending)_ | §4 "UART0 carries S3 only", §6 step 4: `consoleOffUart0()` keeps IDF logs, ROM printf and the software-restart ROM banner off UART0 (HIL `ncwire.s3_console_quiet`). |
-| 2026-10-06 | _(pending)_ | §10: device writes reach S3/S4/S5 through `auxDev()`, which holds them behind a paced line in flight, so they never land inside one (HIL `ncwire.tx_interleave`). |
-| 2026-10-06 | _(pending)_ | §4 UART allocation, §8, §11: S4/S5 are `NcSoftSerial` — RMT transmit, EspSoftwareSerial receive with the GPIO ISR service at level 3 and the `rxBits()` race closed (WCB repo HIL `ncwire.soft_tx_integrity`, D-NC24; `ncwire.rx_monitor_bcast_in`). |
+| 2026-10-06 | `b247a91` | §4 "UART0 carries S3 only", §6 step 4: `consoleOffUart0()` keeps IDF logs, ROM printf and the software-restart ROM banner off UART0 (HIL `ncwire.s3_console_quiet`). |
+| 2026-10-06 | `50078c9` | §10: device writes reach S3/S4/S5 through `auxDev()`, which holds them behind a paced line in flight, so they never land inside one (HIL `ncwire.tx_interleave`). |
+| 2026-10-06 | `2c698c6` | §4 UART allocation, §8, §11: S4/S5 are `NcSoftSerial` — RMT transmit, EspSoftwareSerial receive with the GPIO ISR service at level 3 and the `rxBits()` race closed (WCB repo HIL `ncwire.soft_tx_integrity`, D-NC24; `ncwire.rx_monitor_bcast_in`). |
 | 2026-10-05 | `bb0dda6` | §8: WebSocket output is a Core 1 → httpd-task hand-off through NaviCore's own PSRAM queue under `wsTxMux`, one `wsDrainWork` at a time. |
 | 2026-10-04 | `aa6ae0a` | §7 lists `checkDeferredRestart()`, last in `loop()`: a mesh `REBOOT` is ACKed from `rcTelemetry::tick()` and restarts once the inbound queues are quiet (HIL `ncboot.mesh_reboot`). |
 | 2026-10-04 | `4833716` | §7, §10: a serial action goes through the paced aux transmitter (`queueSerialAction()` → `auxTxPump()`) instead of one blocking whole-line write (HIL `ncdev.serial_action_paced`). |

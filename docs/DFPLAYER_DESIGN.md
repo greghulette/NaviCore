@@ -250,6 +250,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-06 | _(pending)_ | Traps: S4/S5 are `NcSoftSerial` (RMT transmit); only their receive has the ≤57600 limit. |
+| 2026-10-06 | `2c698c6` | Traps: S4/S5 are `NcSoftSerial` (RMT transmit); only their receive has the ≤57600 limit. |
 | 2026-08-18 | _(uncommitted)_ | Status corrected to **shipped** — the header and the §9 tail still read "in progress" / "Nothing is pushed" after every repo had landed, which reads as a build-blocking `WcbCmd` prerequisite that was satisfied long ago. §8's push order restated as the rule for the next change rather than outstanding work. |
 | 2026-08-05 | _(uncommitted)_ | Feature built across all five repos: `WcbCmd` `DfPlayerCodec` (0.8.0), NaviCore `RA_DFPLAYER` + `dfpDest` + `;D` dispatch, config-tool Audio tab and DFPlayer editor, WCB `WCB_DFP` + `?DFP` + `;D` routing + `WDP_CAP_DFPLAYER`, capability mirrors, both wikis. Page written alongside — decisions locked, wire format and verb table, data model, routing, traps, repo build order. |

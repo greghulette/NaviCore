@@ -131,8 +131,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-06 | _(pending)_ | Serial peripherals: console output on S3 (UART0) and the missing ROM banner after a restart (`consoleOffUart0()`, HIL `ncwire.s3_console_quiet`). |
-| 2026-10-06 | _(pending)_ | Serial peripherals: S4/S5 transmit through RMT (`NcSoftSerial`), so only their receive limits the baud; a row for the `no RMT channel` fallback. |
+| 2026-10-06 | `b247a91` | Serial peripherals: console output on S3 (UART0) and the missing ROM banner after a restart (`consoleOffUart0()`, HIL `ncwire.s3_console_quiet`). |
+| 2026-10-06 | `2c698c6` | Serial peripherals: S4/S5 transmit through RMT (`NcSoftSerial`), so only their receive limits the baud; a row for the `no RMT channel` fallback. |
 | 2026-10-04 | `a72459b` | "Config lost unexpectedly" no longer blames Full Wipe, which never writes `/config.json` (D-NC34). |
 | 2026-10-04 | `941a782` | Two tabs on one WCB: the sid row now says why tabs get a random start, and a new row covers a Save confirmed by the other tab's ACK (D-NC35). |
 | 2026-09-28 | `1e15601` | *Build and tooling*: which build a board runs, and decoding a backtrace against the wrong `.elf` — answered by the new `App SHA256` line. |
