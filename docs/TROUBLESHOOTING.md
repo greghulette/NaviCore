@@ -26,7 +26,7 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 |---|---|---|
 | `{"type":"ERROR","msg":"JSON parse failed",...,"rxLen":N}` | Line truncated in transit — compare `rxLen` against what the host sent. The board sets a 4 KB RX buffer and the tool chunks writes at 512 B with 4 ms pacing | `handleSerialInput()`, `sendLine()` |
 | A reply (ACK, `CONFIG`, a `#L` dump) arrives one command late, or only when the next command is sent | The USB-CDC core marked the host disconnected after a brief pause in draining output and stopped sending. `kickUsbCdcTx()` in `loop()` recovers it within 20 ms; if this returns, check that it is still called | `NaviCore.ino` `kickUsbCdcTx` |
-| `CONFIG` reply arrives truncated / mangled mid-string | USB-CDC TX overflow. The 8 KB TX buffer and 50 ms TX timeout exist for exactly this | `setup()` |
+| `CONFIG` reply arrives truncated / mangled mid-string | USB-CDC TX overflow: a host that stopped reading for the core's 50 ms TX timeout made it drop the rest of a long write, then the oldest queued bytes (a hole mid-line). `printLong()` paces GET_CONFIG and GET_CMDLIB into the 8 KB TX ring and waits up to 1 s for a stalled host; seen again, the host stalled for longer than that | `printLong()`, `setup()` |
 | A new JSON field reads as its default on the board | Not added to the ArduinoJson **filter whitelist**. The header parse is a whitelist — unlisted fields are silently stripped | `handleSerialInput()` |
 | Board reboots when the config tool connects (incl. every page refresh) | **Expected on a NaviCore v2, not a fault.** `Reset reason: 11 - USB peripheral`, RTC code 21 = `USB UART chip reset`. The S3 has no bridge chip: the USB Serial/JTAG peripheral itself resets the chip from the host CDC control lines — the mechanism esptool uses. It fires on port **OPEN** (the boot log appears as the port opens; the first PING follows `settleMs` later), and Chrome asserts DTR/RTS as part of `open()` with no Web Serial way to suppress it. The `pagehide` teardown does **not** address it — that only cleans the close edge. The only real lever is the `USBMode` FQBN field (`hwcdc` → USB Serial/JTAG hardware reset; `default`/TinyUSB implements reset in software instead) — a load-bearing build change needing hardware validation, not a config tweak. **Consequence: every RAM-only counter resets on connect, including the mesh stats** | `printBootTelemetry()` |
 | Board appears frozen with no host attached | TX timeout tuning. 0 drops bytes when the host is briefly slow; ~100 ms stalls the loop. 50 ms is the deliberate middle | `setup()` |
@@ -131,6 +131,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | Serial/JSON: a mangled CONFIG line and `printLong()`, which paces GET_CONFIG and GET_CMDLIB into the USB TX ring (D-NC75). |
 | 2026-10-06 | `b247a91` | Serial peripherals: console output on S3 (UART0) and the missing ROM banner after a restart (`consoleOffUart0()`, HIL `ncwire.s3_console_quiet`). |
 | 2026-10-06 | `2c698c6` | Serial peripherals: S4/S5 transmit through RMT (`NcSoftSerial`), so only their receive limits the baud; a row for the `no RMT channel` fallback. |
 | 2026-10-04 | `a72459b` | "Config lost unexpectedly" no longer blames Full Wipe, which never writes `/config.json` (D-NC34). |

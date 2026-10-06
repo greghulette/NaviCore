@@ -170,6 +170,10 @@ reformat — the config filesystem.
    arrived (about 2 % of back-to-back commands on the HIL bench; 0 of 800 with the kick). IN_EMPTY only
    fires once the host drains the FIFO, so with no reader attached nothing changes and the no-host guard
    still holds.
+   A reply line longer than the TX ring (GET_CONFIG ~14 KB, GET_CMDLIB ~19 KB) goes out through
+   `printLong()`, which hands the core only what fits and waits for room itself (up to 1 s): a single
+   write of it let the core's 50 ms timeout drop the rest and then the oldest queued bytes, a hole
+   mid-line for any host that paused reading (D-NC75).
 5. `ps_calloc` the config, then `rcConfigLoadDefaults()` → `rcConfigBeginLFS()` →
    `rcConfigLoadLFS()`, falling back to a one-time NVS→LittleFS migration. A
    *present-but-unreadable* `/config.json` is kept and defaults run for that boot —
@@ -499,6 +503,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | §6 step 4: long reply lines (GET_CONFIG, GET_CMDLIB) are paced into the USB TX ring by `printLong()` (D-NC75). |
 | 2026-10-06 | `b247a91` | §4 "UART0 carries S3 only", §6 step 4: `consoleOffUart0()` keeps IDF logs, ROM printf and the software-restart ROM banner off UART0 (HIL `ncwire.s3_console_quiet`). |
 | 2026-10-06 | `50078c9` | §10: device writes reach S3/S4/S5 through `auxDev()`, which holds them behind a paced line in flight, so they never land inside one (HIL `ncwire.tx_interleave`). |
 | 2026-10-06 | `2c698c6` | §4 UART allocation, §8, §11: S4/S5 are `NcSoftSerial` — RMT transmit, EspSoftwareSerial receive with the GPIO ISR service at level 3 and the `rxBits()` race closed (WCB repo HIL `ncwire.soft_tx_integrity`, D-NC24; `ncwire.rx_monitor_bcast_in`). |

@@ -1765,6 +1765,53 @@ static void vlogf(const char* fmt, ...) {
   // and on overflow the sink drops whole lines rather than truncating one.
 }
 
+// ── A long reply line over USB (D-NC75) ─────────────────────────────────────
+// GET_CONFIG (~14 KB) and GET_CMDLIB (~19 KB) went out as ONE print into the 8 KB USB TX
+// ring. The core's HWCDC::write (esp32 3.3.4) waits for room in 1 ms steps; after its
+// 50 ms TX timeout with no progress it marks the host gone and returns the rest unsent,
+// and the next writes (the closing "}") take its not-connected path, which pops the
+// OLDEST queued bytes to make room. So a host that stopped reading for 50 ms got the line
+// with a hole in its middle (the WCB repo's HIL saw "cmd":";A,P run into "clusive":false).
+// printLong() hands the port only what fits the ring (availableForWrite), so the core
+// never waits and never times out, and waits for room itself - kicking the drain as
+// loop() does - for up to LONG_LINE_STALL_MS without progress. A host that reads nothing
+// for that long, or none at all (HWCDC not connected: a WebSocket-only session), gets the
+// rest the old way, at once. The WebSocket and RTERM tees (rcSerial's capture) see every
+// byte either way. loop() waits with it: only a host that asked for the line and then
+// stalled can hold it, at most LONG_LINE_STALL_MS.
+#define LONG_LINE_STALL_MS 1000
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+static void kickUsbCdcTx();
+#endif
+static void printLong(const char* p, size_t len) {
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  if (!HWCDC::isConnected()) { Serial.write((const uint8_t*)p, len); return; }   // nobody draining USB
+#endif
+  uint32_t lastMove = millis();
+  while (len) {
+    const int room = Serial.availableForWrite();
+    if (room > 0) {
+      // All of it goes: it fits, so the core takes it whole. Advance by what was handed
+      // over - rcSerial's capture already took all n bytes.
+      const size_t n = len < (size_t)room ? len : (size_t)room;
+      Serial.write((const uint8_t*)p, n);
+      p += n;
+      len -= n;
+      lastMove = millis();
+      continue;
+    }
+    if ((uint32_t)(millis() - lastMove) >= LONG_LINE_STALL_MS) {
+      Serial.write((const uint8_t*)p, len);   // the host stopped reading: as before
+      return;
+    }
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+    kickUsbCdcTx();
+#endif
+    delay(1);
+  }
+}
+static inline void printLong(const String& s) { printLong(s.c_str(), s.length()); }
+
 // ── UART0 is aux port S3: the console stays off it ──────────────────────────
 // The core's prebuilt sdkconfig keeps UART0 as the ESP-IDF console
 // (CONFIG_ESP_CONSOLE_UART_NUM 0; the USB-Serial/JTAG is only the secondary one), and
@@ -4213,7 +4260,7 @@ bool processInputLine(const String& line) {
         Serial.println(cfg);
       } else {
         Serial.print("{\"type\":\"CONFIG\",\"data\":");
-        Serial.print(cfg);
+        printLong(cfg);   // ~14 KB: paced into the USB TX ring (D-NC75)
         Serial.println("}");
       }
 
@@ -4225,7 +4272,7 @@ bool processInputLine(const String& line) {
       if (!rcCmdlibLoadLFS(lib) || lib.length() == 0) lib = "{\"boards\":[],\"enums\":{}}";
       Serial.printf("{\"type\":\"CMDLIB\",\"size\":%u,\"hash\":%u,\"data\":",
                     (unsigned)lib.length(), (unsigned)rcCmdlibHash(lib));
-      Serial.print(lib);
+      printLong(lib);   // up to ~19 KB: paced into the USB TX ring (D-NC75)
       Serial.println("}");
 
     } else if (strcmp(type,"GET_CMDLIB_META")==0) {

@@ -266,7 +266,7 @@ payload approaches 98 KB and copying it per line is real cost.
 | `PING` / `{"type":"PING"}` | `{"type":"PONG","version":"<FW_VERSION>"}` | Also clears a stale calibration mute. Over the mesh (`rc_telemetry.h`) the answer is `{"sys":1,"type":"PONG","id":<deviceId>,"version":…,"model":…,"mode":…}`. **Only the relayed PONG carries `id`**: the tool's transport auto-detect reads the link a PONG came over from it, so a direct PONG must never gain one |
 | `{"type":"GET_CONFIG"}` | `{"type":"CONFIG","data":{…}}` | Full `rcConfigToJSON()` |
 | `{"type":"SET_CONFIG","data":{…},"saveId":N}` | `{"type":"ACK","of":"SET_CONFIG","ok":bool,"saveId":N}` | Deserialised un-filtered; re-applies bauds, SBUS-out, board profile live. `saveId` is echoed so the tool can tell its own save's ACK from a late or foreign one; the tool sends a random per-tab base plus its own save count (`_saveWireId`) |
-| `{"type":"GET_CMDLIB"}` | `{"type":"CMDLIB","size":N,"hash":H,"data":{…}}` | Command library stored on the droid, opaque to firmware |
+| `{"type":"GET_CMDLIB"}` | `{"type":"CMDLIB","size":N,"hash":H,"data":{…}}` | Command library stored on the droid, opaque to firmware. Like CONFIG's, its line (up to ~19 KB) goes out paced into the USB TX ring by `printLong()`, so a host that pauses reading gets it whole (up to 1 s of no progress) |
 | `{"type":"GET_CMDLIB_META"}` | `{"type":"CMDLIB_META","size":N,"hash":H}` | Cheap change-check so a connect can skip the pull |
 | `{"type":"SET_CMDLIB","data":{…}}` | `ACK` | Raw value pulled by substring, stored verbatim. Its end is found by **bracket matching** (`rcCmdlibExtractData()`, the one extraction USB and the bridge share), so a key after `data` — the tool's `"sys":1` — is never stored with the library |
 | `{"type":"START_MONITOR"}` | streams `PWM_UPDATE` every 50 ms | |
@@ -1006,6 +1006,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | GET_CONFIG and GET_CMDLIB replies go out through `printLong()`: paced into the 8 KB USB TX ring so a host that pauses reading gets the line whole instead of with a hole mid-line (WCB repo HIL plan D-NC75). |
 | 2026-10-06 | `50078c9` | `DBG_WIRE`: the aux TX pump writes (and logs) one block per pass; a device write held behind a line is logged when it goes out (HIL `ncwire.tx_interleave`). |
 | 2026-10-05 | `bb0dda6` | WebSocket output goes through NaviCore's own PSRAM queue, drained by one httpd work item at a time, instead of one work item per frame or a 2 KB hold behind a slow send; a line is admitted whole at its first byte or dropped whole (over 256 KB queued) with a USB note. The hold cut GET_CONFIG at 2048 characters on a healthy socket — its start time could also read 1 ms in the future (`millis() \| 1`) and wrap to ~4.3e9 ms (HIL `ncwifi.ws_parity`, `ws_utf8_and_latch`, `intellex.wifi_nc_tool`; a regression from `37428e4`). |
 | 2026-10-04 | `37428e4` | A client whose send fails is shut down with `shutdown()`, not `httpd_sess_trigger_close()`, whose queued close was lost in httpd's full control socket and left the stalled client open and deaf (HIL `ncwifi.ws_stalled_client`); `pump()` queues nothing behind a send stalled 250 ms (`WS_LINK_SLOW_MS`). |
