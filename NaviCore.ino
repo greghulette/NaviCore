@@ -1807,8 +1807,17 @@ static void consoleOffUart0() {
 // The destination is GLOBAL — pulled from rcConfig.hcrDest rather than from
 // the action itself. This lets every HCR action share one configured
 // vocalizer wiring; the action only carries fn/chan/track.
-static void executeHcrAction(const RcAction& a) {
+static void executeHcrAction(const RcAction& action) {
   const RcHcrDest& dest = rcConfig.hcrDest;
+  // A Trigger/Stimulate level (fn 3/4) is Moderate (0) or Strong (1): the config tool
+  // offers those two and shows a saved 2 or more as Strong, and the WCB transport's
+  // verbs carry MOD|STRONG. HcrCodec formats any number, so a legacy level 50 went out
+  // <SH50,QEH,QT> on NaviCore's own port but <SH1,QEH,QT> through a WCB: one saved
+  // action, two commands (HIL ncdev.hcr_level_same_both_ways, D-NC59). Normalised here,
+  // before either transport, as the tool reads it. The config keeps what was saved, and
+  // the trace lines name the action as saved (action.track) beside the bytes that went out.
+  RcAction a = action;
+  if ((a.fn == 3 || a.fn == 4) && a.track > 1) a.track = 1;
 
   // transport 2 = the user has this device switched off in the tool's Audio
   // section. Refuse here rather than at the port: a disabled device must not
@@ -1847,7 +1856,7 @@ static void executeHcrAction(const RcAction& a) {
     }
     if (cmd.length() == 0) {
       dskip(DBG_HCR, "[DISPATCH] HCR-WCB: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
-            a.fn, a.chan, a.track);
+            a.fn, a.chan, action.track);
       return;
     }
     uint8_t target = (uint8_t)atoi(dest.target);
@@ -1930,11 +1939,11 @@ static void executeHcrAction(const RcAction& a) {
   }
   if (payload.length() == 0) {
     dskip(DBG_HCR, "[DISPATCH] HCR-Serial: bad/unsupported fn=%u chan=%d track=%d — skipped\n",
-          a.fn, a.chan, a.track);
+          a.fn, a.chan, action.track);
     return;
   }
   dlog(DBG_HCR, "[DISPATCH] HCR→%s  fn=%u chan=%d track=%d  %s",
-        dest.target, a.fn, a.chan, a.track, payload.c_str());
+        dest.target, a.fn, a.chan, action.track, payload.c_str());
   auxDev(hcrSerial)->print(payload);
 }
 
