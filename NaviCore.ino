@@ -1919,7 +1919,11 @@ static void executeHcrAction(const RcAction& a) {
     int step = (a.track > 0) ? a.track : 5;
     if (a.fn == 19) step = -step;
     int nv = g_hcr.getVol(ch) + step;
-    if (nv < 0) nv = 0; else if (nv > 99) nv = 99;
+    // 0-100, the range of HcrCodec's SetVolume and all-channel steps and of a WCB's
+    // ;H,VOLUP,<ch>. It was 99 (the cap WCB issue #16 removed from WcbCmd 0.9.0), so the
+    // same action sent <PVA99> here and <PVA100> through a WCB, and a Volume Up on a
+    // channel at 100 turned it down (HIL ncdev.hcr_local_volstep_cap, D-NC57).
+    if (nv < 0) nv = 0; else if (nv > 100) nv = 100;
     payload = g_hcr.format(17, ch, nv);                 // SetVolume(ch, nv) — updates the shadow
   } else {
     payload = hcrFormatCommand(a.fn, a.chan, a.track);  // chan 0 = ALL + every other fn (byte-identical to today)
