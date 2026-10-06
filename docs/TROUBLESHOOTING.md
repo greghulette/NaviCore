@@ -131,7 +131,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-06 | _(pending)_ | Serial/JSON: a mangled CONFIG line and `printLong()`, which paces GET_CONFIG and GET_CMDLIB into the USB TX ring (D-NC75). |
+| 2026-10-06 | `0657025` | Serial/JSON: a mangled CONFIG line and `printLong()`, which paces GET_CONFIG and GET_CMDLIB into the USB TX ring (D-NC75). |
 | 2026-10-06 | `b247a91` | Serial peripherals: console output on S3 (UART0) and the missing ROM banner after a restart (`consoleOffUart0()`, HIL `ncwire.s3_console_quiet`). |
 | 2026-10-06 | `2c698c6` | Serial peripherals: S4/S5 transmit through RMT (`NcSoftSerial`), so only their receive limits the baud; a row for the `no RMT channel` fallback. |
 | 2026-10-04 | `a72459b` | "Config lost unexpectedly" no longer blames Full Wipe, which never writes `/config.json` (D-NC34). |
