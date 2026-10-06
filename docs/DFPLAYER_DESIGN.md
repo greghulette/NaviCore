@@ -192,7 +192,7 @@ forwarded to NaviCore, which has no inbound `;D` handler and would silently drop
 | **Boot silence** — a DFPlayer needs ~1.5–3 s after power-on before it accepts commands | A sound action fired at boot is silently lost | The codec has no clock and does not gate. Documented for the user; a boot-time sound should carry a `delayMs` |
 | **Volume scale inversion** vs the MP3 Trigger | `VOL,25` is near-silent on one and near-max on the other | Separate action types; the tool labels the field `Volume (0=silent, 30=loud)` |
 | **Clone modules** vary in opcode support | `RANDOM`, `EQ`, `LOOPFOLDER` may no-op on some clones | Fire-and-forget means a no-op is harmless; `STATUS` exists for bench diagnosis |
-| **`S4`/`S5` are bit-banged `SoftwareSerial`** | — | 9600 is well inside their ≤57600 limit; any aux port works |
+| **`S4`/`S5` receive in software** (`NcSoftSerial`: EspSoftwareSerial RX, RMT TX) | — | 9600 is well inside their ≤57600 receive limit; any aux port works |
 | **A port hosting a DFPlayer must not be drained as raw serial** | Response frames would be consumed by the wrong reader | `auxPortHasDevice()` must return true for a DFPlayer port, as it already does for HCR/MP3/WLED |
 
 ---
@@ -250,5 +250,6 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | Traps: S4/S5 are `NcSoftSerial` (RMT transmit); only their receive has the ≤57600 limit. |
 | 2026-08-18 | _(uncommitted)_ | Status corrected to **shipped** — the header and the §9 tail still read "in progress" / "Nothing is pushed" after every repo had landed, which reads as a build-blocking `WcbCmd` prerequisite that was satisfied long ago. §8's push order restated as the rule for the next change rather than outstanding work. |
 | 2026-08-05 | _(uncommitted)_ | Feature built across all five repos: `WcbCmd` `DfPlayerCodec` (0.8.0), NaviCore `RA_DFPLAYER` + `dfpDest` + `;D` dispatch, config-tool Audio tab and DFPlayer editor, WCB `WCB_DFP` + `?DFP` + `;D` routing + `WDP_CAP_DFPLAYER`, capability mirrors, both wikis. Page written alongside — decisions locked, wire format and verb table, data model, routing, traps, repo build order. |

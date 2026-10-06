@@ -11,7 +11,7 @@
 //    • Local Pololu Maestro on Serial2 @ 115200 baud (GPIO6 TX)
 //    • Up to 8 remote Maestros via WCBStream broadcast over ESP-NOW
 //    • WCB unicast and broadcast command dispatch
-//    • Three aux serial ports S3/S4/S5 (S3 = hardware UART0; S4/S5 SoftwareSerial)
+//    • Three aux serial ports S3/S4/S5 (S3 = hardware UART0; S4/S5 NcSoftSerial: RMT TX)
 //    • Multi-mode RC button/switch/knob mapping (NVS-backed, GUI-configurable)
 //    • USB Serial JSON protocol for config tool and CLI debugging
 //      (open config_tool/index.html on your PC, connect via Web Serial API)
@@ -46,6 +46,8 @@
 #include "esp_timer.h"          // one-shot boot-guard timer (cold-boot auto-recovery)
 #include "esp_ota_ops.h"        // esp_ota_get_bootloader_description (boot banner)
 #include "rom/rtc.h"            // rtc_get_reset_reason (low-level boot telemetry)
+#include "driver/gpio.h"        // gpio_install_isr_service at level 3 (soft-port RX, setup())
+#include "esp_log.h"            // esp_log_level_set: mute the gpio tag while setup() attaches RX
 #include <esp_netif.h>          // esp_netif_dhcps_option/_stop/_start — SoftAP offers no gateway
 #include "dhcpserver/dhcpserver.h"  // dhcps_offer_t
 #include <WCB_Client.h>   // header in greghulette/WCBClient is WCB_Client.h
@@ -66,6 +68,7 @@
 #include "navicore_rterm.h" // remote terminal — mirror CLI output back over the WCB bridge (RTERM)
 #include "navicore_record.h" // record/replay — capture dispatched droid actions to a clip + replay
 #include "navicore_wsserver.h" // optional WebSocket command endpoint over the SoftAP (rcConfig.wifiEnabled)
+#include "navicore_softserial.h" // S4/S5: EspSoftwareSerial RX + RMT TX (NcSoftSerial)
 
 // USB-CDC tee instance backing the `#define Serial rcSerial` in rc_serial.h.
 // Defined once here; setup()'s Serial.begin()/setRxBufferSize() drive it.
@@ -247,22 +250,23 @@ WCBStream* maestroBroadcast = nullptr;
 //    • Serial0 → UART0 → aux S3 (freed because SBUS IN+OUT share UART1)
 //  Both current boards use the shared-SBUS layout (sbusSharedUart=true), so the
 //  first aux port S3 runs on HARDWARE UART0/Serial0 (can exceed 57600, up to
-//  115200); S4 and S5 are bit-banged via SoftwareSerial (≤57600 baud; they never
-//  run the 100k SBUS rate). The dedicated-SBUS-out-on-UART0 layout
+//  115200); S4 and S5 are NcSoftSerial (navicore_softserial.h): EspSoftwareSerial
+//  receive, RMT transmit (≤57600 baud for receive; they never run the 100k SBUS
+//  rate). The dedicated-SBUS-out-on-UART0 layout
 //  (sbusSharedUart=false) is a kept-but-unused fallback — see applyBoardProfile().
 // =============================================================================
 // Aux command ports — their TYPE is RUNTIME board-dependent, so they're reached
 // through Stream* pointers bound in setup() AFTER applyBoardProfile(). On both
 // current (shared-SBUS) boards: s3 = HARDWARE Serial0/UART0, s4 + s5 =
-// SoftwareSerial. v2 silkscreen = "Serial 1/2/3"; WCB 3.2 = its "Serial 3/4/5"
+// NcSoftSerial. v2 silkscreen = "Serial 1/2/3"; WCB 3.2 = its "Serial 3/4/5"
 // headers (S5 = GPIO9/10). The dedicated-SBUS fallback would make s3 + s4
-// SoftwareSerial with s5 = nullptr.
-// Two SoftwareSerial instances back whichever slots are software on the active
+// NcSoftSerial with s5 = nullptr.
+// Two NcSoftSerial instances back whichever slots are software on the active
 // board; the core's Serial0 backs s3 on v2. s3IsHw tells applySerialBauds which
 // .begin() overload to use. (This replaces the old compile-time #if SBUS_SHARED_UART
 // HardwareSerial&/SoftwareSerial alias — that choice is now runtime, per board.)
-SoftwareSerial swAux0;      // backing SoftwareSerial A
-SoftwareSerial swAux1;      // backing SoftwareSerial B
+NcSoftSerial swAux0;        // backing soft port A (RMT TX, library RX)
+NcSoftSerial swAux1;        // backing soft port B
 Stream* s3 = nullptr;       // aux "S3"  (v2 "Serial 1")
 Stream* s4 = nullptr;       // aux "S4"  (v2 "Serial 2")
 Stream* s5 = nullptr;       // aux "S5"  (v2 "Serial 3" GPIO38/47; WCB 3.2 "Serial 5" GPIO9/10)
@@ -278,16 +282,18 @@ static const char* auxPortLabel(int idx) {
   return lbl;
 }
 
-// Open/close an aux port, dispatching on hardware-UART vs bit-banged SoftwareSerial.
+// Open/close an aux port, dispatching on hardware UART vs NcSoftSerial. The cast must
+// name NcSoftSerial: its begin()/end() hide the library's (they are not virtual), and
+// through a SoftwareSerial* the port would come up bit-banged with no RMT channel.
 static inline void auxBegin(Stream* p, bool isHw, uint32_t baud, uint8_t rxPin, uint8_t txPin) {
   if (!p) return;
   if (isHw) ((HardwareSerial*)p)->begin(baud, SERIAL_8N1, rxPin, txPin);
-  else      ((SoftwareSerial*)p)->begin(baud, SWSERIAL_8N1, rxPin, txPin, false, 95);
+  else      ((NcSoftSerial*)p)->begin(baud, SWSERIAL_8N1, rxPin, txPin, false, 95);
 }
 static inline void auxEnd(Stream* p, bool isHw) {
   if (!p) return;
   if (isHw) ((HardwareSerial*)p)->end();
-  else      ((SoftwareSerial*)p)->end();
+  else      ((NcSoftSerial*)p)->end();
 }
 // SBUS OUT uses the real UART0 (Serial0) — see setup() and SBUS_OUT_PIN above.
 
@@ -317,10 +323,11 @@ static inline Stream* auxStreamFor(int fwPort) {
 //              bcastOut ports. Both are per-port opt-in (rcConfig.serialBcast*).
 //
 // EVERY write is deferred to loop() through this queue. onWCBCommand runs on the
-// Core-0 WiFi task, and S4/S5 are bit-banged SoftwareSerial — a write there blocks
-// with interrupts off for the whole frame time (~1 ms per 10 chars at 9600), which
-// on the WiFi task would stall ESP-NOW and on either core would jitter the ~111 fps
-// SBUS path. The queue is the same cross-core hop pattern as remoteCliQueue.
+// Core-0 WiFi task, and a write to S4/S5 blocks its caller until the bytes are on
+// the wire (~1 ms per byte at 9600; NcSoftSerial sleeps on the RMT driver rather
+// than spinning), which on the WiFi task would stall ESP-NOW. Every soft-port
+// writer is also the loop task, so one port never has two writers on two cores.
+// The queue is the same cross-core hop pattern as remoteCliQueue.
 //
 // text[] is sized to the 200-char mesh command payload (WCB_Client's structCommand
 // cap), so a forwarded command is never truncated in transit.
@@ -1490,11 +1497,11 @@ static void executeMaestroCmd(uint8_t id, const char* cmd) {
 // =============================================================================
 //  Serial port write helpers (S3, S4, S5 aux ports)
 // =============================================================================
-// Write the payload + a trailing CR in as few SoftwareSerial calls as
-// possible.  The old form `for (char c : (s + '\r'))` allocated a fresh
-// String every call AND wrote one byte at a time; on a bit-banged port
-// each write blocks ~1 byte-time, so a long command stalled loop() (and
-// thus SBUS) for many ms.  One block write + one CR minimizes the hit.
+// Write the payload + a trailing CR in as few port calls as possible.  The
+// old form `for (char c : (s + '\r'))` allocated a fresh String every call AND
+// wrote one byte at a time; on a soft port each write returns only once its
+// bytes are on the wire, so a long command stalled loop() (and thus SBUS) for
+// many ms.  One block write + one CR minimizes the hit.
 void writeS3(const String& s) { if (s3) { HIL_TAP(s3)->write((const uint8_t*)s.c_str(), s.length()); HIL_TAP(s3)->write('\r'); } }
 void writeS4(const String& s) { if (s4) { HIL_TAP(s4)->write((const uint8_t*)s.c_str(), s.length()); HIL_TAP(s4)->write('\r'); } }
 void writeS5(const String& s) { if (s5) { HIL_TAP(s5)->write((const uint8_t*)s.c_str(), s.length()); HIL_TAP(s5)->write('\r'); } }
@@ -3441,7 +3448,7 @@ static void applySerialBauds(bool initial) {
   }
   if (initial || auxBaud[0] != appliedAuxBaud[0]) {
     if (!initial) auxEnd(s3, s3IsHw);
-    auxBegin(s3, s3IsHw, auxBaud[0], S3_RX_PIN, S3_TX_PIN);   // hw UART0 (v2) or SoftwareSerial (3.2)
+    auxBegin(s3, s3IsHw, auxBaud[0], S3_RX_PIN, S3_TX_PIN);   // hw UART0, or NcSoftSerial in the fallback layout
     appliedAuxBaud[0] = auxBaud[0];
     Serial.printf("[AUX] S3 %s @ %lu baud (%s)\n",
                   initial ? "open" : "re-open", (unsigned long)auxBaud[0], s3IsHw ? "hw UART0" : "sw");
@@ -4820,17 +4827,17 @@ void setup() {
   applyBoardProfile();
 
   // Bind the aux command ports to their backing objects for THIS board — their
-  // type (hardware UART0 vs SoftwareSerial) is board-dependent (see the Stream*
+  // type (hardware UART0 vs NcSoftSerial) is board-dependent (see the Stream*
   // declarations above). Done before applySerialBauds() opens them.
-  if (sbusSharedUart) {            // shared SBUS frees UART0 → S3 = hardware UART0, S4 = SoftwareSerial
+  if (sbusSharedUart) {            // shared SBUS frees UART0 → S3 = hardware UART0, S4 = NcSoftSerial
     s3 = &Serial0; s3IsHw = true;
     s4 = &swAux0;
     // Both boards now expose a third aux port (S5): NaviCore v2 on GPIO38/47, WCB 3.2 on
-    // the freed Serial5 header GPIO9/10. swAux1 is the spare SoftwareSerial (s3 is hardware
+    // the freed Serial5 header GPIO9/10. swAux1 is the spare soft port (s3 is hardware
     // UART0 in shared mode), so it backs S5 on both.
     s5 = &swAux1;
   } else {                         // dedicated SBUS-out on UART0 (fallback layout, not used by
-    s3 = &swAux0; s3IsHw = false;  //   either current board): S3/S4 SoftwareSerial, no hardware aux.
+    s3 = &swAux0; s3IsHw = false;  //   either current board): S3/S4 NcSoftSerial, no hardware aux.
     s4 = &swAux1;
     s5 = nullptr;
   }
@@ -4856,12 +4863,28 @@ void setup() {
     Serial.printf("[SBUS] IN  on Serial1/UART1 RX (GPIO%d)\n", SBUS_RX_PIN);
   }
 
-  // Open Serial2 (local Maestro) + Serial3/4 (aux SWSerial) at their
-  // configured baud. Single source of truth: rcConfig (maestroBaud /
-  // auxBaud[]). Same helper runs again after every SET_CONFIG save so a
-  // baud change in the config tool applies live — no reboot needed.
-  // Keep aux baud ≤ ~57600 (higher rates choke bit-banged SWSerial on
-  // ESP32-S3). One port = one device = one baud.
+  // Soft-port RX (S4/S5, NcSoftSerial) decodes bits from the TIME each edge's GPIO
+  // interrupt starts, so a late edge is a wrong bit (HIL rx_monitor_bcast_in: '5' on S5
+  // read as '4'). Arduino would install the GPIO ISR service at level 1, the level of the
+  // UART, RMT and USB interrupts, which can hold an edge back. Installed here first at
+  // level 3, edges pre-empt those; Arduino's attachInterrupt (the first begin() below)
+  // accepts an already-installed service (esp32-hal-gpio.c). Must stay ahead of the
+  // first applySerialBauds(). NOT ESP_INTR_FLAG_IRAM: every attachInterrupt handler is
+  // reached through Arduino's __onPinInterrupt, which is in flash, so an IRAM service
+  // would run flash code with the cache off during a config save and panic. Without the
+  // flag an edge waits out the flash write, as it always did. (The WCB's rule 13.)
+  gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
+  // That first attachInterrupt tries to install the service again, gets INVALID_STATE
+  // (which it accepts), and the IDF logs it as an error on every boot. Mute the gpio tag
+  // until setup() ends.
+  const esp_log_level_t gpioLogLevel = esp_log_level_get("gpio");
+  esp_log_level_set("gpio", ESP_LOG_NONE);
+
+  // Open Serial2 (local Maestro) + S3/S4/S5 (aux) at their configured baud. Single
+  // source of truth: rcConfig (maestroBaud / auxBaud[]). Same helper runs again after
+  // every SET_CONFIG save so a baud change in the config tool applies live — no reboot
+  // needed. Keep S4/S5 ≤ ~57600: their RECEIVE is software (their transmit is RMT and
+  // exact at any baud). One port = one device = one baud.
   applySerialBauds(true);
   applySbusOut(/*initial=*/true);     // bring up SBUS OUT only if rcConfig.sbusOutEnabled
 
@@ -5141,6 +5164,7 @@ void setup() {
   Serial.println("  Send PING to test. Send GET_CONFIG to read mappings.");
 
   // setup() completed — cancel the boot guard so a healthy board never trips it.
+  esp_log_level_set("gpio", gpioLogLevel);   // see gpio_install_isr_service above
   bootGuardDisarm();
 }
 
@@ -5217,12 +5241,11 @@ void drainRemoteCli() {
 // ── Paced aux-port transmitter ───────────────────────────────────────────────
 // One in-flight message per aux port, clocked out a few bytes per loop() pass.
 //
-// Writing a whole command in one go is NOT an option here: S4/S5 are bit-banged
-// SoftwareSerial, whose write() blocks with interrupts disabled for the full frame
-// time. A 200-char command at 9600 baud is ~208 ms of that — over twenty missed
-// SBUS frames. So each pass hands a port only as many bytes as it can absorb
-// without holding the CPU past AUX_TX_BUDGET_US, and the rest waits for the next
-// pass. loop() runs far faster than any of these line rates, so a port still
+// Writing a whole command in one go is NOT an option here: a write to S4/S5
+// (NcSoftSerial) returns only once its bytes are on the wire. A 200-char command at
+// 9600 baud is ~208 ms of loop() — over twenty SBUS frames left waiting in Serial1.
+// So each pass hands a port only as many bytes as it can absorb without holding
+// loop() past AUX_TX_BUDGET_US, and the rest waits for the next pass. loop() runs far faster than any of these line rates, so a port still
 // transmits at its full baud; it just never blocks long enough to be noticed.
 //
 // One slot per port (not a shared queue drain) so a slow port can't hold up a fast
@@ -5241,7 +5264,7 @@ static int auxTxBudget(int idx) {
     int room = ((HardwareSerial*)s3)->availableForWrite();
     return room > 0 ? room : 0;
   }
-  // Bit-banged: bytes = budget_us * baud / (10 bits per byte * 1e6 us). Always at
+  // Soft port: bytes = budget_us * baud / (10 bits per byte * 1e6 us). Always at
   // least 1 so a slow port still makes progress instead of stalling forever.
   uint32_t baud = rcConfig.auxBaud[idx];
   if (baud == 0) return 1;

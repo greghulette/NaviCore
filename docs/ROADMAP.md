@@ -42,10 +42,9 @@ Ports** tab:
   that driver's protocol, not commands.
 
 **Every write is deferred to Core 1 through `serialFwdQueue`.** `onWCBCommand` runs on the
-Core-0 WiFi task and S4/S5 are bit-banged SoftwareSerial, where a write blocks with interrupts
-off for the whole frame time (~1 ms per 10 chars at 9600) — on the WiFi task that stalls
-ESP-NOW, and on either core it jitters the ~111 fps SBUS path. `drainSerialFwd()` in `loop()`
-does the writing. **Never write an aux port directly from a mesh callback.**
+Core-0 WiFi task, and a write to S4/S5 returns only once its bytes are on the wire (~1 ms a
+byte at 9600, RMT-timed) — on the WiFi task that stalls ESP-NOW. `drainSerialFwd()` in `loop()`
+does the writing, a few bytes a pass. **Never write an aux port directly from a mesh callback.**
 
 `auxRxLine()` in [`NaviCore.ino`](../NaviCore.ino) is where an "act on incoming serial" parser
 belongs — it already has the assembled line and the terminated/fragment distinction.
@@ -123,6 +122,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | §1 mesh ↔ serial bridge: S4/S5 transmit through RMT (`NcSoftSerial`); why writes still go through `serialFwdQueue`. |
 | 2026-08-18 | _(uncommitted)_ | §1 rewritten as **shipped** — the mesh↔serial bridge (S1-S3 → firmware S3/S4/S5 numbering, always-on targeted `;s<n>` writes, per-port broadcast in/out, the `serialFwdQueue` Core-1 hop) is built in firmware and tool; the answered open questions are carried forward as constraints. §5: corrected the cloud-backup row — backups are keyed on an independent **username + password** pair, not the WCB password; the no-per-install-discriminator rationale still stands. |
 | 2026-08-13 | _(uncommitted)_ | Recorded the decision NOT to port the WCB `?ETM,CHAR` network test to NaviCore, with the reasoning — chiefly that `ETM_RETRY_INTERVAL_MS` has no setter, so the recommended timeout it produces cannot be applied. Relaying `?MGMT,ETM,CHAR` is the cheap path if it is ever wanted. |
 | 2026-08-04 | _(uncommitted)_ | Initial version. |

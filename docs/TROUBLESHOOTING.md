@@ -80,7 +80,8 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | Symptom | Cause | Where |
 |---|---|---|
 | HCR does nothing from a mapped button | Run `#L20` (S3) or `#L21` (S4) — they bypass config *and* mapping. Reacts → the fault is config/mapping. Silent → wiring, ground, or the port | `execCliLine()` |
-| Garbled output above ~57600 baud | S4/S5 are bit-banged `SoftwareSerial`. Only S3 (hardware UART0) is reliable at higher rates | `applySerialBauds()` |
+| Garbled input above ~57600 baud on S4/S5 | S4/S5 receive in software (EspSoftwareSerial, a GPIO interrupt per edge). Their transmit is RMT and exact at any rate. Only S3 (hardware UART0) receives reliably higher | `applySerialBauds()` |
+| Garbled or lost bytes out S4/S5 under load | The port transmits bit-banged: boot printed `[AUX] TX GPIO<n>: no RMT channel` (all 4 S3 RMT TX channels taken, or a port begun other than 8N1). Find what else took a channel | `NcSoftSerial::begin()` |
 | WLED unreliable | It wants 115200, so it needs S3 | `RcWledSlot` |
 | A live port blips on an unrelated save | Only ports whose baud actually changed are re-opened — verify the guard still holds | `applySerialBauds()` |
 
@@ -128,6 +129,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | Serial peripherals: S4/S5 transmit through RMT (`NcSoftSerial`), so only their receive limits the baud; a row for the `no RMT channel` fallback. |
 | 2026-10-04 | `a72459b` | "Config lost unexpectedly" no longer blames Full Wipe, which never writes `/config.json` (D-NC34). |
 | 2026-10-04 | `941a782` | Two tabs on one WCB: the sid row now says why tabs get a random start, and a new row covers a Save confirmed by the other tab's ACK (D-NC35). |
 | 2026-09-28 | `1e15601` | *Build and tooling*: which build a board runs, and decoding a backtrace against the wrong `.elf` — answered by the new `App SHA256` line. |

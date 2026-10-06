@@ -96,7 +96,14 @@ in `applyBoardProfile()`; every pin is a runtime global, so all use sites are or
 **UART allocation.** Both profiles set `sbusSharedUart = true`: SBUS IN *and* OUT share
 one full-duplex UART1 at 100 k 8E2 inverted, with a byte-tee re-emitting each received
 byte. That frees UART0, which becomes the **hardware** aux port S3 (so S3 tolerates
-bauds above 57600); S4 and S5 are bit-banged `SoftwareSerial` and should stay ≤ 57600.
+bauds above 57600). S4 and S5 are `NcSoftSerial` (`navicore_softserial.h`): EspSoftwareSerial
+receives (a GPIO interrupt per edge, so keep them ≤ 57600) and an **RMT channel transmits**, so
+no interrupt can stretch a transmitted bit. The GPIO ISR service is installed at **level 3** in
+`setup()`, ahead of the first `begin()`, so a receive edge pre-empts the level-1 UART, RMT and
+USB interrupts; and `available()`/`read()`/`peek()` hold the scheduler around the library's
+`rxBits()`, whose check-then-`micros()` race injects a false stop bit mid-byte. RMT channels:
+the S3 has 4 for transmit, the status NeoPixel takes one and S4/S5 one each. A port begun
+without one (or not 8N1) transmits bit-banged and prints `[AUX] TX GPIO<n>: no RMT channel`.
 A `sbusSharedUart = false` fallback (SBUS OUT on its own UART0, S3 bit-banged) exists in
 the code but no current board uses it.
 
@@ -238,9 +245,10 @@ loop core, so a line printed on Core 0 reaches USB alone. The queues:
 | `navirec` capture queue | `rcExecuteActionNow` (Core 1 — hop kept as a safeguard) | `navirec::drain()` | `RecEvent` |
 | `rcTelemetry` pending slots | `handle()` under `_pendingMutex` | `tick()` | deferred config saves, test actions |
 
-The two serial queues are not conveniences: S4/S5 are bit-banged `SoftwareSerial`, so a write blocks
-with interrupts off for the whole frame time, and a Maestro `get*` blocks up to 25 ms waiting
-on the reply. Either one on the WiFi task stalls ESP-NOW and jitters the SBUS path.
+The two serial queues are not conveniences: a write to S4/S5 returns only once its bytes are on
+the wire (~1 ms a byte at 9600; `NcSoftSerial` sleeps on the RMT driver meanwhile), and a
+Maestro `get*` blocks up to 25 ms waiting on the reply. Either one on the WiFi task stalls
+ESP-NOW. Every soft-port writer is the loop task.
 
 Enqueue helpers are marked `__attribute__((noinline))` so their locals do not inflate the
 ESP-NOW callback's stack frame — a prior stack overflow was fixed exactly this way.
@@ -423,7 +431,7 @@ droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
 |---|---|---|
 | **USB-CDC** (native, `HWCDC`) | Config tool "Direct USB", CLI, OTA-local | Wrapped by `RcSerial` tee. `#define Serial rcSerial` — include order in `NaviCore.ino` matters |
 | **Serial2 / UART2** | Local Pololu Maestro | Binary Pololu protocol, baud from `rcConfig.maestroBaud` |
-| **S3 / S4 / S5** | HCR, MP3, DFPlayer, WLED, raw serial actions | S3 = hardware UART0; S4/S5 SoftwareSerial. One port = one device = one baud (a DFPlayer's is fixed at 9600) |
+| **S3 / S4 / S5** | HCR, MP3, DFPlayer, WLED, raw serial actions | S3 = hardware UART0; S4/S5 `NcSoftSerial` (software receive, RMT transmit). One port = one device = one baud (a DFPlayer's is fixed at 9600) |
 | **UART1** | SBUS IN + OUT | 100 k 8E2 inverted, shared, byte-teed |
 | **ESP-NOW / WCB mesh** | Remote actions, config bridge, telemetry, OTA, RTERM, bulk transfer | 250 B MTU; **187 B effective payload cap** after the bridge's CRC suffix |
 
@@ -471,6 +479,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | _(pending)_ | §4 UART allocation, §8, §11: S4/S5 are `NcSoftSerial` — RMT transmit, EspSoftwareSerial receive with the GPIO ISR service at level 3 and the `rxBits()` race closed (WCB repo HIL `ncwire.soft_tx_integrity`, D-NC24; `ncwire.rx_monitor_bcast_in`). |
 | 2026-10-05 | `bb0dda6` | §8: WebSocket output is a Core 1 → httpd-task hand-off through NaviCore's own PSRAM queue under `wsTxMux`, one `wsDrainWork` at a time. |
 | 2026-10-04 | `aa6ae0a` | §7 lists `checkDeferredRestart()`, last in `loop()`: a mesh `REBOOT` is ACKed from `rcTelemetry::tick()` and restarts once the inbound queues are quiet (HIL `ncboot.mesh_reboot`). |
 | 2026-10-04 | `4833716` | §7, §10: a serial action goes through the paced aux transmitter (`queueSerialAction()` → `auxTxPump()`) instead of one blocking whole-line write (HIL `ncdev.serial_action_paced`). |
