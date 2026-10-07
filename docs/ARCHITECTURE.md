@@ -98,9 +98,11 @@ one full-duplex UART1 at 100 k 8E2 inverted, with a byte-tee re-emitting each re
 byte. That frees UART0, which becomes the **hardware** aux port S3 (so S3 tolerates
 bauds above 57600). S4 and S5 are `NcSoftSerial` (`navicore_softserial.h`): EspSoftwareSerial
 receives (a GPIO interrupt per edge, so keep them ≤ 57600) and an **RMT channel transmits**, so
-no interrupt can stretch a transmitted bit. The GPIO ISR service is installed at **level 3** in
-`setup()`, ahead of the first `begin()`, so a receive edge pre-empts the level-1 UART, RMT and
-USB interrupts; and `available()`/`read()`/`peek()` hold the scheduler around the library's
+no interrupt can stretch a transmitted bit. The GPIO ISR service is installed at **level 3** first
+thing in `setup()`, before SBUS or anything else raises interrupts: ESP-IDF registers it through
+the 1 KB IPC task, and an interrupt pending across that registration overflowed the stack, a boot
+panic (D-NC77). A receive edge then pre-empts the level-1 UART, RMT and USB interrupts; and
+`available()`/`read()`/`peek()` hold the scheduler around the library's
 `rxBits()`, whose check-then-`micros()` race injects a false stop bit mid-byte. RMT channels:
 the S3 has 4 for transmit, the status NeoPixel takes one and S4/S5 one each. A port begun
 without one (or not 8N1) transmits bit-banged and prints `[AUX] TX GPIO<n>: no RMT channel`.
@@ -503,6 +505,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-07 | `520b096` | §4 UART allocation: the GPIO ISR service is installed first in `setup()`, not after `sbusRx.begin()`, where an interrupt pending across its registration overflowed the IPC task's stack at boot (D-NC77). |
 | 2026-10-06 | `0657025` | §6 step 4: long reply lines (GET_CONFIG, GET_CMDLIB) are paced into the USB TX ring by `printLong()` (D-NC75). |
 | 2026-10-06 | `b247a91` | §4 "UART0 carries S3 only", §6 step 4: `consoleOffUart0()` keeps IDF logs, ROM printf and the software-restart ROM banner off UART0 (HIL `ncwire.s3_console_quiet`). |
 | 2026-10-06 | `50078c9` | §10: device writes reach S3/S4/S5 through `auxDev()`, which holds them behind a paced line in flight, so they never land inside one (HIL `ncwire.tx_interleave`). |

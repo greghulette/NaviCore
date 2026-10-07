@@ -15,6 +15,7 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 | Reboots forever after an OTA | The new image was never marked valid, so the bootloader rolls it back. `esp_ota_mark_app_valid_cancel_rollback()` is the **first statement** of `setup()` for this reason — anything that crashes ahead of it reintroduces the loop | `setup()` |
 | Reboots ~a few seconds into boot, repeatedly | `setup()` never completed and the boot guard fired. It is armed first and disarmed last | `bootGuardArm()` / `bootGuardDisarm()` |
 | Crash-loops ~2 s after boot | Heap starvation — classically from raising `FRAG_MAX_PARTS` (384 does this; 192 is stable). The config load needs ~96 KB | `rc_telemetry.h` |
+| `Guru Meditation Error: Core 1 panic'ed (Unhandled debug exception)` in `_frxt_int_enter` on `ipc1` during boot, then a boot reporting reset 4 (panic) | The level-3 GPIO ISR service was registered through the 1 KB IPC task while SBUS was already interrupting, and an interrupt pending across the registration overflowed that stack (firmware before `520b096`, D-NC77). It is now installed first in `setup()`; registering any interrupt late, with others already firing, can bring it back | `setup()`, `gpio_install_isr_service()` |
 | Servos twitch at power-on with no SBUS connected | Maestro TX floating before `Serial2.begin()` runs (~2 s in). The pin is driven HIGH at the top of `setup()` to prevent it — check that still happens | `setup()` |
 | Config lost unexpectedly | Not the in-browser flasher: neither `⬆ Update Firmware` nor `⚠ Full Wipe & Flash` writes `/config.json` (LittleFS at `0x3D0000`) — Full Wipe erases only NVS and OTA data — and a serial app-flash preserves it too. Look for `[CONFIG] /config.json present but unreadable` (next row), a Restore Defaults followed by a Save, or a flash with a different partition table | [BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md) |
 | `[CONFIG] /config.json present but unreadable` | Parse failure or transient low memory. The file is **kept** and defaults run for that boot — deliberately, so a good config is never overwritten. Retries next boot | `setup()` |
@@ -131,6 +132,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-07 | `520b096` | Boot and LED: a boot panic in `_frxt_int_enter` on `ipc1`, from the GPIO ISR service installed after SBUS starts (D-NC77). |
 | 2026-10-06 | `0657025` | Serial/JSON: a mangled CONFIG line and `printLong()`, which paces GET_CONFIG and GET_CMDLIB into the USB TX ring (D-NC75). |
 | 2026-10-06 | `b247a91` | Serial peripherals: console output on S3 (UART0) and the missing ROM banner after a restart (`consoleOffUart0()`, HIL `ncwire.s3_console_quiet`). |
 | 2026-10-06 | `2c698c6` | Serial peripherals: S4/S5 transmit through RMT (`NcSoftSerial`), so only their receive limits the baud; a row for the `no RMT channel` fallback. |
