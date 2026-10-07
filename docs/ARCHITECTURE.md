@@ -505,7 +505,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-07 | _(pending)_ | §6: the new-peer grace is 12 s, one WCB heartbeat period and a second, not 8 s (D-NC25). |
+| 2026-10-07 | `2d6964d` | §6: the new-peer grace is 12 s, one WCB heartbeat period and a second, not 8 s (D-NC25). |
 | 2026-10-07 | `520b096` | §4 UART allocation: the GPIO ISR service is installed first in `setup()`, not after `sbusRx.begin()`, where an interrupt pending across its registration overflowed the IPC task's stack at boot (D-NC77). |
 | 2026-10-06 | `0657025` | §6 step 4: long reply lines (GET_CONFIG, GET_CMDLIB) are paced into the USB TX ring by `printLong()` (D-NC75). |
 | 2026-10-06 | `b247a91` | §4 "UART0 carries S3 only", §6 step 4: `consoleOffUart0()` keeps IDF logs, ROM printf and the software-restart ROM banner off UART0 (HIL `ncwire.s3_console_quiet`). |

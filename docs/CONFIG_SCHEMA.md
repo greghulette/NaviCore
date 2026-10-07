@@ -335,7 +335,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-07 | _(pending)_ | `peerNewActions`: the boot grace is 12 s, so a board that never left is heard again before it closes (D-NC25). |
+| 2026-10-07 | `2d6964d` | `peerNewActions`: the boot grace is 12 s, so a board that never left is heard again before it closes (D-NC25). |
 | 2026-10-04 | `073bfc2` | `peerNewActions` / the new-peer alert no longer fire for boards already online when the boot grace ends (HIL `ncboot.new_peer_after_boot`). |
 | 2026-10-04 | `6cdaa8a` | Every config apply (both `SET_CONFIG` paths, both `RESET_DEFAULTS` paths) forgets a parked tap or hold and re-arms the matrix (HIL `sbus.reconfig_parked_tap_cleared`). |
 | 2026-10-04 | `2ebcc42` | `boardType` accepts only 0 and 1; another value is ignored instead of stored, where it booted the v2 pins under a "WCB 3.2" advert (HIL `ncboot.boardtype2_mismatch`). |
