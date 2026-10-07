@@ -4858,6 +4858,31 @@ void setup() {
   // bring-up). Disarmed at the very end once the board is confirmed healthy.
   bootGuardArm();
 
+  // Soft-port RX (S4/S5, NcSoftSerial) decodes bits from the TIME each edge's GPIO
+  // interrupt starts, so a late edge is a wrong bit (HIL rx_monitor_bcast_in: '5' on S5
+  // read as '4'). Arduino would install the GPIO ISR service at level 1, the level of the
+  // UART, RMT and USB interrupts, which can hold an edge back. Installed here at level 3,
+  // edges pre-empt those; Arduino's attachInterrupt (the first begin() in
+  // applySerialBauds) accepts an already-installed service (esp32-hal-gpio.c). NOT
+  // ESP_INTR_FLAG_IRAM: every attachInterrupt handler is reached through Arduino's
+  // __onPinInterrupt, which is in flash, so an IRAM service would run flash code with the
+  // cache off during a config save and panic. Without the flag an edge waits out the
+  // flash write, as it always did. (The WCB's rule 13.)
+  //
+  // HERE, before anything raises interrupts. ESP-IDF registers the service through the
+  // core's IPC task (gpio_isr_register -> esp_ipc_call_blocking), whose stack is 1 KB
+  // (CONFIG_ESP_IPC_TASK_STACK_SIZE). Installed after SBUS had started streaming into
+  // UART1, an interrupt pending across the registration's heap critical section fired at
+  // its deepest point, overflowed that stack and panicked about one boot in five
+  // ("Unhandled debug exception" in _frxt_int_enter on ipc1, then a second boot that
+  // reports "Crash (panic)"; HIL full runs 20261006-122850 and -235930).
+  gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
+  // That first attachInterrupt tries to install the service again, gets INVALID_STATE
+  // (which it accepts), and the IDF logs it as an error on every boot. Mute the gpio tag
+  // until setup() ends.
+  const esp_log_level_t gpioLogLevel = esp_log_level_get("gpio");
+  esp_log_level_set("gpio", ESP_LOG_NONE);
+
   // Hold the local Maestro command line (Serial2 TX) idle-HIGH from the very first
   // instant of boot. Until Serial2.begin() runs (~2 s from here — after the delay
   // below + config load) the pin would otherwise float, and a floating/noisy
@@ -5029,22 +5054,7 @@ void setup() {
     Serial.printf("[SBUS] IN  on Serial1/UART1 RX (GPIO%d)\n", SBUS_RX_PIN);
   }
 
-  // Soft-port RX (S4/S5, NcSoftSerial) decodes bits from the TIME each edge's GPIO
-  // interrupt starts, so a late edge is a wrong bit (HIL rx_monitor_bcast_in: '5' on S5
-  // read as '4'). Arduino would install the GPIO ISR service at level 1, the level of the
-  // UART, RMT and USB interrupts, which can hold an edge back. Installed here first at
-  // level 3, edges pre-empt those; Arduino's attachInterrupt (the first begin() below)
-  // accepts an already-installed service (esp32-hal-gpio.c). Must stay ahead of the
-  // first applySerialBauds(). NOT ESP_INTR_FLAG_IRAM: every attachInterrupt handler is
-  // reached through Arduino's __onPinInterrupt, which is in flash, so an IRAM service
-  // would run flash code with the cache off during a config save and panic. Without the
-  // flag an edge waits out the flash write, as it always did. (The WCB's rule 13.)
-  gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
-  // That first attachInterrupt tries to install the service again, gets INVALID_STATE
-  // (which it accepts), and the IDF logs it as an error on every boot. Mute the gpio tag
-  // until setup() ends.
-  const esp_log_level_t gpioLogLevel = esp_log_level_get("gpio");
-  esp_log_level_set("gpio", ESP_LOG_NONE);
+  // (The GPIO ISR service the soft ports' RX needs was installed at the top of setup().)
 
   // Open Serial2 (local Maestro) + S3/S4/S5 (aux) at their configured baud. Single
   // source of truth: rcConfig (maestroBaud / auxBaud[]). Same helper runs again after
