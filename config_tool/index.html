@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">07.05:23.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">07.12:33.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -9696,7 +9696,11 @@ function handleBoardMessage(line) {
     // Saves will only ship the top-level branches that changed since
     // this snapshot — typically a single section (mappings or thresholds)
     // instead of all ~3 KB of config.  See _diffConfigBranches.
-    _configBaseline = _deepClone(config);
+    // Except after Restore Defaults: RESET_DEFAULTS is RAM only, and /config.json still holds the
+    // config the baseline already describes until a Save stores the reset. Taking the reset as the
+    // baseline made an unedited Save answer "No changes to save", and the reset was gone at the next
+    // reboot (WCB repo HIL plan D-NC74). Keeping the stored one leaves the reset pending for Save.
+    _configBaseline = (_pendingDefaultsReset && _configBaseline) ? _configBaseline : _deepClone(config);
     // A fresh board snapshot just became the diff baseline. Any SET_CONFIG still
     // awaiting ACK is now stale — its captured baseline predates this Refresh, so
     // letting the late ACK advance _configBaseline to it (ACK handler above) would
@@ -9733,7 +9737,7 @@ function handleBoardMessage(line) {
       _pendingDefaultsReset = false;
       if (_pendingDefaultsTimer) { clearTimeout(_pendingDefaultsTimer); _pendingDefaultsTimer = null; }
       _dismissToast(_defaultsToast); _defaultsToast = null;
-      showToast('Reset to factory defaults', 'success');
+      showToast('Reset to factory defaults — Save to keep it on NaviCore', 'success');
     }
     return;
   }

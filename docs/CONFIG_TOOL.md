@@ -718,6 +718,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-07 | _(pending)_ | **Restore Defaults leaves the reset to Save** (D-NC74). RESET_DEFAULTS is RAM only, and the tool took the reset config as its diff baseline, so an unedited Save answered "No changes to save" and the reset was gone at the next reboot. The baseline stays the stored config, the reset shows as unsaved, and the toast says *Reset to factory defaults — Save to keep it on NaviCore*. |
 | 2026-10-04 | `255161d` | **Connect via USB identifies the device with `?REC` before any JSON** (§2, D-NC70). On a tethered WCB the direct probe's up to six bare JSON PINGs were broadcast out of the WCB's serial ports and onto the mesh; a WCB is now recognised by its answer and connected Via WCB with nothing bare written. |
 | 2026-10-04 | `6b0f3fe` | **A WCB doorway is no longer taken for a direct NaviCore** (§2, D-NC30). Any PONG satisfied the direct probe, so a relayed one left the session "direct" with USB OTA enabled against the WCB; a relayed PONG on the direct probe now switches to Via WCB, announced. |
 | 2026-10-04 | `12e6da6` | **A slow direct board is no longer taken for a bridged one** (§2). The epoch only told which phase a PONG arrived in, so a direct PONG 3.5 s late satisfied the Via-WCB probe; the probe now reads the link from the PONG's shape (`id` = relayed). |
