@@ -107,7 +107,11 @@ QueueHandle_t peerEventQueue   = nullptr;
 uint32_t      g_peerSeenMask   = 0;   // bit (id-1) set once a board's new-peer event has been handled this session
 uint32_t      g_peerGraceUntil = 0;   // millis(): boards first heard before this are recorded silently (the boot fleet)
 uint32_t      g_peerFlashUntil = 0;   // millis(): show the new-peer LED pulse until then (0 = not flashing)
-#define PEER_GRACE_MS 8000            // suppress the initial fleet-discovery burst for 8 s after wcb->begin()
+// Suppress the initial fleet-discovery burst for 12 s after wcb->begin(): one WCB heartbeat period (9-11 s, at each
+// board's own phase) and a second, so every board that never left is heard again before it closes. A WCB does not
+// answer our boot announce; at 8 s a board whose next heartbeat came later fired the new-peer alert (D-NC25, HIL
+// ncboot.new_peer_after_boot: W1 heard 8.3 s and W3 9.3 s after the join, run 20261007-050329).
+#define PEER_GRACE_MS 12000
 
 // ── Inbound mesh COMMAND counters ───────────────────────────────────────────
 // The receive-side half of the delivery statistics. WCB_Client 1.13.0 counts
@@ -5707,12 +5711,12 @@ void onWcbNeighbor(const WCBNeighbor& nb) {
 // action tier + the passive alert. Fires at most once per board per session.
 void drainPeerEvents() {
   if (!peerEventQueue) return;
-  // The grace window alone cannot hold the boot fleet: it is 8 s, and a WCB advertises
+  // The grace window alone cannot hold the boot fleet: it is 12 s, and a WCB advertises
   // every 60 s, so most boards' first advert of the session lands after it and every WCB
   // that never left fired the new-peer alert and the user's peer actions after each
   // NaviCore restart (HIL ncboot.new_peer_after_boot). So the moment the grace ends, every
-  // board ALREADY ONLINE in the ETM table (its heartbeats reach us within seconds of boot)
-  // is recorded as seen, silently. One shot; a board that appears later still fires.
+  // board ALREADY ONLINE in the ETM table (heard again at its next heartbeat, which the 12 s
+  // grace outlasts) is recorded as seen, silently. One shot; a board that appears later still fires.
   static bool graceClosed = false;
   if (!graceClosed && (int32_t)(millis() - g_peerGraceUntil) >= 0) {
     graceClosed = true;

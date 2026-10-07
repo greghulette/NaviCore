@@ -191,7 +191,7 @@ reformat — the config filesystem.
 11. Construct `WCB_Client`, `setMeshChannel()`, banner if the mesh password is empty,
     `begin()`. On success: create every cross-core queue, *then* register `onCommand` /
     `onRawPacket` / bulk hooks / `onNeighbor` / `onStatusChange`; publish WDP identity and
-    port labels; enable auto-join; arm the 8 s new-peer grace window and the 30 s boot
+    port labels; enable auto-join; arm the 12 s new-peer grace window and the 30 s boot
     roll call.
 12. Construct the `WCBStream` broadcast channel — after `wcb` exists, so it self-registers
     and gets flushed by `wcb->update()`.
@@ -505,6 +505,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-07 | _(pending)_ | §6: the new-peer grace is 12 s, one WCB heartbeat period and a second, not 8 s (D-NC25). |
 | 2026-10-07 | `520b096` | §4 UART allocation: the GPIO ISR service is installed first in `setup()`, not after `sbusRx.begin()`, where an interrupt pending across its registration overflowed the IPC task's stack at boot (D-NC77). |
 | 2026-10-06 | `0657025` | §6 step 4: long reply lines (GET_CONFIG, GET_CMDLIB) are paced into the USB TX ring by `printLong()` (D-NC75). |
 | 2026-10-06 | `b247a91` | §4 "UART0 carries S3 only", §6 step 4: `consoleOffUart0()` keeps IDF logs, ROM printf and the software-restart ROM banner off UART0 (HIL `ncwire.s3_console_quiet`). |
