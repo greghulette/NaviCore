@@ -2937,6 +2937,23 @@ static int8_t lastKnobMode[RC_NUM_KNOBS] = {0};
 // is itself the action that commands the move.
 static bool knobPrimed[RC_NUM_KNOBS] = {false};
 
+// Settle resend, REMOTE passthrough only. A remote Maestro slot's frames go out as one
+// unacknowledged ESP-NOW broadcast (maestroWrite type 2 -> the Kyber WCBStream): no ACK, no
+// retry, and a receiver that misses one never sees it again, because the deadband sends
+// nothing more until the stick moves. A lost LAST frame of a move therefore left that servo
+// at the previous position indefinitely (HIL: W1 missed single knob frames that W3 forwarded,
+// runs 20261009-182550 and 20261010-000816). So once a knob has been still for
+// KNOB_SETTLE_RESEND_MS, each remote output's last target goes out once more. Only the frame:
+// no keyframe and no idle-timer re-arm, so auto-release still runs from the real move. It is
+// dropped if anything else wrote that channel since (another mover, an auto-release, a
+// goHome/stopScript re-arm, or a config apply, which zeroes g_maeLastMoveMs) - checked by
+// g_maeLastMoveMs still being the time the knob's own write set - or if a clip or the
+// calibration wizard took over. A local slot (Serial2, wired) needs none.
+#define KNOB_SETTLE_RESEND_MS 250
+struct KnobResend { uint8_t mid, ch; uint16_t pos; uint32_t moveMs; bool pending; };
+static KnobResend knobResend[RC_NUM_KNOBS][RC_KNOB_MAX_OUTPUTS];
+static uint32_t knobLastDispatchMs[RC_NUM_KNOBS] = {0};
+
 void processKnobs() {
   // The calibration wizard asks the operator to sweep every source to its
   // extremes. Dispatch is already muted while it runs, but passthrough is NOT a
@@ -2997,6 +3014,10 @@ void processKnobs() {
     if (!knobPrimed[i]) { knobPrimed[i] = true; continue; }
     if (cnt == 0) continue;   // this mode drives nothing (still tracked lastKnobRaw above)
 
+    // A new dispatch replaces this knob's pending settle resends (see KNOB_SETTLE_RESEND_MS).
+    knobLastDispatchMs[i] = millis();
+    for (uint8_t o = 0; o < RC_KNOB_MAX_OUTPUTS; o++) knobResend[i][o].pending = false;
+
     for (uint8_t o = 0; o < cnt && o < RC_KNOB_MAX_OUTPUTS; o++) {
       const RcKnobOutput& out = outs[o];
       // midClosed only reshapes the Maestro-passthrough mapping — never HCR volume.
@@ -3027,6 +3048,8 @@ void processKnobs() {
         }
         maestroSetTarget(mid, mch, mapped);
         navirec::captureMaestroKf(mid, mch, mapped);   // knob keyframe
+        if (mid >= 1 && mid <= RC_NUM_MAESTROS && mch < 32 && rcConfig.maestros[mid - 1].type == 2)
+          knobResend[i][o] = { mid, mch, mapped, g_maeLastMoveMs[mid - 1][mch], true };
         // Carry THIS output's auto-release policy (the idle timeout) to the channel —
         // only the passthrough output knows releaseIdleMs. The idle-timer re-arm +
         // released-clear happen inside maestroSetTarget() above, which fires for every
@@ -3070,6 +3093,26 @@ void resetModeAwareKnobs() {
 // dispatch loop above. Runs in loop() on Core 1 — the SAME core as the passthrough
 // dispatch and maestroWrite, so there is no cross-core race on the Maestro UART.
 // Scans at ~20 Hz (the timeout is coarse, 100s-1000s of ms), keeping loop() cheap.
+// The settle resend's trailing edge (see KNOB_SETTLE_RESEND_MS). Core 1 only (loop()).
+static void knobResendTick() {
+  const bool owned = calibrationActive || navirec::isReplaying();
+  const uint32_t now = millis();
+  for (int i = 0; i < RC_NUM_KNOBS; i++) {
+    if (!owned && (uint32_t)(now - knobLastDispatchMs[i]) < KNOB_SETTLE_RESEND_MS) continue;
+    for (uint8_t o = 0; o < RC_KNOB_MAX_OUTPUTS; o++) {
+      KnobResend& r = knobResend[i][o];
+      if (!r.pending) continue;
+      r.pending = false;
+      if (owned) continue;                                          // a clip or the wizard owns the servos now
+      if (rcConfig.maestros[r.mid - 1].type != 2) continue;         // no longer a remote slot
+      if (g_maeReleased[r.mid - 1][r.ch] || g_maeLastMoveMs[r.mid - 1][r.ch] != r.moveMs) continue;   // written since
+      const uint8_t p[3] = { r.ch, (uint8_t)(r.pos & 0x7F), (uint8_t)((r.pos >> 7) & 0x7F) };
+      if (maestroWrite(r.mid, 0x84, p, 3))
+        dlog(DBG_MAESTRO, "[KNOB] settle resend: Maestro %u ch %u -> %u\n", r.mid, r.ch, r.pos);
+    }
+  }
+}
+
 void maestroIdleReleaseTick() {
   // Replay owns the servos while a clip plays (processKnobs bails at its own isReplaying
   // gate). Without this, the tick would de-energize a channel the clip is actively
@@ -6031,6 +6074,9 @@ void loop() {
   // Auto-release idle passthrough servos (RcKnobOutput.releaseIdleMs) — de-energize a
   // resting servo so it stops buzzing/hunting; the next stick move re-energizes it.
   maestroIdleReleaseTick();
+
+  // A remote passthrough knob's last target, once more after it settles (unacknowledged broadcast).
+  knobResendTick();
 
   // Trailing edge of the HCR volume throttle — send the last value a knob sweep
   // asked for, which the leading-edge gate held back.
