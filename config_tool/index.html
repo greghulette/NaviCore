@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">10.17:06.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">11.12:33.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -16747,6 +16747,7 @@ function _stringifyStable(v) {
 // firmware can choose to interpret null as "leave alone" or "clear".
 // In practice the GUI never deletes top-level branches in normal flow,
 // so this only matters as a defensive correctness fix.
+function _isLabelMap(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
 function _diffConfigBranches(current, baseline) {
   if (!baseline) return _deepClone(current);
   const out = {};
@@ -16764,6 +16765,19 @@ function _diffConfigBranches(current, baseline) {
         // fragments. Guard against an empty sub-diff so we never ship `mappings:{}`.
         const md = _diffMappings(current.mappings, baseline.mappings);
         if (Object.keys(md).length) out.mappings = md;
+      } else if ((key === 'knobs' || key === 'switches') && _isLabelMap(current[key]) && _isLabelMap(baseline[key])) {
+        // The per-knob and per-switch maps follow the same firmware rule as the
+        // mappings: a label that is PRESENT is rebuilt wholesale, an ABSENT one is
+        // left untouched (rc_config.h ~1715 / ~1738). The editors' Clear All deletes
+        // the label from `config`, so shipping the map as it stands would never
+        // reach the board — it keeps the old wiring, and the next Refresh brings
+        // it straight back into the tool. Ship a deleted label as `{}` instead:
+        // the firmware resets it to its defaults (default channel, no function /
+        // no actions), which is what the tool shows for an absent label.
+        const cur = current[key];
+        const map = { ...cur };
+        for (const k of Object.keys(baseline[key])) if (!(k in cur)) map[k] = {};
+        out[key] = map;
       } else {
         // Only include if `current` actually has the key.  A baseline-only
         // key means the GUI dropped the branch (unusual); send null and
