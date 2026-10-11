@@ -5192,6 +5192,13 @@ void setup() {
         // NEVER use WiFi.softAPConfig() instead. On the WCB it broke DHCP whether called
         // before or after softAP(): the right IP, clients associated, no lease ever.
         {
+          // The AP's start is an EVENT: softAP() returns before WIFI_EVENT_AP_START has run, and
+          // on the first boot after a changed SSID or password (the driver rewrites its own NVS
+          // copy of the AP config) the gap was long enough that the netif read "not ready" and
+          // the gateway option stayed at its default for the whole session — on exactly the
+          // boot after a user renames the AP (HIL ncwifi.ap_ssid_change_at_boot, 2026-10-11).
+          // Give it up to 2 s; a normal boot passes the first poll.
+          for (int i = 0; i < 40 && !(WiFi.AP.netif() && WiFi.AP.started()); i++) delay(50);
           esp_netif_t   *apNetif = WiFi.AP.netif();
           dhcps_offer_t  router  = 0;   // 1 byte — the IDF rejects any other length
           if (!apNetif || !WiFi.AP.started()) {
