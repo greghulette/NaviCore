@@ -35,7 +35,7 @@ class RcSerial : public Stream {
   // ── HWCDC-specific pass-throughs used by NaviCore setup() ────────────────
   void begin(unsigned long baud)   { HWCDCSerial.begin(baud); }
   void setRxBufferSize(size_t s)   { HWCDCSerial.setRxBufferSize(s); }
-  void setTxBufferSize(size_t s)   { HWCDCSerial.setTxBufferSize(s); }
+  void setTxBufferSize(size_t s)   { HWCDCSerial.setTxBufferSize(s); _txRing = s; if (!_lock) _lock = xSemaphoreCreateMutex(); }
   void setTxTimeoutMs(uint32_t ms) { HWCDCSerial.setTxTimeoutMs(ms); }
 
   // ── Stream interface → real USB ──────────────────────────────────────────
@@ -67,11 +67,27 @@ class RcSerial : public Stream {
     if (cap && xPortGetCoreID() == _capCore) cap->write(c);
     return HWCDCSerial.write(c);
   }
+  // A multi-byte write (each Serial.printf/println arrives as one) goes to USB whole or not at all. HWCDC writes what
+  // fits its TX ring and gives up on the rest after the TX timeout (50 ms, setup()), so under a burst a line was cut
+  // part-way and the next task's line followed straight on: '[RC] Unknown inboun[WCB RX] from WCB1: ...' with the rest
+  // lost (HIL navicore.mesh_json_declined, full run 20261013-021405). Now writers take turns (a mutex), each waits up to
+  // TX_WAIT_MS for room for the whole line, and a line that still does not fit is dropped whole and counted
+  // (droppedLines, reported by loop()). A write larger than the ring, or with no host attached, passes straight through.
   size_t write(const uint8_t* buf, size_t n) override {
     Print* cap = _cap;
     if (cap && xPortGetCoreID() == _capCore) cap->write(buf, n);
-    return HWCDCSerial.write(buf, n);
+    if (n <= 1 || n > _txRing || !(bool)HWCDCSerial || !_lock) return HWCDCSerial.write(buf, n);
+    if (xSemaphoreTake(_lock, pdMS_TO_TICKS(TX_WAIT_MS)) != pdTRUE) { _dropped++; return 0; }
+    const uint32_t t0 = millis();
+    while ((size_t)HWCDCSerial.availableForWrite() < n && (uint32_t)(millis() - t0) < TX_WAIT_MS) vTaskDelay(1);
+    size_t w = 0;
+    if ((size_t)HWCDCSerial.availableForWrite() >= n) w = HWCDCSerial.write(buf, n);
+    else _dropped++;
+    xSemaphoreGive(_lock);
+    return w;
   }
+  // Lines dropped whole since the last call (and reset). loop() reports them.
+  uint32_t takeDroppedLines() { uint32_t d = _dropped; _dropped = 0; return d; }
   using Print::write;
   operator bool() { return (bool)HWCDCSerial; }
 
@@ -91,6 +107,10 @@ class RcSerial : public Stream {
   Print* _cap      = nullptr;
   void (*_capFlush)() = nullptr;   // push a buffering sink before the CPU stalls
   int    _capCore = -1;
+  static constexpr uint32_t TX_WAIT_MS = 50;   // as setup()'s setTxTimeoutMs
+  SemaphoreHandle_t _lock   = nullptr;          // created by setTxBufferSize() in setup()
+  size_t            _txRing = 0;                // the TX ring's size; 0 until set (writes pass through)
+  volatile uint32_t _dropped = 0;
 };
 
 extern RcSerial rcSerial;

@@ -5942,6 +5942,18 @@ void loop() {
 #if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
   kickUsbCdcTx();   // recover a stalled USB output - see above
 #endif
+  {
+    // Console lines rcSerial dropped whole because the USB host was not draining (rc_serial.h write): said here, at
+    // most every 2 s, so a parser knows lines are missing rather than seeing them silently gone.
+    static uint32_t usbDropped = 0, usbDropSaidMs = 0;
+    usbDropped += rcSerial.takeDroppedLines();
+    if (usbDropped && (uint32_t)(millis() - usbDropSaidMs) >= 2000) {
+      Serial.printf("[USB] %lu console line(s) dropped whole - the USB host was not reading fast enough\n",
+                    (unsigned long)usbDropped);
+      usbDropped = 0;
+      usbDropSaidMs = millis();
+    }
+  }
   // WCB — heartbeats, ACKs, WCBStream flushes
   if (wcb && wcbReady) wcb->update();
 
