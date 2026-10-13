@@ -135,6 +135,53 @@ The terminal is a resizable split pane; in Via WCB mode it grows a second column
 CLI to the bridge WCB. Debug chips map to the firmware's `SET_DEBUG_FLAGS` bitmask, so
 turning a category off actually silences the board rather than hiding lines client-side.
 
+### Motion layer
+
+Open/close animation for the overlays, terminal drawer, Monitor sidebar, mode tabs and
+transmitter zones. Every visual is CSS — the **MOTION LAYER** block at the end of the main
+`<style>` (`nc-*` classes, `--nc-*` variables, `@keyframes nc*`). The JS **Motion layer**
+section (`ncShow`, `ncHide`, `ncOpenActionModal`, `ncCfgIndicator`, `ncModeChanged`,
+`ncFoldSidebar`, `ncInitRail`) only sets those classes and origin variables.
+
+| Surface | What moves | Hook |
+|---|---|---|
+| Action modal (`#modal`) | grows out of the clicked control (`.nc-zoom`), which pulses (`.nc-src`); shrinks back into it on close; Apply flashes it green (`.nc-saved`). Each tier (Single / Double / Triple tap / Long press; a switch's Down / Mid / Up) has its own colour (`--nc-tier`) on its tab, count, card and row stripes; a tier switch is a short cross-fade with a 10 px drift toward the side you moved, and `ncTierDir()` eases the container height (kept gentle on purpose — a bigger slide, 3D turn or per-row stagger read as jumpy). Action rows inside a tier are coloured and numbered by position (`--nc-row`, `#1`…`#5`) — step 1 in the tier's colour, the rest continuing round the palette (`--nc-r1`…`--nc-r5` per card) — so they recolour when ▲ Up / ▼ Down reorders them | `openModal` / `openSwitchModal` / `openKnobModal` → `ncOpenActionModal(sel)`; `closeModal`; `saveModalDispatch`; `setActionTier` / `setSwitchTier` → `ncTierDir` |
+| Config window | unfolds down from the Config button (`.nc-drop`); one indicator slides to the active tab; each tab has its own colour (`--nc-tc`), copied to `.cfg-body` for the pane's title bar and headings; pane blocks rise in | `openHwSetup` / `closeHwSetup` / `setConfigTab` |
+| Connect | grows from the Connect button; picking a method flies it into the status light (`.nc-fly`), which spins (`.connecting`) until `setConnected()` rewrites its class; green burst on link | `openConnectModal` / `closeConnectModal(toDot)` / `connectDirect` / `connectViaWcbOpt` |
+| Other overlays | fade + pop in, fade out (meshstats, clips, timeline, timeline action, command library, calibration) | `ncShow` / `ncHide` |
+| Mode tabs | the mode colour floods the tab (`::before` clip-path), a wave leaves the tab, configured outlines recolour left→right, and a glow in the mode colour sits behind the transmitter (`.tx-wrap::before`, cross-faded through the registered `--nc-mode-glow` — a background layer, not a filter on the SVG, which would re-rasterise it on every live-activity flash) | `setEditingMode` → `ncModeChanged` |
+| Terminal drawer | springs up, drops away; header controls pop in; flowing colour edge; NaviCore / WCB pane chips in blue / orange; debug chips lit in their category's colour; lines slide in with a flash and keep a gutter in their type's colour | `setTerminalOpen` |
+| Monitor sidebar | sections fold away a beat apart, width eases to 42 px, a rail of live status lights pops in | sidebar toggle → `ncFoldSidebar`; `ncInitRail` |
+
+Rules that are easy to break:
+
+- **An overlay keeps `.open` through its close animation** (`.nc-closing` marks it, ≈280 ms),
+  so code that tests `.open` still sees it until it is gone. The flip side: **every open path
+  for an overlay closed with `ncHide()` must use `ncShow()`**, which cancels the pending close.
+  A bare `classList.add('open')` inside the close window is undone when the timer fires. The
+  terminal drawer follows the same rule, and its top-bar toggle treats `.nc-closing` as closed.
+- **The action modal is aimed at whichever transmitter model is showing.** The X18, TwinXLite
+  and X20 groups share zone classes and `data-btn` / `data-sw` / `data-knob` ids (some ids appear
+  in more than one group; the X-Lite D-pads have two zones per slot). `ncZone()` uses the clicked
+  zone, else the first match with client rects — only the active `.tx-model` group has any. A new
+  model needs nothing here as long as its zones use the same classes and ids.
+- **Configured button outlines are the mode colour**: `updateButtonHighlights()` writes
+  `var(--nc-mode-color, var(--accent2))`, and `ncModeChanged()` sets `--nc-mode-color` on
+  `<body>` (plus once at load, because `setEditingMode` early-returns for the starting mode).
+- **The left→right recolour runs only while `.tx-wrap.nc-sweeping` is on** (≈0.9 s after a mode
+  change). The same stroke carries the 10 Hz live-activity flash, which must stay instant; a
+  permanent transition there would smear it. Each zone's delay (`--nc-sweep`) is measured from
+  its SVG x the first time its model is visible.
+- **The sidebar's end state is still exactly `.collapsed`** (42 px, sections `display:none`), so
+  the drag handle's "dragging un-collapses" path is unchanged. The dragged width lives in the
+  inline style and is restored after each fold. The rail mirrors `#sbus-dot` and the
+  `.wcb-chip-dot`s through `MutationObserver`s rather than hooking their renderers, so it cannot
+  drift from the expanded sidebar. It is dots only (no text fits in 42 px); each WCB dot
+  carries its chip's name and state as a hover tooltip.
+- **`prefers-reduced-motion: reduce`** turns every animation and transition here off (CSS) and
+  makes `ncHide` / `setTerminalOpen` / `ncFoldSidebar` skip their timers — instant open and
+  close, as before the layer existed.
+
 ---
 
 ## 4. Function map
@@ -708,6 +755,8 @@ will not reappear on their own.
 7. Push — the Pages workflow deploys `main` to `/config_tool` and any other branch to
    `/dev/<branch>/config_tool` automatically.
 8. Update the wiki if the feature is user-visible.
+9. A new overlay (`.modal-overlay`): open it with `ncShow()` and close it with `ncHide()` —
+   never a bare `classList.add/remove('open')` (§3, Motion layer).
 
 ---
 
@@ -718,6 +767,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-13 | _(uncommitted)_ | **Motion layer** (§3): open/close animation for every overlay (action modal zooms from the clicked control on any transmitter model, Config drops from its button with colour-coded tabs, Connect folds into the status light), mode-colour flood + left→right outline recolour on mode change, terminal drawer spring + typed line colours, animated sidebar fold to a rail of live status lights. Action-modal tiers, the action rows within a tier (numbered steps) and terminal debug chips are colour-coded; a mode-colour glow sits behind the transmitter. Configured button outlines now take the active mode's colour, and Mode 3 is gold (`--mode3` #e0a526, was green #36c08a — too close to Mode 1 teal and to the Connected/Apply green). Overlays must open with `ncShow()` / close with `ncHide()`; all motion is off under `prefers-reduced-motion`. |
 | 2026-10-07 | `304bd0f` | **Restore Defaults leaves the reset to Save** (D-NC74). RESET_DEFAULTS is RAM only, and the tool took the reset config as its diff baseline, so an unedited Save answered "No changes to save" and the reset was gone at the next reboot. The baseline stays the stored config, the reset shows as unsaved, and the toast says *Reset to factory defaults — Save to keep it on NaviCore*. |
 | 2026-10-04 | `255161d` | **Connect via USB identifies the device with `?REC` before any JSON** (§2, D-NC70). On a tethered WCB the direct probe's up to six bare JSON PINGs were broadcast out of the WCB's serial ports and onto the mesh; a WCB is now recognised by its answer and connected Via WCB with nothing bare written. |
 | 2026-10-04 | `6b0f3fe` | **A WCB doorway is no longer taken for a direct NaviCore** (§2, D-NC30). Any PONG satisfied the direct probe, so a relayed one left the session "direct" with USB OTA enabled against the WCB; a relayed PONG on the direct probe now switches to Via WCB, announced. |

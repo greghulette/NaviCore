@@ -33,7 +33,7 @@
     --red:       #f0584b;
     --mode1:     #1aa392;
     --mode2:     #b169d8;
-    --mode3:     #36c08a;
+    --mode3:     #e0a526;   /* gold — was green, too close to mode1 teal and to --green (Connected/Apply) */
     --hover:     rgba(255,255,255,.04);
     --hover-2:   rgba(255,255,255,.025);
     --shadow:    0 12px 40px rgba(0,0,0,.5);
@@ -151,7 +151,7 @@
   }
   .btn-icon:active { background: rgba(43,134,255,.2); }
   .sidebar.collapsed { width: 42px; min-width: 42px; max-width: 42px; }
-  .sidebar.collapsed > :not(.panel-header) { display:none; }
+  .sidebar.collapsed > :not(.panel-header):not(.nc-rail) { display:none; }
   .sidebar.collapsed .panel-header span { display:none; }
   .sidebar.collapsed .panel-actions { width:100%; justify-content:flex-end; }
   .content {
@@ -316,9 +316,9 @@
   .mode-tabs { display: flex; gap: 0; margin-bottom: 0; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); flex: 1; min-width: 360px; }
   .mode-tab  { flex: 1; padding: 8px; text-align: center; cursor: pointer; font-size: 12px; font-weight: 600; background: var(--surface); transition: background .2s; }
   .mode-tab:hover { background: var(--card); }
-  .mode-tab.active-1 { background: var(--mode1); color: #fff; }
-  .mode-tab.active-2 { background: var(--mode2); color: #fff; }
-  .mode-tab.active-3 { background: var(--mode3); color: #000; }
+  .mode-tab.active-1 { color: #fff; }   /* fill: .mode-tab::before (MOTION LAYER) */
+  .mode-tab.active-2 { color: #fff; }
+  .mode-tab.active-3 { color: #000; }
   /* Manual override is active — auto-follow paused until the physical
      switch moves. Dashed inner outline cues that the tab is "pinned". */
   .mode-tab-override {
@@ -936,6 +936,316 @@
   .calib-info-panel { width: 290px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
   .calib-step-counter { font-size: 11px; color: var(--muted); text-align: right; }
   .calib-instruction  { font-size: 15px; font-weight: 600; color: var(--text); line-height: 1.4; white-space: pre-wrap; }
+
+  /* ════════════════════════════════════════════════════════════════════
+     MOTION LAYER — open/close animation for overlays, drawer, sidebar,
+     mode tabs and the transmitter zones. Every effect lives here; the JS
+     "Motion layer" section only toggles the nc-* classes and sets the
+     --nc-* origin variables these rules read. Nothing here changes what a
+     control does, only how it arrives and leaves. All of it is switched off
+     under prefers-reduced-motion (block at the end), and the JS skips its
+     close timers there too, so reduced-motion users get the old instant
+     behaviour exactly.
+     ════════════════════════════════════════════════════════════════════ */
+
+  /* ── Overlays (every .modal-overlay) ─────────────────────────────────
+     Open: the overlay fades and the dialog pops. Variants, set by ncShow():
+       .nc-zoom  grows out of the control that opened it (--nc-ox/--nc-oy)
+       .nc-drop  unfolds down from a top-bar button (Config)
+     Close: ncHide() adds .nc-closing for the out-animation and only then
+     drops .open — see the JS for why .open stays on meanwhile.
+       .nc-fly   (close only) squashes and flies into another element
+                 (the Connect modal into the status light). */
+  .modal-overlay.open { animation: ncFadeIn .22s ease both; }
+  .modal-overlay.open > .modal { animation: ncPop .32s cubic-bezier(.2,1.1,.3,1) both; }
+  .modal-overlay.open.nc-zoom > .modal { transform-origin: var(--nc-ox, 50%) var(--nc-oy, 50%);
+    animation: ncZoom .5s cubic-bezier(.2,1.12,.3,1) both; }
+  .modal-overlay.open.nc-drop > .modal { transform-origin: var(--nc-ox, 50%) 0;
+    animation: ncDrop .55s cubic-bezier(.7,0,.2,1) both; }
+  .modal-overlay.nc-closing { animation: ncFadeOut .28s ease both; pointer-events: none; }
+  .modal-overlay.nc-closing > .modal { animation: ncPopOut .2s ease-in both; }
+  .modal-overlay.nc-closing.nc-zoom > .modal { animation: ncZoomOut .28s cubic-bezier(.6,0,.8,.3) both; }
+  .modal-overlay.nc-closing.nc-drop > .modal { animation: ncUndrop .28s cubic-bezier(.7,0,.3,1) both; }
+  .modal-overlay.nc-closing.nc-fly { animation: ncFadeOut .45s ease both; }
+  .modal-overlay.nc-closing.nc-fly > .modal { transform-origin: 50% 50%;
+    animation: ncFly .6s cubic-bezier(.6,0,.4,1) both; }
+  @keyframes ncFadeIn  { from { opacity: 0; } }
+  @keyframes ncFadeOut { to   { opacity: 0; } }
+  @keyframes ncPop     { from { opacity: 0; transform: translateY(10px) scale(.96); } }
+  @keyframes ncPopOut  { to   { opacity: 0; transform: translateY(6px) scale(.97); } }
+  @keyframes ncZoom    { 0% { opacity: 0; transform: scale(.05); border-radius: 60px; }
+                         30% { opacity: 1; } 100% { opacity: 1; transform: none; } }
+  @keyframes ncZoomOut { to { opacity: 0; transform: scale(.05); border-radius: 60px; } }
+  @keyframes ncDrop    { 0% { opacity: .6; transform: scale(.12,.01); } 40% { opacity: 1; transform: scale(1,.01); }
+                         100% { transform: none; } }
+  @keyframes ncUndrop  { 0% { transform: none; } 60% { transform: scale(1,.01); } 100% { opacity: 0; transform: scale(.12,.01); } }
+  @keyframes ncFly     { 0% { transform: none; } 35% { transform: scale(.92,.14); border-radius: 40px; }
+                         100% { transform: translate(var(--nc-tx,0), var(--nc-ty,0)) scale(.02,.03); border-radius: 40px; opacity: 0; } }
+
+  /* ── Transmitter zones (all models: .tx-x18 / .tx-twinxlite / .tx-x20) ──
+     Hover lifts the control; .nc-src pulses the control whose modal is open
+     (in the live colour, so it reads as "this one"); .nc-saved flashes green
+     when Apply lands. transform-box keeps the scale centred on the control
+     itself rather than the SVG origin. */
+  .btn-zone, .switch-zone, .knob-zone { transform-box: fill-box; transform-origin: center;
+    transition: opacity .15s, transform .2s cubic-bezier(.3,1.8,.5,1); }
+  .btn-zone:hover, .switch-zone:hover, .knob-zone:hover { transform: scale(1.12); }
+  .btn-zone.nc-src, .switch-zone.nc-src, .knob-zone.nc-src { animation: ncSrcPulse 1.2s ease-in-out infinite; }
+  .btn-zone.nc-saved, .switch-zone.nc-saved, .knob-zone.nc-saved { animation: ncSaved .9s ease-out; }
+  @keyframes ncSrcPulse { 0%,100% { filter: drop-shadow(0 0 4px var(--live-color)); }
+                          50% { filter: drop-shadow(0 0 14px var(--live-color)) drop-shadow(0 0 4px var(--live-color)); } }
+  @keyframes ncSaved { 0% { filter: drop-shadow(0 0 16px var(--green)) drop-shadow(0 0 6px var(--green)); transform: scale(1.25); }
+                       100% { filter: none; transform: none; } }
+  /* Mode change: configured outlines take the mode colour (updateButtonHighlights
+     writes var(--nc-mode-color)). While .nc-sweeping is on (≈0.9 s after a mode
+     change) the recolour runs left→right, each zone delayed by its x position
+     (--nc-sweep, measured from the SVG). Scoped to that window on purpose: the
+     same stroke/fill carries the 10 Hz live-activity flash, which must stay
+     instant. */
+  .tx-wrap.nc-sweeping .btn-zone :is(rect, circle) {
+    transition: stroke .35s ease var(--nc-sweep, 0ms), filter .35s ease var(--nc-sweep, 0ms); }
+  .workspace-title { color: var(--nc-mode-color, var(--accent)); transition: color .4s; }
+  .nc-mode-wave { position: fixed; width: 60px; height: 60px; margin: -30px 0 0 -30px; border-radius: 50%;
+    pointer-events: none; z-index: 5; opacity: 0;
+    background: radial-gradient(circle, var(--nc-wave-color, var(--accent)) 0%, transparent 70%); }
+  .nc-mode-wave.go-a { animation: ncWaveA 1.1s cubic-bezier(.2,.7,.3,1) both; }
+  .nc-mode-wave.go-b { animation: ncWaveB 1.1s cubic-bezier(.2,.7,.3,1) both; }
+  /* Two identical keyframes so alternating the class restarts the wave. */
+  @keyframes ncWaveA { 0% { transform: scale(.5); opacity: .75; } 100% { transform: scale(22); opacity: 0; } }
+  @keyframes ncWaveB { 0% { transform: scale(.5); opacity: .75; } 100% { transform: scale(22); opacity: 0; } }
+
+  /* ── Mode tabs: the active colour floods out from the centre ─────────── */
+  .mode-tab { position: relative; overflow: hidden; isolation: isolate; }
+  .mode-tab::before { content: ''; position: absolute; inset: 0; z-index: -1;
+    clip-path: circle(0% at 50% 50%); transition: clip-path .5s cubic-bezier(.7,0,.2,1); }
+  .mode-tab[data-mode="1"]::before { background: var(--mode1); }
+  .mode-tab[data-mode="2"]::before { background: var(--mode2); }
+  .mode-tab[data-mode="3"]::before { background: var(--mode3); }
+  .mode-tab.active-1::before, .mode-tab.active-2::before, .mode-tab.active-3::before { clip-path: circle(75% at 50% 50%); }
+
+  /* ── Config window ───────────────────────────────────────────────────
+     Each tab carries its own colour (--nc-tc). ncCfgIndicator() slides one
+     shared indicator to the active tab and copies its colour onto .cfg-body,
+     so the pane's title bar and section headings follow it. */
+  .cfg-header { position: relative; }
+  .cfg-header::after { content: ''; position: absolute; left: 0; right: 0; bottom: -2px; height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--mode1), var(--mode2), var(--accent3), var(--yellow), var(--accent));
+    background-size: 300% 100%; animation: ncFlow 6s linear infinite; }
+  @keyframes ncFlow { to { background-position: 300% 0; } }
+  #cfg-tabs { position: relative; }
+  #cfg-tabs .cfg-tab { position: relative; z-index: 1; display: flex; align-items: center; gap: 9px; }
+  #cfg-tabs .cfg-tab::before { content: ''; width: 7px; height: 7px; border-radius: 50%; flex: none;
+    background: var(--nc-tc); transition: transform .25s, box-shadow .25s; }
+  #cfg-tabs .cfg-tab.active { background: transparent; border-left-color: transparent; color: var(--nc-tc); }
+  #cfg-tabs .cfg-tab.active::before { transform: scale(1.4); box-shadow: 0 0 8px var(--nc-tc); }
+  #cfg-tabs .cfg-tab[data-tab="general"]     { --nc-tc: #5cb0ff; }
+  #cfg-tabs .cfg-tab[data-tab="channels"]    { --nc-tc: #2fc4b1; }
+  #cfg-tabs .cfg-tab[data-tab="logical"]     { --nc-tc: #c98ae8; }
+  #cfg-tabs .cfg-tab[data-tab="transmitter"] { --nc-tc: #7aa2ff; }
+  #cfg-tabs .cfg-tab[data-tab="wcb"]         { --nc-tc: #ff8f5c; }
+  #cfg-tabs .cfg-tab[data-tab="audio"]       { --nc-tc: #e0b341; }
+  #cfg-tabs .cfg-tab[data-tab="maestro"]     { --nc-tc: #ef6fa8; }
+  #cfg-tabs .cfg-tab[data-tab="wled"]        { --nc-tc: #4fd1e8; }
+  #cfg-tabs .cfg-tab[data-tab="smoothing"]   { --nc-tc: #36c08a; }
+  #cfg-tabs .cfg-tab[data-tab="serial"]      { --nc-tc: #a3b4cc; }
+  #cfg-tabs .cfg-tab[data-tab="firmware"]    { --nc-tc: #f0584b; }
+  .nc-cfg-ind { position: absolute; left: 0; right: 0; z-index: 0; pointer-events: none;
+    border-left: 3px solid var(--nc-tc, var(--accent));
+    background: color-mix(in srgb, var(--nc-tc, var(--accent)) 14%, transparent);
+    transition: top .38s cubic-bezier(.5,1.35,.5,1), height .38s cubic-bezier(.5,1.35,.5,1),
+                border-color .3s, background-color .3s; }
+  .nc-cfg-ind.nc-noanim { transition: none; }
+  #hwsetup-modal .cfg-pane .sb-section h3 { color: var(--nc-tc, var(--accent)); transition: color .3s; }
+  #hwsetup-modal .cfg-pane-title { position: relative; }
+  #hwsetup-modal .cfg-pane-title::after { content: ''; position: absolute; left: 0; bottom: -1px; width: 120px; height: 3px;
+    border-radius: 2px; background: var(--nc-tc, var(--accent)); box-shadow: 0 0 10px var(--nc-tc, var(--accent));
+    transform-origin: left; animation: ncDraw .5s cubic-bezier(.7,0,.2,1) both; }
+  @keyframes ncDraw { from { transform: scaleX(0); } }
+  /* Pane switch: the pane's blocks rise in, a beat apart. .cfg-pane goes
+     display:none → block on every switch, so the animation replays. */
+  #hwsetup-modal .cfg-pane.active > * { animation: ncRise .42s cubic-bezier(.2,.9,.25,1) both; }
+  #hwsetup-modal .cfg-pane.active > :nth-child(2) { animation-delay: .05s; }
+  #hwsetup-modal .cfg-pane.active > :nth-child(3) { animation-delay: .10s; }
+  #hwsetup-modal .cfg-pane.active > :nth-child(4) { animation-delay: .15s; }
+  #hwsetup-modal .cfg-pane.active > :nth-child(5) { animation-delay: .20s; }
+  #hwsetup-modal .cfg-pane.active > :nth-child(n+6) { animation-delay: .25s; }
+  @keyframes ncRise { from { opacity: 0; transform: translateY(14px); } }
+  /* Light theme: the tab colours are tuned for the dark ground; darken text uses. */
+  body.theme-light #cfg-tabs .cfg-tab.active,
+  body.theme-light #hwsetup-modal .cfg-pane .sb-section h3 { color: color-mix(in srgb, var(--nc-tc, var(--accent)) 62%, #000); }
+
+  /* ── Connect: options slide in; hover runs a light round the border; the
+     status light spins yellow while a port is being opened and bursts green
+     on link. ── */
+  @property --nc-a { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+  #connect-modal.open .connect-opt { animation: ncSlideIn .45s cubic-bezier(.2,.9,.25,1) both; }
+  #connect-modal.open .connect-opt:nth-child(1) { --nc-sx: -36px; animation-delay: .15s; }
+  #connect-modal.open .connect-opt:nth-child(2) { --nc-sx: 36px;  animation-delay: .22s; }
+  @keyframes ncSlideIn { from { opacity: 0; transform: translateX(var(--nc-sx, 0)); } }
+  /* Extra .modal in the selector: the connect modal's own <style> sits later in
+     the file and would otherwise win the border-color on hover. */
+  #connect-modal.open .modal .connect-opt:hover { border-color: transparent;
+    background: linear-gradient(var(--surface), var(--surface)) padding-box,
+                conic-gradient(from var(--nc-a), var(--accent), transparent 30%, var(--accent3) 55%, transparent 80%, var(--accent)) border-box;
+    animation: ncOrbit 1.6s linear infinite; }
+  @keyframes ncOrbit { to { --nc-a: 360deg; } }
+  .status-dot { position: relative; transition: background .3s, box-shadow .3s; }
+  .status-dot.connecting { background: var(--yellow); box-shadow: 0 0 10px rgba(224,179,65,.8); }
+  .status-dot.connecting::after { content: ''; position: absolute; inset: -6px; border-radius: 50%;
+    border: 2px solid transparent; border-top-color: var(--yellow); border-right-color: rgba(224,179,65,.35);
+    animation: ncSpin .7s linear infinite; }
+  .status-dot.connected { animation: ncLinkBurst .9s cubic-bezier(.2,.7,.3,1); }
+  @keyframes ncSpin { to { transform: rotate(360deg); } }
+  @keyframes ncLinkBurst { 0% { box-shadow: 0 0 0 0 rgba(54,192,138,.85); }
+                           70% { box-shadow: 0 0 0 14px rgba(54,192,138,0); }
+                           100% { box-shadow: 0 0 7px rgba(54,192,138,.55); } }
+
+  /* ── Terminal drawer: springs up, drops away; lines slide in with a flash
+     in their type's colour and keep a thin gutter in it. ── */
+  .terminal-panel.open { animation: ncTermUp .5s cubic-bezier(.2,1.15,.3,1) both; }
+  .terminal-panel.open.nc-closing { animation: ncTermDown .3s cubic-bezier(.6,0,.8,.4) both; pointer-events: none; }
+  @keyframes ncTermUp   { from { transform: translateY(100%); } }
+  @keyframes ncTermDown { to   { transform: translateY(105%); } }
+  .terminal-line { --nc-lc: 151,161,176; padding-left: 8px; box-shadow: inset 2px 0 0 rgba(var(--nc-lc), .7);
+    animation: ncLineIn .3s cubic-bezier(.2,.9,.25,1) both; }
+  .terminal-line.tx    { --nc-lc: 43,134,255; }
+  .terminal-line.rx    { --nc-lc: 54,192,138; }
+  .terminal-line.info,
+  .terminal-line.sys   { --nc-lc: 224,179,65; }
+  .terminal-line.error { --nc-lc: 240,88,75; }
+  @keyframes ncLineIn { 0% { opacity: 0; transform: translateX(-10px); background: rgba(var(--nc-lc), .2); }
+                        40% { opacity: 1; background: rgba(var(--nc-lc), .2); }
+                        100% { background: transparent; } }
+
+  /* ── Monitor sidebar: sections fold away a beat apart, the width eases to
+     the 42 px strip, then a rail of live status lights (SBUS + one per WCB,
+     mirrored by ncInitRail) pops in. --nc-i is each section's index. ── */
+  .sidebar > .sb-section { transition: opacity .24s ease calc(var(--nc-i, 0) * 60ms),
+                                       transform .34s cubic-bezier(.2,.8,.2,1) calc(var(--nc-i, 0) * 60ms); }
+  .sidebar.nc-folding > .sb-section { opacity: 0; transform: translateX(-22px); transition-duration: .16s; }
+  .sidebar.nc-folding .panel-header span { opacity: 0; }
+  .sidebar .panel-header span { transition: opacity .2s; }
+  .sidebar.nc-wanim { transition: width .46s cubic-bezier(.7,0,.2,1); overflow: hidden; }
+  .nc-rail { display: none; }
+  .sidebar.collapsed .nc-rail { display: flex; flex-direction: column; align-items: center; gap: 14px; padding-top: 14px; }
+  .nc-rail > * { animation: ncPip .42s cubic-bezier(.3,1.8,.5,1) both; }
+  .nc-rail > :nth-child(2) { animation-delay: .08s; }
+  .nc-pip-sbus { width: 12px; height: 12px; border-radius: 50%; background: var(--red); }
+  .nc-pip-wcb { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+  .nc-pip-wcb .wcb-chip-dot { margin: 0; cursor: help; }
+  .sidebar.collapsed .nc-rail { pointer-events: auto; }
+  @keyframes ncPip { from { opacity: 0; transform: scale(.3); } }
+
+  /* ── Mode colour behind the transmitter: a soft glow in the active mode's
+     colour. --nc-mode-glow is a registered <color> so the change between modes
+     cross-fades (a plain var inside a gradient would just snap). A background
+     layer, not a filter on the SVG: a drop-shadow would re-rasterise the whole
+     transmitter on every 10 Hz live-activity flash. ── */
+  @property --nc-mode-glow { syntax: '<color>'; inherits: true; initial-value: transparent; }
+  .tx-wrap { position: relative; isolation: isolate;
+    --nc-mode-glow: color-mix(in srgb, var(--nc-mode-color, var(--accent)) 55%, transparent);
+    transition: --nc-mode-glow .6s ease; }
+  .tx-wrap::before { content: ''; position: absolute; z-index: -1; pointer-events: none;
+    left: -8%; right: -8%; top: 18%; bottom: -6%; border-radius: 50%; filter: blur(8px);
+    background: radial-gradient(closest-side, var(--nc-mode-glow), transparent); }
+
+  /* ── Action modal: colour-coded tiers ────────────────────────────────
+     Each tier (Single / Double / Triple tap / Long press; a switch's Down / Mid
+     / Up) has its own colour (--nc-tier): its tab, count badge, card stripe and
+     action-row stripes. A tier switch slides the card in from the side you moved
+     toward (#tiers-container[data-nc-dir], set by setActionTier/setSwitchTier);
+     the card goes display:none → block on every switch, so the animation replays. */
+  #modal .modal-header { position: relative; }
+  #modal .modal-header::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px;
+    background: linear-gradient(90deg, var(--mode1), var(--mode2), var(--mode3), var(--accent3));
+    transform-origin: left; transform: scaleX(0); }
+  #modal.open .modal-header::after { animation: ncDrawX .55s cubic-bezier(.7,0,.2,1) .22s both; }
+  @keyframes ncDrawX { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  #tiers-container .tier-tab[data-tier="1"], #tier-card-1, #tiers-container .tier-tab[data-tier="p0"], #tier-card-p0 { --nc-tier: #5cb0ff; }
+  #tiers-container .tier-tab[data-tier="2"], #tier-card-2, #tiers-container .tier-tab[data-tier="p1"], #tier-card-p1 { --nc-tier: #c98ae8; }
+  #tiers-container .tier-tab[data-tier="3"], #tier-card-3, #tiers-container .tier-tab[data-tier="p2"], #tier-card-p2 { --nc-tier: #2fc4b1; }
+  #tiers-container .tier-tab[data-tier="4"], #tier-card-4 { --nc-tier: #ff8f5c; }
+  #tiers-container .tier-tab { transition: background .25s ease, color .25s ease, border-color .25s ease, box-shadow .25s ease; }
+  #tiers-container .tier-tab:hover { border-color: var(--nc-tier, var(--accent)); }
+  #tiers-container .tier-tab.active { color: var(--nc-tier, var(--accent)); border-color: var(--nc-tier, var(--accent));
+    background: color-mix(in srgb, var(--nc-tier, var(--accent)) 16%, transparent);
+    box-shadow: 0 0 14px color-mix(in srgb, var(--nc-tier, var(--accent)) 35%, transparent); }
+  #tiers-container .tier-tab .tier-tab-count { background: var(--nc-tier, var(--accent)); color: #0c1119; }
+  /* Tier switch is deliberately gentle — a short cross-fade with a 10 px drift and
+     the container height eased by ncTierDir(). A bigger slide, a 3D turn or
+     per-row stagger here read as jumpy (and dizzying) when flicking between tiers. */
+  #modal .tier-card { border-left: 3px solid var(--nc-tier, #384662);
+    animation: ncCardF .26s cubic-bezier(.25,.1,.25,1) both; }
+  #tiers-container[data-nc-dir="back"] .tier-card { animation-name: ncCardB; }
+  /* Rows inside a tier each get their own colour by position plus a numbered tag,
+     so a sequence of similar rows reads as separate steps. Step 1 takes the
+     tier's own colour; the rest continue round the palette from there
+     (blue → purple → teal → orange → gold → pink → …; MAX_ACTIONS_PER_TIER is 5),
+     set per card as --nc-r1…--nc-r5. Position-based on purpose: the colour and
+     number track the step's place in the order, so ▲ Up / ▼ Down recolour it. */
+  #tier-card-1, #tier-card-p0 { --nc-r1: #5cb0ff; --nc-r2: #c98ae8; --nc-r3: #2fc4b1; --nc-r4: #ff8f5c; --nc-r5: #e0b341; }
+  #tier-card-2, #tier-card-p1 { --nc-r1: #c98ae8; --nc-r2: #2fc4b1; --nc-r3: #ff8f5c; --nc-r4: #e0b341; --nc-r5: #ef6fa8; }
+  #tier-card-3, #tier-card-p2 { --nc-r1: #2fc4b1; --nc-r2: #ff8f5c; --nc-r3: #e0b341; --nc-r4: #ef6fa8; --nc-r5: #5cb0ff; }
+  #tier-card-4               { --nc-r1: #ff8f5c; --nc-r2: #e0b341; --nc-r3: #ef6fa8; --nc-r4: #5cb0ff; --nc-r5: #c98ae8; }
+  #modal .rows-container { counter-reset: nc-step; gap: 16px; padding-top: 6px; }
+  #modal .rows-container > .action-row { --nc-row: var(--nc-r1, #5cb0ff); position: relative; counter-increment: nc-step;
+    border-left-color: var(--nc-row);
+    background: color-mix(in srgb, var(--nc-row) 7%, #35435a); }
+  #modal .rows-container > .action-row:nth-child(5n+2) { --nc-row: var(--nc-r2, #c98ae8); }
+  #modal .rows-container > .action-row:nth-child(5n+3) { --nc-row: var(--nc-r3, #2fc4b1); }
+  #modal .rows-container > .action-row:nth-child(5n+4) { --nc-row: var(--nc-r4, #e0b341); }
+  #modal .rows-container > .action-row:nth-child(5n+5) { --nc-row: var(--nc-r5, #ef6fa8); }
+  #modal .rows-container > .action-row::before { content: '#' counter(nc-step); position: absolute; top: -9px; left: 10px;
+    padding: 1px 7px; border-radius: 8px; font-size: 10px; font-weight: 700; letter-spacing: .04em;
+    background: var(--nc-row); color: #0c1119; pointer-events: none; }
+  body.theme-light #modal .rows-container > .action-row { background: color-mix(in srgb, var(--nc-row) 8%, var(--surface-2)); }
+  @keyframes ncCardF { from { opacity: 0; transform: translateX(10px); } }
+  @keyframes ncCardB { from { opacity: 0; transform: translateX(-10px); } }
+  #modal .modal-header .btn-ghost { transition: transform .3s, color .15s, border-color .15s; }
+  #modal .modal-header .btn-ghost:hover { transform: rotate(90deg); border-color: var(--red); }
+  #modal .btn-success:hover:not(:disabled) { box-shadow: 0 0 18px rgba(54,192,138,.55); }
+  body.theme-light #tiers-container .tier-tab.active { color: color-mix(in srgb, var(--nc-tier, var(--accent)) 62%, #000); }
+
+  /* ── Terminal: flowing colour edge, colour-coded pane chips and debug chips
+     (same hues as the Config tabs they belong to), header controls pop in. ── */
+  .terminal-panel::before { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px; z-index: 3;
+    pointer-events: none; background: linear-gradient(90deg, var(--accent), var(--mode2), var(--accent3), var(--mode1), var(--accent));
+    background-size: 300% 100%; animation: ncFlow 6s linear infinite; }
+  #term-vis-chip-nc:has(input:checked)  { border-color: var(--accent);  color: #8cc8ff; background: rgba(43,134,255,.14); }
+  #term-vis-chip-wcb:has(input:checked) { border-color: var(--accent3); color: #ffb48a; background: rgba(255,122,61,.14); }
+  .dbg-chip[data-cat="maestro"] { --nc-dc: #ef6fa8; }
+  .dbg-chip[data-cat="wcb"]     { --nc-dc: #ff8f5c; }
+  .dbg-chip[data-cat="hcr"]     { --nc-dc: #e0b341; }
+  .dbg-chip[data-cat="mp3"]     { --nc-dc: #f2c96b; }
+  .dbg-chip[data-cat="dfp"]     { --nc-dc: #d6a12c; }
+  .dbg-chip[data-cat="wled"]    { --nc-dc: #4fd1e8; }
+  .dbg-chip[data-cat="serial"]  { --nc-dc: #a3b4cc; }
+  .dbg-chip:hover { border-color: var(--nc-dc, var(--accent)); }
+  .dbg-chip[aria-pressed="true"], .dbg-chip[aria-pressed="true"]:hover {
+    background: var(--nc-dc, var(--accent)); border-color: var(--nc-dc, var(--accent)); color: #0c1119;
+    box-shadow: 0 0 8px color-mix(in srgb, var(--nc-dc, var(--accent)) 60%, transparent); }
+  .terminal-panel.open:not(.nc-closing) :is(.term-title, .term-vis-chip, .btn-term, .dbg-chip) {
+    animation: ncPop .4s cubic-bezier(.3,1.7,.5,1) both; }
+  .terminal-panel.open:not(.nc-closing) .term-vis-chip { animation-delay: .06s; }
+  .terminal-panel.open:not(.nc-closing) .btn-term     { animation-delay: .12s; }
+  .terminal-panel.open:not(.nc-closing) .dbg-chip     { animation-delay: .16s; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tx-wrap, #modal .modal-header::after, #tiers-container .tier-tab, #modal .tier-card,
+    .terminal-panel::before, .terminal-panel :is(.term-title, .term-vis-chip, .btn-term, .dbg-chip) {
+      animation: none !important; transition: none !important; }
+    #modal .modal-header::after { transform: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .modal-overlay, .modal-overlay > .modal, .btn-zone, .switch-zone, .knob-zone,
+    .mode-tab::before, .nc-mode-wave, .workspace-title, .cfg-header::after, .nc-cfg-ind,
+    #hwsetup-modal .cfg-pane > *, #hwsetup-modal .cfg-pane-title::after, #connect-modal .connect-opt,
+    .status-dot, .status-dot::after, .terminal-panel, .terminal-line, .sidebar, .sidebar > .sb-section,
+    .nc-rail > *, .tx-wrap .btn-zone :is(rect, circle) {
+      animation: none !important; transition: none !important; }
+    .btn-zone:hover, .switch-zone:hover, .knob-zone:hover { transform: none; }
+  }
 </style>
 </head>
 <body class="tx-show-x18"><!-- Default model; applyTxModel() swaps when user picks a different one -->
@@ -2319,7 +2629,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.14:42.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.15:31.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -4018,12 +4328,12 @@ function setMeshStatsAutoPoll(on) {
   if (on) { requestMeshStats(); _meshStatsTimer = setInterval(requestMeshStats, 5000); }
 }
 function openMeshStats() {
-  document.getElementById('meshstats-modal').classList.add('open');
+  ncShow(document.getElementById('meshstats-modal'));
   renderMeshStats();
   requestMeshStats();          // freshen on open; the glance data may be ~15 s old
 }
 function closeMeshStats() {
-  document.getElementById('meshstats-modal').classList.remove('open');
+  ncHide(document.getElementById('meshstats-modal'));
   // Stop the fast poll with the modal — nothing is reading it at 5 s any more.
   const ap = document.getElementById('stats-autopoll');
   if (ap) ap.checked = false;
@@ -4693,16 +5003,300 @@ function settleWithin(p, ms) {
   ]);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  Motion layer
+// ════════════════════════════════════════════════════════════════════════════
+// Open/close animation for the overlays, the terminal drawer, the Monitor
+// sidebar, the mode tabs and the transmitter zones. Every visual is CSS (the
+// MOTION LAYER block at the end of the main <style>); these helpers only set the
+// nc-* classes and the --nc-* origin variables those rules read.
+//
+// Two rules keep the animation from changing behaviour:
+//  • An overlay keeps .open through its close animation (.nc-closing marks it),
+//    so code that tests .open still sees the overlay until it is really gone.
+//    The flip side: every open path for an overlay that closes through ncHide()
+//    must go through ncShow(), which cancels the pending close. A bare
+//    classList.add('open') during the close window would be undone when the
+//    timer fires.
+//  • prefers-reduced-motion skips every timer — open and close are instant,
+//    exactly as before this layer existed.
+const NC_CLOSE_MS = 280;
+const NC_FLY_MS   = 620;
+function ncReduced() {
+  return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+function ncShow(overlay, originEl, variant) {
+  if (!overlay) return;
+  clearTimeout(overlay._ncT);
+  overlay.classList.remove('nc-closing', 'nc-fly', 'nc-zoom', 'nc-drop');
+  overlay.classList.add('open');
+  if (originEl && variant && !ncReduced()) ncAim(overlay, originEl, variant);
+}
+function ncHide(overlay, variant, targetEl) {
+  if (!overlay || !overlay.classList.contains('open')) return;
+  clearTimeout(overlay._ncT);
+  if (ncReduced()) { overlay.classList.remove('open', 'nc-closing', 'nc-fly', 'nc-zoom', 'nc-drop'); return; }
+  const fly = variant === 'fly' && targetEl;
+  if (fly) ncAimFly(overlay, targetEl);
+  overlay.classList.add('nc-closing');
+  overlay._ncT = setTimeout(() => {
+    if (overlay.classList.contains('nc-closing'))
+      overlay.classList.remove('open', 'nc-closing', 'nc-fly', 'nc-zoom', 'nc-drop');
+  }, fly ? NC_FLY_MS : NC_CLOSE_MS);
+}
+// The dialog's UNtransformed box inside its overlay (position:fixed; inset:0, so
+// these are viewport coordinates). offsetLeft/Top, not getBoundingClientRect: by
+// the time this runs the open animation has applied its first-frame scale, and a
+// transformed rect would aim the origin at the wrong point.
+function ncDialogBox(overlay) {
+  const d = overlay.querySelector('.modal');
+  return d ? { d, x: d.offsetLeft, y: d.offsetTop, w: d.offsetWidth, h: d.offsetHeight } : null;
+}
+function ncAim(overlay, el, variant) {
+  const b = ncDialogBox(overlay);
+  if (!b) return;
+  const r = el.getBoundingClientRect();
+  b.d.style.setProperty('--nc-ox', (r.left + r.width / 2 - b.x) + 'px');
+  b.d.style.setProperty('--nc-oy', (r.top + r.height / 2 - b.y) + 'px');
+  overlay.classList.add('nc-' + variant);
+}
+function ncAimFly(overlay, el) {
+  const b = ncDialogBox(overlay);
+  if (!b) return;
+  const r = el.getBoundingClientRect();
+  b.d.style.setProperty('--nc-tx', (r.left + r.width / 2 - (b.x + b.w / 2)) + 'px');
+  b.d.style.setProperty('--nc-ty', (r.top + r.height / 2 - (b.y + b.h / 2)) + 'px');
+  overlay.classList.add('nc-fly');
+}
+
+// The transmitter control a modal is about, on whichever model is showing. The
+// X18, TwinXLite and X20 groups all use the same zone classes and data-* ids, and
+// several ids exist in more than one group (and the X-Lite D-pads have two zones
+// per slot), so querySelector alone can return a hidden one. Prefer the zone that
+// was actually clicked; otherwise the first match with a layout box — only the
+// active .tx-model group has one.
+function ncZone(sel) {
+  const ev = window.event;
+  const hit = ev && ev.target && ev.target.closest && ev.target.closest(sel);
+  if (hit) return hit;
+  for (const z of document.querySelectorAll(sel)) if (z.getClientRects().length) return z;
+  return null;
+}
+// Tier switch direction for the card slide: forward (higher tier) slides in from
+// the right, back from the left. Stored on #tiers-container, which the CSS reads.
+// Also eases the container's height between tiers of different length: called at
+// the start of setActionTier/setSwitchTier, it records the height now, and a
+// microtask (which runs after the caller has swapped the cards, before paint)
+// animates from that to the new height — without it the footer jumps.
+function ncTierDir(n) {
+  const tc = document.getElementById('tiers-container');
+  if (!tc) return;
+  const prev = tc.dataset.ncTier === undefined ? n : +tc.dataset.ncTier;
+  tc.dataset.ncDir = n >= prev ? 'fwd' : 'back';
+  tc.dataset.ncTier = n;
+  const h0 = tc.offsetHeight;
+  if (!h0 || n === prev || ncReduced() || !tc.animate) return;   // hidden (opening) or no change
+  queueMicrotask(() => {
+    const h1 = tc.offsetHeight;
+    if (Math.abs(h1 - h0) < 2) return;
+    if (tc._ncH) tc._ncH.cancel();
+    tc.style.overflow = 'hidden';
+    tc._ncH = tc.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }],
+                         { duration: 260, easing: 'cubic-bezier(.25,.1,.25,1)' });
+    tc._ncH.onfinish = tc._ncH.oncancel = () => { tc.style.overflow = ''; tc._ncH = null; };
+  });
+}
+let _ncSrc = null;   // zone whose action modal is open (pulses via .nc-src)
+function ncMarkSource(z) {
+  if (_ncSrc) _ncSrc.classList.remove('nc-src');
+  _ncSrc = z || null;
+  if (_ncSrc) _ncSrc.classList.add('nc-src');
+}
+function ncOpenActionModal(zoneSel) {
+  const z = ncZone(zoneSel);
+  ncMarkSource(z);
+  ncShow(document.getElementById('modal'), z, 'zoom');
+}
+function ncFlashSaved(z) {
+  if (!z || ncReduced()) return;
+  z.classList.remove('nc-saved');
+  void z.getBoundingClientRect();          // restart the animation if it is mid-run
+  z.classList.add('nc-saved');
+  setTimeout(() => z.classList.remove('nc-saved'), 1000);
+}
+
+// Status light while a port is being picked/opened. setConnected() rewrites the
+// dot's className, which drops this on success; the caller clears it otherwise.
+function ncConnecting(on) {
+  const d = document.getElementById('conn-dot');
+  if (!d) return;
+  if (on && !d.classList.contains('connected')) d.classList.add('connecting');
+  else if (!on) d.classList.remove('connecting');
+}
+
+// Config window: one indicator slides to the active tab; its colour (--nc-tc on
+// the tab) is copied to .cfg-body so the pane's title bar and headings follow.
+// Called from setConfigTab (animate) and again after the window opens (no
+// animation), because tabs inside a display:none overlay have no offsets.
+function ncCfgIndicator(animate) {
+  const nav = document.getElementById('cfg-tabs');
+  const tab = nav && nav.querySelector('.cfg-tab.active');
+  if (!tab) return;
+  let ind = nav.querySelector('.nc-cfg-ind');
+  if (!ind) {
+    ind = document.createElement('span');
+    ind.className = 'nc-cfg-ind';
+    ind.setAttribute('aria-hidden', 'true');
+    nav.prepend(ind);
+  }
+  const body = nav.closest('.cfg-body');
+  if (body) body.style.setProperty('--nc-tc', getComputedStyle(tab).getPropertyValue('--nc-tc').trim() || 'var(--accent)');
+  if (!animate) ind.classList.add('nc-noanim');
+  ind.style.top    = tab.offsetTop + 'px';
+  ind.style.height = tab.offsetHeight + 'px';
+  if (!animate) { void ind.offsetWidth; ind.classList.remove('nc-noanim'); }
+}
+
+// Mode change: colour, a wave from the tab, and a left→right recolour of the
+// configured zones. Runs from setEditingMode, which only gets here on a real
+// change (it is idempotent at the 10 Hz monitor rate), so a physical switch flip
+// on the transmitter plays it too.
+function ncModeChanged(mode) {
+  document.body.style.setProperty('--nc-mode-color', `var(--mode${mode})`);
+  if (ncReduced()) return;
+  const wrap = document.querySelector('.tx-wrap');
+  if (wrap) {
+    const svg = wrap.querySelector('svg');
+    const vbw = (svg && svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) || 1000;
+    // Measured lazily per zone: zones of a hidden model have no box yet; they get
+    // theirs the first time their model is the one showing.
+    wrap.querySelectorAll('.btn-zone').forEach(z => {
+      if (z.dataset.ncSweep || !z.getClientRects().length) return;
+      try {
+        z.style.setProperty('--nc-sweep', Math.round(z.getBBox().x / vbw * 320) + 'ms');
+        z.dataset.ncSweep = '1';
+      } catch (_) {}
+    });
+    wrap.classList.add('nc-sweeping');
+    clearTimeout(wrap._ncT);
+    wrap._ncT = setTimeout(() => wrap.classList.remove('nc-sweeping'), 900);
+  }
+  const tab = document.querySelector(`.mode-tab[data-mode="${mode}"]`);
+  if (tab && tab.getClientRects().length) {
+    let w = document.querySelector('.nc-mode-wave');
+    if (!w) { w = document.createElement('div'); w.className = 'nc-mode-wave'; w.setAttribute('aria-hidden', 'true'); document.body.appendChild(w); }
+    const r = tab.getBoundingClientRect();
+    w.style.left = (r.left + r.width / 2) + 'px';
+    w.style.top  = (r.top + r.height / 2) + 'px';
+    w.style.setProperty('--nc-wave-color', `var(--mode${mode})`);
+    const next = w.classList.contains('go-a') ? 'go-b' : 'go-a';
+    w.classList.remove('go-a', 'go-b');
+    w.classList.add(next);
+  }
+}
+
+// Monitor sidebar fold. The end state is exactly the old one — .collapsed (42 px,
+// sections display:none) — so everything that reads that class, including the
+// drag handle's "dragging un-collapses" path, is unchanged. The user's dragged
+// width lives in the inline style and is put back after each run, so collapse →
+// expand returns to the width they chose rather than the CSS default.
+function ncFoldSidebar(panel, collapse, done) {
+  const finish = () => { panel._ncBusy = false; if (done) done(); };
+  if (ncReduced()) { panel.classList.toggle('collapsed', collapse); finish(); return; }
+  panel._ncBusy = true;
+  const keep = panel.style.width;
+  panel.querySelectorAll(':scope > .sb-section').forEach((s, i) => s.style.setProperty('--nc-i', i));
+  if (collapse) {
+    panel.style.width = panel.offsetWidth + 'px';
+    panel.classList.add('nc-folding');
+    setTimeout(() => {
+      panel.classList.add('nc-wanim');
+      panel.style.width = '42px';
+      setTimeout(() => {
+        panel.classList.add('collapsed');
+        panel.classList.remove('nc-wanim', 'nc-folding');
+        panel.style.width = keep;
+        finish();
+      }, 470);
+    }, 170);
+  } else {
+    const target = parseFloat(keep) || 320;   // 320 = .sidebar's CSS width
+    panel.classList.add('nc-folding');
+    panel.style.width = '42px';
+    panel.classList.remove('collapsed');
+    void panel.offsetWidth;
+    panel.classList.add('nc-wanim');
+    panel.style.width = target + 'px';
+    setTimeout(() => {
+      panel.classList.remove('nc-wanim', 'nc-folding');
+      panel.style.width = keep;
+      finish();
+    }, 470);
+  }
+}
+
+// Collapsed-sidebar rail: live status lights mirrored from the real monitor —
+// the SBUS dot (#sbus-dot's inline colour) and one dot per WCB chip. Mirrored by
+// observing those elements rather than hooking their renderers, so the rail can
+// never drift from what the expanded sidebar would show.
+function ncInitRail() {
+  const panel = document.getElementById('sidebar-panel');
+  const header = panel && panel.querySelector('.panel-header');
+  if (!header || panel.querySelector('.nc-rail')) return;
+  const rail = document.createElement('div');
+  rail.className = 'nc-rail';
+  rail.setAttribute('aria-hidden', 'true');
+  rail.innerHTML = '<span class="nc-pip-sbus" title="SBUS receiver"></span><span class="nc-pip-wcb" title="WCB status"></span>';
+  header.after(rail);
+  const sbusSrc = document.getElementById('sbus-dot');
+  const sbus = rail.querySelector('.nc-pip-sbus');
+  const wcb  = rail.querySelector('.nc-pip-wcb');
+  const syncSbus = () => {
+    if (!sbusSrc) return;
+    sbus.style.background = sbusSrc.style.background;
+    sbus.style.boxShadow  = sbusSrc.style.boxShadow;
+  };
+  const syncWcb = () => {
+    wcb.textContent = '';
+    // One dot per chip, no text — the strip is 42 px. Each dot carries the chip's
+    // name and state as a hover tooltip ("WCB 3 · Offline"); the full chip, with
+    // its stats and buttons, is one click away by expanding the sidebar.
+    document.querySelectorAll('#wcb-status-list .wcb-chip').forEach(chip => {
+      const d = chip.querySelector('.wcb-chip-dot');
+      if (!d) return;
+      const i = document.createElement('i');
+      i.className = d.className;
+      const name  = (chip.querySelector('.wcb-chip-name')?.textContent  || '').replace(/\s+/g, ' ').trim();
+      const state = (chip.querySelector('.wcb-chip-state')?.textContent || '').replace(/\s+/g, ' ').trim();
+      i.title = [name, state].filter(Boolean).join(' · ');
+      wcb.appendChild(i);
+    });
+  };
+  if (sbusSrc) new MutationObserver(syncSbus).observe(sbusSrc, { attributes: true, attributeFilter: ['style', 'class'] });
+  const list = document.getElementById('wcb-status-list');
+  if (list) new MutationObserver(syncWcb).observe(list, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+  syncSbus();
+  syncWcb();
+}
+
 // ── Connect method modal (USB / Via WCB / Shared port) ───────────────────────
-function openConnectModal()  { document.getElementById('connect-modal')?.classList.add('open'); }
-function closeConnectModal() { document.getElementById('connect-modal')?.classList.remove('open'); }
+function openConnectModal()  { ncShow(document.getElementById('connect-modal'), document.getElementById('btn-connect'), 'zoom'); }
+// toDot: a method was picked — the modal folds into the status light, which then
+// spins (ncConnecting) until setConnected() turns it green or the attempt ends.
+function closeConnectModal(toDot) {
+  const m = document.getElementById('connect-modal');
+  if (toDot) ncHide(m, 'fly', document.getElementById('conn-dot'));
+  else       ncHide(m);
+}
 
 async function connectDirect() {
-  closeConnectModal();
+  closeConnectModal(true);
+  ncConnecting(true);
   try {
     const p = await navigator.serial.requestPort();
     await openPortAndStart(p, 4000, true, false);   // try direct, auto-fallback to Via WCB
   } catch (e) { console.error(e); if (e?.name !== 'NotFoundError') alert('Could not open serial port:\n' + e.message); port = null; }
+  finally { ncConnecting(false); }
 }
 // "Via a WCB" — always routes through the cross-tab hub (WcbSerialHub). As the
 // sole tab it elects itself leader and owns the tethered WCB's port (identical
@@ -4710,8 +5304,10 @@ async function connectDirect() {
 // both tabs drive it with no second cable. Merged from the old separate
 // "Via a WCB" (direct) + "Shared port (across tabs)" options into one.
 async function connectViaWcbOpt() {
-  closeConnectModal();
-  await connectSharedPort();
+  closeConnectModal(true);
+  ncConnecting(true);
+  try { await connectSharedPort(); }
+  finally { ncConnecting(false); }
 }
 
 // ── Shared-port transport (WcbSerialHub) ─────────────────────────────────────
@@ -6124,7 +6720,18 @@ function initTerminal() {
   // Drawer-style open/close — closed = fully hidden (no bottom strip).
   function setTerminalOpen(open) {
     if (!terminalPanel) return;
-    terminalPanel.classList.toggle('open', open);
+    // Closing keeps .open for the drop-away animation (.nc-closing); see Motion layer.
+    clearTimeout(terminalPanel._ncT);
+    if (open) {
+      terminalPanel.classList.remove('nc-closing');
+      terminalPanel.classList.add('open');
+    } else if (terminalPanel.classList.contains('open')) {
+      if (ncReduced()) terminalPanel.classList.remove('open');
+      else {
+        terminalPanel.classList.add('nc-closing');
+        terminalPanel._ncT = setTimeout(() => terminalPanel.classList.remove('open', 'nc-closing'), 300);
+      }
+    }
     if (terminalOpenBtn) terminalOpenBtn.classList.toggle('active', open);
     // Reserve page space for the drawer so content can scroll clear of it
     // instead of hiding underneath (see the body.terminal-open CSS + --term-h).
@@ -6198,14 +6805,16 @@ function initTerminal() {
   if (sidebarToggle) {
     sidebarToggle.addEventListener('click', () => {
       const panel = sidebarPanel;
-      const collapsed = panel.classList.toggle('collapsed');
+      if (panel._ncBusy) return;   // mid-fold: ignore until the animation settles
+      const collapsed = !panel.classList.contains('collapsed');
       sidebarToggle.textContent = collapsed ? '▶' : '◀';
       sidebarToggle.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
       sidebarToggle.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
       // Swap brand: full logo in the open sidebar ↔ wordmark in the top bar.
       document.body.classList.toggle('sidebar-collapsed', collapsed);
-      // Re-sync brand-box width / topbar padding for the new state.
-      syncBrandBoxToSidebar();
+      // Animated fold (sets .collapsed when it lands); re-sync brand-box width /
+      // topbar padding once it settles.
+      ncFoldSidebar(panel, collapsed, syncBrandBoxToSidebar);
     });
   }
   // In-panel ▼ Close button → hide the drawer.
@@ -6215,7 +6824,7 @@ function initTerminal() {
   // Top-bar ⌨ Terminal button → toggle the drawer.
   if (terminalOpenBtn) {
     terminalOpenBtn.addEventListener('click', () => {
-      setTerminalOpen(!terminalPanel.classList.contains('open'));
+      setTerminalOpen(!terminalPanel.classList.contains('open') || terminalPanel.classList.contains('nc-closing'));
     });
   }
 
@@ -6224,6 +6833,7 @@ function initTerminal() {
 }
 
 initTerminal();
+ncInitRail();
 
 // ══════════════════════════════════════════════════════════════════════════
 // Clips panel — record/replay library GUI (Slice 2d).
@@ -6277,11 +6887,11 @@ function _ensureClipNamesFresh() {
 }
 
 function openClipsModal() {
-  document.getElementById('clips-modal').classList.add('open');
+  ncShow(document.getElementById('clips-modal'));
   clipsRefresh();
 }
 function closeClipsModal() {
-  document.getElementById('clips-modal').classList.remove('open');
+  ncHide(document.getElementById('clips-modal'));
 }
 // Dismiss on backdrop click, matching the other modals.
 document.getElementById('clips-modal').addEventListener('click', e => {
@@ -7263,7 +7873,7 @@ function _tlSoftWeight(distMs) {
 function _tlId() { return _tlNextId++; }
 
 function openTimelineEditor(name) {
-  document.getElementById('tl-modal').classList.add('open');
+  ncShow(document.getElementById('tl-modal'));
   document.getElementById('tl-title').textContent = '📈 Timeline — ' + name;
   _tlSetStatus('Loading…');
   _tlClip = null;
@@ -7326,7 +7936,7 @@ function closeTimelineEditor() {
   _tlClip = null;
   _tlDownload = null;
   _tlAbortWaiters('editor closed');   // orphaned waiters must not steal the next upload's markers
-  document.getElementById('tl-modal').classList.remove('open');
+  ncHide(document.getElementById('tl-modal'));
 }
 document.getElementById('tl-modal').addEventListener('click', e => {
   if (e.target === document.getElementById('tl-modal')) closeTimelineEditor();
@@ -8890,7 +9500,7 @@ function _tlFreeActionTime(t, ignoreId) {
 }
 function _tlOpenActionEditor(existing, defaultT) {
   _tlEditingActionId = existing ? existing.id : null;
-  document.getElementById('tl-action-modal').classList.add('open');
+  ncShow(document.getElementById('tl-action-modal'));
   document.getElementById('tl-action-title').textContent = existing ? 'Edit action' : 'New action';
   const typeSel = document.getElementById('tl-action-type');
   typeSel.innerHTML = '';
@@ -8929,7 +9539,7 @@ function _tlOpenActionEditor(existing, defaultT) {
 }
 
 function _tlCloseActionEditor() {
-  document.getElementById('tl-action-modal').classList.remove('open');
+  ncHide(document.getElementById('tl-action-modal'));
   _tlEditingActionId = null;
 }
 
@@ -12089,9 +12699,9 @@ function updateButtonHighlights() {
     document.querySelectorAll(`.btn-zone[data-btn="${btn}"]`).forEach(group => {
       const outer = group.querySelector('rect, circle');
       if (outer) {
-        outer.style.stroke      = hasData ? 'var(--accent2)' : '';
+        outer.style.stroke      = hasData ? 'var(--nc-mode-color, var(--accent2))' : '';
         outer.style.strokeWidth = hasData ? '2.5' : '';
-        outer.style.filter      = hasData ? 'drop-shadow(0 0 3px var(--accent2))' : '';
+        outer.style.filter      = hasData ? 'drop-shadow(0 0 3px var(--nc-mode-color, var(--accent2)))' : '';
       }
     });
   }
@@ -12216,12 +12826,13 @@ function openModal(btn) {
   for (let tier = 1; tier <= NUM_TAP_TIERS; tier++) refreshTierState(tier);
   setActionTier(1);   // start on single-tap
 
-  document.getElementById('modal').classList.add('open');
+  ncOpenActionModal(`.btn-zone[data-btn="${btn}"]`);
 }
 
 // Show one tap-tier's card; hide the others; highlight its tab.
 function setActionTier(tier) {
   tier = +tier;
+  ncTierDir(tier);   // which side the card slides in from (MOTION LAYER)
   document.querySelectorAll('#tiers-container .tier-tab')
           .forEach(t => t.classList.toggle('active', +t.dataset.tier === tier));
   for (let t = 1; t <= NUM_TAP_TIERS; t++) {
@@ -13722,7 +14333,7 @@ async function openCmdLibrary(fid) {
   const modal = document.getElementById('cmdlib-modal');
   document.getElementById('cmdlib-close').onclick = closeCmdLibrary;
   modal.onclick = e => { if (e.target === modal) closeCmdLibrary(); };
-  modal.classList.add('open');
+  ncShow(modal);
   _cmdlibOpenView(fid);
   await _cmdlibReady;
   // Once the vendored catalog finishes loading, upgrade the view for THIS row —
@@ -13770,7 +14381,7 @@ function _cmdlibOpenView(fid) {
   else         { _cmdlibShowList(); }
 }
 function closeCmdLibrary() {
-  document.getElementById('cmdlib-modal').classList.remove('open');
+  ncHide(document.getElementById('cmdlib-modal'));
   _cmdlibFid = null; _cmdlibSel = null; _cmdlibValues = {};
 }
 
@@ -15832,7 +16443,8 @@ function clearButton() {
 }
 
 function closeModal() {
-  document.getElementById('modal').classList.remove('open');
+  ncHide(document.getElementById('modal'));   // shrinks back into the control (nc-zoom)
+  ncMarkSource(null);
   editingBtn  = null;
   editingSw   = null;
   editingKnob = null;
@@ -16019,7 +16631,7 @@ function openKnobModal(name) {
               onclick="addKnobOutput()">+ Add output</button>
     </div>
   `;
-  document.getElementById('modal').classList.add('open');
+  ncOpenActionModal(`.knob-zone[data-knob="${name}"]`);
   renderKnobOutputs();
 }
 
@@ -16436,7 +17048,7 @@ function openSwitchModal(swName) {
   container.appendChild(hwCard);
 
   buildSwitchTiers(sw);
-  document.getElementById('modal').classList.add('open');
+  ncOpenActionModal(`.switch-zone[data-sw="${swName}"]`);
 }
 
 function buildSwitchTiers(sw) {
@@ -16503,6 +17115,7 @@ function buildSwitchTiers(sw) {
 // Show one switch-position card; hide the others; highlight its tab. Mirrors
 // setActionTier (button modal) — cards stay in the DOM so Save reads them all.
 function setSwitchTier(tierKey) {
+  ncTierDir(+String(tierKey).slice(1));   // p0/p1/p2 → 0/1/2
   document.querySelectorAll('#tiers-container .tier-tab')
           .forEach(t => t.classList.toggle('active', t.dataset.tier === tierKey));
   ['p0','p1','p2'].forEach(k => {
@@ -16580,10 +17193,16 @@ function renderSwitchHighlights() {
 
 // Dispatch Apply / Clear All to the right handler.
 async function saveModalDispatch() {
+  const savedZone = _ncSrc;   // captured first: the save closes the modal, which clears it
   // Write the modal's edits into the in-memory config (closes modal + renders)…
   if (editingKnob)     saveKnobModal();
   else if (editingSw)  saveSwitchModal();
   else                 saveButton();
+  // Green flash on the control as the modal shrinks into it — only if the save
+  // actually closed the modal (a validation stop leaves it open, no flash).
+  { const m = document.getElementById('modal');
+    if (!m.classList.contains('open') || m.classList.contains('nc-closing'))
+      setTimeout(() => ncFlashSaved(savedZone), 180); }
   // …then push the whole config to the board, same as the Config window's Save.
   // No-op if not connected (sendLine bails when there's no writer).
   try { await saveConfigToBoard(); } catch (_) {}
@@ -16609,6 +17228,7 @@ function setEditingMode(mode) {
   if (!(mode >= 1 && mode <= 3)) return;
   if (mode === currentMode) return;
   currentMode = mode;
+  ncModeChanged(mode);   // before updateButtonHighlights: the sweep must be armed when outlines change
   document.querySelectorAll('.mode-tab').forEach(t => {
     const isActive = (+t.dataset.mode === mode);
     t.className = isActive ? `mode-tab active-${mode}` : 'mode-tab';
@@ -16619,6 +17239,9 @@ function setEditingMode(mode) {
   renderAssignmentList();
   updateButtonHighlights();
 }
+// Initial mode colour for the configured outlines — setEditingMode early-returns
+// for the mode the page starts in, so ncModeChanged never sets it on load.
+document.body.style.setProperty('--nc-mode-color', `var(--mode${currentMode})`);
 
 // Live mode tracking with manual-override support.
 //   _lastHwMode    last mode value reported by the firmware (PWM_UPDATE)
@@ -17338,7 +17961,8 @@ function openHwSetup() {
   // prompt (_hwSetupUnsaved) only fires for edits you actually make IN this window, never for
   // a field a render lazily padded after the on-board diff baseline was taken.
   _hwSetupBaseline = _deepClone(config);
-  document.getElementById('hwsetup-modal').classList.add('open');
+  ncShow(document.getElementById('hwsetup-modal'), document.getElementById('btn-hwsetup'), 'drop');
+  ncCfgIndicator(false);   // place the tab indicator now the tabs have layout
   // Push-budget readout. Polled rather than event-driven ON PURPOSE: config is
   // mutated from dozens of editors across this file with no central "changed"
   // event, so hooking each one would rot the moment a new editor is added. The
@@ -17411,7 +18035,7 @@ function closeHwSetup() {
       saveConfigToBoard();
     }
   }
-  document.getElementById('hwsetup-modal').classList.remove('open');
+  ncHide(document.getElementById('hwsetup-modal'));
   clearInterval(_pushBudgetTimer);   // readout is invisible now — stop diffing
   _pushBudgetTimer = null;
 }
@@ -17441,6 +18065,7 @@ function setConfigTab(name) {
   if (name === 'audio')     renderDfpBaudWarning();   // re-check the DFPlayer port's baud (Serial Ports may have changed it)
   if (!found) setConfigTab('channels');   // fallback if stored name is stale
   else try { localStorage.setItem('rcConfigLastTab', name); } catch {}
+  if (found) ncCfgIndicator(true);
 }
 document.querySelectorAll('#cfg-tabs .cfg-tab').forEach(t => {
   t.addEventListener('click', () => setConfigTab(t.dataset.tab));
@@ -18523,7 +19148,7 @@ function openCalibrationModal() {
     autoAdvance,
     autoAdvanceTimer: null
   };
-  document.getElementById('calibration-modal').classList.add('open');
+  ncShow(document.getElementById('calibration-modal'));
   const nextBtn = document.getElementById('btn-calibration-next');
   nextBtn.textContent = 'Next →';
   nextBtn.onclick = calibrationNextStep;
@@ -18551,7 +19176,7 @@ function closeCalibrationModal() {
     clearTimeout(calibrationState.autoAdvanceTimer);
   }
   calibrationState = null;
-  document.getElementById('calibration-modal').classList.remove('open');
+  ncHide(document.getElementById('calibration-modal'));
   clearCalibrationHighlights();
   // Un-mute the board — calibration is over, resume normal action dispatch.
   // (Belt-and-suspenders: the board also auto-clears this on STOP_MONITOR
