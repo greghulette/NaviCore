@@ -1237,6 +1237,25 @@
     #modal .modal-header::after { transform: none; }
   }
 
+  /* ── Live channel monitor: colour by what drives the channel ─────────
+     Bar, glow and control name take the colour of the control's kind, set per
+     row as data-kind by updateChannelsGrid (ncChannelKind): sticks blue,
+     switches purple, knobs/sliders teal, the matrix channel keeps its amber,
+     unassigned channels go grey. Kind, not a per-channel rainbow, so the colour
+     says something — and it follows a control when its channel is reassigned. */
+  .nc-ch-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 10px; font-size: 10px; color: var(--muted); }
+  .nc-ch-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .nc-ch-legend i { width: 10px; height: 6px; border-radius: 2px; background: var(--nc-ch); }
+  .ch-row, .nc-ch-legend span { --nc-ch: #6b7686; }
+  .ch-row[data-kind="stick"],  .nc-ch-legend .k-stick  { --nc-ch: #5cb0ff; }
+  .ch-row[data-kind="switch"], .nc-ch-legend .k-switch { --nc-ch: #c98ae8; }
+  .ch-row[data-kind="knob"],   .nc-ch-legend .k-knob   { --nc-ch: #2fc4b1; }
+  .nc-ch-legend .k-matrix { --nc-ch: #ff9f43; }
+  .ch-row .ch-bar { background: var(--nc-ch); box-shadow: 0 0 6px color-mix(in srgb, var(--nc-ch) 45%, transparent); }
+  .ch-row .ch-ctrl { color: var(--nc-ch); }
+  .ch-row.is-matrix .ch-bar { box-shadow: 0 0 6px rgba(255,159,67,.5); }
+  .ch-row.is-matrix .ch-ctrl { color: #ff9f43; }
+
   @media (prefers-reduced-motion: reduce) {
     .modal-overlay, .modal-overlay > .modal, .btn-zone, .switch-zone, .knob-zone,
     .mode-tab::before, .nc-mode-wave, .workspace-title, .cfg-header::after, .nc-cfg-ind,
@@ -1382,6 +1401,10 @@
       <!-- All channels — live sparkline per channel populated from
            msg.sbus.channels[]. Rows are built on demand based on the
            detected channel count, so SBUS-16 shows 16 and SBUS-24 shows 24. -->
+      <div class="nc-ch-legend" aria-hidden="true">
+        <span class="k-stick"><i></i>Sticks</span><span class="k-switch"><i></i>Switches</span>
+        <span class="k-knob"><i></i>Knobs / sliders</span><span class="k-matrix"><i></i>Matrix</span><span><i></i>Unassigned</span>
+      </div>
       <div class="ch-grid" id="channels-grid">
         <div class="noconn" id="monitor-note">Connect board to enable live monitor</div>
       </div>
@@ -2629,7 +2652,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.15:31.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.15:39.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -5105,6 +5128,16 @@ function ncTierDir(n) {
                          { duration: 260, easing: 'cubic-bezier(.25,.1,.25,1)' });
     tc._ncH.onfinish = tc._ncH.oncancel = () => { tc.style.overflow = ''; tc._ncH = null; };
   });
+}
+// Live channel monitor colour: what kind of control a channel's name belongs to,
+// on the active model. Sticks are the J* knobs; S1/S2/S3/LS/RS are knobs/sliders.
+function ncChannelKind(name) {
+  if (!name) return '';
+  if (name === 'Matrix') return 'matrix';
+  const model = TX_MODELS[activeTxModel] || TX_MODELS[TX_MODEL_X18];
+  if (model.switches.includes(name)) return 'switch';
+  if (/^J\d$/.test(name)) return 'stick';
+  return 'knob';
 }
 let _ncSrc = null;   // zone whose action modal is open (pulses via .nc-src)
 function ncMarkSource(z) {
@@ -12197,6 +12230,8 @@ function updateChannelsGrid(channels) {
     const ctrlEl = row.querySelector('.ch-ctrl');
     if (ctrlEl) {
       const name = controlNameForChannel(i + 1);
+      const kind = ncChannelKind(name);   // bar colour (MOTION LAYER CSS)
+      if (row.dataset.kind !== kind) row.dataset.kind = kind;
       const next = name ? ` ${name}` : '';
       if (ctrlEl.textContent !== next) ctrlEl.textContent = next;
     }
