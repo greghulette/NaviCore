@@ -2319,7 +2319,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.09:48.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">13.14:42.Q.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -17464,6 +17464,7 @@ async function checkFirmwareLatest(force) {
   }
   latestEl.textContent = 'checking…';
   statusEl.textContent = '';
+  statusEl.title = '';
   try {
     _fwLatest = await fetchLatestFirmwareVersion();
     latestEl.textContent = _fwLatest.version || _fwLatest.filename || '?';
@@ -17472,7 +17473,11 @@ async function checkFirmwareLatest(force) {
     _fwLatest = null;
     latestEl.textContent = '—';
     statusEl.style.color = 'var(--muted)';
-    statusEl.textContent = 'Could not reach GitHub (' + (e.message || e) + ').';
+    // GitHub down, throttled or out of reach: say so in words (ghExplain,
+    // flasher.js), with the technical detail on hover. Anything else as before.
+    const why = (typeof ghExplain === 'function') ? await ghExplain(e) : null;
+    statusEl.title = why ? String(e.message || e) : '';
+    statusEl.textContent = why || ('Could not reach GitHub (' + (e.message || e) + ').');
   }
 }
 function renderFwUpdateStatus() {
@@ -18241,7 +18246,9 @@ async function runFirmwareFlash({ eraseNvs, sourceBtn, label, defaultLabel }) {
     }
   } catch (e) {
     console.error(e);
-    setStatus('Flash failed.');
+    // A download GitHub could not serve says why on the status line (ghExplain,
+    // flasher.js); the log keeps the whole story either way.
+    setStatus(e?.ghExplained ? 'Flash failed: ' + e.ghExplained : 'Flash failed.');
     appendLog('');
     appendLog('✖ ' + (e?.message || String(e)));
     sourceBtn.textContent = defaultLabel;
