@@ -233,6 +233,26 @@ WCB_Client* wcb = nullptr;
 // undefined behavior — so every wcb-> call is gated on this flag.
 bool wcbReady = false;
 
+// ── Mesh transmit watchdog (WCB_Client 1.18.0 setTxWatchdog) ─────────────────
+// WCB repo HIL full run 20261014-084137: right after ten minutes of ?RTERM traffic relayed into this board, NaviCore
+// went on hearing every WCB while none heard it - WCB20 OFFLINE on every board, gone from their WDP tables, ;W20 dead -
+// for 20 minutes, until a REBOOT. Nothing here could tell, because a broadcast is never acknowledged. WCB_Client now
+// proves every 30 s that the mesh still answers (a WDP solicit, the ?WDP,POLL probe), restarts ESP-NOW and puts the
+// mesh MAC back after 3 unanswered probes (level 1), and reports level 2 when that does not help. Then NaviCore
+// restarts - the cure that worked - from loop() (txwdService), never from inside wcb->update(). At most
+// TXWD_MAX_AUTO_REBOOTS in a row: the count lives in RTC memory, which a software reset keeps and a power-on clears,
+// and it is forgiven after TXWD_FORGIVE_MS of uptime with the mesh answering, so a wedge a reboot cannot cure cannot
+// become a boot loop.
+static constexpr uint32_t TXWD_MAX_AUTO_REBOOTS = 2;
+static constexpr uint32_t TXWD_FORGIVE_MS       = 30UL * 60UL * 1000UL;
+static constexpr uint32_t TXWD_RTC_MAGIC        = 0x54585744UL;   // "TXWD"
+RTC_NOINIT_ATTR uint32_t g_txwdRtcMagic;
+RTC_NOINIT_ATTR uint32_t g_txwdAutoReboots;
+volatile bool g_txwdRebootPending = false;
+static void onMeshTxStall(uint8_t level, uint32_t stalledMs);   // these three are defined above loop()
+static void txwdBoot();
+static void txwdService();
+
 // One stream, broadcast to all WCBs.  target_port is ignored for broadcast.
 //
 // MUST be constructed AFTER `wcb` (in setup()): WCBStream's constructor
@@ -4064,6 +4084,12 @@ bool execCliLine(const String& line) {
               if (rcTelemetry::wcbBoardKnown(i, q))
                 Serial.printf("WCB%d=%s%s ", i, wcb->isOnline(i) ? "UP" : "dn", (i > q) ? "*" : ""); }
           Serial.println(" (* = auto-discovered beyond quantity)");
+          { const WCBTxWatchStatus tw = wcb->getTxWatchStatus();
+            Serial.printf("  Transmit watchdog: %s, level %u, probes %lu, misses %u, ESP-NOW restarts %lu, "
+                          "automatic reboots %lu, send errors %lu, last answered %s\n",
+                          tw.enabled ? "on" : "off", tw.level, (unsigned long)tw.probes, tw.misses,
+                          (unsigned long)tw.restarts, (unsigned long)g_txwdAutoReboots, (unsigned long)tw.sendErrors,
+                          tw.sinceProofMs == 0xFFFFFFFFUL ? "never" : (String(tw.sinceProofMs / 1000UL) + " s ago").c_str()); }
           break;
         }
         case 12: Serial.printf("Mode=%d  matrixBtn=%d  matrixVal=%d\n",
@@ -4129,7 +4155,7 @@ bool execCliLine(const String& line) {
         // HIL fault verbs (navicore_hil.h), in a NAVICORE_HIL_HOOKS build only. Left out
         // of the "Valid:" list below on purpose: every other image answers these with that
         // exact line, and the harness compares it whole (nccfg #L99) on both kinds.
-        case 90: case 91: case 92: case 93:
+        case 90: case 91: case 92: case 93: case 94:
           navihil::command(fn, line);
           break;
 #endif
@@ -4990,7 +5016,7 @@ void setup() {
   // The exact image (FW_VERSION changes only per commit) — see naviota::otaAppSha16().
   Serial.printf("App SHA256: %s\n", naviota::otaAppSha16());
 #ifdef NAVICORE_HIL_HOOKS
-  Serial.println("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L93 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, never a release");
+  Serial.println("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L94 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, never a release");
 #endif
   printBootloaderInfo();
   printBootTelemetry();
@@ -5242,6 +5268,7 @@ void setup() {
   // g_meshPasswordBoot, which every hand-built packet (RTERM, OTA, WcbMgmt) also
   // reads, so a later unrebooted change cannot split them from the ETM stack.
   strlcpy(g_meshPasswordBoot, rcConfig.wcbNetwork.password, sizeof(g_meshPasswordBoot));
+  txwdBoot();   // the automatic-restart count: zero from a power-on, said when the watchdog caused this boot
   wcb = new WCB_Client(rcConfig.wcbNetwork.macOct2,
                       rcConfig.wcbNetwork.macOct3,
                       g_meshPasswordBoot,
@@ -5366,6 +5393,9 @@ void setup() {
     // begin() so the boot-time burst of first heartbeats is reported as ONLINE
     // rather than lost. See onWcbStatus for the two-task/Core-0 constraint.
     wcb->onStatusChange(onWcbStatus);
+    // Prove every 30 s that the mesh still hears this board, and recover when it does not (see TXWD_MAX_AUTO_REBOOTS).
+    wcb->onTxStall(onMeshTxStall);
+    wcb->setTxWatchdog(true);
     // Arm the one-shot boot roll call — names any configured board still unheard.
     g_rollCallAt = millis() + ROLL_CALL_MS;
     Serial.printf("[WCB] Joined network as device ID %d (quantity=%d)\n",
@@ -5935,6 +5965,54 @@ static void checkDeferredRestart() {
   ESP.restart();
 }
 
+// ── Mesh transmit watchdog (see TXWD_MAX_AUTO_REBOOTS) ───────────────────────
+// WCB_Client calls this from update(), on the loop task (WCBTxStallCallback). It only decides; a restart is left to
+// txwdService() so update() returns first.
+static void onMeshTxStall(uint8_t level, uint32_t stalledMs) {
+  if (level == 0) {
+    Serial.printf("[MESH] transmit watchdog: the WCBs answer again (%lu s unanswered)\n",
+                  (unsigned long)(stalledMs / 1000UL));
+  } else if (level == 1) {
+    Serial.println("[MESH] transmit watchdog: no WCB answers - ESP-NOW restarted; NaviCore restarts if they still do not");
+  } else if (g_txwdAutoReboots >= TXWD_MAX_AUTO_REBOOTS) {
+    Serial.printf("[MESH] transmit watchdog: still no WCB answers after an ESP-NOW restart, and %lu automatic restarts "
+                  "in a row did not cure it - not restarting again: power-cycle NaviCore\n",
+                  (unsigned long)g_txwdAutoReboots);
+  } else {
+    g_txwdRebootPending = true;
+  }
+}
+
+// setup(), before the client is built. RTC memory after a power-on holds whatever it powered up with.
+static void txwdBoot() {
+  if (esp_reset_reason() == ESP_RST_POWERON || g_txwdRtcMagic != TXWD_RTC_MAGIC) {
+    g_txwdRtcMagic    = TXWD_RTC_MAGIC;
+    g_txwdAutoReboots = 0;
+  } else if (g_txwdAutoReboots) {
+    Serial.printf("[MESH] this boot is the transmit watchdog's (automatic restart %lu of %lu in a row)\n",
+                  (unsigned long)g_txwdAutoReboots, (unsigned long)TXWD_MAX_AUTO_REBOOTS);
+  }
+}
+
+// loop(), right after wcb->update().
+static void txwdService() {
+  if (g_txwdRebootPending) {
+    g_txwdRebootPending = false;
+    g_txwdAutoReboots++;
+    Serial.printf("[MESH] transmit watchdog: still no WCB answers after an ESP-NOW restart - restarting NaviCore "
+                  "(automatic restart %lu of %lu)\n",
+                  (unsigned long)g_txwdAutoReboots, (unsigned long)TXWD_MAX_AUTO_REBOOTS);
+    Serial.flush();
+    naviota::otaFarewellAP();   // as every other restart path does
+    delay(250);
+    ESP.restart();
+  }
+  if (g_txwdAutoReboots && millis() >= TXWD_FORGIVE_MS && wcb && wcbReady && wcb->getTxWatchStatus().level == 0) {
+    g_txwdAutoReboots = 0;
+    Serial.println("[MESH] transmit watchdog: the mesh has answered for 30 min - the automatic-restart count starts over");
+  }
+}
+
 void loop() {
 #ifdef NAVICORE_HIL_HOOKS
   navihil::loopStall();   // #L90 (HIL builds only): a requested stall, before anything else this pass
@@ -5956,6 +6034,7 @@ void loop() {
   }
   // WCB — heartbeats, ACKs, WCBStream flushes
   if (wcb && wcbReady) wcb->update();
+  txwdService();   // a restart the transmit watchdog asked for, and forgiving the count
 
   // Firmware OTA over the WCB mesh — drain packets the receive callback queued
   // (esp_ota_* blocks, so it can't run in the WiFi task) and reap a stalled

@@ -564,7 +564,7 @@ reassembles a fragmented command whole, so the length is the sender's, not a pac
 | `#L02` | Restart |
 | `#L09` | SBUS state dump |
 | `#L10` | Toggle 1 Hz live SBUS dump |
-| `#L11` | WCB device id, quantity, per-board up/down (`*` = auto-discovered) |
+| `#L11` | WCB device id, quantity, per-board up/down (`*` = auto-discovered), then `  Transmit watchdog: <on\|off>, level <0-2>, probes <n>, misses <n>, ESP-NOW restarts <n>, automatic reboots <n>, send errors <n>, last answered <n s ago\|never>` (WCB_Client 1.18.0 `getTxWatchStatus()`; automatic reboots is NaviCore's RTC count) |
 | `#L12` | Mode + decoded matrix button + raw value |
 | `#L13` | Raw SBUS frame hex with byte-offset annotations |
 | `#L20` / `#L21` | Send a fixed HCR `SetEmotion(HAPPY,80)` straight to S3 / S4 — bypasses config **and** mapping, so it separates wiring faults from config faults |
@@ -587,6 +587,7 @@ hook image apart. A hook image also says so in its boot banner:
 | `#L91,R` | Move `/config.json.hil` back over `/config.json` (atomic rename); takes effect at the next boot. The copy is on flash, so it survives the restarts a test in between makes |
 | `#L92` | The next `GET_CONFIG` over USB or the WebSocket takes `rcConfigToJSON()`'s overflow branch: `[CONFIG] ERROR: GET_CONFIG overflowed memory — …` and a top-level `{"type":"ERROR","msg":"GET_CONFIG overflow — …"}`. A config save or a mesh `GET_CONFIG` in between does not use it up |
 | `#L93` | The next config save (`rcConfigSaveLFS()`, any path) fails before touching flash: `[CONFIG] LFS: save failed (HIL fault #L93) — previous config kept`, and a USB `SET_CONFIG` answers `ok:false` "applied to RAM but could not be saved to flash (LittleFS write error)" with its `saveId` |
+| `#L94,<mode>[,<probeMs>]` | The mesh transmit watchdog: `WCB_Client::debugTxWedge(<mode>)` — every frame WCB_Client sends is reported sent and never reaches the radio, `1` until the watchdog's ESP-NOW restart, `2` until reboot, `0` off — and, with `<probeMs>`, `setTxWatchdog(true, <probeMs>)` (5000–600000) so a test does not wait 30 s a probe: `[HIL] #L94: transmit wedge mode <mode>`. `#L94,R`: no wedge, the 30 s interval, the automatic-restart count zeroed |
 
 ### WCB Wizard management (`?backup`, `?WDP,DUMP`, `?MGMT,…`)
 
@@ -1006,6 +1007,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-14 | (this commit) | `#L11` gains the `Transmit watchdog:` line (WCB_Client 1.18.0); §3: `#L94` arms a transmit wedge and sets the watchdog's probe interval (HIL `ncmesh.tx_watchdog_*`). |
 | 2026-10-06 | `0657025` | GET_CONFIG and GET_CMDLIB replies go out through `printLong()`: paced into the 8 KB USB TX ring so a host that pauses reading gets the line whole instead of with a hole mid-line (WCB repo HIL plan D-NC75). |
 | 2026-10-06 | `50078c9` | `DBG_WIRE`: the aux TX pump writes (and logs) one block per pass; a device write held behind a line is logged when it goes out (HIL `ncwire.tx_interleave`). |
 | 2026-10-05 | `bb0dda6` | WebSocket output goes through NaviCore's own PSRAM queue, drained by one httpd work item at a time, instead of one work item per frame or a 2 KB hold behind a slow send; a line is admitted whole at its first byte or dropped whole (over 256 KB queued) with a USB note. The hold cut GET_CONFIG at 2048 characters on a healthy socket — its start time could also read 1 ms in the future (`millis() \| 1`) and wrap to ~4.3e9 ms (HIL `ncwifi.ws_parity`, `ws_utf8_and_latch`, `intellex.wifi_nc_tool`; a regression from `37428e4`). |

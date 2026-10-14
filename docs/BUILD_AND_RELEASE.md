@@ -94,7 +94,7 @@ arduino-cli compile --fqbn "<the FQBN above>" --build-path <a private folder> \
 
 (`compiler.cpp.extra_flags` is empty by default in the esp32 3.3.4 recipe, so nothing else
 changes.) That compiles in [`navicore_hil.h`](../navicore_hil.h): `DBG_WIRE` and the
-`#L90`–`#L93` fault verbs ([PROTOCOLS.md §3](PROTOCOLS.md#hil-test-hooks-navicore_hil_hooks-builds-only)).
+`#L90`–`#L94` fault verbs ([PROTOCOLS.md §3](PROTOCOLS.md#hil-test-hooks-navicore_hil_hooks-builds-only)).
 They are fault injectors — a corrupted config file, a failed save — so **CI, the release bins
 and the flasher never define it**, and without it the image is byte-for-byte what it would be
 if the hooks did not exist: every hook site sits inside `#ifdef NAVICORE_HIL_HOOKS`, and
@@ -248,6 +248,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-14 | (this commit) | §3: the hook build's verbs run to `#L94` (a mesh transmit wedge). |
 | 2026-10-04 | `b525a94` | §7 OTA: the USB sender rewinds once every chunk behind a lost one has answered; it counted to a whole window (8), which one loss can never produce, so each lost chunk cost a 10 s stall (`nctool.ota_usb_lost_chunk`). |
 | 2026-10-04 | `d3af2d1` | §7: a flash from a live session fetches the flash tool and the image set before the teardown (`prepareFirmwareFlash()`), so a refused set no longer leaves the session disconnected (`nctool.fw_refused_flash_keeps_session`). |
 | 2026-10-04 | `a72459b` | §7 Full Wipe row corrected: it erases NVS and OTA data only — `/config.json`, the command library and the clips survive, and the tool's texts that promised the config is erased now say so (D-NC34). |

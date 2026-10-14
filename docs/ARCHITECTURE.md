@@ -59,7 +59,7 @@ always address "the RC" without asking which one.
 | [`navicore_record.h`](../navicore_record.h) | Record/replay: capture queue, PSRAM clip buffer, clip files, replay interpolation, timeline-editor transport |
 | [`navicore_ota.h`](../navicore_ota.h) | Firmware OTA over USB (`?OTALOCAL`) and over the mesh (`?OTA`) |
 | [`navicore_rterm.h`](../navicore_rterm.h) | Remote terminal — ships captured CLI output back over the mesh as RTERM packets |
-| [`navicore_hil.h`](../navicore_hil.h) | HIL test hooks — `DBG_WIRE` and the `#L90`–`#L93` fault verbs. Compiled **only** with `-DNAVICORE_HIL_HOOKS=1` ([BUILD_AND_RELEASE.md §3](BUILD_AND_RELEASE.md#3-verifying-a-firmware-change)); CI and releases never define it |
+| [`navicore_hil.h`](../navicore_hil.h) | HIL test hooks — `DBG_WIRE` and the `#L90`–`#L94` fault verbs. Compiled **only** with `-DNAVICORE_HIL_HOOKS=1` ([BUILD_AND_RELEASE.md §3](BUILD_AND_RELEASE.md#3-verifying-a-firmware-change)); CI and releases never define it |
 | [`rc_serial.h`](../rc_serial.h) | `RcSerial` USB-CDC tee — makes every existing `Serial.print` mirrorable to the remote terminal |
 | [`sbus_reader.h`](../sbus_reader.h) | SBUS-16 / SBUS-24 parser with auto-detect + byte-tee passthrough |
 | [`wcb_config.h`](../wcb_config.h) | Compile-time **factory defaults only** for mesh credentials (runtime values live in `RcConfig.wcbNetwork`) |
@@ -495,6 +495,13 @@ droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
 - **WDP identity** — `setIdentity()` + `setPortLabel()` advertise NaviCore's name, firmware,
   board, and what is attached to each serial port, so WCBs and the Wizard discover it
   automatically.
+- **Mesh transmit watchdog** — `wcb->setTxWatchdog(true)` (WCB_Client 1.18.0): a WDP SOLICIT
+  every 30 s proves the WCBs still hear NaviCore; three unanswered probes restart ESP-NOW and
+  put the mesh MAC back, and if that does not help `onMeshTxStall()` asks `txwdService()` — on
+  the loop, after `wcb->update()` returns — to restart NaviCore. At most
+  `TXWD_MAX_AUTO_REBOOTS` (2) in a row: the count is `RTC_NOINIT` (a software reset keeps it,
+  a power-on clears it) and is forgiven after 30 min answered, so a wedge a reboot cannot cure
+  does not become a boot loop.
 
 ---
 
@@ -505,6 +512,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-14 | (this commit) | §13: the mesh transmit watchdog and its restart cap; §3: `#L94`. |
 | 2026-10-07 | `2d6964d` | §6: the new-peer grace is 12 s, one WCB heartbeat period and a second, not 8 s (D-NC25). |
 | 2026-10-07 | `520b096` | §4 UART allocation: the GPIO ISR service is installed first in `setup()`, not after `sbusRx.begin()`, where an interrupt pending across its registration overflowed the IPC task's stack at boot (D-NC77). |
 | 2026-10-06 | `0657025` | §6 step 4: long reply lines (GET_CONFIG, GET_CMDLIB) are paced into the USB TX ring by `printLong()` (D-NC75). |

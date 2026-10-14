@@ -22,6 +22,11 @@
 //    #L92         the next GET_CONFIG over USB or the WebSocket takes
 //                 rcConfigToJSON()'s overflow branch
 //    #L93         the next rcConfigSaveLFS() fails before it touches flash
+//    #L94,<mode>[,<probeMs>]  the mesh transmit watchdog (WCB_Client setTxWatchdog): every frame
+//                 WCB_Client sends is dropped before the radio - mode 1 until the watchdog's
+//                 ESP-NOW restart, 2 until reboot, 0 off (WCB_Client::debugTxWedge) - and with
+//                 <probeMs> the probe interval (5000-600000) so a test does not wait 30 s a probe.
+//                 #L94,R zeroes the automatic-restart count and puts the 30 s interval back
 //  Every armed state is RAM and clear at boot. #L91 is the exception by nature: it
 //  edits flash, and its copy survives a restart on purpose, so a run that dies
 //  between the fault and its restore can still put the user's config back.
@@ -38,6 +43,12 @@
 #include <LittleFS.h>
 #include <WCBStream.h>
 #include "rc_config.h"   // RC_CFG_PATH, g_lfsReady, g_hilJsonOverflowNow, g_hilFailNextSave
+#include <WCB_Client.h>
+
+// Defined in NaviCore.ino ahead of the include: the mesh client and the transmit watchdog's restart count.
+extern WCB_Client* wcb;
+extern bool wcbReady;
+extern uint32_t g_txwdAutoReboots;
 
 // Defined in NaviCore.ino ahead of the include: g_dbgFlags and DBG_WIRE, the aux ports
 // s3/s4/s5 and maestroBroadcast. vlogf() is defined further down that file.
@@ -261,6 +272,26 @@ inline void command(int fn, const String& line) {
       g_hilFailNextSave = true;
       Serial.println("[HIL] #L93: the next config save fails");
       break;
+    case 94: {
+      if (!wcb || !wcbReady) { Serial.println("[HIL] #L94: the mesh client is not running"); break; }
+      if (arg.equalsIgnoreCase("R")) {
+        wcb->debugTxWedge(0);
+        wcb->setTxWatchdog(true, WCB_TXWD_PROBE_MS);
+        g_txwdAutoReboots = 0;
+        Serial.println("[HIL] #L94,R: no wedge, the 30 s probe interval, the automatic-restart count zeroed");
+        break;
+      }
+      const int c2 = arg.indexOf(',');
+      const long mode = (c2 >= 0 ? arg.substring(0, c2) : arg).toInt();
+      if (arg.length() == 0 || mode < 0 || mode > 2) {
+        Serial.println("[HIL] #L94 usage: #L94,<0|1|2>[,<probeMs>] or #L94,R");
+        break;
+      }
+      if (c2 >= 0) wcb->setTxWatchdog(true, (uint32_t)arg.substring(c2 + 1).toInt());
+      wcb->debugTxWedge((uint8_t)mode);
+      Serial.printf("[HIL] #L94: transmit wedge mode %ld\n", mode);
+      break;
+    }
   }
 }
 
