@@ -133,7 +133,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-14 | (this commit) | Mesh: a row for the transmit wedge (WCBs list NaviCore offline while it lists them online) and the watchdog's lines. |
+| 2026-10-14 | `969fb1f` | Mesh: a row for the transmit wedge (WCBs list NaviCore offline while it lists them online) and the watchdog's lines. |
 | 2026-10-07 | `520b096` | Boot and LED: a boot panic in `_frxt_int_enter` on `ipc1`, from the GPIO ISR service installed after SBUS starts (D-NC77). |
 | 2026-10-06 | `0657025` | Serial/JSON: a mangled CONFIG line and `printLong()`, which paces GET_CONFIG and GET_CMDLIB into the USB TX ring (D-NC75). |
 | 2026-10-06 | `b247a91` | Serial peripherals: console output on S3 (UART0) and the missing ROM banner after a restart (`consoleOffUart0()`, HIL `ncwire.s3_console_quiet`). |

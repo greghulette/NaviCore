@@ -1007,7 +1007,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-14 | (this commit) | `#L11` gains the `Transmit watchdog:` line (WCB_Client 1.18.0); §3: `#L94` arms a transmit wedge and sets the watchdog's probe interval (HIL `ncmesh.tx_watchdog_*`). |
+| 2026-10-14 | `969fb1f` | `#L11` gains the `Transmit watchdog:` line (WCB_Client 1.18.0); §3: `#L94` arms a transmit wedge and sets the watchdog's probe interval (HIL `ncmesh.tx_watchdog_*`). |
 | 2026-10-06 | `0657025` | GET_CONFIG and GET_CMDLIB replies go out through `printLong()`: paced into the 8 KB USB TX ring so a host that pauses reading gets the line whole instead of with a hole mid-line (WCB repo HIL plan D-NC75). |
 | 2026-10-06 | `50078c9` | `DBG_WIRE`: the aux TX pump writes (and logs) one block per pass; a device write held behind a line is logged when it goes out (HIL `ncwire.tx_interleave`). |
 | 2026-10-05 | `bb0dda6` | WebSocket output goes through NaviCore's own PSRAM queue, drained by one httpd work item at a time, instead of one work item per frame or a 2 KB hold behind a slow send; a line is admitted whole at its first byte or dropped whole (over 256 KB queued) with a USB note. The hold cut GET_CONFIG at 2048 characters on a healthy socket — its start time could also read 1 ms in the future (`millis() \| 1`) and wrap to ~4.3e9 ms (HIL `ncwifi.ws_parity`, `ws_utf8_and_latch`, `intellex.wifi_nc_tool`; a regression from `37428e4`). |

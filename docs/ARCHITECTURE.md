@@ -512,7 +512,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-14 | (this commit) | §13: the mesh transmit watchdog and its restart cap; §3: `#L94`. |
+| 2026-10-14 | `969fb1f` | §13: the mesh transmit watchdog and its restart cap; §3: `#L94`. |
 | 2026-10-07 | `2d6964d` | §6: the new-peer grace is 12 s, one WCB heartbeat period and a second, not 8 s (D-NC25). |
 | 2026-10-07 | `520b096` | §4 UART allocation: the GPIO ISR service is installed first in `setup()`, not after `sbusRx.begin()`, where an interrupt pending across its registration overflowed the IPC task's stack at boot (D-NC77). |
 | 2026-10-06 | `0657025` | §6 step 4: long reply lines (GET_CONFIG, GET_CMDLIB) are paced into the USB TX ring by `printLong()` (D-NC75). |
