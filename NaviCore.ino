@@ -51,6 +51,12 @@
 #include <esp_netif.h>          // esp_netif_dhcps_option/_stop/_start — SoftAP offers no gateway
 #include "dhcpserver/dhcpserver.h"  // dhcps_offer_t
 #include <WCB_Client.h>   // header in greghulette/WCBClient is WCB_Client.h
+// The mesh transmit watchdog (setTxWatchdog, onMeshTxStall below) needs 1.18.1: 1.18.0 took one board's own periodic
+// advert for an answer and called a dead radio recovered (WCB repo HIL run 20261014-173713). A sketchbook copy older
+// than that shadows the real library in a local build (CLAUDE.md rule 5) - stop here rather than ship it.
+#if !defined(WCB_CLIENT_VERSION_NUM) || WCB_CLIENT_VERSION_NUM < 11801
+#error "NaviCore needs WCB_Client 1.18.1 or newer (greghulette/WCBClient master): the transmit watchdog"
+#endif
 #include <WCB_Mgmt.h>     // WCB Wizard management surface (?backup / ?WDP,DUMP / ?MGMT,*)
 #include <WcbCmd.h>       // shared device-command translators (Maestro/MP3/WLED/HCR) —
                           // ONE source of the device wire bytes across WCB + NaviCore

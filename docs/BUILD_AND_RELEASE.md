@@ -248,6 +248,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-14 | (this commit) | NaviCore.ino refuses to compile against WCB_Client older than 1.18.1 (`WCB_CLIENT_VERSION_NUM`), so a stale sketchbook copy fails loudly instead of building the flawed watchdog. |
 | 2026-10-14 | `969fb1f` | §3: the hook build's verbs run to `#L94` (a mesh transmit wedge). |
 | 2026-10-04 | `b525a94` | §7 OTA: the USB sender rewinds once every chunk behind a lost one has answered; it counted to a whole window (8), which one loss can never produce, so each lost chunk cost a 10 s stall (`nctool.ota_usb_lost_chunk`). |
 | 2026-10-04 | `d3af2d1` | §7: a flash from a live session fetches the flash tool and the image set before the teardown (`prepareFirmwareFlash()`), so a refused set no longer leaves the session disconnected (`nctool.fw_refused_flash_keeps_session`). |

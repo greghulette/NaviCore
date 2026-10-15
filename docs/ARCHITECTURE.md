@@ -495,8 +495,9 @@ droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
 - **WDP identity** — `setIdentity()` + `setPortLabel()` advertise NaviCore's name, firmware,
   board, and what is attached to each serial port, so WCBs and the Wizard discover it
   automatically.
-- **Mesh transmit watchdog** — `wcb->setTxWatchdog(true)` (WCB_Client 1.18.0): a WDP SOLICIT
-  every 30 s proves the WCBs still hear NaviCore; three unanswered probes restart ESP-NOW and
+- **Mesh transmit watchdog** — `wcb->setTxWatchdog(true)` (WCB_Client 1.18.1, required at compile time): a WDP SOLICIT
+  every 30 s proves the WCBs still hear NaviCore (two boards must answer when two can, so one
+  board's own advert is not taken for an answer); three unanswered probes restart ESP-NOW and
   put the mesh MAC back, and if that does not help `onMeshTxStall()` asks `txwdService()` — on
   the loop, after `wcb->update()` returns — to restart NaviCore. At most
   `TXWD_MAX_AUTO_REBOOTS` (2) in a row: the count is `RTC_NOINIT` (a software reset keeps it,
@@ -512,6 +513,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-14 | (this commit) | The transmit watchdog needs WCB_Client 1.18.1 (two boards answer a probe; two answers end a stall; a relapse within 3 min goes to level 2) - a compile-time check stops an older sketchbook copy. |
 | 2026-10-14 | `969fb1f` | §13: the mesh transmit watchdog and its restart cap; §3: `#L94`. |
 | 2026-10-07 | `2d6964d` | §6: the new-peer grace is 12 s, one WCB heartbeat period and a second, not 8 s (D-NC25). |
 | 2026-10-07 | `520b096` | §4 UART allocation: the GPIO ISR service is installed first in `setup()`, not after `sbusRx.begin()`, where an interrupt pending across its registration overflowed the IPC task's stack at boot (D-NC77). |
