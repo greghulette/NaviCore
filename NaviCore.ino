@@ -4992,8 +4992,13 @@ void setup() {
   // ("Unhandled debug exception" in _frxt_int_enter on ipc1, then a second boot that
   // reports "Crash (panic)"; HIL full runs 20261006-122850 and -235930). That alone was
   // not enough: a restart leaves the soft-port RX pins' interrupts armed, and their
-  // traffic did the same from the first instant - see clearStaleGpioInterrupts.
+  // traffic did the same from the first instant - see clearStaleGpioInterrupts. With
+  // those cleared it still happened once in 37 restarts (run 20261015-220331): at that
+  // depth any interrupt overflows, and core 1's 1 ms FreeRTOS tick is always there. The
+  // delay(1) wakes on a tick, so the registration (tens of us) starts with the next one
+  // a millisecond away.
   const uint64_t staleGpioIrqs = clearStaleGpioInterrupts();
+  delay(1);
   gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
   // That first attachInterrupt tries to install the service again, gets INVALID_STATE
   // (which it accepts), and the IDF logs it as an error on every boot. Mute the gpio tag
