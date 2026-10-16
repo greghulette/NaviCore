@@ -47,6 +47,7 @@
 #include "esp_ota_ops.h"        // esp_ota_get_bootloader_description (boot banner)
 #include "rom/rtc.h"            // rtc_get_reset_reason (low-level boot telemetry)
 #include "driver/gpio.h"        // gpio_install_isr_service at level 3 (soft-port RX, setup())
+#include "soc/gpio_struct.h"    // GPIO.pin[]: clearStaleGpioInterrupts reads each pin's interrupt type/enable
 #include "esp_log.h"            // esp_log_level_set: mute the gpio tag while setup() attaches RX
 #include <esp_netif.h>          // esp_netif_dhcps_option/_stop/_start — SoftAP offers no gateway
 #include "dhcpserver/dhcpserver.h"  // dhcps_offer_t
@@ -4922,6 +4923,32 @@ void rcAdvertiseSerialLabels() {
   wcb->setMaestroIds(mIds, mCount, mBauds);
 }
 
+// A CPU-only reset - a REBOOT command, ESP.restart() after an OTA or a config push, a panic (SW_CPU_RESET /
+// *_PANIC) - leaves the GPIO peripheral as it was, including each pin's interrupt TYPE and ENABLE bits. The S4/S5
+// soft-port RX (EspSoftwareSerial) arms an any-edge interrupt on its pin, so a restart leaves it armed with no
+// handler behind it, and every edge on that wire raises the GPIO interrupt source again. The very first thing
+// setup() does with interrupts is gpio_install_isr_service(), which runs on the 1 KB IPC task: an interrupt
+// arriving at its deepest point overflows that stack ("Stack canary watchpoint triggered (ipc1)" in
+// _frxt_int_enter, under esp_intr_alloc -> heap_caps_malloc), and the panic restarts the CPU only, so the pin is
+// still armed and the next boot panics the same way until the wire goes quiet (HIL full run 20261015-145452:
+// four boots in a row after a REBOOT in nccfg.persist_reboot, 2 of 20 in ncboot.reboots_clean). The WCB met the
+// same armed-across-a-restart pins as a boot loop and clears them the same way (WCB.ino clearStaleGpioInterrupts,
+// its tracker #78). Nothing has attached a GPIO interrupt when this runs, so any pin with a type or enable set is
+// stale by definition. Must run BEFORE gpio_install_isr_service and before any pinMode (Arduino's pinMode copies
+// a pin's current int_type into gpio_config, which enables it again). Returns a mask of the pins it cleared,
+// printed once Serial is up.
+static uint64_t clearStaleGpioInterrupts() {
+  uint64_t cleared = 0;
+  for (int pin = 0; pin < SOC_GPIO_PIN_COUNT; pin++) {
+    if (!GPIO_IS_VALID_GPIO(pin)) continue;
+    if (GPIO.pin[pin].int_type == 0 && GPIO.pin[pin].int_ena == 0) continue;
+    gpio_intr_disable((gpio_num_t)pin);
+    gpio_set_intr_type((gpio_num_t)pin, GPIO_INTR_DISABLE);
+    cleared |= (1ULL << pin);
+  }
+  return cleared;
+}
+
 void setup() {
   // OTA brick-loop guard — MUST be the very first thing. A freshly-OTA'd image
   // boots in PENDING_VERIFY because app-rollback is enabled in the Arduino esp32
@@ -4954,7 +4981,10 @@ void setup() {
   // UART1, an interrupt pending across the registration's heap critical section fired at
   // its deepest point, overflowed that stack and panicked about one boot in five
   // ("Unhandled debug exception" in _frxt_int_enter on ipc1, then a second boot that
-  // reports "Crash (panic)"; HIL full runs 20261006-122850 and -235930).
+  // reports "Crash (panic)"; HIL full runs 20261006-122850 and -235930). That alone was
+  // not enough: a restart leaves the soft-port RX pins' interrupts armed, and their
+  // traffic did the same from the first instant - see clearStaleGpioInterrupts.
+  const uint64_t staleGpioIrqs = clearStaleGpioInterrupts();
   gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
   // That first attachInterrupt tries to install the service again, gets INVALID_STATE
   // (which it accepts), and the IDF logs it as an error on every boot. Mute the gpio tag
@@ -5026,6 +5056,11 @@ void setup() {
 #endif
   printBootloaderInfo();
   printBootTelemetry();
+  if (staleGpioIrqs) {
+    Serial.print("[BOOT] Cleared a stale GPIO interrupt left armed by the restart on GPIO");
+    for (int pin = 0; pin < 64; pin++) if (staleGpioIrqs & (1ULL << pin)) Serial.printf(" %d", pin);
+    Serial.println();
+  }
 
   // Status LED
   statusLed.begin();
