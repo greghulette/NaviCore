@@ -1814,9 +1814,16 @@ static void vlogf(const char* fmt, ...) {
 #if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
 static void kickUsbCdcTx();
 #endif
+// True while processInputLine() runs a line that came in over USB (the USB reader sets it).
+// A host that just sent a line is there to read the answer, whatever HWCDC::isConnected()
+// says: that flag is set only once the host has polled the IN endpoint, so right after a
+// boot a GET_CONFIG (~14 KB) took the "nobody draining" shortcut into the 8 KB ring and
+// came back cut at ~8 KB (HIL nccfg.persist_reboot, run 20261015-214736: its read straight
+// after a REBOOT; the next read was whole).
+static bool usbLineInFlight = false;
 static void printLong(const char* p, size_t len) {
 #if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
-  if (!HWCDC::isConnected()) { Serial.write((const uint8_t*)p, len); return; }   // nobody draining USB
+  if (!usbLineInFlight && !HWCDC::isConnected()) { Serial.write((const uint8_t*)p, len); return; }   // nobody draining USB
 #endif
   uint32_t lastMove = millis();
   while (len) {
@@ -4741,7 +4748,9 @@ void handleSerialInput() {
       // Framing is this function's job; the dispatch is processInputLine's. Pass the
       // buffer by reference and clear it AFTER — copying it would cost a ~98 KB
       // duplicate on a large SET_CONFIG.
+      usbLineInFlight = true;    // its answer has a USB host to pace into (printLong)
       const bool yieldNow = processInputLine(serialInputBuf);
+      usbLineInFlight = false;
       serialInputBuf = "";
       if (yieldNow) return;
     } else {
