@@ -419,14 +419,35 @@ cmdlib/
                                             RSeriesLogic, HCR, MP3, WLED, Maestro,
                                             RoamADome, UppitySpinner, AstroPixels, WCB config +
                                             sequences, …)
+  wcb/manifest.json       + wcb-builder.json the WCB's own boards: Maestro (;M at the firmware's
+                                            ranges + DroidNet's @A<name> trigger), DFPlayer (;D),
+                                            Actions (serial text, ;V variables, ;P PWM)
   navicore/manifest.json  + navicore.json   NaviCore-native verbs (record / play / stop)
 ```
 
-`cmdlib/droidnet/` is a **vendored MPL-2.0 snapshot** — NaviCore's own boards never go in
-there. They live inline in `NC_CMDLIB_SEED` in `index.html`; `wcb-dfplayer` (the `;D` verb
-set) is one of them. Two local deltas to the snapshot are described below: the `source`
-field, and the `wcb-sequences` board split out of `wcb-native`. A param's `enum` field is a
-**string id** into the library-level `enums` map, not an inline list.
+`cmdlib/droidnet/` is a **vendored MPL-2.0 snapshot** — our own boards never go in there.
+Two local deltas to the snapshot are described below: the `source` field, and the
+`wcb-sequences` board split out of `wcb-native`. A param's `enum` field is a **string id**
+into the library-level `enums` map, not an inline list.
+
+`cmdlib/wcb/` holds **the WCB's own boards**, in the same schema, and is the one copy both
+tools read: this tool loads it, Intellex bundles it with this tool, and the WCB Wizard's
+sequence builder carries a byte-for-byte copy (`Wizard/cmdlib/wcb/`), which a test in the
+WCB repo holds to this one (`tests/wizard/unit/seq_builder.test.js`). Edit it here, then copy
+it over the Wizard's, as for `cmdlib/droidnet/` (`cmdlib/wcb/NOTICE.md`). Its `wcb-maestro`
+replaces the snapshot's narrow `maestro` and the inline `nc-maestro-wcb` (`NC_CMDLIB_SUPERSEDE`);
+its `wcb-dfplayer` replaces the seed's of the same id on merge. The seed (`NC_CMDLIB_SEED`)
+keeps both as the `file://` fallback, where `fetch()` of the files is blocked.
+
+A few command fields in `cmdlib/wcb/` are tool hints the DroidNet schema lacks, ignored by a
+consumer that does not know them: **`defaultPort`** — the serial port a freshly picked device
+command goes to before label routing (`_cmdlibUse`: DroidNet's trigger goes to the first WCB's
+Serial 0, where DroidNet listens); **`caseInsensitive`** — the device takes the fixed text in
+either case, so `_ncCommandPattern` matches it so (`@AMonsterMash` and `@aMonsterMash`);
+`laneName` and `shortName` are for the Wizard's timeline only. A template with **no fixed
+text and a free-text field** (`wcb.serialText`, `{text}`) is never decoded: `ncDecodeCommand`
+takes the first match, and such a template would claim every command after it. A lone enum
+(`flthy.special.sequence`, `{special}`) matches only its codes and still decodes.
 
 Each command declares `id, name, safety, encoder, template, params[], examples,
 commentLabel, category`, plus routing metadata (`class`, `nativeWrapper`,
@@ -459,14 +480,14 @@ What survives renders collapsed. Related boards fold one level further into a **
 
 | Group | Members |
 |---|---|
-| **WCB** | Stored Sequences, HCR Vocalizer, MP3 Trigger, DFPlayer Mini, Maestro, WLED Lighting |
+| **WCB** | Stored Sequences, HCR Vocalizer, MP3 Trigger, DFPlayer Mini, Maestro, WLED Lighting, Actions |
 | **AstroPixels** | General, Sound, PSI, Logics, Holo, Servo |
 
 A board joins by **id prefix** (`wcb-`, `astropixels-`) *or* by an explicit **`ids`**
 listing — either is enough. `ids` exists for the member a prefix can't reach:
-`nc-maestro-wcb` (the `;M` sequence + servo verbs) is routed by the WCB exactly like the
-rest of the group, but it is one of NaviCore's own seed boards so its id doesn't start
-with `wcb-`. Its sibling `nc-maestro` is deliberately **out** — raw Pololu bytes to a
+`nc-maestro-wcb` (the inline `;M` fallback, seen only when `cmdlib/wcb/` did not load) is
+routed by the WCB exactly like the rest of the group, but it is one of NaviCore's own seed
+boards so its id doesn't start with `wcb-`; the shared `wcb-maestro` joins by prefix. Its sibling `nc-maestro` is deliberately **out** — raw Pololu bytes to a
 configured Maestro slot is a controller concern, not a WCB one.
 
 Each group's `sub()` shortens a member's label inside it, since the shared part is now the
@@ -768,6 +789,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-20 | _(uncommitted)_ | **§6: `cmdlib/wcb/`, the WCB's own boards, shared with the WCB Wizard** — Maestro at the firmware's ranges with DroidNet's `@A<name>` trigger (case-insensitive, Serial 0 by default), DFPlayer, Actions; `wcb-maestro` supersedes `maestro` and the inline `nc-maestro-wcb`; the `defaultPort` / `caseInsensitive` hints; a free-text-only template never decodes (it would claim every later command in this first-match decoder). Greg: NaviCore gets the DroidNet trigger too, and the libraries stay in sync. |
 | 2026-10-13 | _(uncommitted)_ | **Live channel monitor: one colour per channel** (§3, Motion layer) — eight hues cycling down the list on a slim glowing bar; the matrix channel keeps its amber. CSS only. |
 | 2026-10-13 | `84fb178` | **Motion layer** (§3): open/close animation for every overlay (action modal zooms from the clicked control on any transmitter model, Config drops from its button with colour-coded tabs, Connect folds into the status light), mode-colour flood + left→right outline recolour on mode change, terminal drawer spring + typed line colours, animated sidebar fold to a rail of live status lights. Action-modal tiers, the action rows within a tier (numbered steps) and terminal debug chips are colour-coded; a mode-colour glow sits behind the transmitter. Configured button outlines now take the active mode's colour, and Mode 3 is gold (`--mode3` #e0a526, was green #36c08a — too close to Mode 1 teal and to the Connected/Apply green). Overlays must open with `ncShow()` / close with `ncHide()`; all motion is off under `prefers-reduced-motion`. |
 | 2026-10-07 | `304bd0f` | **Restore Defaults leaves the reset to Save** (D-NC74). RESET_DEFAULTS is RAM only, and the tool took the reset config as its diff baseline, so an unedited Save answered "No changes to save" and the reset was gone at the next reboot. The baseline stays the stored config, the reset shows as unsaved, and the toast says *Reset to factory defaults — Save to keep it on NaviCore*. |

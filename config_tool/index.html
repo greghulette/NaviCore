@@ -2650,7 +2650,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">15.22:34.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">20.18:45.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -13567,9 +13567,10 @@ const NC_CMDLIB_SEED = {
   // (see cmdlib/droidnet/NOTICE.md). WLED + Maestro-;M are now ALSO upstream (wcb-wled,
   // maestro — our 4.2.0 PR) but kept inline as the file:// fallback, since fetch() of the
   // vendored library is blocked under file://. The vendored `maestro` ;M range is still
-  // narrow (id 0-2 / seq 0-9) vs the firmware's 0-9 / 0-99, so _cmdlibNormalize() drops the
-  // vendored `maestro` in favor of the accurate `nc-maestro-wcb` (via-WCB) board, which now
-  // carries the ;M<id><seq> sequence trigger AND the ;M<id>,<verb> servo/script commands.
+  // narrow (id 0-2 / seq 0-9) vs the firmware's, so _cmdlibNormalize() drops it in favor of
+  // the shared `wcb-maestro` (cmdlib/wcb: the ;M<id><seq> trigger, the ;M<id>,<verb>
+  // servo/script commands and DroidNet's @A<name>), which also replaces the inline
+  // `nc-maestro-wcb` below once loaded; that one is the file:// fallback.
   // nc-maestro is the Pololu servo command set (local:'maestro' → a NaviCore Maestro
   // slot 1-8; the firmware routes Local→Serial2 or Remote→ESP-NOW broadcast-by-device#,
   // so ONE board covers both local and remote Maestros). The vendored `maestro-native`
@@ -14184,7 +14185,7 @@ const NC_BOARD_DEVICE_LABELS = {
   'wcb-mp3': ['MP3 Trigger'], 'wcb-dfplayer': ['DFPlayer'],
   'ia-magic-panel': ['Magic Panel(IA)'], 'pd-magic-panel': ['Magic Panel(PRINTDRD)'],
   'rseries-logic': ['R-Series Logics'],
-  'maestro': ['Maestro'], 'maestro-native': ['Maestro'], 'nc-maestro-wcb': ['Maestro'], 'nc-maestro': ['Maestro'],
+  'maestro': ['Maestro'], 'maestro-native': ['Maestro'], 'wcb-maestro': ['Maestro'], 'nc-maestro-wcb': ['Maestro'], 'nc-maestro': ['Maestro'],
   'psi-pro': ['PSI Front', 'PSI Rear'],
   'r2uppityspinner-alt': ['Uppity Spinner', 'Periscope'],
   'roam-a-dome': ['Roam-A-Dome'],
@@ -14280,8 +14281,9 @@ function _ncCommandPattern(cmd) {
   const order = [];
   let prevWasFreeText = false;
   let ambiguous = false;
+  let literal = 0, freeCount = 0;
   for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 0) { re += _reEscape(parts[i]); continue; }
+    if (i % 2 === 0) { re += _reEscape(parts[i]); literal += parts[i].length; continue; }
     const p = byName[parts[i]] || { name: parts[i] };
     order.push(p.name);
     const literalBefore = parts[i - 1];
@@ -14302,9 +14304,14 @@ function _ncCommandPattern(cmd) {
     else { isFreeText = true; re += '(.+?)'; }
     if (literalBefore === '' && prevWasFreeText && isFreeText) ambiguous = true;
     prevWasFreeText = isFreeText;
+    if (isFreeText) freeCount++;
   }
   re += '$';
-  const regex = ambiguous ? null : new RegExp(re);
+  // A template with no fixed text and a free-text field (cmdlib/wcb's serial text, "{text}") would match every wire
+  // string, and this is a first-match decoder: it would claim every command of every board after it. Never decode one.
+  // (A lone enum, flthy-hps's "{special}", matches only its codes and still decodes.) caseInsensitive: the device takes
+  // the fixed text in either case (DroidNet's @A / @a, cmdlib/wcb NOTICE.md).
+  const regex = (ambiguous || (literal === 0 && freeCount > 0)) ? null : new RegExp(re, cmd.caseInsensitive ? 'i' : '');
   return (cmd.__ncRe = { regex, order, gen: _cmdlibGeneration });
 }
 function ncDecodeCommand(wire) {
@@ -14962,11 +14969,15 @@ function _cmdlibUse() {
     action = { type: 'wled', cmd: wire };
   } else if (mode === 'device') {
     // A raw device string must egress a serial port. Keep the row's existing port
-    // routing on a re-edit; else auto-route to where a WCB advertises this device's
-    // label over WDP; else default to the first WCB · Serial 1.
+    // routing on a re-edit; else a port the command names itself (`defaultPort`:
+    // DroidNet's @A<name> Maestro trigger is read on a WCB's Serial 0, cmdlib/wcb);
+    // else auto-route to where a WCB advertises this device's label over WDP; else
+    // default to the first WCB · Serial 1.
     const ld = rowHadCmd ? null : _cmdlibLabelDest(board);
+    const dp = (cmd && cmd.defaultPort != null && /^[0-5]$/.test(String(cmd.defaultPort))) ? String(cmd.defaultPort) : null;
     if (rowHadCmd && mWS)                         action = { type: 'wcb_broadcast', cmd: `;W${mWS[1]};S${mWS[2]}` + wire };
     else if (rowHadCmd && /^S\d$/.test(destsel)) action = { type: 'serial', port: destsel, cmd: wire };
+    else if (dp)                                 action = { type: 'wcb_broadcast', cmd: `;W${_firstKnownWcb()};S${dp}` + wire };
     else if (ld)                                 action = { type: 'wcb_broadcast', cmd: `;W${ld.wcb};S${ld.port}` + wire };
     else                                         action = { type: 'wcb_broadcast', cmd: `;W${_firstKnownWcb()};S1` + wire };
   } else {
@@ -15081,10 +15092,12 @@ function _cmdlibMergeLibraryData(data) {
 //      (a) HIDDEN outright (see NC_CMDLIB_HIDDEN) — a board whose commands aren't
 //          ACTIONS. This library exists to build things a pilot triggers from the
 //          transmitter, and nobody binds a button to "set the hardware version".
-//      (b) SUPERSEDED: a vendored board loses to the NaviCore seed board that
-//          replaces it (see NC_CMDLIB_SUPERSEDE). Two cases today:
-//          the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9) loses to our
-//          firmware-accurate `nc-maestro-wcb` (id 0-9 / seq 0-99); and the generic
+//      (b) SUPERSEDED: a board loses to the board that replaces it (see
+//          NC_CMDLIB_SUPERSEDE). Three cases today:
+//          the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9), and our own
+//          inline `nc-maestro-wcb`, both lose to the shared, firmware-accurate
+//          `wcb-maestro` (cmdlib/wcb: subroutine 0-127, plus DroidNet's @A<name>
+//          trigger) - the inline one stays only as the file:// fallback; and the generic
 //          `maestro-native` (raw Pololu bytes to a `;W<wcb>;S<port>` WCB port)
 //          loses to `nc-maestro`, whose IDENTICAL commands instead target a
 //          NaviCore configured-Maestro slot (firmware picks Local Serial2 vs remote
@@ -15132,9 +15145,10 @@ const NC_CMDLIB_HIDDEN_CMDS = new Set([
   'wcb.seqClearAll',  // ?SEQ,CLEAR,ALL
   'wcb.seqClear',     // ?SEQ,CLEAR,{key}
 ]);
-// vendored id -> NaviCore seed id that replaces it when both are present.
+// board id -> the board that replaces it when both are present.
 const NC_CMDLIB_SUPERSEDE = {
-  'maestro':        'nc-maestro-wcb', // narrow upstream ;M board -> our via-WCB board (;M sequence + verbs)
+  'maestro':        'wcb-maestro',   // narrow upstream ;M board -> the shared cmdlib/wcb board (;M sequence + verbs + DroidNet)
+  'nc-maestro-wcb': 'wcb-maestro',   // our inline fallback -> the same shared board, once cmdlib/wcb has loaded
   'maestro-native': 'nc-maestro',    // raw-WCB-port Pololu board -> our configured-Maestro-slot board
 };
 const NC_CMDLIB_ORDER_TOP = [
@@ -15143,8 +15157,10 @@ const NC_CMDLIB_ORDER_TOP = [
   // the picker. nc-maestro-wcb is a MEMBER (see NC_CMDLIB_GROUPS.ids) despite the id,
   // so it belongs inside this run; breaking the run would split the group in two.
   // Order INSIDE the group is this array too: Stored Sequences first (the everyday
-  // one), sound, then Maestro, then lighting, and the 71-command native config last.
-  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'nc-maestro-wcb', 'wcb-wled',
+  // one), sound, then Maestro, then lighting, the WCB's own actions (cmdlib/wcb), and
+  // the 71-command native config last. The WCB Wizard's sequence builder uses the same
+  // order (seq-builder.js SB_ORDER_TOP).
+  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'wcb-maestro', 'nc-maestro-wcb', 'wcb-wled', 'wcb-actions',
   'wcb-native',   // inert while NC_CMDLIB_HIDDEN hides it; kept so un-hiding restores its place
 
   'navicore',
@@ -15607,11 +15623,18 @@ async function _cmdlibImportFromManifest(manifestUrl, onLog) {
 // raw.githubusercontent.com. _cmdlibReady lets openCmdLibrary wait a beat on
 // a slow first load instead of showing a half-populated list.
 const NC_DROIDNET_LOCAL_MANIFEST = 'cmdlib/droidnet/manifest.json';
+// The WCB's own boards the snapshot lacks (Maestro at the firmware's ranges with
+// DroidNet's @A<name> trigger, DFPlayer, actions), in the same schema. Kept here, and
+// copied byte for byte into the WCB Wizard, so both tools present one library
+// (cmdlib/wcb/NOTICE.md). Its wcb-dfplayer replaces the seed's of the same id.
+const NC_WCB_LOCAL_MANIFEST = 'cmdlib/wcb/manifest.json';
 // NaviCore's own controller-native commands (record/play/stop sequences), authored
 // in the DroidNet board schema so the file can be PR'd to that library verbatim.
 const NC_NAVICORE_LOCAL_MANIFEST = 'cmdlib/navicore/manifest.json';
 let _cmdlibReady = _cmdlibImportFromManifest(NC_DROIDNET_LOCAL_MANIFEST)
   .catch(e => { console.warn('Command library: vendored snapshot failed to load —', e.message); return null; })
+  .then(() => _cmdlibImportFromManifest(NC_WCB_LOCAL_MANIFEST))
+  .catch(e => { console.warn('Command library: WCB boards failed to load —', e.message); return null; })
   .then(() => _cmdlibImportFromManifest(NC_NAVICORE_LOCAL_MANIFEST))
   .catch(e => { console.warn('Command library: NaviCore boards failed to load —', e.message); return null; })
   // Re-merge your PRIVATE custom boards LAST (localStorage) so they layer on top
