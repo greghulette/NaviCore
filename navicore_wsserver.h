@@ -46,8 +46,9 @@
 //  client echoes it or WS_BYE_WAIT_MS later, and for WS_AUTH_LOCKOUT_MS after any
 //  failure every ?AUTH on any session fails - one guess a second. With no token
 //  nothing is sent on open and "?AUTH,<anything>" answers "[AUTH:OK]", so a
-//  client can always send it. A session's state is decided when it opens: a
-//  token set, changed or cleared applies to NEW sessions only.
+//  client can always send it. A session that has not signed in 15 s after it
+//  opened (WS_SIGNIN_MS) is shut down. A session's state is decided when it opens:
+//  a token set, changed or cleared applies to NEW sessions only.
 //  wsAdmit() decides each line on the httpd task, BEFORE the queue, so a line
 //  from a session that has not signed in never reaches processInputLine(), and
 //  ?AUTH never does. Its answers go out there too (wsSay): that is the task every
@@ -121,9 +122,13 @@ static const uint32_t WS_KICK_LOST_MS  = 2000;
 //     and Windows discards what it had not delivered. Waiting for the echo gets the line read.
 //   WS_REAP_RETRY_MS   - how often drain() queues that shut-down again while it is due and has not
 //     happened: httpd's control socket drops a work item it cannot hold, without an error.
+//   WS_SIGNIN_MS       - a session that has not signed in this long after it opened is shut down the
+//     same way: with three slots and httpd's LRU purge, a client that connects and never signs in
+//     would otherwise hold a slot for good. 15 s, as on the WCB (WCB_WS.cpp WS_SIGNIN_MS).
 static const size_t   WS_TOKEN_MAX       = 32;
 static const uint32_t WS_AUTH_LOCKOUT_MS = 1000;
 static const uint32_t WS_BYE_WAIT_MS     = 1000;
+static const uint32_t WS_SIGNIN_MS       = 15000;
 static const uint32_t WS_REAP_RETRY_MS   = 250;
 
 struct WsCmd {
@@ -558,6 +563,7 @@ struct WsAcc {
   bool     authed = false;   // httpd task only: in the mirror, and its lines run
   bool     failed = false;   // httpd task only: its ?AUTH failed - nothing it sends is acted on again
   uint32_t byeAt  = 0;       // wsAuthMux: millis() its CLOSE went (never 0 when set); 0 = none
+  uint32_t signinFrom = 0;   // wsAuthMux: millis() it opened needing a sign-in (never 0 when set); 0 = signed in / none
 };
 inline WsAcc wsAcc[WS_MAX_CLIENTS];
 
@@ -610,8 +616,10 @@ inline WsAcc* accFor(int fd) {
   if (!a) a = &wsAcc[0];   // full: evict, as begin() does
   const bool open = !tokenSet();
   a->fd = fd; a->len = 0; a->authed = open; a->failed = false;
+  const uint32_t now = millis();
   portENTER_CRITICAL(&wsAuthMux);
   a->byeAt = 0;
+  a->signinFrom = open ? 0 : (now ? now : 1);
   portEXIT_CRITICAL(&wsAuthMux);
   return a;
 }
@@ -622,6 +630,7 @@ inline void accRelease(int fd) {
       wsAcc[i].fd = -1; wsAcc[i].len = 0; wsAcc[i].authed = false; wsAcc[i].failed = false;
       portENTER_CRITICAL(&wsAuthMux);
       wsAcc[i].byeAt = 0;
+      wsAcc[i].signinFrom = 0;
       portEXIT_CRITICAL(&wsAuthMux);
     }
 }
@@ -676,6 +685,9 @@ inline bool wsAdmit(httpd_handle_t hd, int fd, WsAcc* ac, const char* line, size
     // reaches the client ahead of the first console frame it joins.
     wsSay(hd, fd, "[AUTH:OK]\r\n");
     if (!ac->authed) { ac->authed = true; wsSink.begin(fd); }
+    portENTER_CRITICAL(&wsAuthMux);
+    ac->signinFrom = 0;
+    portEXIT_CRITICAL(&wsAuthMux);
     return false;
   }
   wsAuthFailMs = now ? now : 1;   // a failure inside the lockout starts it again
@@ -690,13 +702,15 @@ inline bool wsAdmit(httpd_handle_t hd, int fd, WsAcc* ac, const char* line, size
   httpd_ws_send_frame_async(hd, fd, &f);
   portENTER_CRITICAL(&wsAuthMux);
   ac->byeAt = now ? now : 1;
+  ac->signinFrom = 0;              // it closes on its own deadline now
   portEXIT_CRITICAL(&wsAuthMux);
   return false;
 }
 
 // RUNS ON THE HTTPD TASK, queued by drain(): shut down every failed session whose CLOSE
 // went WS_BYE_WAIT_MS ago and that has not echoed it (an echo ends the session in httpd,
-// and wsClose releases the slot first). shutdown(), as wsSendFrame does: httpd's select()
+// and wsClose releases the slot first), and every session still not signed in
+// WS_SIGNIN_MS after it opened. shutdown(), as wsSendFrame does: httpd's select()
 // sees it and deletes the session (close_fn = wsClose). On this task, the one that opens
 // and closes sessions, so the fd is still the failed session's and never a newcomer's
 // that got its number back.
@@ -706,11 +720,16 @@ inline void wsReapWork(void* arg) {
   int due[WS_MAX_CLIENTS];
   int n = 0;
   portENTER_CRITICAL(&wsAuthMux);
-  for (int i = 0; i < WS_MAX_CLIENTS; i++)
-    if (wsAcc[i].fd >= 0 && wsAcc[i].byeAt && (uint32_t)(now - wsAcc[i].byeAt) >= WS_BYE_WAIT_MS) {
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+    if (wsAcc[i].fd < 0) continue;
+    const bool bye    = wsAcc[i].byeAt && (uint32_t)(now - wsAcc[i].byeAt) >= WS_BYE_WAIT_MS;
+    const bool signin = wsAcc[i].signinFrom && (uint32_t)(now - wsAcc[i].signinFrom) >= WS_SIGNIN_MS;
+    if (bye || signin) {
       due[n++] = wsAcc[i].fd;
       wsAcc[i].byeAt = 0;
+      wsAcc[i].signinFrom = 0;
     }
+  }
   portEXIT_CRITICAL(&wsAuthMux);
   for (int k = 0; k < n; k++) shutdown(due[k], SHUT_RDWR);
 }
@@ -925,19 +944,22 @@ inline void drain() {
   //    one place the bytes actually go out, so network I/O stays at a known point
   //    on the core that must also service SBUS.
   wsLoopCore = xPortGetCoreID();   // this IS the loop task; see wsLoopCore
-  // A session whose ?AUTH failed and that has not echoed its CLOSE in WS_BYE_WAIT_MS is
-  // shut down by wsReapWork on the httpd task. Queued again every WS_REAP_RETRY_MS while one
+  // A session whose ?AUTH failed and that has not echoed its CLOSE in WS_BYE_WAIT_MS, or that
+  // has not signed in WS_SIGNIN_MS after it opened, is shut down by wsReapWork on the httpd task. Queued again every WS_REAP_RETRY_MS while one
   // is due: httpd's control socket drops a work item it cannot hold, and the reap clears the
   // deadline it acts on, so a reap that ran is never repeated.
   if (wsServer) {
     static uint32_t reapKickAt = 0;
     bool due = false;
-    uint32_t bye[WS_MAX_CLIENTS];
+    uint32_t bye[WS_MAX_CLIENTS], signin[WS_MAX_CLIENTS];
     portENTER_CRITICAL(&wsAuthMux);
-    for (int i = 0; i < WS_MAX_CLIENTS; i++) bye[i] = wsAcc[i].byeAt;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) { bye[i] = wsAcc[i].byeAt; signin[i] = wsAcc[i].signinFrom; }
     portEXIT_CRITICAL(&wsAuthMux);
     const uint32_t now = millis();   // read after the deadlines, so none is in its future
-    for (int i = 0; i < WS_MAX_CLIENTS; i++) if (bye[i] && (uint32_t)(now - bye[i]) >= WS_BYE_WAIT_MS) due = true;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+      if (bye[i] && (uint32_t)(now - bye[i]) >= WS_BYE_WAIT_MS) due = true;
+      if (signin[i] && (uint32_t)(now - signin[i]) >= WS_SIGNIN_MS) due = true;
+    }
     if (due && (uint32_t)(now - reapKickAt) >= WS_REAP_RETRY_MS) {
       reapKickAt = now;
       httpd_queue_work(wsServer, wsReapWork, nullptr);

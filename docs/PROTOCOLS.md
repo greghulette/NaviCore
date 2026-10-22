@@ -196,6 +196,9 @@ so Intellex signs in to all three the same way:
 - A session that has not signed in gets **nothing else**: it is not in `wsSink`, so no console
   output, no monitor, no reply. Its state is decided at the handshake: setting, changing or
   clearing the token applies to **new** sessions; one already signed in keeps going.
+- A session still not signed in 15 s after it opened (`WS_SIGNIN_MS`, as on a WCB) is shut down
+  by `wsReapWork`, the same way as a failed one: with three slots and httpd's LRU purge, a
+  client that connects and never signs in would otherwise hold a slot for good.
 - With no token set, nothing is sent on open and nothing changes from before the token existed.
 - `wsAdmit()` decides each whole line on the httpd task, **before** the command queue, so a
   signed-out session's lines never take a queue slot and `?AUTH` never reaches
@@ -1053,6 +1056,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-22 | — | §1: a session not signed in 15 s after it opened is shut down (`WS_SIGNIN_MS`), matching the WCB's `ws://`; it had no limit, so a client that never signed in kept one of the three slots. |
 | 2026-10-21 | — | §1: the WebSocket login token (`wifiToken`) — `[AUTH:REQUIRED]` / `?AUTH,<token>` / `[AUTH:OK]` / `[AUTH:FAIL]` + CLOSE 1008, 1 s lockout, the protocol of a WCB's `ws://`; decided per line on the httpd task before the queue, answered there. §3: `?CHSYNC`, `?CHSYNC,SEARCH`, `?CHSYNC,MOVE,<ch>` (WCB_Client 1.19.0 channel sync), `?AUTH` a no-op off a socket, `#L11` ends with the channel-sync block. §4: a bridged `SET_CONFIG` also strips `wcbNetwork.region` and `wifiToken`; a bridged `GET_CONFIG` leaves `wifiToken` out. |
 | 2026-10-14 | `969fb1f` | `#L11` gains the `Transmit watchdog:` line (WCB_Client 1.18.0); §3: `#L94` arms a transmit wedge and sets the watchdog's probe interval (HIL `ncmesh.tx_watchdog_*`). |
 | 2026-10-06 | `0657025` | GET_CONFIG and GET_CMDLIB replies go out through `printLong()`: paced into the 8 KB USB TX ring so a host that pauses reading gets the line whole instead of with a hole mid-line (WCB repo HIL plan D-NC75). |
