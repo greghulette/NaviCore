@@ -248,6 +248,15 @@ Saving is diff-based, and the guard rails exist because each failure mode actual
     count `n` (`_pendingSaveId`). Every tab reads every ACK on a shared WCB, so ids that
     counted from 1 in each tab let one tab's ACK confirm another tab's save
     (`nctool.multi_tab_save`).
+11. **Via WCB, Save never sends what the firmware strips** from a bridged `SET_CONFIG`
+    (`_stripBridgedPayload`): the `wcbNetwork` transport fields (`WCB_TRANSPORT_KEYS` —
+    deviceId, octets, password, quantity, channel, region) and the droid-WiFi settings
+    (`WIFI_RADIO_KEYS` — `wifiEnabled`, `wifiSsid`, `wifiPassword`, `wifiToken`). It says so
+    (*"WCB Network and Droid WiFi changes were NOT sent"*) and keeps those values **out of the
+    pending baseline**, so the edit stays unsaved instead of vanishing: had the tool sent them,
+    the board would have dropped them while the ACK advanced the baseline over them. Through a
+    WCB doorway — Intellex forces Via WCB there — those settings therefore change only over USB
+    or the droid's own WiFi. `chanSync` is not among them and travels.
 
 ### Verified clip download
 
@@ -355,7 +364,8 @@ three transforms are easy to miss — each alone makes the number wrong by a lar
 
 1. The payload is the **branch diff**, not the whole config, with `mappings` sub-diffed per
    button. A one-button edit is ~5 fragments; the full config is ~389.
-2. Via WCB additionally **strips the `wcbNetwork` transport fields**.
+2. Via WCB additionally **strips the `wcbNetwork` transport fields and the droid-WiFi
+   settings** — the same `_stripBridgedPayload()` Save calls (§5 item 11).
 3. `sendJSON()` wraps the result as `{sys:1, type:'SET_CONFIG', data, saveId}` and chunks
    **that** string. The count is over the outer wrapper; the per-fragment envelope is applied
    *after* chunking and so does not enter the count.
@@ -736,8 +746,26 @@ The corollary is that a droid *reporting* WiFi on should say so in visible chrom
 who cannot see the switch — hide the control, never the state. Deliberately **not** in the CSV
 cheat-sheet export, which is a user-facing artifact; it does round-trip through config JSON and
 cloud backups, because enabling it has to survive a restore.
-| 2026-08-25 | _(uncommitted)_ | **Cloud backup can include clips** (§5), checkbox default ON. Payload is gzipped BEFORE encryption (ciphertext is incompressible, so the order is not a preference) with transparent decompress on read, so pre-gzip backups still restore. Size is refused client-side before the PUT rather than eating a bare 413, and the manifest write now retries — with clip-sized payloads, a slot that lands while the manifest fails leaves the ring describing the previous backup. Only VERIFIED clips are included; any that will not transfer completely are named and left out. |
-| 2026-08-25 | _(uncommitted)_ | **Clip backup and restore** (§5): ⤓ per clip, ⤓ All + config (bundle), ⤒ Restore, and Import offering bundled clips. Restore defaults to skip-existing because `EDITEND` overwrites silently and `[CLIPITEM]` has no mtime, so nothing can tell which copy is newer. Guards: flash pre-flight via `[CLIPFS]`, per-clip read-back via `listClips` (a real flash re-read), `EDITCANCEL` on failure so the board never wedges in `ST_EDITING`, and skipped clips named rather than silently omitted. |
+
+**The access token** (`cfg-wifi-token`, `config.wifiToken`) sits under the AP name and password:
+masked, with the same 👁 reveal. `config` only ever holds a **valid** token — `ncTokenProblem()`,
+the tool's copy of the firmware's `rcWsTokenValid()` — because the firmware ignores an invalid
+one, and storing it would show it saved while the board kept the old; the note turns red and
+says the token is not applied. Blank = no token. It applies on Save, **live**, to WebSocket
+sessions that open afterwards. The tool itself never sends `?AUTH`: Intellex signs in under it.
+The board leaves the token out of the config it sends **over the mesh**, so a Via-WCB load drops
+`config.wifiToken` (rather than keep a token an earlier droid left there, which a cloud backup
+would then carry) and the field is disabled with a note; a bridged Save never sends it (§5
+item 11). A backup taken over the mesh therefore has no token, and restoring it leaves the
+board's token as it is.
+
+**Region and channel sync** sit on the WCB Network tab. **Region** (`wcb-region`) lists
+`NC_REGIONS` with the channels the tool assumes each allows (`_ncRegionMaxCh`: 11 for `01`, US,
+CA, TW; 13 for the rest); the channel input's max follows it. A channel above the region's is
+**not clamped** — moving the board off its mesh's channel quietly is worse than saying so — but
+the note turns red and says the board would run on channel 1. Region is a transport field: it
+shows in the REBOOT PENDING badge and saves over Direct USB only. **Channel sync**
+(`wcb-chansync`, `config.chanSync`) applies on Save without a reboot, over either transport.
 
 **WCB credential profiles.** On the WCB Network tab, save the current network credentials
 (MAC octets, password, quantity, device id, channel) as a named profile and radio-toggle
@@ -789,6 +817,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-21 | — | **Access token, region, channel sync** (§9): a masked `cfg-wifi-token` with a reveal and `ncTokenProblem()` validation (only a valid token reaches `config`; disabled Via WCB, where the board does not send it); `wcb-region` (`NC_REGIONS`) with the channel input's max following it (`_ncRegionMaxCh`, 12-13 only under a 13-channel region; an out-of-region channel is flagged, not clamped); the `wcb-chansync` checkbox. §5 item 11: Via WCB, Save strips the WiFi settings as well as the `wcbNetwork` transport fields, region included (`_stripBridgedPayload`, shared with the push-budget readout), and keeps them out of the pending baseline — the firmware already dropped the WiFi ones while the ACK advanced the baseline over them. The profile CSV channel clamp is 1-13. Moved two stray 2026-08-25 rows from the §9 body into this log. |
 | 2026-10-20 | _(uncommitted)_ | **§6: `cmdlib/wcb/`, the WCB's own boards, shared with the WCB Wizard** — Maestro at the firmware's ranges with DroidNet's `@A<name>` trigger (case-insensitive, Serial 0 by default), DFPlayer, Actions; `wcb-maestro` supersedes `maestro` and the inline `nc-maestro-wcb`; the `defaultPort` / `caseInsensitive` hints; a free-text-only template never decodes (it would claim every later command in this first-match decoder). Greg: NaviCore gets the DroidNet trigger too, and the libraries stay in sync. |
 | 2026-10-13 | _(uncommitted)_ | **Live channel monitor: one colour per channel** (§3, Motion layer) — eight hues cycling down the list on a slim glowing bar; the matrix channel keeps its amber. CSS only. |
 | 2026-10-13 | `84fb178` | **Motion layer** (§3): open/close animation for every overlay (action modal zooms from the clicked control on any transmitter model, Config drops from its button with colour-coded tabs, Connect folds into the status light), mode-colour flood + left→right outline recolour on mode change, terminal drawer spring + typed line colours, animated sidebar fold to a rail of live status lights. Action-modal tiers, the action rows within a tier (numbered steps) and terminal debug chips are colour-coded; a mode-colour glow sits behind the transmitter. Configured button outlines now take the active mode's colour, and Mode 3 is gold (`--mode3` #e0a526, was green #36c08a — too close to Mode 1 teal and to the Connected/Apply green). Overlays must open with `ncShow()` / close with `ncHide()`; all motion is off under `prefers-reduced-motion`. |
@@ -817,6 +846,8 @@ as the code. Page body stays present-tense; history lives here.
 | 2026-08-27 | _(uncommitted)_ | **Clip downloads ask for batched keyframes** (`,B`) and ingest `[CLIPDL:EVB,<firstIdx>]`, expanding each run back into the exact per-event object shape so the model builder and file writer are untouched. 5.0× fewer mesh packets. Sent unconditionally — old firmware's `toInt()` never saw the flag and replies in the per-event form, which the same code path still accepts, so there is no version handshake. Also: the OTA-over-WCB sender now appends a CRC-32 to each `?OTA,DATA` line (`<offset>:<crc32>`) and paces at 25 ms instead of 12 ms to stop outrunning the relay's serial ring — that ring overflow was corrupting the image silently and failing verification at 100%. |
 | 2026-08-27 | _(uncommitted)_ | **Download All no longer cascades.** The `[CLIPDL:*]` reply stream was anonymous and `_clipRange` is a single global, so a range that timed out while the board was still streaming had its lines adopted by the NEXT clip: a stale `END` finished that session before its header arrived (*"no reply from the board"*), a stale `BEGIN` replaced its `count`/`fp` (*"the clip changed on the board mid-download"*), and stale events were stored under foreign absolute indices — pushing `got.size` past `total` and reporting a NEGATIVE shortfall (*"-32 of 16 events"*), while `if (got.size >= total) break` then skipped fetching the real events entirely. Each failure left more undrained stream to poison the next clip, so one timeout took out the rest of the backup. Three defences now: `_clipRangeFeed` accepts a `BEGIN`/`END` only if its `from`/`n`/`nm` answer the request actually sent, events only if the index is inside the requested range, and `_clipDlQuiesce()` drains the stream to silence before every clip (the probe is `(0,0)` for every clip, so identity alone cannot separate two probes). The range deadline now scales with the slice instead of a flat 15 s, and a timeout says so rather than claiming the board was silent. Needs the matching firmware for `nm`; the drain and range gating work without it. |
 | 2026-08-27 | _(uncommitted)_ | **The firmware buttons now follow a reconnect.** `viaWcbActive` is assigned directly by `openPortAndStart()` and the disconnect path, both bypassing `_updateFirmwareBtnState()` — and a successful direct-USB auto-detect never calls `onViaWcbToggle()`, the only other caller. So disconnecting a Via-WCB session and reconnecting over USB left all four buttons on the previous transport: flash/wipe/USB-OTA greyed, "Update over WCB" the only option. Both sites now re-sync, and §2 records the invariant. Also corrected two comments claiming the flag is restored from `localStorage` — it is deliberately not persisted. |
+| 2026-08-25 | _(uncommitted)_ | **Cloud backup can include clips** (§5), checkbox default ON. Payload is gzipped BEFORE encryption (ciphertext is incompressible, so the order is not a preference) with transparent decompress on read, so pre-gzip backups still restore. Size is refused client-side before the PUT rather than eating a bare 413, and the manifest write now retries — with clip-sized payloads, a slot that lands while the manifest fails leaves the ring describing the previous backup. Only VERIFIED clips are included; any that will not transfer completely are named and left out. |
+| 2026-08-25 | _(uncommitted)_ | **Clip backup and restore** (§5): ⤓ per clip, ⤓ All + config (bundle), ⤒ Restore, and Import offering bundled clips. Restore defaults to skip-existing because `EDITEND` overwrites silently and `[CLIPITEM]` has no mtime, so nothing can tell which copy is newer. Guards: flash pre-flight via `[CLIPFS]`, per-clip read-back via `listClips` (a real flash re-read), `EDITCANCEL` on failure so the board never wedges in `ST_EDITING`, and skipped clips named rather than silently omitted. |
 | 2026-08-25 | _(uncommitted)_ | **Transport auto-detect no longer misreports a slow direct board as bridged.** Probe phases now take an epoch and a PONG only satisfies its own (§2) — a reply arriving after the direct phase gave up was being credited to the Via-WCB probe, so the tool showed "Connected via WCB" with nothing bridged, and Save then silently stripped WCB Network. An auto-switch is announced rather than silent. |
 | 2026-08-25 | _(uncommitted)_ | Added `clipDownloadVerified()` and the **⤓ per-clip download** (§5). Uses the ranged protocol so completeness is a set check over event indices rather than a count compare — a count cannot support retry, since a partly-duplicated re-request nets a shortfall of zero while events are still missing. Refuses on `fc != count` (truncated on the board), on a changed `fp` (buffer replaced mid-assembly by a Record/Play trigger), or on an incomplete set. **Never writes a partial file.** |
 | 2026-08-24 | _(uncommitted)_ | Added the **live trigger flash** (§5) — an `rc_trig` lights the exact tier row that fired in the assignment cards, in the live-activity orange. Mirrors `rcDispatch()`: cumulative lights every tier up to the match, exclusive and long press light only their own. |

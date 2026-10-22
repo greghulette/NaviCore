@@ -52,11 +52,12 @@
 #include <esp_netif.h>          // esp_netif_dhcps_option/_stop/_start — SoftAP offers no gateway
 #include "dhcpserver/dhcpserver.h"  // dhcps_offer_t
 #include <WCB_Client.h>   // header in greghulette/WCBClient is WCB_Client.h
-// The mesh transmit watchdog (setTxWatchdog, onMeshTxStall below) needs 1.18.1: 1.18.0 took one board's own periodic
-// advert for an answer and called a dead radio recovered (WCB repo HIL run 20261014-173713). A sketchbook copy older
-// than that shadows the real library in a local build (CLAUDE.md rule 5) - stop here rather than ship it.
-#if !defined(WCB_CLIENT_VERSION_NUM) || WCB_CLIENT_VERSION_NUM < 11801
-#error "NaviCore needs WCB_Client 1.18.1 or newer (greghulette/WCBClient master): the transmit watchdog"
+// Channel sync (setChanSyncRank, setRegion, onChannelMove - onMeshChannelMove below) needs 1.19.0, which also keeps
+// the transmit watchdog's 1.18.1 fix (1.18.0 took one board's own periodic advert for an answer and called a dead radio
+// recovered, WCB repo HIL run 20261014-173713). A sketchbook copy older than that shadows the real library in a local
+// build (CLAUDE.md rule 5) - stop here rather than ship it.
+#if !defined(WCB_CLIENT_VERSION_NUM) || WCB_CLIENT_VERSION_NUM < 11900
+#error "NaviCore needs WCB_Client 1.19.0 or newer (greghulette/WCBClient master): channel sync"
 #endif
 #include <WCB_Mgmt.h>     // WCB Wizard management surface (?backup / ?WDP,DUMP / ?MGMT,*)
 #include <WcbCmd.h>       // shared device-command translators (Maestro/MP3/WLED/HCR) —
@@ -259,6 +260,8 @@ volatile bool g_txwdRebootPending = false;
 static void onMeshTxStall(uint8_t level, uint32_t stalledMs);   // these three are defined above loop()
 static void txwdBoot();
 static void txwdService();
+static bool onMeshChannelMove(uint8_t ch);   // channel sync: a mesh move is saved, then applied (above loop())
+static void reportBootChannel();             // after begin(): a saved channel this boot could not use
 
 // One stream, broadcast to all WCBs.  target_port is ignored for broadcast.
 //
@@ -3766,6 +3769,11 @@ static void applySbusOut(bool initial) {
 // already prompts for after a board change; the caller reports that its own way.
 bool applyConfigSideEffects() {
   rcMatrixResetGesture();    // first, whatever the return below - see rcMatrixResetGesture()
+  // Both live, and neither depends on the pin profile, so ahead of the boardType return.
+  // The WebSocket token applies to sessions that open from now on (naviws::setToken);
+  // a session already signed in keeps going. Channel sync on/off takes effect at once.
+  naviws::setToken(rcConfig.wifiToken);
+  if (wcb && wcbReady) wcb->setChanSyncEnabled(rcConfig.chanSync);
   if (rcConfig.boardType != appliedBoardType) return false;
   applySerialBauds(false);   // HCR / MP3 / Maestro pick up a new rate immediately
   applySbusOut(false);       // apply a flipped SBUS-OUT toggle live
@@ -3813,6 +3821,36 @@ bool execCliLine(const String& line) {
   // command. Returns false for anything it does not own, so the rest of this
   // dispatcher is untouched.
   if (WcbMgmt::handleLine(line.c_str())) return true;
+  // ?AUTH,<token> signs a WebSocket session in, and the socket layer answers it before
+  // any queue (navicore_wsserver.h wsAdmit), so it never arrives here from a socket.
+  // Here - USB, or a line relayed over the mesh - there is nothing to sign in to: a
+  // no-op, never "Unknown command: ?AUTH,<the token>" echoed back.
+  if (line.length() >= 5 && line.substring(0, 5).equalsIgnoreCase("?AUTH") &&
+      (line.length() == 5 || line[5] == ','))
+    return true;
+  // ── Channel sync (WCB_Client 1.19.0; WCB repo docs/CHANNEL_SYNC.md §7) ──
+  //   ?CHSYNC              status, ending in the [CHSYNC:...] machine line (also in #L11)
+  //   ?CHSYNC,SEARCH       one search of the other channels now, if this board leads its group
+  //   ?CHSYNC,MOVE,<ch>    operator move of the whole mesh (a refusal says why)
+  // On/off and the region are config fields (chanSync, wcbNetwork.region), saved by the tool.
+  if (line.length() >= 7 && line.substring(0, 7).equalsIgnoreCase("?CHSYNC") &&
+      (line.length() == 7 || line[7] == ',')) {
+    String arg = (line.length() > 8) ? line.substring(8) : "";
+    arg.trim();
+    if (!wcb || !wcbReady) Serial.println("[CHSYNC] the mesh is not up (wcb->begin() failed)");
+    else if (!arg.length()) wcb->printChanSyncStatus(Serial);
+    else if (arg.equalsIgnoreCase("SEARCH")) wcb->chanSyncSearchNow();   // logs why not
+    else if (arg.length() > 5 && arg.substring(0, 5).equalsIgnoreCase("MOVE,")) {
+      const long ch = arg.substring(5).toInt();
+      String why;
+      if (wcb->chanSyncMove((uint8_t)(ch > 0 && ch < 256 ? ch : 0), &why))
+        Serial.printf("[CHSYNC] moving the mesh to channel %ld\n", ch);
+      else
+        Serial.printf("[CHSYNC] move refused: %s\n", why.c_str());
+    }
+    else Serial.println("[CHSYNC] usage: ?CHSYNC  |  ?CHSYNC,SEARCH  |  ?CHSYNC,MOVE,<channel>");
+    return true;
+  }
   // ?FORGET,<id>  — drop learned WCB <id> from the peer table + NVS
   // ?FORGET,ALL   — drop every learned (auto-joined) peer
   if (line.length() >= 7 && line.substring(0, 7).equalsIgnoreCase("?FORGET")) {
@@ -4104,6 +4142,7 @@ bool execCliLine(const String& line) {
                           tw.enabled ? "on" : "off", tw.level, (unsigned long)tw.probes, tw.misses,
                           (unsigned long)tw.restarts, (unsigned long)g_txwdAutoReboots, (unsigned long)tw.sendErrors,
                           tw.sinceProofMs == 0xFFFFFFFFUL ? "never" : (String(tw.sinceProofMs / 1000UL) + " s ago").c_str()); }
+          if (wcbReady) wcb->printChanSyncStatus(Serial);   // the same block ?CHSYNC prints
           break;
         }
         case 12: Serial.printf("Mode=%d  matrixBtn=%d  matrixVal=%d\n",
@@ -5206,6 +5245,35 @@ void setup() {
   // servos moving continuously (~400 keyframes/s worst case). ~6.7 MB PSRAM was free.
   navirec::recBegin(24000, recCbDispatch, recCbEmitMaestro, recCbEmitHcrVol, recCbResetChan);
 
+  // ── WCB Client: built here, begun after the SoftAP below ──────────────────
+  // Built BEFORE the SoftAP rather than just before begin(), because the radio
+  // region must be in force before softAP() for an AP on channel 12 or 13, and the
+  // client is what applies it (setRegion). The constructor touches no hardware
+  // (WCB_Client.cpp), and until begin() only the setters here are called: every
+  // other wcb-> use is gated on wcbReady.
+  //
+  // The mesh password goes in through g_meshPasswordBoot, which every hand-built
+  // packet (RTERM, OTA, WcbMgmt) also reads, so a later unrebooted change cannot
+  // split them from the ETM stack.
+  strlcpy(g_meshPasswordBoot, rcConfig.wcbNetwork.password, sizeof(g_meshPasswordBoot));
+  txwdBoot();   // the automatic-restart count: zero from a power-on, said when the watchdog caused this boot
+  wcb = new WCB_Client(rcConfig.wcbNetwork.macOct2,
+                      rcConfig.wcbNetwork.macOct3,
+                      g_meshPasswordBoot,
+                      rcConfig.wcbNetwork.quantity,
+                      rcConfig.wcbNetwork.deviceId);
+  // Channel sync (WCB_Client 1.19.0; WCB repo docs/CHANNEL_SYNC.md §8). NaviCore leads at
+  // rank 0, so the mesh is on NaviCore's channel unless a WCB joined to an access point
+  // pins it elsewhere, and a stray board is searched for and brought home. A move is
+  // saved, and with the SoftAP up applied by a restart (onMeshChannelMove). The region
+  // is stored now and applied by begin() - or at once in the SoftAP branch below, which
+  // starts WiFi first.
+  wcb->setChanSyncRank(chansync::RANK_NAVICORE);
+  wcb->setChanSyncEnabled(rcConfig.chanSync);
+  wcb->onChannelMove(onMeshChannelMove);
+  wcb->setRegion(rcConfig.wcbNetwork.region);
+  uint8_t meshCh = rcConfig.wcbNetwork.channel;   // the SoftAP branch runs an out-of-region one on 1
+
   // ── Optional SoftAP (rcConfig.wifiEnabled) ────────────────────────────────
   // ORDER IS LOAD-BEARING: this must run BEFORE wcb->begin(). WCB_Client checks
   // WiFi.getMode() at entry and, finding an AP already up, selects WIFI_AP_STA and
@@ -5213,8 +5281,8 @@ void setup() {
   // ≈89-110). Raise the AP after begin() and the AP survives, but ESP-NOW has
   // already pinned the radio — the two then fight over the channel.
   //
-  // CHANNEL: softAP()'s 3rd parameter defaults to 1. It MUST be passed
-  // rcConfig.wcbNetwork.channel explicitly. Once an AP owns the radio WCB_Client
+  // CHANNEL: softAP()'s 3rd parameter defaults to 1. It MUST be passed the mesh
+  // channel (meshCh) explicitly. Once an AP owns the radio WCB_Client
   // stops calling esp_wifi_set_channel and only WARNS on a mismatch (≈121-130), so
   // a defaulted channel 1 against a mesh on any other channel is a silent, total
   // blackout — every packet dropped, no fault LED, one line in a log nobody reads.
@@ -5236,7 +5304,16 @@ void setup() {
       char ssid[33];
       if (rcConfig.wifiSsid[0]) strlcpy(ssid, rcConfig.wifiSsid, sizeof(ssid));
       else snprintf(ssid, sizeof(ssid), "NaviCore-%u", (unsigned)rcConfig.wcbNetwork.deviceId);
-      const int ch = rcConfig.wcbNetwork.channel;
+      // REGION BEFORE softAP(): under "01" an AP on 12 or 13 is refused. setRegion()
+      // applies it at once when WiFi is running, so start WiFi, apply it, and take the
+      // region's real top channel from the driver. A saved channel it does not allow
+      // runs on WCB_MESH_CHANNEL this boot (reported after begin(), reportBootChannel).
+      WiFi.mode(WIFI_AP);
+      wcb->setRegion(rcConfig.wcbNetwork.region);
+      if (!chansync::validChannel(meshCh, wcb->maxChannel())) meshCh = WCB_MESH_CHANNEL;
+      // The login token before the socket can take a session (naviws::begin below).
+      naviws::setToken(rcConfig.wifiToken);
+      const int ch = meshCh;
       // max_connection 4 (the default): this is a config channel, not a hotspot.
       if (WiFi.softAP(ssid, rcConfig.wifiPassword, ch, /*hidden=*/0, /*max_conn=*/4)) {
         Serial.printf("[WIFI] SoftAP \"%s\" up on channel %d — %s\n",
@@ -5315,23 +5392,16 @@ void setup() {
     }
   }
 
-  // WCB Client — sets STA mode + custom MAC + inits ESP-NOW. With the SoftAP above
-  // enabled it runs WIFI_AP_STA and shares that AP's channel; with it off (the
-  // default) this is ESP-NOW only, exactly as before. Credentials come from NVS
-  // (editable via the GUI's "WCB Network" sidebar); a reboot is required
-  // for credential changes to take effect. The password goes in through
-  // g_meshPasswordBoot, which every hand-built packet (RTERM, OTA, WcbMgmt) also
-  // reads, so a later unrebooted change cannot split them from the ETM stack.
-  strlcpy(g_meshPasswordBoot, rcConfig.wcbNetwork.password, sizeof(g_meshPasswordBoot));
-  txwdBoot();   // the automatic-restart count: zero from a power-on, said when the watchdog caused this boot
-  wcb = new WCB_Client(rcConfig.wcbNetwork.macOct2,
-                      rcConfig.wcbNetwork.macOct3,
-                      g_meshPasswordBoot,
-                      rcConfig.wcbNetwork.quantity,
-                      rcConfig.wcbNetwork.deviceId);
+  // WCB Client begin() — sets STA mode + custom MAC + inits ESP-NOW. With the SoftAP
+  // above enabled it runs WIFI_AP_STA and shares that AP's channel; with it off (the
+  // default) this is ESP-NOW only, exactly as before. Credentials come from the config
+  // (editable via the GUI's "WCB Network" sidebar); a reboot is required for credential
+  // changes to take effect.
   // Pin the ESP-NOW radio to the mesh channel every WCB is on BEFORE begin() — the
   // ESP32 has one radio, so a mismatched channel makes this RC silently unreachable.
-  wcb->setMeshChannel(rcConfig.wcbNetwork.channel);
+  // AFTER setRegion(): before begin() the client takes 12-13 only under a region that
+  // may allow them, and begin() re-checks against the region's real range.
+  wcb->setMeshChannel(meshCh);
   // An EMPTY mesh password is a silent, symptomless blackout. The password is a
   // plain-text namespace field on every packet (wcb_packet_etm_t::structPassword)
   // and the receive path strncmp's it before anything else (WCB_Client.cpp ≈2036),
@@ -5361,6 +5431,7 @@ void setup() {
     setStatusLed(C_ORANGE, 200);   // show immediately for the rest of setup()
   } else {
     wcbReady = true;   // ESP-NOW is up — wcb-> calls are now safe
+    reportBootChannel();   // a saved channel the region does not allow is running on 1: say so
     // Create the remote-TRIGGER queue BEFORE registering onCommand so a TRIGGER
     // arriving the instant the callback is live has a live queue to land in
     // (queueRemoteTrigger no-ops on a null queue, so a miss is only dropped, but
@@ -5976,7 +6047,7 @@ static void kickUsbCdcTx() {
 }
 #endif
 
-// ── Deferred restart (a mesh-relayed REBOOT) ────────────────────────────────
+// ── Deferred restart (a mesh-relayed REBOOT, a channel move) ─────────────────
 // Never restart from a receive callback or a command handler: a REBOOT that arrives
 // mid-stream would discard every command queued behind it. rcTelemetry::tick() ACKs the
 // REBOOT and calls requestDeferredRestart(); this restarts from loop() once every
@@ -5984,17 +6055,25 @@ static void kickUsbCdcTx() {
 // RESTART_QUIET_MS - quiet matters, because a paced sender empties the queues between
 // every pair of commands - or, failing that, once the request is RESTART_MAX_DEFER_MS
 // old, so a chatty mesh cannot hold a requested restart off for good. The quiet window
-// also gives the ETM ACK time to leave before the radio goes down.
+// also gives the ETM ACK time to leave before the radio goes down. A channel move with
+// the SoftAP up asks for one too (onMeshChannelMove): the mesh has gone already, so the
+// quiet comes at once.
 #define RESTART_QUIET_MS      500
 #define RESTART_MAX_DEFER_MS  5000
-static uint32_t g_restartReqMs     = 0;   // millis() of the request; 0 = none pending
-static uint32_t g_restartQuietFrom = 0;   // millis() the current quiet window began
-static uint32_t g_restartRxSeen    = 0;   // g_meshRxCount when that window began
-void requestDeferredRestart() {
-  if (g_restartReqMs) return;              // already pending
-  g_restartReqMs     = millis() | 1u;      // never 0 - 0 means "none"
-  g_restartQuietFrom = millis();
+static uint32_t    g_restartReqMs     = 0;   // millis() of the request; 0 = none pending
+static uint32_t    g_restartQuietFrom = 0;   // millis() the current quiet window began
+static uint32_t    g_restartRxSeen    = 0;   // g_meshRxCount when that window began
+static const char* g_restartWhy       = "remote REBOOT";   // a string literal; said as it restarts
+void requestDeferredRestart(const char* why) {
+  if (g_restartReqMs) return;              // already pending (and it takes whatever was saved meanwhile)
+  const uint32_t t = millis();
+  // Never 0 - 0 means "none" - but never millis() | 1 either: that is 1 ms in the future
+  // half the time, and `now - g_restartReqMs` then wraps to ~4.3e9 and reads as overdue on
+  // the very next check, skipping the quiet window altogether.
+  g_restartReqMs     = t ? t : 1;
+  g_restartQuietFrom = t;
   g_restartRxSeen    = g_meshRxCount;
+  g_restartWhy       = why ? why : "remote REBOOT";
 }
 static bool inboundWorkPending() {
   QueueHandle_t qs[] = { remoteTriggerQueue, remoteCliQueue, serialFwdQueue, maestroCmdQueue, forgetPeerQueue };
@@ -6012,12 +6091,69 @@ static void checkDeferredRestart() {
   const bool quiet   = (uint32_t)(now - g_restartQuietFrom) >= RESTART_QUIET_MS;
   const bool overdue = (uint32_t)(now - g_restartReqMs)     >= RESTART_MAX_DEFER_MS;
   if (!quiet && !overdue) return;
-  Serial.println(overdue ? "[RC] restarting (remote REBOOT; the mesh never went quiet)"
-                         : "[RC] restarting (remote REBOOT)");
+  Serial.printf(overdue ? "[RC] restarting (%s; the mesh never went quiet)\n"
+                        : "[RC] restarting (%s)\n", g_restartWhy);
   Serial.flush();
   naviota::otaFarewellAP();   // deauth SoftAP clients first, as every other restart path does
   delay(250);
   ESP.restart();
+}
+
+// ── Channel sync: a mesh move (WCB_Client 1.19.0 onChannelMove) ─────────────
+// WCB_Client calls this from update() - the LOOP task - once, when a MOVE this board
+// accepted, or one it announced itself (its own search, ?CHSYNC,MOVE), reaches its switch
+// time. Flash is safe here. The channel is saved first, either way, so the next boot
+// starts where the mesh went (setup() hands it to setMeshChannel). Then:
+//   - no SoftAP: return false, and the library switches the radio live
+//     (esp_wifi_set_channel). Nothing else here holds the channel.
+//   - the SoftAP up: it moves only by coming up again, so ask loop() for the deferred
+//     restart and return true - NEVER ESP.restart() in here, inside update(). Associated
+//     clients lose the AP and find it again on the new channel.
+// A save that fails: with the SoftAP up the move cannot be followed at all (a restart
+// would come up on the old channel), so say so and stay - this board then leads alone,
+// and its search finds the others and brings everyone back to one channel. With no
+// SoftAP the radio still follows live, and only the next boot starts on the old channel.
+// The save is the whole config as it is in RAM, which is what /config.json holds - except
+// in the window after a RESET_DEFAULTS (RAM only until the tool saves), whose reset a move
+// then saves with it.
+static bool onMeshChannelMove(uint8_t ch) {
+  const uint8_t was = rcConfig.wcbNetwork.channel;
+  rcConfig.wcbNetwork.channel = ch;
+  const bool saved = rcConfigSaveLFS();
+  const bool apUp  = (WiFi.getMode() & WIFI_MODE_AP) != 0;   // the library's own test (_csSoftApUp)
+  if (!saved && apUp) {
+    Serial.printf("[CHSYNC] *** the mesh moved to channel %u, but the config could not be saved - "
+                  "staying on %u with the SoftAP\n", ch, was);
+    rcConfig.wcbNetwork.channel = was;
+    return false;   // not applied: with the SoftAP up the library then stays too, and says so
+  }
+  if (!saved) {
+    Serial.printf("[CHSYNC] *** the mesh moved to channel %u - following, but the config could not be saved: "
+                  "the next boot starts on %u\n", ch, was);
+    return false;
+  }
+  if (!apUp) {
+    Serial.printf("[CHSYNC] the mesh moved to channel %u - saved\n", ch);
+    return false;
+  }
+  Serial.printf("[CHSYNC] the mesh moved to channel %u - saved; restarting to bring the SoftAP up there\n", ch);
+  requestDeferredRestart("the mesh moved channel");
+  return true;
+}
+
+// After begin(): the channel this boot runs on is not the saved one. A saved channel the
+// region does not allow (the region was changed back, or a config came from a board in
+// another region) runs on WCB_MESH_CHANNEL for the boot - the SoftAP branch picks it,
+// WCB_Client's begin() does with no AP - and the saved value stays, so setting the region
+// alone brings it back. Loud, because a board on the wrong channel shows nothing else.
+static void reportBootChannel() {
+  const uint8_t saved = rcConfig.wcbNetwork.channel, now = wcb->currentChannel(), top = wcb->maxChannel();
+  if (now == saved) return;
+  Serial.printf("[CHSYNC] *** The saved mesh channel is %u, but this boot runs on channel %u (region \"%s\", channels 1-%u).\n",
+                saved, now, rcConfig.wcbNetwork.region, top);
+  if (saved > top)
+    Serial.println("[CHSYNC] *** The saved channel is kept: set the region every board on this mesh uses "
+                   "(config tool > WCB Network > Region), Save, and reboot.");
 }
 
 // ── Mesh transmit watchdog (see TXWD_MAX_AUTO_REBOOTS) ───────────────────────

@@ -90,12 +90,12 @@ void                queueRemoteTrigger(int mode, int btn, uint8_t tap);   // Cor
 void                queueForgetPeer(uint8_t id);   // Core-0 → loop hop for FORGET_PEER; id 0 = all (defined in .ino)
 void                resetModeAwareKnobs();   // re-arm mode-aware knobs on a mode change (defined in .ino)
 bool                applyConfigSideEffects();   // post-save live re-apply, shared with the USB path (defined in .ino)
-void                requestDeferredRestart();   // restart from loop() once the inbound queues are quiet (defined in .ino)
+void                requestDeferredRestart(const char* why = "remote REBOOT");   // restart from loop() once the inbound queues are quiet (defined in .ino); why: a string literal, said as it restarts
 
 // Forward declarations from rc_config.h — needed for SET_CONFIG / GET_CONFIG
 // fragmentation handlers below.  Both already exist; declared here so
 // rc_telemetry.h doesn't have to #include rc_config.h's huge implementation.
-String rcConfigToJSON();
+String rcConfigToJSON(bool forMesh);   // forMesh = true leaves wifiToken out (see rc_config.h)
 bool   rcConfigFromJSON(const String& json);
 bool   rcConfigFromJSON(const JsonObject& doc);   // JsonObject overload — skip the double-parse
 void   rcConfigResetKeepIdentity();               // RESET_DEFAULTS: factory defaults minus the network identity
@@ -748,7 +748,7 @@ inline bool _startFragSendFile(uint8_t target, const char* path, const char* wha
 // Arm a fragmented CONFIG send to `target`.  Returns false if the payload
 // can't be sent (empty / too large for the fragment budget); true if armed.
 inline bool _startGetConfigSend(uint8_t target) {
-  String body = rcConfigToJSON();
+  String body = rcConfigToJSON(/*forMesh=*/true);   // never the WebSocket token: see rcConfigToJSON
   // rcConfigToJSON() returns an ERROR envelope, NOT a config, when the document
   // overflowed — that guard exists precisely so a truncated config never reaches
   // the tool.  Splicing it into "data" defeats it: the tool would reassemble a
@@ -1164,6 +1164,9 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
       // off the mesh at its next boot (the tool already strips it; HIL
       // ncmesh.bridged_set_config_strip).
       if (wnet.containsKey("channel"))  wnet.remove("channel");
+      // ...and the region, its other half: a region without the running channel (a mesh on
+      // 12, a save of "US") runs this board on channel 1 from its next boot, off the mesh.
+      wnet.remove("region");            // a no-op when absent
       // If we stripped every field, drop the empty `wcbNetwork: {}` so
       // rcConfigFromJSON's containsKey("wcbNetwork") check short-circuits
       // and we skip the whole "apply each field from JSON with fallback"
@@ -1175,10 +1178,13 @@ inline void _applyReassembled(uint8_t senderID, const String& json) {
     // wifiPassword are read at boot only, so a bridged Save could switch the AP off,
     // rename it or change its key for the NEXT boot with nothing visible now - and
     // the AP is how a WiFi client reaches this board at all. Radio settings change
-    // over USB (or the AP's own socket), never through the mesh.
+    // over USB (or the AP's own socket), never through the mesh. The WebSocket token
+    // with them: it is the AP's other key, and anyone holding the public mesh password
+    // could otherwise set one and lock the owner out, or clear it. (The mesh copy of
+    // the config never carries it either - rcConfigToJSON(true).)
     {
       bool strippedWifi = false;
-      for (const char* k : { "wifiEnabled", "wifiSsid", "wifiPassword" })
+      for (const char* k : { "wifiEnabled", "wifiSsid", "wifiPassword", "wifiToken" })
         if (data.containsKey(k)) { data.remove(k); strippedWifi = true; }
       if (strippedWifi)
         Serial.println("[RC] SET_CONFIG: ignoring incoming wifi* fields (WCB-transport saves can't change the SoftAP)");

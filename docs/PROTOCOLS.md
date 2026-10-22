@@ -22,7 +22,8 @@ Related: [ARCHITECTURE.md](ARCHITECTURE.md) · [CONFIG_SCHEMA.md](CONFIG_SCHEMA.
 [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md)). It carries the **same newline-delimited JSON** as
 Direct USB, because it feeds the same `processInputLine()`; there is no second command
 surface to keep in step. Unlike Via WCB it has no 187-byte cap and no fragmentation — it is
-a direct link, so a large `SET_CONFIG` crosses in one frame.
+a direct link, so a large `SET_CONFIG` crosses in one frame. With a login token set
+(`wifiToken`) a session must send `?AUTH,<token>` first — see *The login token* below.
 
 **The SoftAP offers no default gateway.** Its DHCP server hands out an address and a /24 but
 **no router** (option 3). The AP has no upstream, so naming itself the gateway only invites a
@@ -180,6 +181,45 @@ Two consequences for anyone touching `navicore_wsserver.h`:
   `[OTA] DATA base64 error -44`: the same symptom as unframed messages, from a different
   cause. A client that closed *mid-line* was worse — nothing owned the tail, so it waited in
   the buffer and ate the first command of whoever connected next.
+
+**The login token** (`rcConfig.wifiToken`). The WebSocket is a command channel to the whole
+mesh, and the AP's WPA2 password is the only lock on it unless a token is set. The protocol is
+the one a WCB's `ws://` and the `MgmtRelay` example speak (WCB repo `docs/WIFI_DESIGN.md` §7),
+so Intellex signs in to all three the same way:
+
+| Board sends | When |
+|---|---|
+| `[AUTH:REQUIRED]` | A session opens while a token is set; and for every line that session sends before it signs in. That line is dropped, never run. |
+| `[AUTH:OK]` | `?AUTH,<token>` matched: the session is signed in for its lifetime, joins the console mirror and its lines run. With no token, any `?AUTH,<anything>` is answered `[AUTH:OK]`, so a client can always send it. A session already signed in gets `[AUTH:OK]` for any `?AUTH`. |
+| `[AUTH:FAIL]`, then a CLOSE (1008) | `?AUTH` did not match, or came within 1 s (`WS_AUTH_LOCKOUT_MS`) of a failed one on **any** session; each failure starts the second again. The session ends when the client echoes the CLOSE, or `WS_BYE_WAIT_MS` (1 s) later. Nothing it sends is acted on in between. |
+
+- A session that has not signed in gets **nothing else**: it is not in `wsSink`, so no console
+  output, no monitor, no reply. Its state is decided at the handshake: setting, changing or
+  clearing the token applies to **new** sessions; one already signed in keeps going.
+- With no token set, nothing is sent on open and nothing changes from before the token existed.
+- `wsAdmit()` decides each whole line on the httpd task, **before** the command queue, so a
+  signed-out session's lines never take a queue slot and `?AUTH` never reaches
+  `processInputLine()`. The comparison reads all 32 bytes whatever matched (`tokenMatches`).
+  Typed on USB or relayed over the mesh, `?AUTH` is a silent no-op (`execCliLine`), never
+  `Unknown command` with the token echoed.
+- The answers are sent from the handler (`wsSay`), on the httpd task — the task every socket
+  write is issued on — and a signed-out session is in no frame's client list, so nothing can
+  interleave with them. `[AUTH:OK]` goes out before the session joins the sink, so it precedes
+  the first console frame.
+- **Why a CLOSE and a wait, not a close.** A close with unread input sends a reset, and Windows
+  throws away what it had not delivered, so `[AUTH:FAIL]` would vanish into a dropped
+  connection. The CLOSE gets the line read first; `drain()` queues `wsReapWork` on the httpd
+  task to `shutdown()` a session that has not echoed it (re-queued every 250 ms while due,
+  because httpd's control socket drops a work item it cannot hold). Shut down on the httpd
+  task, the fd cannot be a newcomer's that got the number back.
+- The token is never printed: the boot line says `(login token: set|none)`. It travels in
+  `GET_CONFIG` over USB and a signed-in socket, and **never over the mesh** — the bridged
+  `GET_CONFIG` leaves it out (`rcConfigToJSON(true)`), because anyone holding the mesh password,
+  public by construction, can ask for that copy; and a bridged `SET_CONFIG` strips it (§4).
+- **Known limit**, as on the WCB: a signed-out session still holds one of the three socket
+  slots, and httpd's LRU purge closes the least recently used session to take a new one, so
+  anyone on the AP can push a signed-in client off by connecting. The token stops commands and
+  output, not that.
 
 **The 187-byte number.** ESP-NOW carries 250 B. `WCB_Client::_sendPacket()` copies the
 command into a 200-byte `structCommand[]` and appends `"|CRC%08X"` (12 B). A payload over
@@ -564,7 +604,7 @@ reassembles a fragmented command whole, so the length is the sender's, not a pac
 | `#L02` | Restart |
 | `#L09` | SBUS state dump |
 | `#L10` | Toggle 1 Hz live SBUS dump |
-| `#L11` | WCB device id, quantity, per-board up/down (`*` = auto-discovered), then `  Transmit watchdog: <on\|off>, level <0-2>, probes <n>, misses <n>, ESP-NOW restarts <n>, automatic reboots <n>, send errors <n>, last answered <n s ago\|never>` (WCB_Client 1.18.0 `getTxWatchStatus()`; automatic reboots is NaviCore's RTC count) |
+| `#L11` | WCB device id, quantity, per-board up/down (`*` = auto-discovered), then `  Transmit watchdog: <on\|off>, level <0-2>, probes <n>, misses <n>, ESP-NOW restarts <n>, automatic reboots <n>, send errors <n>, last answered <n s ago\|never>` (WCB_Client 1.18.0 `getTxWatchStatus()`; automatic reboots is NaviCore's RTC count), then the channel-sync block `?CHSYNC` prints |
 | `#L12` | Mode + decoded matrix button + raw value |
 | `#L13` | Raw SBUS frame hex with byte-offset annotations |
 | `#L20` / `#L21` | Send a fixed HCR `SetEmotion(HAPPY,80)` straight to S3 / S4 — bypasses config **and** mapping, so it separates wiring faults from config faults |
@@ -666,6 +706,10 @@ saveable).
 | Command | Meaning |
 |---|---|
 | `?FORGET,<id>` / `?FORGET,ALL` | Drop a learned peer from the ESP-NOW table + NVS |
+| `?CHSYNC` | Channel-sync status (WCB_Client `printChanSyncStatus`): channel, region and its top channel, this board's rank (0), the leader, a missing board, the search count, each heard device's key, then the machine line `[CHSYNC:EN=,CH=,MAXCH=,CC=,RANK=,PIN=0,LEAD=,LRANK=,LPIN=,STATE=idle\|search\|move]` |
+| `?CHSYNC,SEARCH` | One search of the other channels when the board is quiet, if it leads its group; the library logs why not |
+| `?CHSYNC,MOVE,<ch>` | Operator move of the whole mesh (WCB repo `docs/CHANNEL_SYNC.md` §3); `[CHSYNC] move refused: <why>` otherwise. On/off and the region are config fields (`chanSync`, `wcbNetwork.region`), not commands |
+| `?AUTH[,<token>]` | Signs a WebSocket session in (§1, answered by the socket layer). On USB or over the mesh: a silent no-op |
 | `?OTALOCAL,*` | Direct-USB firmware OTA |
 | `?OTALOCAL,STATUS` | The OTA status block: `Chip`, `Firmware`, `App SHA256`, `Running`, `Next (OTA)`, `Session` (`idle`, or `ACTIVE id=1  <written> / <size> B`), between dashed lines |
 | `?OTA,*` | Mesh-relayed firmware OTA — `DATA` carries an optional CRC-32, see below |
@@ -712,9 +756,11 @@ Inbound `rc_*` messages are filtered by `id == 20` so other mesh peers do not bl
 `SET_CONFIG` and `GET_CONFIG` **do** work over the bridge via fragmentation, but a
 very large config or command library still needs Direct USB (see the caps below).
 A bridged `SET_CONFIG` can never change this board's radio settings: `_applyReassembled()`
-strips `wcbNetwork.deviceId`, `macOct2`, `macOct3`, `password`, `quantity` and `channel`,
-and the top-level `wifiEnabled`, `wifiSsid` and `wifiPassword`, before applying. Those
-change over USB or the SoftAP's own socket only.
+strips `wcbNetwork.deviceId`, `macOct2`, `macOct3`, `password`, `quantity`, `channel` and
+`region`, and the top-level `wifiEnabled`, `wifiSsid`, `wifiPassword` and `wifiToken`, before
+applying. Those change over USB or the SoftAP's own socket only; the tool strips the same
+fields before sending (`_stripBridgedPayload`). `chanSync` is not a radio setting and does
+travel. A bridged `GET_CONFIG` carries everything but `wifiToken` (`rcConfigToJSON(true)`).
 
 ### Fragmentation
 
@@ -1007,6 +1053,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-21 | — | §1: the WebSocket login token (`wifiToken`) — `[AUTH:REQUIRED]` / `?AUTH,<token>` / `[AUTH:OK]` / `[AUTH:FAIL]` + CLOSE 1008, 1 s lockout, the protocol of a WCB's `ws://`; decided per line on the httpd task before the queue, answered there. §3: `?CHSYNC`, `?CHSYNC,SEARCH`, `?CHSYNC,MOVE,<ch>` (WCB_Client 1.19.0 channel sync), `?AUTH` a no-op off a socket, `#L11` ends with the channel-sync block. §4: a bridged `SET_CONFIG` also strips `wcbNetwork.region` and `wifiToken`; a bridged `GET_CONFIG` leaves `wifiToken` out. |
 | 2026-10-14 | `969fb1f` | `#L11` gains the `Transmit watchdog:` line (WCB_Client 1.18.0); §3: `#L94` arms a transmit wedge and sets the watchdog's probe interval (HIL `ncmesh.tx_watchdog_*`). |
 | 2026-10-06 | `0657025` | GET_CONFIG and GET_CMDLIB replies go out through `printLong()`: paced into the 8 KB USB TX ring so a host that pauses reading gets the line whole instead of with a hole mid-line (WCB repo HIL plan D-NC75). |
 | 2026-10-06 | `50078c9` | `DBG_WIRE`: the aux TX pump writes (and logs) one block per pass; a device write held behind a line is logged when it goes out (HIL `ncwire.tx_interleave`). |

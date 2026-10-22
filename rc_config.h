@@ -43,6 +43,41 @@ static inline size_t cfgStrlcpy(char* dst, const char* src, size_t size) {
   return n;
 }
 
+// The radio regions channel sync accepts (WCB repo docs/CHANNEL_SYNC.md §6): "01", ESP-IDF's
+// world-safe default (channels 1-11), or a country code esp_wifi_set_country_code() knows. The
+// same list as WCB_Client's (kCsRegions, WCB_Client.cpp) and the config tool's NC_REGIONS - a
+// region accepted here that the library refused would be stored, shown, and never applied.
+static const char RC_REGIONS[][3] = {
+  "01", "AT", "AU", "BE", "BG", "BR", "CA", "CH", "CN", "CY", "CZ", "DE", "DK", "EE", "ES", "FI",
+  "FR", "GB", "GR", "HK", "HR", "HU", "IE", "IN", "IS", "IT", "JP", "KR", "LI", "LT", "LU", "LV",
+  "MT", "MX", "NL", "NO", "NZ", "PL", "PT", "RO", "SE", "SI", "SK", "TW", "US"
+};
+// Exactly two characters, upper case, from RC_REGIONS. The tool sends upper case; nothing
+// here folds it, so the stored value is always one the library takes as it is.
+static inline bool rcRegionValid(const char* cc) {
+  if (!cc || !cc[0] || !cc[1] || cc[2]) return false;
+  for (size_t i = 0; i < sizeof(RC_REGIONS) / sizeof(RC_REGIONS[0]); i++)
+    if (cc[0] == RC_REGIONS[i][0] && cc[1] == RC_REGIONS[i][1]) return true;
+  return false;
+}
+
+// The WebSocket login token (rcConfig.wifiToken): "" (none), or 8-32 printable ASCII characters
+// with none of space , ^ ; ? " \ - the rule every WCB applies to ?WIFI,TOKEN (WCB repo
+// docs/WIFI_DESIGN.md §7), so one droid's token is valid on all of its devices. Each of those
+// characters means something in a config chain or the line grammar: ',' separates fields, '^'
+// commands, ';' starts a command, '?' is the function character, '"' and '\' are quoted by JSON.
+static inline bool rcWsTokenValid(const char* t) {
+  if (!t) return false;
+  const size_t n = strlen(t);
+  if (n == 0) return true;
+  if (n < 8 || n > 32) return false;
+  for (size_t i = 0; i < n; i++) {
+    const char c = t[i];
+    if (c <= ' ' || c > '~' || strchr(",^;?\"\\", c)) return false;
+  }
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Action types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -472,10 +507,19 @@ struct RcWcbNetwork {
                           // slot 20 so the config tool's "Via WCB" bridge
                           // has a single known target.  Field is left
                           // writable for unusual multi-RC deployments.
-  uint8_t channel;        // ESP-NOW mesh WiFi channel (1-11). The ESP32 has ONE radio,
-                          // so this MUST match the channel every WCB is on or this RC is
-                          // silently unreachable. Passed to wcb->setMeshChannel() before
-                          // begin(); a reboot is required to change it. Default 1.
+  uint8_t channel;        // ESP-NOW mesh WiFi channel (1-13; 12-13 only under a region that
+                          // allows them). The ESP32 has ONE radio, so this MUST match the
+                          // channel every WCB is on or this RC is silently unreachable.
+                          // Passed to wcb->setMeshChannel() before begin(); a reboot is
+                          // required to change it. Default 1. Channel sync writes it too:
+                          // a mesh move is saved here (onMeshChannelMove, NaviCore.ino).
+  char    region[3];      // radio region: "01" (default, world safe, channels 1-11) or an
+                          // ESP-IDF country code (rcRegionValid). Every device on a mesh that
+                          // uses 12-13 needs a region allowing them (a WCB: ?REGION). Read at
+                          // boot only (wcb->setRegion, before the SoftAP and begin()). A
+                          // TRANSPORT field like channel: a bridged SET_CONFIG strips it
+                          // (rc_telemetry.h), because a region that excludes the running
+                          // channel takes this board off its mesh at the next boot.
 };
 
 // Named snapshots of WCB-network credentials (a whole mesh identity) the config tool
@@ -676,6 +720,17 @@ struct RcConfig {
                                         // (RESET_DEFAULTS and REBOOT dispatch on a bare type string). Never reuse
                                         // wcbNetwork.password here — that one rides in cleartext in every ESP-NOW
                                         // packet the droid emits, so it is public by construction.
+  char           wifiToken[33];         // WebSocket login token (rcWsTokenValid), 8-32 chars +1 for the NUL. EMPTY =
+                                        // none, and the socket behaves as it always has. Set, a session must send
+                                        // ?AUTH,<token> before it gets the console or runs a line - the protocol of
+                                        // a WCB's ws:// (navicore_wsserver.h). Applied live, to sessions that open
+                                        // after the change. Never printed. Travels over USB and a signed-in socket
+                                        // only: the mesh copy of the config leaves it out (rcConfigToJSON(true)),
+                                        // because anyone holding the mesh password - public by construction, see
+                                        // above - can ask for that copy.
+  bool           chanSync;              // channel sync (WCB_Client 1.19.0): follow a mesh MOVE, lead at rank 0,
+                                        // search the other channels for a missing board. DEFAULT ON. Applied live
+                                        // (wcb->setChanSyncEnabled); off behaves as before channel sync existed.
   uint8_t        boardType;             // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   int            tapWindowMs;
   // Continuous hold (ms) on a matrix button that promotes the gesture to a LONG
@@ -841,6 +896,8 @@ void rcConfigLoadDefaults() {
   rcConfig.wifiEnabled      = false;         // WiFi/SoftAP OFF by default — opt-in only, never on for an existing droid
   rcConfig.wifiSsid[0]      = '\0';          // empty → derived at bring-up (NaviCore-<deviceId>)
   rcConfig.wifiPassword[0]  = '\0';          // empty → AP refuses to start; there is deliberately no default password
+  rcConfig.wifiToken[0]     = '\0';          // empty → no WebSocket login, as before the token existed
+  rcConfig.chanSync         = true;          // channel sync on, as on every WCB (?CHSYNC,ON is their default too)
   rcConfig.maeGateMs        = 250;           // remote skip-if-running fail-open window (ms)
   rcConfig.boardType        = 0;             // 0 = NaviCore v2 PCB (default pinout); 1 = WCB HW 3.2
   rcConfig.tapWindowMs      = 500;
@@ -994,6 +1051,7 @@ void rcConfigLoadDefaults() {
   rcConfig.wcbNetwork.quantity = WCB_QUANTITY;
   rcConfig.wcbNetwork.deviceId = WCB_DEVICE_ID;
   rcConfig.wcbNetwork.channel  = 1;    // default ESP-NOW mesh channel (matches WCB_MESH_CHANNEL)
+  cfgStrlcpy(rcConfig.wcbNetwork.region, "01", sizeof(rcConfig.wcbNetwork.region));   // IDF world-safe default, channels 1-11
 
   // Saved WCB-credential profiles — none until the user creates them in the GUI.
   memset(rcConfig.wcbProfiles, 0, sizeof(rcConfig.wcbProfiles));
@@ -1002,7 +1060,8 @@ void rcConfigLoadDefaults() {
 
 // RESET_DEFAULTS, on BOTH transports (the USB handler and rcTelemetry::tick()):
 // factory defaults for everything EXCEPT the network identity - wcbNetwork (octets,
-// password, quantity, deviceId, channel), wcbProfiles, boardType and the SoftAP fields.
+// password, quantity, deviceId, channel, region), wcbProfiles, boardType and the SoftAP
+// fields, the WebSocket token among them (a reset must not open a locked socket).
 // RAM only, like the defaults themselves; the tool's next Save persists the result.
 // Keeping the identity is the point: a reset loaded the compile-time mesh password,
 // deviceId 20, boardType 0 and WiFi off, and the very next Save of ANYTHING persisted
@@ -1015,10 +1074,11 @@ void rcConfigResetKeepIdentity() {
   const uint8_t      boardType = rcConfig.boardType;
   const bool         wifiOn    = rcConfig.wifiEnabled;
   RcWcbProfile profiles[RC_MAX_WCB_PROFILES];
-  char ssid[sizeof(rcConfig.wifiSsid)], wpw[sizeof(rcConfig.wifiPassword)];
+  char ssid[sizeof(rcConfig.wifiSsid)], wpw[sizeof(rcConfig.wifiPassword)], tok[sizeof(rcConfig.wifiToken)];
   memcpy(profiles, rcConfig.wcbProfiles, sizeof(profiles));
   memcpy(ssid, rcConfig.wifiSsid, sizeof(ssid));
   memcpy(wpw,  rcConfig.wifiPassword, sizeof(wpw));
+  memcpy(tok,  rcConfig.wifiToken, sizeof(tok));
   rcConfigLoadDefaults();
   rcConfig.wcbNetwork      = net;
   rcConfig.wcbProfileCount = nProfiles;
@@ -1027,6 +1087,7 @@ void rcConfigResetKeepIdentity() {
   memcpy(rcConfig.wcbProfiles, profiles, sizeof(profiles));
   memcpy(rcConfig.wifiSsid, ssid, sizeof(ssid));
   memcpy(rcConfig.wifiPassword, wpw, sizeof(wpw));
+  memcpy(rcConfig.wifiToken, tok, sizeof(tok));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1283,8 +1344,15 @@ inline bool g_hilFailNextSave    = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Serialise full config to JSON string (for GET_CONFIG WebSocket response)
+//
+//  forMesh: the copy a GET_CONFIG over the WCB mesh ships (rc_telemetry.h
+//  _startGetConfigSend) leaves wifiToken OUT. Anyone holding the mesh password can
+//  ask for that copy, and the mesh password rides in cleartext in every packet, so a
+//  token in it would be a token for anyone in radio range. Nothing is lost: a bridged
+//  Save strips wifiToken anyway (the SoftAP settings never change over the mesh). USB,
+//  a signed-in WebSocket and /config.json (rcConfigSaveLFS) all take the full copy.
 // ─────────────────────────────────────────────────────────────────────────────
-String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing profiles
+String rcConfigToJSON(bool forMesh = false) {   // doc bumped to 64 KB to hold up to 6 smoothing profiles
   // ArduinoJson 7: the constructor capacity is a legacy no-op — the document
   // grows elastically from the heap as needed. The REAL guard is the
   // overflowed() check at the bottom: if any allocation failed mid-build
@@ -1300,6 +1368,9 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   doc["wifiEnabled"]          = rcConfig.wifiEnabled;      // SoftAP + comms server enable (off by default)
   doc["wifiSsid"]             = rcConfig.wifiSsid;         // SoftAP SSID ("" = derive NaviCore-<deviceId>)
   doc["wifiPassword"]         = rcConfig.wifiPassword;     // SoftAP WPA2 passphrase ("" = AP refuses to start)
+  if (!forMesh)
+    doc["wifiToken"]          = rcConfig.wifiToken;        // WebSocket login token ("" = none) - never in the mesh copy
+  doc["chanSync"]             = rcConfig.chanSync;         // channel sync (follow / lead / search), default on
   doc["maeGateMs"]            = rcConfig.maeGateMs;         // remote skip-if-running fail-open window (ms)
   doc["boardType"]            = rcConfig.boardType;        // hardware pin profile (0=NaviCore v2, 1=WCB 3.2)
   doc["tapWindowMs"]          = rcConfig.tapWindowMs;
@@ -1431,6 +1502,7 @@ String rcConfigToJSON() {   // doc bumped to 64 KB to hold up to 6 smoothing pro
   wcbObj["quantity"] = rcConfig.wcbNetwork.quantity;
   wcbObj["deviceId"] = rcConfig.wcbNetwork.deviceId;
   wcbObj["channel"]  = rcConfig.wcbNetwork.channel;
+  wcbObj["region"]   = rcConfig.wcbNetwork.region;
 
   // Saved WCB-credential profiles (Dev / In-droid / …). Count-based dense array —
   // only the in-use entries are emitted. Inert storage; see RcWcbProfile.
@@ -1602,6 +1674,18 @@ bool rcConfigFromJSON(const JsonObject& doc) {
     cfgStrlcpy(rcConfig.wifiSsid,     doc["wifiSsid"]     | rcConfig.wifiSsid,     sizeof(rcConfig.wifiSsid));
   if (doc.containsKey("wifiPassword"))
     cfgStrlcpy(rcConfig.wifiPassword, doc["wifiPassword"] | rcConfig.wifiPassword, sizeof(rcConfig.wifiPassword));
+  // The WebSocket token. A string rcWsTokenValid() accepts replaces it ("" clears it); an
+  // invalid one is IGNORED with a line that never echoes it, and the stored token stays -
+  // never cut down to fit, which would store a token nobody typed. A non-string (the tool's
+  // diff sends null for a branch it no longer holds, e.g. a config loaded from a backup
+  // made over the mesh, which carries none) leaves it alone without a word.
+  if (doc["wifiToken"].is<const char*>()) {
+    const char* t = doc["wifiToken"].as<const char*>();
+    if (rcWsTokenValid(t)) cfgStrlcpy(rcConfig.wifiToken, t, sizeof(rcConfig.wifiToken));
+    else Serial.println("[CFG] wifiToken ignored: 8-32 printable characters, none of space , ^ ; ? \" \\ "
+                        "(the stored token stays)");
+  }
+  if (doc["chanSync"].is<bool>())          rcConfig.chanSync         = doc["chanSync"].as<bool>();
   if (doc.containsKey("maeGateMs"))        rcConfig.maeGateMs        = doc["maeGateMs"]         | 250;
   // boardType is 0 (NaviCore v2) or 1 (WCB HW 3.2) and nothing else. Any other value was
   // stored as sent, and the readers disagreed on it: applyBoardProfile() takes only 1 as
@@ -1861,19 +1945,29 @@ bool rcConfigFromJSON(const JsonObject& doc) {
             sizeof(rcConfig.wcbNetwork.password));
     rcConfig.wcbNetwork.quantity = (uint8_t)(wcbObj["quantity"] | rcConfig.wcbNetwork.quantity);
     rcConfig.wcbNetwork.deviceId = (uint8_t)(wcbObj["deviceId"] | rcConfig.wcbNetwork.deviceId);
-    // ESP-NOW mesh channel. Valid range is 1-11, NOT the 1-13 this once accepted:
-    // WCB_Client::setMeshChannel() range-checks 1-11 and RETURNS WITHOUT SETTING on
-    // anything above it, so a stored 12/13 left the radio on WCB_MESH_CHANNEL while
-    // the config, the tool, and the status readout all claimed 12/13.
+    // ESP-NOW mesh channel, 1-13. 12 and 13 are real only under a region that allows
+    // them (wcbNetwork.region). That is checked at BOOT, not here, because the region
+    // can change after the channel, in the same save or a later one: setup() runs a
+    // saved channel its region does not allow on channel 1 for that boot, says so
+    // loudly, and keeps the saved value, so fixing the region alone brings it back -
+    // as on a WCB (WCB repo docs/CHANNEL_SYNC.md §6). WCB_Client before 1.19.0 refused
+    // anything above 11 outright; NaviCore requires 1.19.0 (WCB_CLIENT_VERSION_NUM).
     //
-    // Out-of-range falls back to 1, NOT to 11. 1 is WCB_MESH_CHANNEL (see the default
-    // at rcConfigDefaults), which is the channel the radio has ACTUALLY been using all
-    // along whenever a 12/13 was stored — so a fleet already running on channel 1 with
-    // a bogus 13 in its config keeps working, and the config simply stops lying about
-    // it. Clamping to 11 instead would move this board to a channel nothing else is on
-    // and break a setup that works today.
+    // Out-of-range falls back to 1, NOT to 13. 1 is WCB_MESH_CHANNEL (see the default
+    // at rcConfigDefaults), the channel the radio has always used for a value it could
+    // not take, so a bogus value keeps a fleet on channel 1 working rather than moving
+    // this board to a channel nothing else is on.
     { int ch = wcbObj["channel"] | (int)rcConfig.wcbNetwork.channel;
-      rcConfig.wcbNetwork.channel = (uint8_t)((ch < 1 || ch > 11) ? 1 : ch); }
+      rcConfig.wcbNetwork.channel = (uint8_t)((ch < 1 || ch > 13) ? 1 : ch); }
+    // Radio region. Anything rcRegionValid() refuses is IGNORED - the stored one stays,
+    // with a line - never folded onto "01", which would quietly take channels 12-13 away
+    // from a mesh that uses them. Absent or null: left alone.
+    if (!wcbObj["region"].isNull()) {
+      const char* cc = wcbObj["region"].is<const char*>() ? wcbObj["region"].as<const char*>() : "";
+      if (rcRegionValid(cc)) cfgStrlcpy(rcConfig.wcbNetwork.region, cc, sizeof(rcConfig.wcbNetwork.region));
+      else Serial.printf("[CFG] wcbNetwork.region \"%.8s\" ignored: \"01\" or an upper-case IDF country code "
+                         "(the stored \"%s\" stays)\n", cc, rcConfig.wcbNetwork.region);
+    }
   }
 
   // Saved WCB-credential profiles. Guarded by containsKey so a diff-save that omits
@@ -1891,7 +1985,7 @@ bool rcConfigFromJSON(const JsonObject& doc) {
       cfgStrlcpy(wp.password, o["password"] | "", sizeof(wp.password));
       wp.quantity = (uint8_t)(o["quantity"] | 4);
       wp.deviceId = (uint8_t)(o["deviceId"] | 20);
-      { int ch = o["channel"] | 1; wp.channel = (uint8_t)((ch < 1 || ch > 11) ? 1 : ch); }   // 1-11, out-of-range → 1: see wcbNetwork.channel above
+      { int ch = o["channel"] | 1; wp.channel = (uint8_t)((ch < 1 || ch > 13) ? 1 : ch); }   // 1-13, out-of-range → 1: see wcbNetwork.channel above
       n++;
     }
     rcConfig.wcbProfileCount = n;

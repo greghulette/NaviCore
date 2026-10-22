@@ -25,7 +25,7 @@ Related: [ARCHITECTURE.md](ARCHITECTURE.md) · [CONFIG_TOOL.md](CONFIG_TOOL.md)
 | `EspSoftwareSerial` | Library Manager | 8.1.0 |
 | `Adafruit NeoPixel` | Library Manager | 1.15.4 |
 | `PololuMaestro` | Library Manager | floating |
-| `WCB_Client` (+ `WCBStream`) | `git-url https://github.com/greghulette/WCBClient.git` | **master, unpinned** |
+| `WCB_Client` (+ `WCBStream`) | `git-url https://github.com/greghulette/WCBClient.git` | **master, unpinned** — at least 1.19.0 (channel sync), which `NaviCore.ino` checks at compile time (`WCB_CLIENT_VERSION_NUM`) |
 | `WcbCmd` | `git-url https://github.com/greghulette/WcbCmd.git` | **master, unpinned** |
 | ESP32 core | `esp32:esp32@3.3.4` | pinned; bump in lock-step with the WCB repo |
 
@@ -248,6 +248,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-21 | — | §2: NaviCore needs WCB_Client 1.19.0 (channel sync) and refuses to compile against an older one, so WCBClient 1.19.0 must reach master before a NaviCore push or CI fails. |
 | 2026-10-14 | `76edddc` | NaviCore.ino refuses to compile against WCB_Client older than 1.18.1 (`WCB_CLIENT_VERSION_NUM`), so a stale sketchbook copy fails loudly instead of building the flawed watchdog. |
 | 2026-10-14 | `969fb1f` | §3: the hook build's verbs run to `#L94` (a mesh transmit wedge). |
 | 2026-10-04 | `b525a94` | §7 OTA: the USB sender rewinds once every chunk behind a lost one has answered; it counted to a whole window (8), which one loss can never produce, so each lost chunk cost a 10 s stall (`nctool.ota_usb_lost_chunk`). |

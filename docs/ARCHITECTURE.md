@@ -188,12 +188,22 @@ reformat — the config filesystem.
    callback can fire.
 10. `navirec::recBegin()` — allocates the capture queue **before** the mesh callback that
     can feed it.
-11. Construct `WCB_Client`, `setMeshChannel()`, banner if the mesh password is empty,
-    `begin()`. On success: create every cross-core queue, *then* register `onCommand` /
-    `onRawPacket` / bulk hooks / `onNeighbor` / `onStatusChange`; publish WDP identity and
-    port labels; enable auto-join; arm the 12 s new-peer grace window and the 30 s boot
-    roll call.
-12. Construct the `WCBStream` broadcast channel — after `wcb` exists, so it self-registers
+11. Construct `WCB_Client` (no hardware yet) and set channel sync up: `setChanSyncRank(0)`,
+    `setChanSyncEnabled(chanSync)`, `onChannelMove`, `setRegion(wcbNetwork.region)`. **Before
+    the SoftAP**, because the region must be in force for an AP on channel 12 or 13, and the
+    client is what applies it.
+12. The optional SoftAP (`wifiEnabled`), **before `begin()`** so the client finds it and runs
+    `WIFI_AP_STA`: `WiFi.mode(WIFI_AP)`, `setRegion()` again (it applies at once now WiFi
+    runs), the channel checked against the driver's top channel (`wcb->maxChannel()`; one the
+    region does not allow runs on 1 this boot), `naviws::setToken()`, `softAP(..., channel)`,
+    the DHCP no-gateway step, `naviws::begin()`.
+13. `setMeshChannel()` — after `setRegion()`, which decides whether 12–13 are accepted —
+    banner if the mesh password is empty, `begin()`. On success: `reportBootChannel()` says
+    loudly when this boot runs on another channel than the saved one, then create every
+    cross-core queue, *then* register `onCommand` / `onRawPacket` / bulk hooks /
+    `onNeighbor` / `onStatusChange`; publish WDP identity and port labels; enable auto-join;
+    arm the 12 s new-peer grace window and the 30 s boot roll call.
+14. Construct the `WCBStream` broadcast channel — after `wcb` exists, so it self-registers
     and gets flushed by `wcb->update()`.
 
 The recurring rule: **create the queue before registering the callback that writes to it.**
@@ -231,7 +241,7 @@ handleSerialInput()            one USB line per pass
 pollAuxSerialRx()              drain S3/S4/S5 RX so their FIFOs never overflow
 drainSerialFwd()               queued mesh→serial writes and serial actions, a few bytes per pass
 HCR fade tick / maestroIdleReleaseTick() / trackSbusFps() / #L10 live dump
-checkDeferredRestart()         a mesh REBOOT, once ACKed and the queues are quiet (last)
+checkDeferredRestart()         a mesh REBOOT once ACKed, or a channel move with the SoftAP up, once the queues are quiet (last)
 ```
 
 ---
@@ -503,6 +513,18 @@ droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
   `TXWD_MAX_AUTO_REBOOTS` (2) in a row: the count is `RTC_NOINIT` (a software reset keeps it,
   a power-on clears it) and is forgiven after 30 min answered, so a wedge a reboot cannot cure
   does not become a boot loop.
+- **Channel sync** — WCB_Client 1.19.0 (required at compile time; WCB repo
+  `docs/CHANNEL_SYNC.md`) keeps the whole mesh on one radio channel. NaviCore leads at rank 0
+  (`setChanSyncRank`), so the mesh is on its channel unless a WCB joined to an access point
+  pins it elsewhere; it follows a MOVE, and as a group's leader searches the other channels for
+  a board it misses — never while a client is on its SoftAP (the library's rule). A move
+  reaches `onMeshChannelMove()` from `wcb->update()`: the channel is saved to
+  `wcbNetwork.channel`, then with no SoftAP the library switches the radio live, and with one
+  NaviCore asks for the deferred restart (`requestDeferredRestart`, run by
+  `checkDeferredRestart()` once quiet) so the AP comes up on the new channel — never a restart
+  inside the callback. `chanSync` turns it off (live); `?CHSYNC` and `#L11` show its state.
+- **WebSocket login** — with `wifiToken` set, `naviws::wsAdmit()` signs each socket session in
+  on the httpd task before anything is queued ([PROTOCOLS.md §1](PROTOCOLS.md#1-transport-overview)).
 
 ---
 
@@ -513,6 +535,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-21 | — | §6: `WCB_Client` is constructed before the SoftAP so the region applies first (steps 11–13). §7, §13: channel sync (WCB_Client 1.19.0, now the compile-time minimum) — a move is saved and, with the SoftAP up, applied through the deferred restart; the WebSocket login. `requestDeferredRestart()` takes a reason and stamps its time as `millis()` (0 → 1), not `millis() \| 1`, which half the time lay 1 ms in the future and read as overdue on the next check, skipping the quiet window. |
 | 2026-10-14 | `76edddc` | The transmit watchdog needs WCB_Client 1.18.1 (two boards answer a probe; two answers end a stall; a relapse within 3 min goes to level 2) - a compile-time check stops an older sketchbook copy. |
 | 2026-10-14 | `969fb1f` | §13: the mesh transmit watchdog and its restart cap; §3: `#L94`. |
 | 2026-10-07 | `2d6964d` | §6: the new-peer grace is 12 s, one WCB heartbeat period and a second, not 8 s (D-NC25). |

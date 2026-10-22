@@ -33,6 +33,26 @@
 //  slot is impossible, so the handler allocates from PSRAM and drain() frees.
 //  Ownership transfers with the pointer — if the queue send fails, the HANDLER
 //  frees it, because drain() will never see it.
+//
+//  ── THE LOGIN TOKEN (rcConfig.wifiToken) ───────────────────────────────────
+//  The protocol of a WCB's ws:// and the MgmtRelay example's (WCB repo
+//  docs/WIFI_DESIGN.md §7), so Intellex signs in to all three the same way.
+//  With a token set, a session opens with the line "[AUTH:REQUIRED]", is left
+//  out of the console mirror (it is not in wsSink), and every line it sends other
+//  than "?AUTH,<token>" is dropped unrun and answered "[AUTH:REQUIRED]". The
+//  token is compared in constant time: a match answers "[AUTH:OK]" and the
+//  session joins the mirror and runs its lines for its lifetime; a mismatch
+//  answers "[AUTH:FAIL]", sends a CLOSE (1008) and ends the session when the
+//  client echoes it or WS_BYE_WAIT_MS later, and for WS_AUTH_LOCKOUT_MS after any
+//  failure every ?AUTH on any session fails - one guess a second. With no token
+//  nothing is sent on open and "?AUTH,<anything>" answers "[AUTH:OK]", so a
+//  client can always send it. A session's state is decided when it opens: a
+//  token set, changed or cleared applies to NEW sessions only.
+//  wsAdmit() decides each line on the httpd task, BEFORE the queue, so a line
+//  from a session that has not signed in never reaches processInputLine(), and
+//  ?AUTH never does. Its answers go out there too (wsSay): that is the task every
+//  socket write is issued on (wsSendFrame), and a session that has not signed in
+//  is in no frame's client list, so nothing can interleave with them.
 // =============================================================================
 #pragma once
 
@@ -92,6 +112,19 @@ static const uint8_t  WS_DRAIN_BATCH   = 8;
 // A wsDrainWork queued this long ago that has not started was lost (httpd's control
 // socket drops what it cannot hold, without an error); wsKick then queues another.
 static const uint32_t WS_KICK_LOST_MS  = 2000;
+// THE LOGIN TOKEN (header note):
+//   WS_TOKEN_MAX       - rcWsTokenValid's ceiling (rc_config.h); every compare reads all of it.
+//   WS_AUTH_LOCKOUT_MS - after a failed ?AUTH every ?AUTH, on any session, fails for this long.
+//   WS_BYE_WAIT_MS     - a session whose ?AUTH failed is sent [AUTH:FAIL] and a CLOSE, then given
+//     this long to echo the CLOSE before it is shut down. Closing at once could lose the
+//     [AUTH:FAIL] the client has not read yet: a close with input still unread sends a reset,
+//     and Windows discards what it had not delivered. Waiting for the echo gets the line read.
+//   WS_REAP_RETRY_MS   - how often drain() queues that shut-down again while it is due and has not
+//     happened: httpd's control socket drops a work item it cannot hold, without an error.
+static const size_t   WS_TOKEN_MAX       = 32;
+static const uint32_t WS_AUTH_LOCKOUT_MS = 1000;
+static const uint32_t WS_BYE_WAIT_MS     = 1000;
+static const uint32_t WS_REAP_RETRY_MS   = 250;
 
 struct WsCmd {
   int   fd;      // client socket, for the async reply
@@ -514,26 +547,172 @@ inline void flushHook() { wsSink.pump(); }
 // buf/cap are deliberately KEPT when a slot is released. The next client in that
 // slot reuses the allocation instead of churning PSRAM; len = 0 is what guarantees
 // none of the previous client's bytes can ever be read.
+//
+// It is also the SESSION (THE LOGIN TOKEN, header note): whether it has signed in,
+// whether its ?AUTH failed, and when its CLOSE went. Each socket has exactly one slot,
+// from its handshake (wsHandler GET) to wsClose, so the state cannot outlive the session.
 struct WsAcc {
-  int    fd  = -1;
-  char*  buf = nullptr;
-  size_t len = 0, cap = 0;
+  int      fd     = -1;
+  char*    buf    = nullptr;
+  size_t   len = 0, cap = 0;
+  bool     authed = false;   // httpd task only: in the mirror, and its lines run
+  bool     failed = false;   // httpd task only: its ?AUTH failed - nothing it sends is acted on again
+  uint32_t byeAt  = 0;       // wsAuthMux: millis() its CLOSE went (never 0 when set); 0 = none
 };
 inline WsAcc wsAcc[WS_MAX_CLIENTS];
 
+// ── The token ───────────────────────────────────────────────────────────────
+// Written on the loop task (setToken: setup() and every config apply), read on the
+// httpd task (accFor, wsAdmit): copied in and out whole under the lock, never compared
+// in place. Zero-padded to its full size, because tokenMatches() reads every byte.
+// The same lock guards each slot's byeAt, which drain() reads on the loop task.
+inline portMUX_TYPE wsAuthMux  = portMUX_INITIALIZER_UNLOCKED;
+inline char         wsToken[WS_TOKEN_MAX + 1] = "";
+inline size_t       wsTokenLen = 0;
+inline uint32_t     wsAuthFailMs = 0;   // httpd task only: millis() of the last failed ?AUTH (never 0 when set)
+
+// "" or nullptr = no token. Applies to the next session that opens; one already open keeps
+// what it was decided at its handshake. Never printed.
+inline void setToken(const char* t) {
+  const size_t n = t ? strnlen(t, WS_TOKEN_MAX) : 0;
+  portENTER_CRITICAL(&wsAuthMux);
+  memset(wsToken, 0, sizeof(wsToken));
+  if (n) memcpy(wsToken, t, n);
+  wsTokenLen = n;
+  portEXIT_CRITICAL(&wsAuthMux);
+}
+inline bool tokenSet() {
+  portENTER_CRITICAL(&wsAuthMux);
+  const bool set = wsTokenLen != 0;
+  portEXIT_CRITICAL(&wsAuthMux);
+  return set;
+}
+
+// Constant time in what was sent: all WS_TOKEN_MAX bytes are compared whatever matched
+// before, so how long a wrong guess takes says nothing about how much of it was right.
+// Only the lengths branch, and they are no secret worth a second's lockout.
+inline bool tokenMatches(const char* tok, size_t tokLen, const char* cand, size_t candLen) {
+  uint8_t diff = (candLen != tokLen) ? 1 : 0;
+  for (size_t i = 0; i < WS_TOKEN_MAX; i++)
+    diff |= (uint8_t)((uint8_t)tok[i] ^ (uint8_t)(i < candLen ? cand[i] : 0));
+  return diff == 0;
+}
+
 // The slot for `fd`, claiming a free one if this socket is new. The eviction policy
 // is deliberately identical to WsSink::begin() - if the two ever disagree, a client
-// ends up holding a sink slot with no accumulator, or the reverse.
+// ends up holding a sink slot with no accumulator, or the reverse. A session that has
+// not signed in is the one deliberate exception: an accumulator and no sink slot.
+// A claimed slot starts signed in only if there is no token to sign in with.
 inline WsAcc* accFor(int fd) {
   for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsAcc[i].fd == fd) return &wsAcc[i];
-  for (int i = 0; i < WS_MAX_CLIENTS; i++)
-    if (wsAcc[i].fd < 0) { wsAcc[i].fd = fd; wsAcc[i].len = 0; return &wsAcc[i]; }
-  wsAcc[0].fd = fd; wsAcc[0].len = 0; return &wsAcc[0];   // full: evict, as begin() does
+  WsAcc* a = nullptr;
+  for (int i = 0; i < WS_MAX_CLIENTS && !a; i++) if (wsAcc[i].fd < 0) a = &wsAcc[i];
+  if (!a) a = &wsAcc[0];   // full: evict, as begin() does
+  const bool open = !tokenSet();
+  a->fd = fd; a->len = 0; a->authed = open; a->failed = false;
+  portENTER_CRITICAL(&wsAuthMux);
+  a->byeAt = 0;
+  portEXIT_CRITICAL(&wsAuthMux);
+  return a;
 }
 
 inline void accRelease(int fd) {
   for (int i = 0; i < WS_MAX_CLIENTS; i++)
-    if (wsAcc[i].fd == fd) { wsAcc[i].fd = -1; wsAcc[i].len = 0; }
+    if (wsAcc[i].fd == fd) {
+      wsAcc[i].fd = -1; wsAcc[i].len = 0; wsAcc[i].authed = false; wsAcc[i].failed = false;
+      portENTER_CRITICAL(&wsAuthMux);
+      wsAcc[i].byeAt = 0;
+      portEXIT_CRITICAL(&wsAuthMux);
+    }
+}
+
+// One session-layer frame to one client. HTTPD TASK ONLY (the handler): every socket
+// write is issued on that task, so this cannot land inside a data frame, and through
+// the session's wsSendAll it goes out whole. A session that has not signed in is in no
+// frame's client list, so these are all it is ever sent.
+inline void wsSay(httpd_handle_t hd, int fd, const char* line) {
+  httpd_ws_frame_t f = {};
+  f.final   = true;
+  f.type    = HTTPD_WS_TYPE_TEXT;
+  f.payload = (uint8_t*)line;
+  f.len     = strlen(line);
+  httpd_ws_send_frame_async(hd, fd, &f);
+}
+
+// The session layer: decides one whole line from session `ac` on the HTTPD TASK and
+// returns true when it may be queued to run. A ?AUTH line is answered here and never
+// runs; so is a line from a session that has not signed in, which is dropped. Matched
+// on the line as drain() will see it, trimmed, so " ?AUTH,x" is the same line.
+inline bool wsAdmit(httpd_handle_t hd, int fd, WsAcc* ac, const char* line, size_t len) {
+  while (len && isspace((unsigned char)*line)) { line++; len--; }
+  while (len && isspace((unsigned char)line[len - 1])) len--;
+  if (!len || ac->failed) return false;   // drain() skips an empty line too; a failed session is ignored
+  bool isAuth = len >= 5 && line[0] == '?' && (len == 5 || line[5] == ',');
+  for (int i = 0; isAuth && i < 4; i++) if (toupper((unsigned char)line[1 + i]) != "AUTH"[i]) isAuth = false;
+  if (!isAuth) {
+    if (ac->authed) return true;
+    wsSay(hd, fd, "[AUTH:REQUIRED]\r\n");
+    return false;
+  }
+  char   tok[WS_TOKEN_MAX + 1];
+  size_t tokLen;
+  portENTER_CRITICAL(&wsAuthMux);
+  memcpy(tok, wsToken, sizeof(tok));
+  tokLen = wsTokenLen;
+  portEXIT_CRITICAL(&wsAuthMux);
+  const char*  cand    = len > 6 ? line + 6 : "";
+  const size_t candLen = len > 6 ? len - 6 : 0;
+  const uint32_t now   = millis();
+  // Signed in already, or nothing to sign in to: OK, compared with nothing - a client can
+  // always send ?AUTH, and a session signed in for its lifetime cannot be signed out by it.
+  bool ok = ac->authed || !tokLen;
+  if (!ok) {
+    const bool match  = tokenMatches(tok, tokLen, cand, candLen);   // the same work when locked out
+    const bool locked = wsAuthFailMs && (uint32_t)(now - wsAuthFailMs) < WS_AUTH_LOCKOUT_MS;
+    ok = match && !locked;
+  }
+  if (ok) {
+    // [AUTH:OK] first, then the mirror: frames are sent in order on this task, so the line
+    // reaches the client ahead of the first console frame it joins.
+    wsSay(hd, fd, "[AUTH:OK]\r\n");
+    if (!ac->authed) { ac->authed = true; wsSink.begin(fd); }
+    return false;
+  }
+  wsAuthFailMs = now ? now : 1;   // a failure inside the lockout starts it again
+  ac->failed   = true;
+  wsSay(hd, fd, "[AUTH:FAIL]\r\n");
+  static const uint8_t policy[2] = { 0x03, 0xF0 };   // CLOSE, status 1008 "policy violation" (RFC 6455 7.4.1)
+  httpd_ws_frame_t f = {};
+  f.final   = true;
+  f.type    = HTTPD_WS_TYPE_CLOSE;
+  f.payload = (uint8_t*)policy;
+  f.len     = sizeof(policy);
+  httpd_ws_send_frame_async(hd, fd, &f);
+  portENTER_CRITICAL(&wsAuthMux);
+  ac->byeAt = now ? now : 1;
+  portEXIT_CRITICAL(&wsAuthMux);
+  return false;
+}
+
+// RUNS ON THE HTTPD TASK, queued by drain(): shut down every failed session whose CLOSE
+// went WS_BYE_WAIT_MS ago and that has not echoed it (an echo ends the session in httpd,
+// and wsClose releases the slot first). shutdown(), as wsSendFrame does: httpd's select()
+// sees it and deletes the session (close_fn = wsClose). On this task, the one that opens
+// and closes sessions, so the fd is still the failed session's and never a newcomer's
+// that got its number back.
+inline void wsReapWork(void* arg) {
+  (void)arg;
+  const uint32_t now = millis();
+  int due[WS_MAX_CLIENTS];
+  int n = 0;
+  portENTER_CRITICAL(&wsAuthMux);
+  for (int i = 0; i < WS_MAX_CLIENTS; i++)
+    if (wsAcc[i].fd >= 0 && wsAcc[i].byeAt && (uint32_t)(now - wsAcc[i].byeAt) >= WS_BYE_WAIT_MS) {
+      due[n++] = wsAcc[i].fd;
+      wsAcc[i].byeAt = 0;
+    }
+  portEXIT_CRITICAL(&wsAuthMux);
+  for (int k = 0; k < n; k++) shutdown(due[k], SHUT_RDWR);
 }
 
 // Session teardown - httpd calls this when a client closes AND when lru_purge
@@ -594,10 +773,16 @@ inline esp_err_t wsHandler(httpd_req_t* req) {
   // makes the live monitor work rather than only command replies. And give the
   // session wsSendAll, so every frame on it goes out whole (the handshake reply,
   // already sent, is the only write it does not cover).
+  // With a login token set the session is NOT remembered yet: it is told
+  // [AUTH:REQUIRED] and joins the sink only once it signs in (wsAdmit). Its slot is
+  // claimed here, fresh, so the token as it is NOW decides it - nothing carries over
+  // from an earlier socket that had this number.
   if (req->method == HTTP_GET) {
     const int sockfd = httpd_req_to_sockfd(req);
     httpd_sess_set_send_override(req->handle, sockfd, wsSendAll);
-    wsSink.begin(sockfd);
+    accRelease(sockfd);
+    if (accFor(sockfd)->authed) wsSink.begin(sockfd);   // no token: exactly as before
+    else                        wsSay(req->handle, sockfd, "[AUTH:REQUIRED]\r\n");
     return ESP_OK;
   }
 
@@ -636,6 +821,9 @@ inline esp_err_t wsHandler(httpd_req_t* req) {
   // on hardware to destroy BOTH sides of any interleave.
   const int sockfd = httpd_req_to_sockfd(req);
   WsAcc* ac = accFor(sockfd);
+  // Its ?AUTH failed: it is closing (wsReapWork), and nothing it sends is acted on again.
+  // The frame has been received whole above, so the stream stays in step until then.
+  if (ac->failed) { free(buf); return ESP_OK; }
 
   if (ac->len + frame.len + 1 > ac->cap) {
     size_t want = ac->len + frame.len + 1024;
@@ -649,11 +837,13 @@ inline esp_err_t wsHandler(httpd_req_t* req) {
   free(buf);                       // the accumulator owns the bytes now
 
   // Dispatch every COMPLETE line in what we have; keep any tail for the next frame.
+  // Each one passes the session layer first (wsAdmit): a ?AUTH line, or any line from
+  // a session that has not signed in, is answered there and never queued.
   size_t start = 0;
   for (size_t i = 0; i < ac->len; i++) {
     if (ac->buf[i] != '\n' && ac->buf[i] != '\r') continue;
     size_t len = i - start;
-    if (len > 0) {
+    if (len > 0 && wsAdmit(req->handle, sockfd, ac, ac->buf + start, len)) {
       char* line = (char*)ps_malloc(len + 1);
       if (line) {
         memcpy(line, ac->buf + start, len);
@@ -714,8 +904,9 @@ inline bool begin() {
   uri.is_websocket = true;
   httpd_register_uri_handler(wsServer, &uri);
 
-  Serial.printf("[WS] command endpoint ready — ws://%s/ws\n",
-                WiFi.softAPIP().toString().c_str());
+  // Whether a login is needed, never the token itself.
+  Serial.printf("[WS] command endpoint ready — ws://%s/ws (login token: %s)\n",
+                WiFi.softAPIP().toString().c_str(), tokenSet() ? "set" : "none");
   return true;
 }
 
@@ -734,6 +925,24 @@ inline void drain() {
   //    one place the bytes actually go out, so network I/O stays at a known point
   //    on the core that must also service SBUS.
   wsLoopCore = xPortGetCoreID();   // this IS the loop task; see wsLoopCore
+  // A session whose ?AUTH failed and that has not echoed its CLOSE in WS_BYE_WAIT_MS is
+  // shut down by wsReapWork on the httpd task. Queued again every WS_REAP_RETRY_MS while one
+  // is due: httpd's control socket drops a work item it cannot hold, and the reap clears the
+  // deadline it acts on, so a reap that ran is never repeated.
+  if (wsServer) {
+    static uint32_t reapKickAt = 0;
+    bool due = false;
+    uint32_t bye[WS_MAX_CLIENTS];
+    portENTER_CRITICAL(&wsAuthMux);
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) bye[i] = wsAcc[i].byeAt;
+    portEXIT_CRITICAL(&wsAuthMux);
+    const uint32_t now = millis();   // read after the deadlines, so none is in its future
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) if (bye[i] && (uint32_t)(now - bye[i]) >= WS_BYE_WAIT_MS) due = true;
+    if (due && (uint32_t)(now - reapKickAt) >= WS_REAP_RETRY_MS) {
+      reapKickAt = now;
+      httpd_queue_work(wsServer, wsReapWork, nullptr);
+    }
+  }
   if (wsSink.live()) {
     rcSerial.armCapture(&wsSink, flushHook);
     if (!wsSink.pump()) rcSerial.disarmCapture();   // client gone — stop teeing
