@@ -334,7 +334,11 @@ inline uint8_t  _seqReplyTo      = 0;      // bridge requester _seqReplyJson is 
 inline const char* _seqReplyWhat = "WCB_SEQ";   // label for the fragment-send log line
 // The library abandons a pull silently after ~4 s. Give it a margin and then tell
 // the tool, so a picker waiting on the answer shows "no reply" instead of spinning
-// forever on a board that is powered off.
+// forever on a board that is powered off. A names list too long for one reply comes
+// in pages (WCB_Client 1.19.0), about 0.8 s each and a page retried 3 s later, so a
+// long list can take longer than this: while the library still has the pull in hand
+// (sequenceNamesPending) the answer is waited for; the library ends every pull itself,
+// at 60 s at the latest.
 constexpr uint32_t WCB_SEQ_TIMEOUT_MS = 6000;
 
 // Append `n` bytes of EXTERNAL text as a JSON string body (no quotes), ESCAPED: a quote
@@ -1613,8 +1617,11 @@ inline void tick() {
   // No answer in time (board offline, or the mesh ate the request — the library
   // abandons its own pull silently at ~4 s). Tell the requester so a picker
   // waiting on the reply reports it instead of spinning. The failure has to carry
-  // the SAME type as the question, or the tool settles the wrong request.
-  if (_seqPullBoard != 0 && (int32_t)(millis() - _seqPullDeadline) >= 0) {
+  // the SAME type as the question, or the tool settles the wrong request. Not while
+  // the library is still reading a paged names list (WCB_SEQ_TIMEOUT_MS above):
+  // "no reply" then would be followed by the list, which the slot no longer takes.
+  if (_seqPullBoard != 0 && (int32_t)(millis() - _seqPullDeadline) >= 0 &&
+      !(wcb && wcb->sequenceNamesPending())) {
     const uint8_t b = _seqPullBoard, to = _seqPullSender, kind = _seqPullKind;
     _seqPullBoard = 0; _seqPullDeadline = 0;
     _seqReplyError(b, to, _seqKindType(kind), "no reply");

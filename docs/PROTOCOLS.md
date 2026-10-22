@@ -924,7 +924,13 @@ Four things about it are load-bearing:
 - **The reply is asynchronous.** The verb only starts a mesh pull; the `WCB_SEQ` line
   arrives when the board answers. A pull that gets no answer is reported as
   `ok:false,"msg":"no reply"` after `WCB_SEQ_TIMEOUT_MS` (6 s) — the library abandons its
-  own request silently at ~4 s, so without this the requester would wait forever.
+  own request silently at ~4 s, so without this the requester would wait forever. A names
+  list longer than one mesh reply (about 180 names) comes in pages (`WCB_Client` 1.19.0,
+  WCB repo `docs/SEQUENCE_INVENTORY.md` §3), about 0.8 s a page, so it can take longer than
+  6 s: while the library still has the pull in hand (`sequenceNamesPending()`) NaviCore
+  waits, and `WCB_SEQ` carries the whole list once. The library ends every pull itself, at
+  60 s at the latest. A WCB whose firmware predates paged names never answers a list that
+  long (its one-reply error text is not taken for a list), so that is `no reply` too.
 - **One pull at a time, mesh-wide — and the two share that slot.** `WCB_Client` allows a
   single request in flight across `requestSequenceNames` *and* `requestSequence`, and
   rejects a second rather than queueing it. So the firmware's slot is tagged with its
@@ -1056,6 +1062,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-22 | — | `GET_WCB_SEQ`: `no reply` waits while `WCB_Client` is still reading a paged names list (1.19.0: a list over one 2,912-character mesh reply comes a page per request). Without that a list of more than about 7 pages read as `no reply` at 6 s and its `WCB_SEQ` was then dropped. |
 | 2026-10-22 | — | §1: a session not signed in 15 s after it opened is shut down (`WS_SIGNIN_MS`), matching the WCB's `ws://`; it had no limit, so a client that never signed in kept one of the three slots. |
 | 2026-10-21 | — | §1: the WebSocket login token (`wifiToken`) — `[AUTH:REQUIRED]` / `?AUTH,<token>` / `[AUTH:OK]` / `[AUTH:FAIL]` + CLOSE 1008, 1 s lockout, the protocol of a WCB's `ws://`; decided per line on the httpd task before the queue, answered there. §3: `?CHSYNC`, `?CHSYNC,SEARCH`, `?CHSYNC,MOVE,<ch>` (WCB_Client 1.19.0 channel sync), `?AUTH` a no-op off a socket, `#L11` ends with the channel-sync block. §4: a bridged `SET_CONFIG` also strips `wcbNetwork.region` and `wifiToken`; a bridged `GET_CONFIG` leaves `wifiToken` out. |
 | 2026-10-14 | `969fb1f` | `#L11` gains the `Transmit watchdog:` line (WCB_Client 1.18.0); §3: `#L94` arms a transmit wedge and sets the watchdog's probe interval (HIL `ncmesh.tx_watchdog_*`). |

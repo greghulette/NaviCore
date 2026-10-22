@@ -13855,6 +13855,12 @@ function _cmdlibEnum(id)    { return (ncCommandLibrary().enums || {})[id] || nul
 const NC_SEQ_SOURCE  = 'wcb.sequences';
 const NC_SEQ_MANUAL  = '-- type manually --';  // sentinel: spaces make it unusable as a real ?SEQ key
 const NC_SEQ_TIMEOUT = 8000;                   // backstop; the RC gives up at 6 s and answers ok:false
+// A names list too long for one mesh reply comes in pages (WCB_Client 1.19.0), about 0.8 s
+// each, and the RC waits for the last one past its 6 s: the largest store is ~11 pages.
+// Settled sooner by the RC's own answer, ok or not; this backstop only covers an RC that
+// never answers. Too short, and the refresh walk asks the next board while the RC is still
+// busy with this one, which it refuses ("busy").
+const NC_SEQ_NAMES_TIMEOUT = 30000;
 
 // Same "is the droid reachable" test the command-library modal itself uses (a
 // live Web Serial writer here, or the cross-tab hub holding the port elsewhere).
@@ -13915,7 +13921,7 @@ function _wcbSeqRequest(n) {
     };
     _wcbSeqWaiters.push(finish);
     _wcbSeqPending = n;
-    setTimeout(finish, NC_SEQ_TIMEOUT);
+    setTimeout(finish, NC_SEQ_NAMES_TIMEOUT);
     sendJSON({ type: 'GET_WCB_SEQ', wcb: n }, /*silent=*/true).catch(() => finish());
   });
 }
