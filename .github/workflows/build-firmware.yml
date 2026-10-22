@@ -103,8 +103,20 @@ jobs:
           arduino-cli lib install "EspSoftwareSerial@8.1.0"
           arduino-cli lib install "Adafruit NeoPixel@1.15.4"
           arduino-cli lib install "PololuMaestro"
-          arduino-cli lib install --git-url https://github.com/greghulette/WCBClient.git
-          arduino-cli lib install --git-url https://github.com/greghulette/WcbCmd.git
+          # WCBClient and WcbCmd from the branch of the same name when the library repo has one, else its default
+          # branch: a NaviCore feature branch that needs an unreleased library (chansync needs WCB_Client 1.19.0,
+          # NaviCore.ino's #error) builds against that library's branch instead of failing until it is released.
+          # On main that is still each library's default (WCBClient has no main; WcbCmd's default is main).
+          for lib in WCBClient WcbCmd; do
+            url="https://github.com/greghulette/$lib.git"
+            if git ls-remote --exit-code --heads "$url" "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              echo "$lib: branch $GITHUB_REF_NAME"
+              arduino-cli lib install --git-url "$url#$GITHUB_REF_NAME"
+            else
+              echo "$lib: default branch"
+              arduino-cli lib install --git-url "$url"
+            fi
+          done
 
       - name: Build firmware
         run: |
