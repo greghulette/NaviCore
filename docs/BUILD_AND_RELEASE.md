@@ -25,8 +25,8 @@ Related: [ARCHITECTURE.md](ARCHITECTURE.md) · [CONFIG_TOOL.md](CONFIG_TOOL.md)
 | `EspSoftwareSerial` | Library Manager | 8.1.0 |
 | `Adafruit NeoPixel` | Library Manager | 1.15.4 |
 | `PololuMaestro` | Library Manager | floating |
-| `WCB_Client` (+ `WCBStream`) | `git-url https://github.com/greghulette/WCBClient.git` | **master, unpinned** — at least 1.19.0 (channel sync), which `NaviCore.ino` checks at compile time (`WCB_CLIENT_VERSION_NUM`) |
-| `WcbCmd` | `git-url https://github.com/greghulette/WcbCmd.git` | **master, unpinned** |
+| `WCB_Client` (+ `WCBStream`) | `git-url https://github.com/greghulette/WCBClient.git` | **the branch named like NaviCore's when WCBClient has one, else master; unpinned** — at least 1.19.0 (channel sync), which `NaviCore.ino` checks at compile time (`WCB_CLIENT_VERSION_NUM`) |
+| `WcbCmd` | `git-url https://github.com/greghulette/WcbCmd.git` | **the branch named like NaviCore's when WcbCmd has one, else its default (main); unpinned** |
 | ESP32 core | `esp32:esp32@3.3.4` | pinned; bump in lock-step with the WCB repo |
 
 `HCRVocalizer` is deliberately **not** a dependency — NaviCore formats HCR byte strings
@@ -35,7 +35,10 @@ itself in `hcrFormatCommand()`.
 ### The library-source rule
 
 > **A `WCB_Client` change only reaches a deployed NaviCore build once it is pushed to
-> `greghulette/WCBClient` master.**
+> `greghulette/WCBClient` master.** A NaviCore feature branch builds against WCBClient's
+> branch of the same name when there is one (`git ls-remote`, build-firmware.yml), so a
+> branch that needs an unreleased library builds before the library is released; `main`
+> has no counterpart in WCBClient and always takes master.
 
 CI runs `arduino-cli lib install --git-url …` and compiles with no `--libraries` override,
 so it uses that clone. The copy at
@@ -189,6 +192,13 @@ Publishing here is what puts the tool on the **same origin** as the WCB Wizard, 
 precondition for `WcbSerialHub`'s cross-tab port sharing. The workflow also discovers
 `../Images/<file>` references dynamically and deploys only those images.
 
+**A push whose newest commit is CI's own `Auto-build ... [skip ci]` runs no workflow at all**,
+the Pages deploy included, whatever the commits under it changed: GitHub reads `[skip ci]`
+from the head commit of the push. Fast-forwarding `main` to a branch whose last commit is
+its auto-build (2026-10-22, chansync -> main) left production on the old tool. Run
+"Deploy Config Tool to Pages" by hand (`workflow_dispatch`, branch `main`), or push a commit
+after it: the pre-commit hook stamps `config_tool/index.html`, so any commit deploys.
+
 ---
 
 ## 7. Flashing a board
@@ -248,6 +258,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-22 | — | §2: CI builds a branch against the WCBClient / WcbCmd branch of the same name when one exists (b1712ae). §6: a push headed by an `[skip ci]` auto-build commit deploys nothing; run the workflow by hand or push after it. |
 | 2026-10-21 | — | §2: NaviCore needs WCB_Client 1.19.0 (channel sync) and refuses to compile against an older one, so WCBClient 1.19.0 must reach master before a NaviCore push or CI fails. |
 | 2026-10-14 | `76edddc` | NaviCore.ino refuses to compile against WCB_Client older than 1.18.1 (`WCB_CLIENT_VERSION_NUM`), so a stale sketchbook copy fails loudly instead of building the flawed watchdog. |
 | 2026-10-14 | `969fb1f` | §3: the hook build's verbs run to `#L94` (a mesh transmit wedge). |
