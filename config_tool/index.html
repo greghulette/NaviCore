@@ -2650,7 +2650,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">15.22:34.Q.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.22:36.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3186,13 +3186,19 @@
               <small style="color:var(--muted);font-size:10px">1-19 or 20</small>
             </div>
             <div class="wcb-send-row">
+              <label>Region:</label>
+              <!-- Decides whether channels 12-13 exist (NC_REGIONS / _ncRegionMaxCh). Options are
+                   filled by applyWcbNetworkUI(). Every board on the mesh needs the same one. -->
+              <select id="wcb-region" style="flex:1;min-width:0" onchange="onWcbRegionChange(this.value)"></select>
+            </div>
+            <div class="wcb-send-row">
               <label>WiFi channel:</label>
-              <!-- 1-11, not 1-13: WCB_Client::setMeshChannel() rejects >11 and returns without
-                   setting, so a saved 12/13 silently leaves the radio on its default channel
-                   while every readout claims 12/13. Paired with the clamp in rc_config.h. -->
+              <!-- 1-13; the input's max follows the region (_wcbChannelNote). 12-13 only under a
+                   region that allows them: the firmware runs a saved channel its region forbids
+                   on channel 1 for that boot. Paired with the 1-13 clamp in rc_config.h. -->
               <input type="number" id="wcb-channel" min="1" max="11" style="width:60px"
-                     oninput="config.wcbNetwork.channel = Math.max(1, Math.min(11, +this.value || 1)); updateWcbDirtyBadge()">
-              <small style="color:var(--muted);font-size:10px">1-11 — must match every WCB (?WCBCH)</small>
+                     oninput="onWcbChannelInput(this)">
+              <small id="wcb-channel-note" style="color:var(--muted);font-size:10px">1-11 — must match every WCB (?WCBCH)</small>
             </div>
             <div class="btn-row" style="margin-top:8px">
               <button class="btn btn-warn" id="btn-wcb-reboot" type="button" disabled
@@ -3202,6 +3208,19 @@
             <div class="noconn" style="margin-top:6px">
               ESP-NOW credentials. Must match every other WCB on this system. Query a known WCB with <b>?WCBM</b> / <b>?WCBP</b> / <b>?WCBQ</b> over its USB serial port.
               After Save to Board, hit <b>Reboot Board</b> (or power-cycle) — the running WCB client only reads these at boot.
+              The region and channel are mesh-wide: set the same region on every WCB (<b>?REGION</b>) before using channel 12 or 13.
+            </div>
+          </div>
+
+          <div class="sb-section">
+            <h3>Channel Sync</h3>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;margin-bottom:6px">
+              <input type="checkbox" id="wcb-chansync"
+                     onchange="config.chanSync = this.checked">
+              Keep the whole mesh on one channel
+            </label>
+            <div class="noconn" style="margin-top:4px">
+              On (the default, as on every WCB): NaviCore leads the mesh's channel, follows a WCB that joins a WiFi network on another channel, and searches the other channels for a board it misses. A move is saved here; with the droid's WiFi on, NaviCore restarts to bring its access point up on the new channel. Applies on Save — no reboot. Status: <b>?CHSYNC</b> in the terminal.
             </div>
           </div>
 
@@ -4021,6 +4040,8 @@ let config = {
   wifiEnabled:      false,    // SoftAP + comms endpoint (off by default; hidden toggle — see cfgOpenCloudModal)
   wifiSsid:         '',       // SoftAP SSID ('' = firmware derives NaviCore-<deviceId>)
   wifiPassword:     '',       // SoftAP WPA2 passphrase ('' = firmware refuses to raise the AP — never an open network)
+  wifiToken:        '',       // WebSocket login token ('' = none). Absent = the board did not send it (Via WCB) — see applyConfig
+  chanSync:         true,     // channel sync: follow / lead mesh channel moves, search for missing boards (live)
   maeGateMs:        250,      // remote/via-WCB skip-if-running fail-open window (ms)
   boardType:        0,        // hardware pin profile: 0 = NaviCore v2 PCB (default), 1 = WCB HW 3.2
   tapWindowMs:   500,
@@ -4043,7 +4064,7 @@ let config = {
   // WCB network credentials — populated from device's wcb_config.h on first
   // GET_CONFIG; user edits via the WCB Network sidebar section. Changes need
   // a reboot to take effect (WCBClient initialises once in setup()).
-  wcbNetwork:    { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20, channel: 1 },
+  wcbNetwork:    { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20, channel: 1, region: '01' },
   peerEvent:     { alert: true, actions: [] },   // action(s) + passive alert fired when a NEW WCB peer is detected
   // Global MP3 Trigger destination — every "MP3 Trigger" action routes here.
   // transport 'serial' → local S3/S4 (port); 'wcb' → unicast WCB ID.
@@ -10444,6 +10465,14 @@ function applyConfig(data) {
   if (data.wifiEnabled    !== undefined) config.wifiEnabled    = !!data.wifiEnabled;
   if (data.wifiSsid       !== undefined) config.wifiSsid       = String(data.wifiSsid || '').slice(0, 32);
   if (data.wifiPassword   !== undefined) config.wifiPassword   = String(data.wifiPassword || '').slice(0, 63);
+  // The WebSocket login token. ABSENT is not "no token": the board leaves it out of the config it
+  // sends over the mesh (rcConfigToJSON(true) - anyone with the mesh password can ask for that one),
+  // and firmware before the token never sends it. So drop whatever is in `config` rather than keep
+  // a token an earlier droid left there, which a cloud backup taken now would otherwise carry. Save
+  // never sends it Via WCB (_stripBridgedPayload), and the firmware ignores a null for it.
+  if (data.wifiToken !== undefined) config.wifiToken = String(data.wifiToken || '').slice(0, 32);
+  else delete config.wifiToken;
+  if (data.chanSync       !== undefined) config.chanSync       = !!data.chanSync;
   if (data.maeGateMs      !== undefined) config.maeGateMs = Math.max(50, Math.min(5000, +data.maeGateMs || 250));
   if (data.boardType      !== undefined) config.boardType      = +data.boardType | 0;
   if (data.tapWindowMs   !== undefined) {
@@ -10522,6 +10551,9 @@ function applyConfig(data) {
     if (w.macOct3  !== undefined) w.macOct3  = +w.macOct3;
     if (w.quantity !== undefined) w.quantity = +w.quantity;
     if (w.deviceId !== undefined) w.deviceId = +w.deviceId;
+    // Firmware before channel sync sends no region and runs the IDF default, "01" - so
+    // absent means "01", never a region an earlier droid left in `config`.
+    w.region = NC_REGIONS.some(r => r.cc === data.wcbNetwork.region) ? data.wcbNetwork.region : '01';
   }
   // Saved WCB-credential profiles. Full-replace from the board (normalized so a
   // string field can't fabricate a phantom dirty diff); absent = old firmware → empty.
@@ -11475,6 +11507,7 @@ function snapshotWcbBaseline() {
     quantity: w.quantity | 0,
     deviceId: w.deviceId | 0,
     channel:  (w.channel == null ? 1 : w.channel) | 0,
+    region:   w.region || '01',
   };
   updateWcbDirtyBadge();
 }
@@ -11487,7 +11520,8 @@ function isWcbNetworkDirty() {
          (w.password || '') !== wcbNetworkBaseline.password ||
          (w.quantity | 0) !== wcbNetworkBaseline.quantity ||
          (w.deviceId | 0) !== wcbNetworkBaseline.deviceId ||
-         ((w.channel == null ? 1 : w.channel) | 0) !== wcbNetworkBaseline.channel;
+         ((w.channel == null ? 1 : w.channel) | 0) !== wcbNetworkBaseline.channel ||
+         (w.region || '01') !== wcbNetworkBaseline.region;
 }
 
 function updateWcbDirtyBadge() {
@@ -11495,24 +11529,89 @@ function updateWcbDirtyBadge() {
   if (badge) badge.style.display = isWcbNetworkDirty() ? '' : 'none';
 }
 
+// ── Radio region (wcbNetwork.region) ─────────────────────────────────────────
+// The regions the firmware accepts: MUST match RC_REGIONS in rc_config.h (and so
+// WCB_Client's own list) — a region the board refuses is ignored with a [CFG] line
+// and the old one stays. "01" is ESP-IDF's world-safe default, channels 1-11.
+// Every device on a mesh that uses channel 12 or 13 needs a region that allows it
+// (a WCB: ?REGION), so this is a mesh setting, next to the channel. Read at boot,
+// like the channel, and a transport field: never sent Via WCB (_stripBridgedPayload).
+const NC_REGIONS = [
+  ['01', 'World (default)'], ['AT', 'Austria'], ['AU', 'Australia'], ['BE', 'Belgium'], ['BG', 'Bulgaria'],
+  ['BR', 'Brazil'], ['CA', 'Canada'], ['CH', 'Switzerland'], ['CN', 'China'], ['CY', 'Cyprus'],
+  ['CZ', 'Czechia'], ['DE', 'Germany'], ['DK', 'Denmark'], ['EE', 'Estonia'], ['ES', 'Spain'],
+  ['FI', 'Finland'], ['FR', 'France'], ['GB', 'United Kingdom'], ['GR', 'Greece'], ['HK', 'Hong Kong'],
+  ['HR', 'Croatia'], ['HU', 'Hungary'], ['IE', 'Ireland'], ['IN', 'India'], ['IS', 'Iceland'],
+  ['IT', 'Italy'], ['JP', 'Japan'], ['KR', 'South Korea'], ['LI', 'Liechtenstein'], ['LT', 'Lithuania'],
+  ['LU', 'Luxembourg'], ['LV', 'Latvia'], ['MT', 'Malta'], ['MX', 'Mexico'], ['NL', 'Netherlands'],
+  ['NO', 'Norway'], ['NZ', 'New Zealand'], ['PL', 'Poland'], ['PT', 'Portugal'], ['RO', 'Romania'],
+  ['SE', 'Sweden'], ['SI', 'Slovenia'], ['SK', 'Slovakia'], ['TW', 'Taiwan'], ['US', 'United States'],
+].map(([cc, name]) => ({ cc, name }));
+// The top channel the tool OFFERS under a region: 11 for "01" and the 1-11 countries
+// it knows (US, CA, TW), 13 for every other — an assumption, not the driver's table.
+// The firmware never trusts it: setup() asks the WiFi driver (wcb->maxChannel()) and
+// runs a saved channel the real region does not allow on channel 1, loudly.
+function _ncRegionMaxCh(cc) { return ['01', 'US', 'CA', 'TW'].includes(cc || '01') ? 11 : 13; }
+
+// Channel input / region select. A channel above what the region allows is not
+// clamped away — quietly moving this board off its mesh's channel is worse than
+// saying so — but the note turns red and says what the board will do with it.
+function onWcbChannelInput(el) {
+  config.wcbNetwork.channel = Math.max(1, Math.min(13, +el.value || 1));
+  _wcbChannelNote();
+  updateWcbDirtyBadge();
+}
+function onWcbRegionChange(cc) {
+  config.wcbNetwork.region = NC_REGIONS.some(r => r.cc === cc) ? cc : '01';
+  _wcbChannelNote();
+  updateWcbDirtyBadge();
+}
+function _wcbChannelNote() {
+  const w = config.wcbNetwork || {};
+  const top = _ncRegionMaxCh(w.region);
+  const chan = document.getElementById('wcb-channel');
+  const note = document.getElementById('wcb-channel-note');
+  if (chan) chan.max = String(top);
+  if (!note) return;
+  const ch = w.channel || 1;
+  if (ch > top) {
+    note.style.color = 'var(--red, #e5737b)';
+    note.textContent = 'Channel ' + ch + ' is outside region ' + (w.region || '01') + ' (1-' + top
+      + '): the board would run on channel 1. Pick a region that allows it, or a lower channel.';
+  } else {
+    note.style.color = 'var(--muted)';
+    note.textContent = '1-' + top + ' in this region — must match every WCB (?WCBCH)';
+  }
+}
+
 // Populates the WCB Network inputs from config.wcbNetwork. Hex octets are
 // rendered as uppercase 2-digit strings; password and counts are plain values.
 function applyWcbNetworkUI() {
   const w = config.wcbNetwork
-    || (config.wcbNetwork = { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20, channel: 1 });
+    || (config.wcbNetwork = { macOct2: 0, macOct3: 0, password: '', quantity: 4, deviceId: 20, channel: 1, region: '01' });
   if (w.channel == null) w.channel = 1;   // back-compat: older configs have no channel
+  if (!w.region) w.region = '01';         // ...or no region (firmware before channel sync runs "01")
   const oct2 = document.getElementById('wcb-oct2');
   const oct3 = document.getElementById('wcb-oct3');
   const pw   = document.getElementById('wcb-password');
   const qty  = document.getElementById('wcb-quantity');
   const did  = document.getElementById('wcb-deviceid');
   const chan = document.getElementById('wcb-channel');
+  const reg  = document.getElementById('wcb-region');
+  const sync = document.getElementById('wcb-chansync');
   if (oct2) oct2.value = (w.macOct2 || 0).toString(16).toUpperCase().padStart(2, '0');
   if (oct3) oct3.value = (w.macOct3 || 0).toString(16).toUpperCase().padStart(2, '0');
   if (pw)   pw.value   = w.password || '';
   if (qty)  qty.value  = w.quantity || 4;
   if (did)  did.value  = w.deviceId || 20;
   if (chan) chan.value = w.channel  || 1;
+  if (reg) {
+    if (!reg.options.length)
+      for (const r of NC_REGIONS) reg.add(new Option(r.cc + ' — ' + r.name + ' (1-' + _ncRegionMaxCh(r.cc) + ')', r.cc));
+    reg.value = w.region;
+  }
+  if (sync) sync.checked = config.chanSync !== false;
+  _wcbChannelNote();
   renderPeerEventEditor();
   renderWcbProfiles();
   updateWcbDirtyBadge();
@@ -13567,9 +13666,10 @@ const NC_CMDLIB_SEED = {
   // (see cmdlib/droidnet/NOTICE.md). WLED + Maestro-;M are now ALSO upstream (wcb-wled,
   // maestro — our 4.2.0 PR) but kept inline as the file:// fallback, since fetch() of the
   // vendored library is blocked under file://. The vendored `maestro` ;M range is still
-  // narrow (id 0-2 / seq 0-9) vs the firmware's 0-9 / 0-99, so _cmdlibNormalize() drops the
-  // vendored `maestro` in favor of the accurate `nc-maestro-wcb` (via-WCB) board, which now
-  // carries the ;M<id><seq> sequence trigger AND the ;M<id>,<verb> servo/script commands.
+  // narrow (id 0-2 / seq 0-9) vs the firmware's, so _cmdlibNormalize() drops it in favor of
+  // the shared `wcb-maestro` (cmdlib/wcb: the ;M<id><seq> trigger, the ;M<id>,<verb>
+  // servo/script commands and DroidNet's @A<name>), which also replaces the inline
+  // `nc-maestro-wcb` below once loaded; that one is the file:// fallback.
   // nc-maestro is the Pololu servo command set (local:'maestro' → a NaviCore Maestro
   // slot 1-8; the firmware routes Local→Serial2 or Remote→ESP-NOW broadcast-by-device#,
   // so ONE board covers both local and remote Maestros). The vendored `maestro-native`
@@ -13755,6 +13855,12 @@ function _cmdlibEnum(id)    { return (ncCommandLibrary().enums || {})[id] || nul
 const NC_SEQ_SOURCE  = 'wcb.sequences';
 const NC_SEQ_MANUAL  = '-- type manually --';  // sentinel: spaces make it unusable as a real ?SEQ key
 const NC_SEQ_TIMEOUT = 8000;                   // backstop; the RC gives up at 6 s and answers ok:false
+// A names list too long for one mesh reply comes in pages (WCB_Client 1.19.0), about 0.8 s
+// each, and the RC waits for the last one past its 6 s: the largest store is ~11 pages.
+// Settled sooner by the RC's own answer, ok or not; this backstop only covers an RC that
+// never answers. Too short, and the refresh walk asks the next board while the RC is still
+// busy with this one, which it refuses ("busy").
+const NC_SEQ_NAMES_TIMEOUT = 30000;
 
 // Same "is the droid reachable" test the command-library modal itself uses (a
 // live Web Serial writer here, or the cross-tab hub holding the port elsewhere).
@@ -13815,7 +13921,7 @@ function _wcbSeqRequest(n) {
     };
     _wcbSeqWaiters.push(finish);
     _wcbSeqPending = n;
-    setTimeout(finish, NC_SEQ_TIMEOUT);
+    setTimeout(finish, NC_SEQ_NAMES_TIMEOUT);
     sendJSON({ type: 'GET_WCB_SEQ', wcb: n }, /*silent=*/true).catch(() => finish());
   });
 }
@@ -14184,7 +14290,7 @@ const NC_BOARD_DEVICE_LABELS = {
   'wcb-mp3': ['MP3 Trigger'], 'wcb-dfplayer': ['DFPlayer'],
   'ia-magic-panel': ['Magic Panel(IA)'], 'pd-magic-panel': ['Magic Panel(PRINTDRD)'],
   'rseries-logic': ['R-Series Logics'],
-  'maestro': ['Maestro'], 'maestro-native': ['Maestro'], 'nc-maestro-wcb': ['Maestro'], 'nc-maestro': ['Maestro'],
+  'maestro': ['Maestro'], 'maestro-native': ['Maestro'], 'wcb-maestro': ['Maestro'], 'nc-maestro-wcb': ['Maestro'], 'nc-maestro': ['Maestro'],
   'psi-pro': ['PSI Front', 'PSI Rear'],
   'r2uppityspinner-alt': ['Uppity Spinner', 'Periscope'],
   'roam-a-dome': ['Roam-A-Dome'],
@@ -14280,8 +14386,9 @@ function _ncCommandPattern(cmd) {
   const order = [];
   let prevWasFreeText = false;
   let ambiguous = false;
+  let literal = 0, freeCount = 0;
   for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 0) { re += _reEscape(parts[i]); continue; }
+    if (i % 2 === 0) { re += _reEscape(parts[i]); literal += parts[i].length; continue; }
     const p = byName[parts[i]] || { name: parts[i] };
     order.push(p.name);
     const literalBefore = parts[i - 1];
@@ -14302,9 +14409,14 @@ function _ncCommandPattern(cmd) {
     else { isFreeText = true; re += '(.+?)'; }
     if (literalBefore === '' && prevWasFreeText && isFreeText) ambiguous = true;
     prevWasFreeText = isFreeText;
+    if (isFreeText) freeCount++;
   }
   re += '$';
-  const regex = ambiguous ? null : new RegExp(re);
+  // A template with no fixed text and a free-text field (cmdlib/wcb's serial text, "{text}") would match every wire
+  // string, and this is a first-match decoder: it would claim every command of every board after it. Never decode one.
+  // (A lone enum, flthy-hps's "{special}", matches only its codes and still decodes.) caseInsensitive: the device takes
+  // the fixed text in either case (DroidNet's @A / @a, cmdlib/wcb NOTICE.md).
+  const regex = (ambiguous || (literal === 0 && freeCount > 0)) ? null : new RegExp(re, cmd.caseInsensitive ? 'i' : '');
   return (cmd.__ncRe = { regex, order, gen: _cmdlibGeneration });
 }
 function ncDecodeCommand(wire) {
@@ -14962,11 +15074,15 @@ function _cmdlibUse() {
     action = { type: 'wled', cmd: wire };
   } else if (mode === 'device') {
     // A raw device string must egress a serial port. Keep the row's existing port
-    // routing on a re-edit; else auto-route to where a WCB advertises this device's
-    // label over WDP; else default to the first WCB · Serial 1.
+    // routing on a re-edit; else a port the command names itself (`defaultPort`:
+    // DroidNet's @A<name> Maestro trigger is read on a WCB's Serial 0, cmdlib/wcb);
+    // else auto-route to where a WCB advertises this device's label over WDP; else
+    // default to the first WCB · Serial 1.
     const ld = rowHadCmd ? null : _cmdlibLabelDest(board);
+    const dp = (cmd && cmd.defaultPort != null && /^[0-5]$/.test(String(cmd.defaultPort))) ? String(cmd.defaultPort) : null;
     if (rowHadCmd && mWS)                         action = { type: 'wcb_broadcast', cmd: `;W${mWS[1]};S${mWS[2]}` + wire };
     else if (rowHadCmd && /^S\d$/.test(destsel)) action = { type: 'serial', port: destsel, cmd: wire };
+    else if (dp)                                 action = { type: 'wcb_broadcast', cmd: `;W${_firstKnownWcb()};S${dp}` + wire };
     else if (ld)                                 action = { type: 'wcb_broadcast', cmd: `;W${ld.wcb};S${ld.port}` + wire };
     else                                         action = { type: 'wcb_broadcast', cmd: `;W${_firstKnownWcb()};S1` + wire };
   } else {
@@ -15081,10 +15197,12 @@ function _cmdlibMergeLibraryData(data) {
 //      (a) HIDDEN outright (see NC_CMDLIB_HIDDEN) — a board whose commands aren't
 //          ACTIONS. This library exists to build things a pilot triggers from the
 //          transmitter, and nobody binds a button to "set the hardware version".
-//      (b) SUPERSEDED: a vendored board loses to the NaviCore seed board that
-//          replaces it (see NC_CMDLIB_SUPERSEDE). Two cases today:
-//          the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9) loses to our
-//          firmware-accurate `nc-maestro-wcb` (id 0-9 / seq 0-99); and the generic
+//      (b) SUPERSEDED: a board loses to the board that replaces it (see
+//          NC_CMDLIB_SUPERSEDE). Three cases today:
+//          the narrow upstream `maestro` ;M board (id 0-2 / seq 0-9), and our own
+//          inline `nc-maestro-wcb`, both lose to the shared, firmware-accurate
+//          `wcb-maestro` (cmdlib/wcb: subroutine 0-127, plus DroidNet's @A<name>
+//          trigger) - the inline one stays only as the file:// fallback; and the generic
 //          `maestro-native` (raw Pololu bytes to a `;W<wcb>;S<port>` WCB port)
 //          loses to `nc-maestro`, whose IDENTICAL commands instead target a
 //          NaviCore configured-Maestro slot (firmware picks Local Serial2 vs remote
@@ -15132,9 +15250,10 @@ const NC_CMDLIB_HIDDEN_CMDS = new Set([
   'wcb.seqClearAll',  // ?SEQ,CLEAR,ALL
   'wcb.seqClear',     // ?SEQ,CLEAR,{key}
 ]);
-// vendored id -> NaviCore seed id that replaces it when both are present.
+// board id -> the board that replaces it when both are present.
 const NC_CMDLIB_SUPERSEDE = {
-  'maestro':        'nc-maestro-wcb', // narrow upstream ;M board -> our via-WCB board (;M sequence + verbs)
+  'maestro':        'wcb-maestro',   // narrow upstream ;M board -> the shared cmdlib/wcb board (;M sequence + verbs + DroidNet)
+  'nc-maestro-wcb': 'wcb-maestro',   // our inline fallback -> the same shared board, once cmdlib/wcb has loaded
   'maestro-native': 'nc-maestro',    // raw-WCB-port Pololu board -> our configured-Maestro-slot board
 };
 const NC_CMDLIB_ORDER_TOP = [
@@ -15143,8 +15262,10 @@ const NC_CMDLIB_ORDER_TOP = [
   // the picker. nc-maestro-wcb is a MEMBER (see NC_CMDLIB_GROUPS.ids) despite the id,
   // so it belongs inside this run; breaking the run would split the group in two.
   // Order INSIDE the group is this array too: Stored Sequences first (the everyday
-  // one), sound, then Maestro, then lighting, and the 71-command native config last.
-  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'nc-maestro-wcb', 'wcb-wled',
+  // one), sound, then Maestro, then lighting, the WCB's own actions (cmdlib/wcb), and
+  // the 71-command native config last. The WCB Wizard's sequence builder uses the same
+  // order (seq-builder.js SB_ORDER_TOP).
+  'wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'wcb-maestro', 'nc-maestro-wcb', 'wcb-wled', 'wcb-actions',
   'wcb-native',   // inert while NC_CMDLIB_HIDDEN hides it; kept so un-hiding restores its place
 
   'navicore',
@@ -15607,11 +15728,18 @@ async function _cmdlibImportFromManifest(manifestUrl, onLog) {
 // raw.githubusercontent.com. _cmdlibReady lets openCmdLibrary wait a beat on
 // a slow first load instead of showing a half-populated list.
 const NC_DROIDNET_LOCAL_MANIFEST = 'cmdlib/droidnet/manifest.json';
+// The WCB's own boards the snapshot lacks (Maestro at the firmware's ranges with
+// DroidNet's @A<name> trigger, DFPlayer, actions), in the same schema. Kept here, and
+// copied byte for byte into the WCB Wizard, so both tools present one library
+// (cmdlib/wcb/NOTICE.md). Its wcb-dfplayer replaces the seed's of the same id.
+const NC_WCB_LOCAL_MANIFEST = 'cmdlib/wcb/manifest.json';
 // NaviCore's own controller-native commands (record/play/stop sequences), authored
 // in the DroidNet board schema so the file can be PR'd to that library verbatim.
 const NC_NAVICORE_LOCAL_MANIFEST = 'cmdlib/navicore/manifest.json';
 let _cmdlibReady = _cmdlibImportFromManifest(NC_DROIDNET_LOCAL_MANIFEST)
   .catch(e => { console.warn('Command library: vendored snapshot failed to load —', e.message); return null; })
+  .then(() => _cmdlibImportFromManifest(NC_WCB_LOCAL_MANIFEST))
+  .catch(e => { console.warn('Command library: WCB boards failed to load —', e.message); return null; })
   .then(() => _cmdlibImportFromManifest(NC_NAVICORE_LOCAL_MANIFEST))
   .catch(e => { console.warn('Command library: NaviCore boards failed to load —', e.message); return null; })
   // Re-merge your PRIVATE custom boards LAST (localStorage) so they layer on top
@@ -17516,13 +17644,40 @@ let _pushBudgetTimer = null;   // poll handle; runs only while the config modal 
 //   1. The payload is a BRANCH DIFF against the on-board baseline
 //      (`_diffConfigBranches`), NOT the whole config — and `mappings` is
 //      sub-diffed PER BUTTON, so a one-button edit ships one button.
-//   2. Via WCB additionally strips the wcbNetwork transport fields.
+//   2. Via WCB additionally strips the wcbNetwork transport fields and the
+//      droid-WiFi settings (_stripBridgedPayload, which both call).
 //   3. sendJSON wraps the result as {sys:1, type:'SET_CONFIG', data, saveId}
 //      and chunks THAT string. The count is over the wrapped envelope, not the
 //      bare diff. (The per-fragment envelope is applied after chunking, so it
 //      does NOT enter the count — only this outer wrapper does.)
 // Anything that changes saveConfigToBoard()'s payload construction has to change
 // here too, or the readout silently drifts from what Save actually sends.
+
+// What a Via-WCB Save never sends, because the firmware strips it from a bridged
+// SET_CONFIG anyway (rc_telemetry.h _applyReassembled) — and sending it would let the
+// tool's baseline advance over an edit the board threw away. Two groups:
+//   - the wcbNetwork TRANSPORT fields (the region with the channel): changing them over
+//     the mesh breaks the very link the save travels on, or does at the next boot;
+//   - the droid-WiFi settings, the access token among them: read at boot (the token
+//     live), and how a WiFi client reaches the board at all — they change over USB or
+//     the droid's own WiFi, never through the mesh.
+// Mutates `payload`; says which groups held something, so Save can say so and keep
+// those values out of the pending baseline.
+const WCB_TRANSPORT_KEYS = ['deviceId', 'macOct2', 'macOct3', 'password', 'quantity', 'channel', 'region'];
+const WIFI_RADIO_KEYS    = ['wifiEnabled', 'wifiSsid', 'wifiPassword', 'wifiToken'];
+function _stripBridgedPayload(payload) {
+  let wcb = false, wifi = false;
+  if (payload.wcbNetwork) {
+    const rest = { ...payload.wcbNetwork };
+    for (const k of WCB_TRANSPORT_KEYS) if (k in rest) { delete rest[k]; wcb = true; }
+    payload.wcbNetwork = rest;   // preserve any non-transport fields
+    // If everything was transport-related, drop the empty object entirely
+    if (Object.keys(payload.wcbNetwork).length === 0) delete payload.wcbNetwork;
+  }
+  for (const k of WIFI_RADIO_KEYS) if (k in payload) { delete payload[k]; wifi = true; }
+  return { wcb, wifi };
+}
+
 function _pushBudgetInfo() {
   // saveConfigToBoard() commits pending DOM edits into `config` BEFORE diffing.
   // A passive readout must not do that — those writes mutate the very object the
@@ -17554,11 +17709,7 @@ function _pushBudgetInfo() {
   // blocked and the close prompt correctly reports nothing unsaved.
   const base = _pendingSaveBaseline || _configBaseline;
   let payload = _diffConfigBranches(snap, base);
-  if (viaWcbActive && payload.wcbNetwork) {
-    const { deviceId, macOct2, macOct3, password, quantity, channel, ...rest } = payload.wcbNetwork;
-    payload.wcbNetwork = rest;
-    if (Object.keys(payload.wcbNetwork).length === 0) delete payload.wcbNetwork;
-  }
+  if (viaWcbActive) _stripBridgedPayload(payload);
   const branches = Object.keys(payload);
   if (!branches.length) return { branches, bytes: 0, frags: 0, empty: true };
 
@@ -17754,29 +17905,29 @@ async function saveConfigToBoard() {
   // but doing it here too keeps the wire payload smaller and surfaces the
   // policy in one place the user can see.  Same reasoning as on the
   // firmware side: changing wcbNetwork over the WCB transport breaks the
-  // very transport we just sent the message on.
-  // Track whether the user actually edited WCB Network TRANSPORT fields that
-  // we're about to strip — so we can (a) warn plainly instead of a misleading
-  // "No changes to save", and (b) keep the un-sent values OUT of the pending
-  // baseline below (else a later Save diffs them to "no change" and the edit is
-  // lost silently).
-  let wcbStrippedOverBridge = false;
-  if (viaWcbActive && payload.wcbNetwork) {
-    const { deviceId, macOct2, macOct3, password, quantity, channel, ...rest } = payload.wcbNetwork;
-    wcbStrippedOverBridge = [deviceId, macOct2, macOct3, password, quantity, channel].some(v => v !== undefined);
-    payload.wcbNetwork = rest;   // preserve any non-transport fields
-    // If everything was transport-related, drop the empty object entirely
-    if (Object.keys(payload.wcbNetwork).length === 0) delete payload.wcbNetwork;
+  // very transport we just sent the message on — and the droid-WiFi settings
+  // are how a WiFi client reaches the board (_stripBridgedPayload).
+  // Track whether the user actually edited fields that we're about to strip —
+  // so we can (a) warn plainly instead of a misleading "No changes to save",
+  // and (b) keep the un-sent values OUT of the pending baseline below (else a
+  // later Save diffs them to "no change" and the edit is lost silently).
+  let wcbStrippedOverBridge = false, wifiStrippedOverBridge = false;
+  if (viaWcbActive) {
+    const s = _stripBridgedPayload(payload);
+    wcbStrippedOverBridge  = s.wcb;
+    wifiStrippedOverBridge = s.wifi;
   }
+  const strippedWhat = [wcbStrippedOverBridge && 'WCB Network', wifiStrippedOverBridge && 'Droid WiFi']
+                         .filter(Boolean).join(' and ');
 
   // No changes? Skip the round-trip entirely — saves wire time AND avoids
   // confusing the user with an apparent "save" that does nothing.
   if (Object.keys(payload).length === 0) {
-    if (wcbStrippedOverBridge) {
-      // The only edit was WCB Network, and it can't travel over the very bridge
-      // we'd send it on. Say so plainly instead of "No changes to save".
-      appendTerminalLine('< [config] WCB Network changes can only be saved over a DIRECT USB connection — not over Via WCB. Connect via USB, then Save again.', 'rx');
-      showToast('WCB Network changes need a Direct USB connection — not saved', 'warn');
+    if (strippedWhat) {
+      // The only edits were ones that can't travel over the very bridge we'd
+      // send them on. Say so plainly instead of "No changes to save".
+      appendTerminalLine('< [config] ' + strippedWhat + ' changes can only be saved over a DIRECT USB connection — not over Via WCB. Connect via USB, then Save again.', 'rx');
+      showToast(strippedWhat + ' changes need a Direct USB connection — not saved', 'warn');
     } else {
       console.log('saveConfigToBoard: no changes since last load — skipping');
       appendTerminalLine('< [config] No changes to save', 'rx');
@@ -17784,9 +17935,9 @@ async function saveConfigToBoard() {
     }
     return;
   }
-  if (wcbStrippedOverBridge) {
-    appendTerminalLine('< [config] Note: WCB Network changes were NOT sent (only possible over Direct USB). Saving the other changes.', 'rx');
-    showToast('WCB Network changes skipped (need Direct USB) — saving the rest', 'warn');
+  if (strippedWhat) {
+    appendTerminalLine('< [config] Note: ' + strippedWhat + ' changes were NOT sent (only possible over Direct USB). Saving the other changes.', 'rx');
+    showToast(strippedWhat + ' changes skipped (need Direct USB) — saving the rest', 'warn');
   }
 
   const branches = Object.keys(payload).join(', ');
@@ -17819,6 +17970,13 @@ async function saveConfigToBoard() {
   // would vanish silently. Keep the last-known on-board value instead.
   if (wcbStrippedOverBridge && _configBaseline && _configBaseline.wcbNetwork) {
     _pendingSaveBaseline.wcbNetwork = _deepClone(_configBaseline.wcbNetwork);
+  }
+  // Same for the droid-WiFi settings, key by key (they are top-level).
+  if (wifiStrippedOverBridge && _configBaseline) {
+    for (const k of WIFI_RADIO_KEYS) {
+      if (k in _configBaseline) _pendingSaveBaseline[k] = _deepClone(_configBaseline[k]);
+      else delete _pendingSaveBaseline[k];
+    }
   }
   _pendingSaveStartedAt = Date.now();
   _pendingSaveId = ++_saveSeq;   // correlation id for this save (echoed back in the ACK)
@@ -20168,7 +20326,7 @@ function handleConfigImportFile(event) {
                 else if (field === 'password') wp.password = String(raw);
                 else if (field === 'quantity') wp.quantity = Math.max(1, Math.min(20, Number(raw) || 4));
                 else if (field === 'deviceid') wp.deviceId = Math.max(1, Math.min(20, Number(raw) || 20));
-                else if (field === 'channel')  wp.channel  = Math.max(1, Math.min(11, Number(raw) || 1));   // 1-11: setMeshChannel() rejects >11
+                else if (field === 'channel')  wp.channel  = Math.max(1, Math.min(13, Number(raw) || 1));   // 1-13, as rc_config.h clamps a profile's channel
               }
             }
           } else if (control === 'mp3transport' || control === 'mp3target' ||
@@ -21261,6 +21419,18 @@ async function cfgLoadConfigFile(file) {
   if (typeof renderMaestroLocations === 'function')   renderMaestroLocations();
   if (typeof renderWledSlots === 'function')          renderWledSlots();
 }
+// The WebSocket access token's rule — MUST match rcWsTokenValid() in rc_config.h, which is
+// the rule every WCB applies to ?WIFI,TOKEN: '' (none), or 8-32 printable ASCII characters
+// with none of space , ^ ; ? " \ (each means something in a config chain or the line
+// grammar). Returns what is wrong, or null when the token (or '') is acceptable.
+function ncTokenProblem(t) {
+  t = String(t == null ? '' : t);
+  if (!t) return null;
+  if (t.length < 8 || t.length > 32) return 'The token must be 8-32 characters (this is ' + t.length + ').';
+  if (!/^[\x21-\x7E]+$/.test(t)) return 'Only printable ASCII characters, no spaces.';
+  if (/[,^;?"\\]/.test(t)) return 'None of , ^ ; ? " \\ — they break the board\'s command line.';
+  return null;
+}
 // Modal: username + password + optional note, "back up now", and a dated/noted
 // list of this user's backups to restore or re-label.
 function cfgOpenCloudModal() {
@@ -21323,6 +21493,15 @@ function cfgOpenCloudModal() {
     + 'value="' + esc(config.wifiPassword) + '" style="flex:1;min-width:0;' + inputCss + '">'
     + '<button id="cfg-wifi-pw-eye" type="button" title="Show / hide password" aria-label="Show AP password" style="padding:7px 10px;cursor:pointer;' + inputCss + '">👁</button></div>'
     + '<div id="cfg-wifi-note" style="font-size:12px;color:var(--accent-bright,#5cb0ff);min-height:15px;margin:6px 0 0 24px"></div>'
+    // The WebSocket access token (config.wifiToken). Masked like the AP password, with
+    // the same eye. config holds only a VALID token ('' = none): the firmware ignores an
+    // invalid one, so storing it here would show it saved while the board kept the old.
+    + '<div style="display:flex;gap:8px;margin:10px 0 0 24px">'
+    + '<input id="cfg-wifi-token" type="password" maxlength="32" autocomplete="off" spellcheck="false" '
+    + 'placeholder="access token (8-32 characters, blank = none)" '
+    + 'value="' + esc(config.wifiToken || '') + '" style="flex:1;min-width:0;' + inputCss + '">'
+    + '<button id="cfg-wifi-token-eye" type="button" title="Show / hide token" aria-label="Show access token" style="padding:7px 10px;cursor:pointer;' + inputCss + '">👁</button></div>'
+    + '<div id="cfg-wifi-token-note" style="font-size:12px;color:var(--muted,#9a9aa2);min-height:15px;margin:6px 0 0 24px"></div>'
     + '</div>';
   document.body.appendChild(ov);
   const $  = id => document.getElementById(id);
@@ -21368,6 +21547,44 @@ function cfgOpenCloudModal() {
     eye.textContent = show ? '🙈' : '👁';
   });
   _wifiNote();
+  // Access token. Applies on Save, to WebSocket sessions that open after it (no reboot).
+  // Not shown and not saved Via WCB: the board leaves it out of the config it sends over
+  // the mesh (absent from `config` then), and a bridged Save never carries the WiFi settings.
+  const _tokenNote = () => {
+    const el = $('cfg-wifi-token'), note = $('cfg-wifi-token-note');
+    if (!el || !note) return;
+    const absent = config.wifiToken === undefined;
+    el.disabled = viaWcbActive || absent;
+    if (el.disabled) {
+      note.style.color = 'var(--muted,#9a9aa2)';
+      note.textContent = viaWcbActive
+        ? 'The access token is not shown or saved over Via WCB — connect over USB (or the droid\'s WiFi) to set it.'
+        : 'This firmware has no access token — update NaviCore to set one.';
+      return;
+    }
+    const problem = ncTokenProblem(el.value);
+    if (problem) {
+      note.style.color = '#e5737b';
+      note.textContent = problem + ' Not applied — the token stays ' + (config.wifiToken ? 'as it was.' : 'unset.');
+      return;
+    }
+    note.style.color = 'var(--muted,#9a9aa2)';
+    note.textContent = el.value
+      ? 'Apps connecting over the droid\'s WiFi must sign in with this token (Intellex asks for it once). Save to apply.'
+      : 'No access token: anyone who joins the droid\'s WiFi can use it (the AP password is the only lock).';
+  };
+  $('cfg-wifi-token').addEventListener('input', e => {
+    if (!ncTokenProblem(e.target.value)) config.wifiToken = e.target.value;
+    _tokenNote();
+  });
+  $('cfg-wifi-token-eye').addEventListener('click', () => {
+    const p = $('cfg-wifi-token'), eye = $('cfg-wifi-token-eye');
+    const show = p.type === 'password';
+    p.type = show ? 'text' : 'password';
+    eye.textContent = show ? '🙈' : '👁';
+    eye.setAttribute('aria-label', show ? 'Hide access token' : 'Show access token');
+  });
+  _tokenNote();
   // 👁 show/hide the password field.
   $('cfg-cloud-pw-eye').addEventListener('click', () => {
     const p = $('cfg-cloud-pw'), eye = $('cfg-cloud-pw-eye');
