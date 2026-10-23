@@ -311,9 +311,9 @@ inline uint8_t _pendingRebootFrom      = 0;    // REBOOT requester to ACK before
 // which question is outstanding, or a names answer would be emitted as a value one.
 //
 // Values are fetched ONE KEY AT A TIME, on demand, never as a set. A single value
-// is bounded (~1800 chars) but the whole set is not — pulling every body would
-// recreate the failure the WCB's own config pull already has, where the reply
-// exceeds its chunk budget and the target then sends NOTHING.
+// is bounded (3999 characters, the store's limit; a value too long for one mesh
+// reply comes in parts and WCB_Client 1.20.0 delivers it whole, once) but the
+// whole set is not.
 //
 // The pull is ASYNC: the request functions just transmit, and WCB_Client calls
 // seqNamesReply()/seqValueReply() later — on the LOOP task from wcb->update(), so
@@ -402,7 +402,7 @@ inline String buildWcbSeqVal(uint8_t board, const char* key, uint8_t status, con
   s += ",\"key\":\"";
   _seqAppendJsonEsc(s, key ? key : "", WCB_SEQ_KEY_MAX);
   s += "\",\"status\":";
-  s += (int)status;                        // 0 OK, 1 NOTFOUND, 2 TOOBIG (WCBSeqStatus)
+  s += (int)status;                        // 0 OK, 1 NOTFOUND, 2 TOOBIG (WCBSeqStatus; only a WCB older than values in parts)
   s += ",\"value\":\"";
   _seqAppendJsonEsc(s, v, strlen(v));
   s += "\"}";

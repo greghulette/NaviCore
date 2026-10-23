@@ -55,9 +55,11 @@
 // Channel sync (setChanSyncRank, setRegion, onChannelMove - onMeshChannelMove below) needs 1.19.0, which also keeps
 // the transmit watchdog's 1.18.1 fix (1.18.0 took one board's own periodic advert for an answer and called a dead radio
 // recovered, WCB repo HIL run 20261014-173713). A sketchbook copy older than that shadows the real library in a local
-// build (CLAUDE.md rule 5) - stop here rather than ship it.
-#if !defined(WCB_CLIENT_VERSION_NUM) || WCB_CLIENT_VERSION_NUM < 11900
-#error "NaviCore needs WCB_Client 1.19.0 or newer (greghulette/WCBClient master): channel sync"
+// build (CLAUDE.md rule 5) - stop here rather than ship it. 1.20.0: a ?MGMT,STATS / ETM,CHAR result and one stored
+// sequence too long for one mesh reply come through in parts (WCB repo docs/MGMT_RELAY.md §10); with 1.19.0 this
+// relay would hand the Wizard the "[ERROR] Result too large to relay" text instead.
+#if !defined(WCB_CLIENT_VERSION_NUM) || WCB_CLIENT_VERSION_NUM < 12000
+#error "NaviCore needs WCB_Client 1.20.0 or newer (greghulette/WCBClient master): mesh results in parts"
 #endif
 #include <WCB_Mgmt.h>     // WCB Wizard management surface (?backup / ?WDP,DUMP / ?MGMT,*)
 #include <WcbCmd.h>       // shared device-command translators (Maestro/MP3/WLED/HCR) —
@@ -4612,8 +4614,8 @@ bool processInputLine(const String& line) {
     } else if (strcmp(type,"GET_WCB_SEQVAL")==0) {
       // ONE stored sequence's contents, by key — what the command library shows
       // under a chosen sequence. Deliberately one key at a time: a single value
-      // is bounded (~1800 chars) but the whole set is not, and pulling every body
-      // is the failure mode the WCB's own config pull already has.
+      // is bounded (3999 characters; one too long for one mesh reply comes in parts,
+      // WCB_Client 1.20.0) but the whole set is not.
       // Reply is ASYNC (a WCB_SEQVAL line, or an ok:false one on timeout).
       const int seqVB = hdr["wcb"] | 0;
       rcTelemetry::startSeqPull((seqVB >= 1 && seqVB <= 255) ? (uint8_t)seqVB : 0, 0,

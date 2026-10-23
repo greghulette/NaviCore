@@ -525,6 +525,10 @@ droid can host both. See [DFPLAYER_DESIGN.md](DFPLAYER_DESIGN.md).
   inside the callback. `chanSync` turns it off (live); `?CHSYNC` and `#L11` show its state.
 - **WebSocket login** — with `wifiToken` set, `naviws::wsAdmit()` signs each socket session in
   on the httpd task before anything is queued ([PROTOCOLS.md §1](PROTOCOLS.md#1-transport-overview)).
+- **Mesh results in parts** — WCB_Client 1.20.0 (required at compile time; WCB repo
+  `docs/MGMT_RELAY.md` §10): through `WcbMgmt` a `?MGMT,STATS` / `?MGMT,ETM,CHAR` result too long
+  for one mesh reply is asked a part at a time and printed whole, and `requestSequence()` joins a
+  long sequence value, so the Wizard and the tool get whole results instead of the "too large" text.
 
 ---
 
@@ -535,6 +539,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-23 | — | §13: mesh results in parts (WCB_Client 1.20.0, now the compile-time minimum). |
 | 2026-10-21 | — | §6: `WCB_Client` is constructed before the SoftAP so the region applies first (steps 11–13). §7, §13: channel sync (WCB_Client 1.19.0, now the compile-time minimum) — a move is saved and, with the SoftAP up, applied through the deferred restart; the WebSocket login. `requestDeferredRestart()` takes a reason and stamps its time as `millis()` (0 → 1), not `millis() \| 1`, which half the time lay 1 ms in the future and read as overdue on the next check, skipping the quiet window. |
 | 2026-10-14 | `76edddc` | The transmit watchdog needs WCB_Client 1.18.1 (two boards answer a probe; two answers end a stall; a relapse within 3 min goes to level 2) - a compile-time check stops an older sketchbook copy. |
 | 2026-10-14 | `969fb1f` | §13: the mesh transmit watchdog and its restart cap; §3: `#L94`. |

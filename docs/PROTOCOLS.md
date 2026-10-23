@@ -646,8 +646,8 @@ separate MgmtRelay on a network of its own.
 | `?MGMT,FRAG,<target>,<session>,<idx>,<total>,<payload>` | Forward one Wizard fragment to a WCB |
 | `?MGMT,PULL,<target>` | Request that board's config → `[MGMT:CONFIG,<n>]…` |
 | `?MGMT,PULL,<target>,P` | The same, asking for parts (WCB_Client 1.17.1 and later): a config over 2912 characters arrives as `[MGMT:CFGPART,<n>]P<id>,<k>,<K>:<data>~` lines, a refusal as `[MGMT:CFGERR,<n>]<CODE>,<detail>`. Protocol: the WCB repo's `docs/MGMT_RELAY.md` |
-| `?MGMT,STATS,<target>` | ESP-NOW stats → `[MGMT:STATS,<n>]…` |
-| `?MGMT,ETM,CHAR,<target>` | ETM characterization → `[MGMT:ETM,<n>]…` |
+| `?MGMT,STATS,<target>` | ESP-NOW stats → `[MGMT:STATS,<n>]…` (one too long for one mesh reply comes in parts and prints as that one reply; WCB repo `docs/MGMT_RELAY.md` §10) |
+| `?MGMT,ETM,CHAR,<target>` | ETM characterization → `[MGMT:ETM,<n>]…` (the same) |
 
 A target running a remote terminal sends lines back as `[TERM:<n>]…`.
 
@@ -911,9 +911,10 @@ free-text key box. NaviCore pulls them off the mesh with `WCB_Client`'s
 ```
 
 `status` is a real answer, not an error: **0** OK, **1** NOTFOUND (no such key on that
-board), **2** TOOBIG (the stored value exceeds what one reply can carry). The target
-distinguishes these explicitly rather than answering with silence — silence is what makes
-the config-pull path unusable. The `value` is passed through verbatim: its `^`
+board), **2** TOOBIG (the value does not fit one mesh reply and the WCB's firmware predates
+values in parts; a current WCB sends it in parts, which `WCB_Client` 1.20.0 joins and
+delivers whole, so the answer is OK). The target distinguishes these explicitly rather than
+answering with silence. The `value` is passed through verbatim: its `^`
 delimiters and `***` comments are what the consumer renders, so nothing in the firmware
 may reformat it. It and the names are **JSON-escaped, never stripped**
 (`_seqAppendJsonEsc()`), so a value holding JSON — a `;L` command's body — parses back to
@@ -939,10 +940,10 @@ Four things about it are load-bearing:
   request in the tool and leaves the real one hanging. A request arriving while one is
   live gets `ok:false,"msg":"busy"`.
 - **Bodies one key at a time, on demand, never as a set.** A single value is bounded
-  (~1800 chars) but the whole set is not — pulling every body would recreate the failure
-  the WCB's own config pull already has, where the reply exceeds its chunk budget and the
-  target then sends *nothing*. `GET_WCB_SEQ` is therefore names-only, and a consumer
-  walks that list fetching what it actually needs.
+  (3,999 characters; one longer than one mesh reply comes in parts, about 0.8 s a part, and
+  the RC waits for it past its 6 s as for a paged names list) but the whole set is not.
+  `GET_WCB_SEQ` is therefore names-only, and a consumer walks that list fetching what it
+  actually needs.
 - **`wcb` and `key` must be in the filter whitelist.** `handleSerialInput()` parses the
   header with an ArduinoJson filter; an un-whitelisted field is stripped, so `wcb` reads
   as 0 ("wcb out of range") and `key` reads as empty ("key required").
@@ -1062,6 +1063,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-23 | — | Mesh results in parts (`WCB_Client` 1.20.0, now the compile-time minimum): `?MGMT,STATS` and `?MGMT,ETM,CHAR` through this board print a result too long for one mesh reply whole, a part at a time, where they printed the `[ERROR] Result too large to relay` text; `GET_WCB_SEQVAL` answers a value over one reply with status 0 and the whole value (status 2 TOOBIG only from a WCB whose firmware predates it). |
 | 2026-10-22 | — | `GET_WCB_SEQ`: `no reply` waits while `WCB_Client` is still reading a paged names list (1.19.0: a list over one 2,912-character mesh reply comes a page per request). Without that a list of more than about 7 pages read as `no reply` at 6 s and its `WCB_SEQ` was then dropped. |
 | 2026-10-22 | — | §1: a session not signed in 15 s after it opened is shut down (`WS_SIGNIN_MS`), matching the WCB's `ws://`; it had no limit, so a client that never signed in kept one of the three slots. |
 | 2026-10-21 | — | §1: the WebSocket login token (`wifiToken`) — `[AUTH:REQUIRED]` / `?AUTH,<token>` / `[AUTH:OK]` / `[AUTH:FAIL]` + CLOSE 1008, 1 s lockout, the protocol of a WCB's `ws://`; decided per line on the httpd task before the queue, answered there. §3: `?CHSYNC`, `?CHSYNC,SEARCH`, `?CHSYNC,MOVE,<ch>` (WCB_Client 1.19.0 channel sync), `?AUTH` a no-op off a socket, `#L11` ends with the channel-sync block. §4: a bridged `SET_CONFIG` also strips `wcbNetwork.region` and `wifiToken`; a bridged `GET_CONFIG` leaves `wifiToken` out. |

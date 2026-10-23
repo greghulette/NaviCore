@@ -2650,7 +2650,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">22.22:36.R.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">23.11:10.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10282,7 +10282,8 @@ function handleBoardMessage(line) {
   }
   // WCB_SEQVAL — ONE sequence's contents, answering our GET_WCB_SEQVAL. Async, same
   // as WCB_SEQ. status is a real answer, not an error: 1 = NOTFOUND (the key is gone
-  // from that board), 2 = TOOBIG (stored value exceeds what one reply can carry).
+  // from that board), 2 = TOOBIG (a value too long for one mesh reply, from a WCB whose
+  // firmware predates values in parts; a current one sends it whole, in parts).
   // Both are cached so the picker states them instead of re-asking every time.
   if (msg.type === 'WCB_SEQVAL') {
     const n = +msg.wcb || 0;
@@ -13855,6 +13856,11 @@ function _cmdlibEnum(id)    { return (ncCommandLibrary().enums || {})[id] || nul
 const NC_SEQ_SOURCE  = 'wcb.sequences';
 const NC_SEQ_MANUAL  = '-- type manually --';  // sentinel: spaces make it unusable as a real ?SEQ key
 const NC_SEQ_TIMEOUT = 8000;                   // backstop; the RC gives up at 6 s and answers ok:false
+// A sequence value too long for one mesh reply comes in parts (WCB_Client 1.20.0), about 0.8 s
+// a part, and Via WCB its 4 KB answer then goes back in ~26 bridge fragments 150 ms apart: the
+// RC waits for the parts past its 6 s, so the backstop for a value pull is longer too. Settled
+// sooner by the RC's own answer, ok or not.
+const NC_SEQVAL_TIMEOUT = 20000;
 // A names list too long for one mesh reply comes in pages (WCB_Client 1.19.0), about 0.8 s
 // each, and the RC waits for the last one past its 6 s: the largest store is ~11 pages.
 // Settled sooner by the RC's own answer, ok or not; this backstop only covers an RC that
@@ -13983,7 +13989,7 @@ function _wcbSeqValRequest(wcbNum, key) {
     };
     _wcbSeqValWaiters.push(finish);
     _wcbSeqValPending = id;
-    setTimeout(finish, NC_SEQ_TIMEOUT);
+    setTimeout(finish, NC_SEQVAL_TIMEOUT);
     sendJSON({ type: 'GET_WCB_SEQVAL', wcb: wcbNum, key }, /*silent=*/true).catch(() => finish());
   });
 }
@@ -14057,7 +14063,7 @@ function _wcbSeqDetailHtml(wcbNum, key, state) {
   const entry = _wcbSeqVal[wcbNum + '/' + key];
   if (!entry)                return note('No answer from WCB ' + wcbNum + ' — press ⟳ to retry.');
   if (entry.status === 1)    return note('WCB ' + wcbNum + ' no longer has a sequence called "' + key + '".');
-  if (entry.status === 2)    return note('Stored on WCB ' + wcbNum + ', but too large to read back in one reply.');
+  if (entry.status === 2)    return note('Stored on WCB ' + wcbNum + ', but too long for its firmware to send over the mesh — update that WCB to read it here.');
   const lines = _seqValueToLines(entry.value);
   if (!lines.length)         return note('Stored on WCB ' + wcbNum + ', but empty.');
   const alias = (wcbAliases && wcbAliases[wcbNum - 1]) ? ' · ' + wcbAliases[wcbNum - 1] : '';
