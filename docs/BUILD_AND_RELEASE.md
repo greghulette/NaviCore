@@ -197,7 +197,10 @@ the Pages deploy included, whatever the commits under it changed: GitHub reads `
 from the head commit of the push. Fast-forwarding `main` to a branch whose last commit is
 its auto-build (2026-10-22, chansync -> main) left production on the old tool. Run
 "Deploy Config Tool to Pages" by hand (`workflow_dispatch`, branch `main`), or push a commit
-after it: the pre-commit hook stamps `config_tool/index.html`, so any commit deploys.
+after it: the pre-commit hook stamps `config_tool/index.html`, so any commit deploys - as long
+as its own message does not contain the tag either. GitHub matches it anywhere in the head
+commit's message, so a commit that only *mentions* it (9dc1da2, describing this very trap)
+deploys nothing too.
 
 ---
 
