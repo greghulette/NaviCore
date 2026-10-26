@@ -374,12 +374,8 @@ as edited.
 
 ## 12. Changelog
 
-- **Actions in a lane per device (2026-10-25, config-tool only):** the editor's single Actions row becomes a lane
-  per device an action reaches, in the WCB Wizard's device colours, with the sequence an action runs drawn under
-  it, multi-select with Align / Space evenly, sticking and nudges, the command library docked beside the timeline,
-  and a clip built from nothing (＋ New clip, saved through the same EDITBEGIN / EDITEV / EDITEND). The model and the
-  wire are unchanged. Replay never applies an action's `delay` (`recCbDispatch` → `rcExecuteActionNow`), so the
-  popover no longer offers one. CONFIG_TOOL.md §7 has the detail.
+- **Undo covers an action drag and a popover delete (2026-10-25, config-tool only):** dragging an action and
+  deleting one from the action popover each push an undo step now; neither did.
 - **EDITBEGIN carries the clip mode (2026-10-04, `a754e76`, firmware + tool; reflash required):** `editBegin(mode)`
   makes `?REC,EDITBEGIN,<mode>` (1–3) the resident `_mode`. `editBegin()` used to leave `_mode` as it
   was, so every upload — a restore, a timeline save — was saved with the mode of whatever clip had
