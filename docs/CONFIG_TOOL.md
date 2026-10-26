@@ -750,6 +750,16 @@ reason; do not "fix" it by re-enabling the bridged pull.
 
 ## 9. Two extras worth knowing
 
+**A routing prefix typed into a command is its destination.** A wire-command row's WCB and
+Serial dropdowns take a `;W<n>;S<p>` (or `;W<n>,` / `;W<n>;<verb>`) a user types or pastes at
+the front of the command, and the field keeps the rest: `;w2;s3testing` becomes WCB 2 /
+Serial 3 and `testing`, stored as the `;W2;S3` broadcast those make, and `;W3,;M11` WCB 3 /
+auto-route and `;M11`, a unicast to WCB 3 (`adoptRoute` in `_appendCommandView()`). Left in
+the field, the dropdowns kept showing WCB 1 and the action went there, for WCB 1 to forward.
+It is taken when the field is left or on a paste, never mid-typing (`;w2;s` would read as
+`;s` to WCB 2), and a `^` chain is left as typed: its first prefix is not the whole chain's
+destination. A board past 20 or a port past 5 stays in the field.
+
 **The `^`-chain warning.** A wire-command row shows a red line when the command is a `^`
 chain, the destination is a single board, **and** at least one part starts with an
 implicitly-routed verb (`;M` `;L` `;H` `;A` `;D` `;C`/`;SEQ` — the `IMPLICIT_ROUTED` regex).
@@ -929,6 +939,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **A typed routing prefix is the destination** (§9): `;W<n>;S<p>` / `;W<n>,` / `;W<n>;` at the front of a wire command moves into the row's WCB and Serial dropdowns when the field is left or on a paste (`adoptRoute`); a chain stays as typed. |
 | 2026-10-26 | — | **⤢ Expand** (§7b): a button on the timeline's zoom bar widens the button / switch editor to the window (up to 1400 px, `#modal.at-wide`) and fits the view to it; ⤡ Shrink puts it back; remembered per browser (`nc_at_expanded`). |
 | 2026-10-26 | — | **The action timeline inline, the rows one line each** (§7b, design E of the "Action tiles" canvas): the timeline sits in the tier's card above its rows (`_atBind`) instead of a ⏱ window, with a zoom bar (− / +, Fit, presets, `_atSetView`), and is drawn from the rows: a dragged dot sets its row's delay and the row goes where it fires (`_arSettle`), a click opens its row, a double click adds one (and opens the library). Each row is a line (⋮⋮, number, time, device, what, note, ▶, ×) in its device's colour that opens to its fields (`buildActionRow`, `_arPaintTier`, `_arOpen`); ▶ Preview sits beside the name with ▶ Test, which runs the cursor. Gone: the window and its Apply, the step popover, the docked library, multi-select with Align and Space evenly, nudges and undo (the editor's Cancel drops its edits), the strip, and the position-coloured `#n` row tags. The button modal is 720 px wide. |
 | 2026-10-26 | — | **A board's limits hold** (§7b): the tool reads the `limits` a board's config ends with into `ncLimits()` (`applyConfig(data, fromBoard)`; 5 / 65535 / 8 when a board sends none) and holds the rows, the Delay spinner and the action timeline to them; Save refuses a config past them (`_ncOverLimits`). |

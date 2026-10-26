@@ -2724,7 +2724,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.23:56.R.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.07:29.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -16308,6 +16308,33 @@ function _appendCommandView(container, action) {
     };
     portSel.onchange = sync;
     sync();   // initialise the hidden inputs to match the shown dropdowns
+
+    // A routing prefix typed or pasted into the command is where it goes: ";W2;S3testing" puts WCB 2 / Serial 3 in
+    // the dropdowns and leaves "testing" in the field (stored as the ";W2;S3" broadcast those make), and ";W2,;M11"
+    // or ";W2;M11" WCB 2 / auto with ";M11" (a unicast to WCB 2). Left in the field, the dropdowns kept showing WCB 1
+    // and the action went there as a unicast, for WCB 1 to forward. Taken when the field is left (change) or on a
+    // paste, never mid-typing (";w2;s" would read as ";s" to WCB 2). A chain ("^") is left as typed: its first
+    // prefix is not the whole chain's destination.
+    const adoptRoute = () => {
+      const v = cmdInput.value || '';
+      if (v.includes('^')) return;
+      const m = /^;W(\d{1,2})(?:;S(\d)|,|(?=;))([\s\S]+)$/i.exec(v);
+      if (!m) return;
+      const w = +m[1], p = m[2] == null ? 'auto' : m[2];
+      if (w < 1 || w > 20 || (p !== 'auto' && +p > 5)) return;
+      const was = [wcbSel.innerHTML, wcbSel.value, portSel.innerHTML, portSel.value];
+      wcbSel.innerHTML = _wcbTargetOptionsHtml(String(w)); wcbSel.value = String(w);
+      portSel.innerHTML = _portOptionsHtml(String(w), p); portSel.value = p;
+      if (wcbSel.value !== String(w) || portSel.value !== p) {   // not a destination this row can show: as it was
+        wcbSel.innerHTML = was[0]; wcbSel.value = was[1]; portSel.innerHTML = was[2]; portSel.value = was[3];
+        return;
+      }
+      cmdInput.value = m[3];
+      sync();
+      cmdInput.oninput && cmdInput.oninput();   // the hint, the chain and length warnings
+    };
+    cmdInput.addEventListener('change', adoptRoute);
+    cmdInput.addEventListener('input', e => { if (e.inputType === 'insertFromPaste') adoptRoute(); });
 
     row1.appendChild(makeFieldGroup('WCB', wcbSel));
     row1.appendChild(makeFieldGroup('Serial', portSel));
