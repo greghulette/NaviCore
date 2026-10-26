@@ -128,7 +128,7 @@ would otherwise hit the unknown-name fallback and dump the user on **channels**.
 | Command library browser | `openCmdLibrary()` |
 | Clips library | `openClipsModal()` |
 | Timeline editor | `openTimelineEditor()` |
-| Action timeline (⏱ on a button tap or switch position) | `openActionTimeline()` |
+| Action timeline (inline in a button tap's or switch position's card) | `setActionTier()` / `setSwitchTier()` → `_atBind()` |
 | Cheat sheet | `openCheatSheet()` |
 | Calibration wizard | sends `CALIB` on/off to mute dispatch, reads values from `PWM_UPDATE` |
 
@@ -146,7 +146,7 @@ section (`ncShow`, `ncHide`, `ncOpenActionModal`, `ncCfgIndicator`, `ncModeChang
 
 | Surface | What moves | Hook |
 |---|---|---|
-| Action modal (`#modal`) | grows out of the clicked control (`.nc-zoom`), which pulses (`.nc-src`); shrinks back into it on close; Apply flashes it green (`.nc-saved`). Each tier (Single / Double / Triple tap / Long press; a switch's Down / Mid / Up) has its own colour (`--nc-tier`) on its tab, count, card and row stripes; a tier switch is a short cross-fade with a 10 px drift toward the side you moved, and `ncTierDir()` eases the container height (kept gentle on purpose — a bigger slide, 3D turn or per-row stagger read as jumpy). Action rows inside a tier are coloured and numbered by position (`--nc-row`, `#1`…`#5`) — step 1 in the tier's colour, the rest continuing round the palette (`--nc-r1`…`--nc-r5` per card) — so they recolour when ▲ Up / ▼ Down reorders them | `openModal` / `openSwitchModal` / `openKnobModal` → `ncOpenActionModal(sel)`; `closeModal`; `saveModalDispatch`; `setActionTier` / `setSwitchTier` → `ncTierDir` |
+| Action modal (`#modal`) | grows out of the clicked control (`.nc-zoom`), which pulses (`.nc-src`); shrinks back into it on close; Apply flashes it green (`.nc-saved`). Each tier (Single / Double / Triple tap / Long press; a switch's Down / Mid / Up) has its own colour (`--nc-tier`) on its tab, count, card and row stripes; a tier switch is a short cross-fade with a 10 px drift toward the side you moved, and `ncTierDir()` eases the container height (kept gentle on purpose — a bigger slide, 3D turn or per-row stagger read as jumpy). Action rows inside a tier are one line each, numbered on the line in the colour of the device the action reaches — the action timeline's colour (`--ar-c`, §7b) — so a row and its dot match | `openModal` / `openSwitchModal` / `openKnobModal` → `ncOpenActionModal(sel)`; `closeModal`; `saveModalDispatch`; `setActionTier` / `setSwitchTier` → `ncTierDir` |
 | Config window | unfolds down from the Config button (`.nc-drop`); one indicator slides to the active tab; each tab has its own colour (`--nc-tc`), copied to `.cfg-body` for the pane's title bar and headings; pane blocks rise in | `openHwSetup` / `closeHwSetup` / `setConfigTab` |
 | Connect | grows from the Connect button; picking a method flies it into the status light (`.nc-fly`), which spins (`.connecting`) until `setConnected()` rewrites its class; green burst on link | `openConnectModal` / `closeConnectModal(toDot)` / `connectDirect` / `connectViaWcbOpt` |
 | Other overlays | fade + pop in, fade out (meshstats, clips, timeline, timeline action, command library, calibration) | `ncShow` / `ncHide` |
@@ -207,7 +207,7 @@ Where to look when changing a given area:
 | Smoothing | `renderSmoothingPane()`, `_smoothProfiles()` |
 | Clips | `clipsRefresh()`, `_clipListFeed()`, `renderClips()`, `clipRename()`, `clipDelete()` |
 | Timeline editor | everything prefixed `_tl*` |
-| Action timeline (§7b) | `openActionTimeline()`, `applyActionTimeline()`, everything prefixed `_at*` / `AT_*`; the tier strip `_atStripRender()`; the tier test `_testTierActions()` |
+| Action timeline (§7b) | `_atBind()` / `_atUnbind()`, everything prefixed `_at*` / `AT_*`; the rows' lines `buildActionRow()`, `_arPaintTier()`, `_arOpen()`, `_arSettle()`; the tier test `_testTierActions()` |
 | Fragmentation (receive) | fragment envelope handling in `handleBoardMessage()`, `_fragProgress()` |
 | Bulk push | `_bulk*` family |
 | Flashing | `flasher.js` → `flashFirmware(port, callbacks)` |
@@ -602,14 +602,15 @@ Maestro **script source**.
 
 ## 7b. Action timeline (buttons and switches)
 
-**⏱ Timeline** on a button tap (single, double, triple, long press) or a switch position
-opens that tier's actions on a timeline (`openActionTimeline`), the way the WCB Wizard's
-Sequence Builder opens a stored sequence (WCB `docs/SEQUENCE_BUILDER.md` §5). Each action
-sits at its **delay**. **Apply** (`applyActionTimeline`) writes the actions back into the
-tier's rows in time order (actions at one time in the timeline's order), each with its time
-as its delay; the button's own Apply then saves them as before. A **timing strip** under
-each tier's Action Name (`_atStripRender`) shows the same dots; clicking it opens the
-timeline too. It is re-drawn 150 ms after the rows change.
+A button tap's (single, double, triple, long press) or a switch position's actions are drawn
+on a timeline **inline in its card, above its rows**, the way the WCB Wizard's Sequence
+Builder draws a stored sequence (WCB `docs/SEQUENCE_BUILDER.md` §5): a lane per device, each
+action at its **delay**. It is design E of the "Action tiles" canvas: a zoomable timeline over
+the tier's actions, one line each. One timeline block (`#at-inline`, `_atInlineEl`) moves into
+whichever tier's card shows (`_atBind`, from `setActionTier` / `setSwitchTier`); closing the
+editor takes it out (`_atUnbind`). It is drawn from the rows (`_atSync`: a complete row is an
+event at its delay, its id the row's `ai`), so there is no copy to apply: what it shows is what
+the button's Apply saves.
 
 **What a delay means, from the firmware.** `rcDispatch` hands every action of a tier to
 `rcExecuteAction`, which schedules it `delayMs` after the **press** (`scheduleAction`), so an
@@ -620,20 +621,33 @@ switch position. A tier holds `RC_ACTIONS_PER_TIER` (10) actions (`MAX_ACTIONS_P
 delay runs to `RC_MAX_DELAY_MS` — 30 min (`AT_DELAY_MAX`; the board clamps a longer one to it),
 and the board holds `PENDING_ACTION_SLOTS` (32) delayed actions at once (`AT_PENDING_MAX`),
 shared by every button and switch, dropping — never firing early — one past that. Times show in
-seconds under a minute and `m:ss` past it (`_atFmtT`, `_atFmtShort`); zoom goes out to the whole
-30 min (`AT_PX_MIN`). The tier's **▶ Test** follows the same rule (`_testTierActions`): it used to wait each
-delay in turn, so two actions at 1000 ms fired at 1 s and 2 s instead of together.
+seconds under a minute and `m:ss` past it (`_atFmtT`, `_atFmtShort`, the lines' `_arFmtTime`).
+The tier's **▶ Test** follows the same rule (`_testTierActions`): it used to wait each delay in
+turn, so two actions at 1000 ms fired at 1 s and 2 s instead of together.
 
 **Those are this tool's maxima; a connected board's own hold.** The tool is published to Pages
 ahead of any board's flash, so a board a version behind is normal. Every config a board sends ends
 with its `limits` (CONFIG_SCHEMA.md §4), which `applyConfig(data, /*fromBoard=*/true)` reads into
 `ncLimits()`; a board that sends none runs firmware from before them and stores 5 actions a tier, a
 16-bit delay (one past 65535 ms wraps) and 8 slots, with the queue overflow firing at once
-(`NC_LEGACY_LIMITS`). The rows' + Add action, the Delay spinner, the timeline's count, its steps and
-its warnings all hold to `ncLimits()`, and **Save** (`saveConfigToBoard`) refuses, naming each tier,
-a config holding more than the board stores (`_ncOverLimits`), so nothing is cut without a word.
-With no board's config yet, the tool's own maxima apply.
+(`NC_LEGACY_LIMITS`). The rows' + Add action, the Delay spinner, the timeline's double click, its
+zoom and its warnings all hold to `ncLimits()`, and **Save** (`saveConfigToBoard`) refuses, naming
+each tier, a config holding more than the board stores (`_ncOverLimits`), so nothing is cut
+without a word. With no board's config yet, the tool's own maxima apply.
 
+- **The rows are one line each** (`buildActionRow`): ⋮⋮ (drag to reorder, `_arStartReorder`), the
+  number and the time in the colour of the device the action reaches (`--ar-c`, the timeline's),
+  that device, what it does and its note (`_arPaintTier`, the timeline's lane and label), ▶ (test
+  it) and × (remove). A click on the line opens its fields below it — the same fields as before,
+  with the delay ("Delay after press") and the note, ▲ / ▼ and Done; one row is open at a time,
+  and its dot is ringed. Rows loaded from a config start folded; a new or blank row starts open.
+  The fields keep their ids (`type-` / `fields-` / `delay-` / `note-<tier>-<ai>`), which
+  `readActionFromUI` and Save read, open or not. A row with no command yet reads "no command
+  yet": it is not on the timeline, and Save leaves it out (said under the timeline).
+- **The list keeps the order the user made** (actions due at one time fire in it). Where the
+  user changed a time — a dot dragged, a delay typed and the row closed — that row goes where it
+  fires: before the first row due after it, so after those already at its time (`_arSettle`).
+  A row only opened and closed stays where it is, so its tier saves as it was.
 - **A lane per device an action reaches**, named with where it goes (`_atLaneOf`). A device
   string the library knows (`;W<n>;S<p><text>`, `;S<p><text>`, a local serial write) goes in
   its device's lane, "FlthyHPs Holoprojectors / WCB 2 · Serial 1", so two devices on one port
@@ -650,46 +664,47 @@ With no board's config yet, the tool's own maxima apply.
 - **Colour is the device, the same as in the Wizard.** The eight colours are seq-builder.css's
   (`--at-c1..8`, both themes, validated with the dataviz skill's `validate_palette.js` on this
   timeline's surface) and `AT_BOARD_SLOT` is its `SB_BOARD_SLOT` plus NaviCore's own boards;
-  `tests/wizard/unit/seq_builder.test.js` in the WCB repo holds both equal. Colours are given
-  over everything on screen at once (`_atAssignColors`): lanes whose board has a home colour
-  pick first, in order of first appearance, then the rest take the first free one. So a
-  device wears its home colour on whichever tap's timeline it is drawn, and a port no device is
-  known on cannot take Maestro's blue by coming first (the Wizard picks strictly by
-  appearance). No two lanes share a colour; a ninth is grey; every lane and step is labelled.
+  `tests/wizard/unit/seq_builder.test.js` in the WCB repo holds both equal. The editor gives
+  colours out once for all its tiers (`_atColors`, reset when an editor opens, `_atReset`), so a
+  device keeps its colour from tab to tab: lanes whose board has a home colour pick first, in the
+  order they first fire, then the rest take the first free one (`_atAssignColors`). So a device
+  wears its home colour, and a port no device is known on cannot take Maestro's blue by coming
+  first (the Wizard picks strictly by appearance). No two lanes share a colour; a ninth is grey;
+  every lane, step and line is labelled.
 - **The taps that fire with this one** are drawn above it, read only, from their rows as they
-  stand (`_atWithTiers`): a double tap shows "Single tap · fires with it". Their steps are
-  something a moved step sticks to, and count toward the pending-slot warning.
+  stand (`_atWithTiers`): a double tap shows "Single tap · fires with it", and Exclusive on takes
+  it away. Their steps are something a moved step sticks to, and count toward the pending-slot
+  warning.
 - **The sequence an action runs is drawn under it.** An action carrying `;C<key>` or
   `;SEQ<key>` gets a row: the stored sequence's steps where they land (the action's delay plus
   each step's, `_atSeqSteps` following the WCB's `;T`/`;t` timing), in their devices' colours,
   its run hatched. Its body comes from the `GET_WCB_SEQVAL` pull the library's sequence field
-  uses (`_atFetchRefs`, one at a time, each asked once while the timeline is open), from the
+  uses (`_atFetchRefs`, one at a time, each asked once while the editor is open), from the
   board the action goes to, or for a broadcast the first board whose pulled list has the key.
-- **Editing.** Drag a step to change its delay; it sticks to another step, a step of a tap
-  firing with it, a sequence's step, the cursor or 0 within 8 px, with a dashed guide
-  (`_atSnap`); Alt places it to the ms; it never goes under 0 or over `AT_DELAY_MAX` (30 min). ←/→ nudge the
-  selection 10 ms (Shift 100, Alt 1). Shift-click selects several: dragging one moves them all,
-  Delete removes them all, **Align** puts them at the first's, the last's or the cursor's time
-  (at one time, the set placed in the list where its first was, in its order: the order they
-  fire), and with three or more **Space evenly** keeps the ends and evens the middle. Undo and
-  Redo hold one step per change. A click on a step opens its editor (`_atOpenStep`: the row's
-  fields, its time in place of its delay); a click on a lane's empty space starts an action of
-  that lane's kind; the tier's tenth action is its last.
-- **The command library is docked beside the timeline** (📚 Library, shown or hidden per
-  browser, `nc_at_lib_open`). Clicking a command adds it at the cursor, dragging it onto the
-  timeline adds it where it is dropped; a command with fields opens the picker's composer
-  first, whose button says where it lands (`_atLibPick`; the picker's row is `AT_LIB_FID`).
-  Where it is sent is what a new action row would get (`_cmdlibResolveAction`, split out of
-  `_cmdlibUse`): a device's WDP label on a WCB port, its configured home, else WCB 1. The
-  step's lane shows it.
-- **Warnings** (`_atProblems`), errors blocking Apply: a delay over 30 min (error); a press
-  that queues more than 32 delayed actions with the taps that fire with it (warn); two timed
-  sequences on one WCB overlapping, since a WCB runs one timed chain at a time and the second
-  replaces the first (warn); clip controls, which ▶ Test skips (info). An incomplete row (no
-  command yet) is not on the timeline, and Apply leaves it out, as Save would.
-- **▶ Preview** plays the cursor in the browser and lights each action as it passes; nothing
-  goes to the droid. **▶ Test** fires the timeline as it stands, before Apply, through
-  `_testTierActions`, the cursor running alongside.
+- **Editing on the timeline.** Drag a dot to change its row's delay; it sticks to another dot,
+  a step of a tap firing with it, a sequence's step or 0 within 8 px, with a dashed guide
+  (`_atSnap`); Alt places it to the ms; it never goes under 0 or past the board's longest delay
+  (`_atStartDrag`). A click on a dot opens its row; a right-click removes it. A **double click**
+  on empty space adds an action there (`_atAddAt`): of the lane's kind on a lane (an MP3 action
+  on the MP3 lane), any kind on the "＋ Action" row; it opens, and a command one opens the command
+  library at once, routed as a new action row would be (`_cmdlibResolveAction`: a device's WDP
+  label on a WCB port, its configured home, else WCB 1). A blank row the tier already has is used
+  instead of adding another; a tier that holds what the board stores refuses, said under the
+  timeline.
+- **The zoom bar.** The view is a span of time across the track (`_atSetView`): − / + step
+  through `AT_ZOOMS` (1 s … 30 min), the presets jump to 2 s, 10 s, 1 m, 5 m or 30 m (those past
+  the board's longest delay hidden), **Fit** shows every dot and sequence step, and Ctrl+scroll
+  zooms at the pointer. The readout says the view and the board's longest delay; a red line marks
+  that delay where the view reaches it. The view opens fitted. A wide SVG draws its grid near what
+  shows, re-drawn as it scrolls.
+- **Warnings** (`_atProblems`), under the timeline: a delay past the board's longest (error,
+  until the row's delay is changed; Save refuses it); a press that queues more delayed actions
+  than the board's slots with the taps that fire with it (warn); two timed sequences on one WCB
+  overlapping, since a WCB runs one timed chain at a time and the second replaces the first
+  (warn); clip controls, which ▶ Test skips (info).
+- **▶ Preview** beside the tier's name plays the cursor in the browser and lights each action
+  as it passes (`_atPreview`, `_atRunCursor`); nothing goes to the droid. **▶ Test** fires the
+  rows as they stand through `_testTierActions`, the cursor running alongside.
 
 ## 8. Persistence in the browser
 
@@ -911,6 +926,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **The action timeline inline, the rows one line each** (§7b, design E of the "Action tiles" canvas): the timeline sits in the tier's card above its rows (`_atBind`) instead of a ⏱ window, with a zoom bar (− / +, Fit, presets, `_atSetView`), and is drawn from the rows: a dragged dot sets its row's delay and the row goes where it fires (`_arSettle`), a click opens its row, a double click adds one (and opens the library). Each row is a line (⋮⋮, number, time, device, what, note, ▶, ×) in its device's colour that opens to its fields (`buildActionRow`, `_arPaintTier`, `_arOpen`); ▶ Preview sits beside the name with ▶ Test, which runs the cursor. Gone: the window and its Apply, the step popover, the docked library, multi-select with Align and Space evenly, nudges and undo (the editor's Cancel drops its edits), the strip, and the position-coloured `#n` row tags. The button modal is 720 px wide. |
 | 2026-10-26 | — | **A board's limits hold** (§7b): the tool reads the `limits` a board's config ends with into `ncLimits()` (`applyConfig(data, fromBoard)`; 5 / 65535 / 8 when a board sends none) and holds the rows, the Delay spinner and the action timeline to them; Save refuses a config past them (`_ncOverLimits`). |
 | 2026-10-26 | — | **Longer delays, more actions** (§7b): `MAX_ACTIONS_PER_TIER` 5 → 10, `AT_DELAY_MAX` 65535 → 1 800 000 ms (30 min; also the Delay spinner's and the step editor's max), `AT_PENDING_MAX` 8 → 32, with the firmware's pairs. The action timeline zooms out to the whole 30 min (`AT_PX_MIN`) and shows times past a minute as `m:ss`. |
 | 2026-10-26 | — | **Light theme readable**: the action modal's hard-coded dark elevation ramp (`#modal` base, header/footer, `.tier-card`, `.action-row`) gets a light counterpart under `.theme-light` — it stayed dark while its text turned dark. The terminal stays a dark console in both themes and re-declares the dark tokens so its input and chips match. Light `--faint` darkened to `#6b7585` (was 3:1 on white). |

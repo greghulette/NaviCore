@@ -504,7 +504,7 @@
   .cmdlib-board[open] > summary .cmdlib-caret { transform: rotate(90deg); }
   .cmdlib-caret { display: inline-block; transition: transform .12s; }
 
-  /* Action timeline (⏱ on a button tap or switch position). A colour per device: the WCB Wizard's eight
+  /* Action timeline (a button tap's or switch position's actions, inline in its card). A colour per device: the WCB Wizard's eight
      (seq-builder.css --sb-c1..8), in its order, both themes, so a device wears one colour in both tools (AT_BOARD_SLOT).
      Validated with the dataviz skill's validate_palette.js on this timeline's own surface (--field): dark #141b26
      passes every check; light #ffffff passes all but contrast, where slots 3, 4 and 5 sit under 3:1 - every lane and
@@ -519,39 +519,61 @@
     --at-c5: #e87ba4; --at-c6: #008300; --at-c7: #6250d6; --at-c8: #e34948;
     --at-cx: #7a8494;
   }
-  .at-window { max-width: 1240px; width: 96%; }
+  /* The timeline itself, inline in the tap's or position's card above its actions (design E of the "Action tiles"
+     canvas): the zoom bar, the lanes, the hint and the warnings. One block, moved into whichever card shows (_atBind). */
+  .at-inline { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 10px; }
+  .at-zbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .at-zb { min-width: 30px; height: 28px; padding: 0 9px; border-radius: 6px; border: 1px solid var(--border);
+           background: transparent; color: var(--text); font-family: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+  .at-zb:hover:not(:disabled) { border-color: var(--accent); }
+  .at-zb:disabled { opacity: .35; cursor: default; }
+  .at-zr { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: 4px; }
+  .at-zsp { flex: 1; }
+  .at-pre { height: 24px; padding: 0 8px; border-radius: 12px; border: 1px solid var(--border); background: transparent;
+            color: var(--muted); font-family: var(--mono); font-size: 10px; cursor: pointer; }
+  .at-pre:hover { color: var(--text); }
+  .at-pre.on { border-color: var(--accent); color: var(--accent); background: rgba(43,134,255,.12); }
+  .at-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--field); }
+  #at-svg { display: block; }
   #at-svg .at-ev-hit { touch-action: none; }
+  .at-hint, .at-status { font-size: 11px; color: var(--muted); }
+  .at-status:empty, .at-warn:empty { display: none; }
   .at-warn > div { font-size: 12px; }
   .at-warn-error { color: var(--red); }
   .at-warn-warn  { color: var(--yellow); }
   .at-warn-info  { color: var(--muted); }
-  /* The timing strip under a tier's name (_atStripRender). */
-  .at-strip { margin-top: 6px; cursor: pointer; border-radius: 6px; }
-  .at-strip:hover { background: var(--hover); }
-  .at-strip.empty { display: none; }
-  .at-strip svg { display: block; width: 100%; height: 26px; }
-  /* The command library docked beside the timeline (_atLibRender): each board on its home colour, edges only. */
-  .at-lib { flex: 0 0 270px; display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border);
-            border-radius: 8px; background: var(--surface-2); padding: 8px; box-sizing: border-box; }
-  .at-lib[hidden] { display: none; }
-  .at-lib input[type=search] { width: 100%; box-sizing: border-box; }
-  .at-lib-list { max-height: 440px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-  .at-lib-list details > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
-            padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
-            font-size: 12px; user-select: none; }
-  .at-lib-list details > summary::-webkit-details-marker { display: none; }
-  .at-lib-list details > summary::marker { content: ''; }
-  .at-lib-board > summary { border-left: 3px solid var(--at-col) !important; }
-  .at-lib-bn { flex: 1; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .at-lib-n { font-size: 10px; color: var(--muted); }
-  .at-lib-sw { flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--at-col); }
-  .at-lib-inner { padding: 4px 0 2px 8px; display: flex; flex-direction: column; gap: 4px; }
-  .at-lib-cmd { margin: 3px 0 0 6px; padding: 4px 7px; border: 1px solid var(--border); border-left: 3px solid var(--at-col);
-            border-radius: 6px; background: var(--card); cursor: grab; font-size: 12px; }
-  .at-lib-cmd:hover { border-color: var(--accent); border-left-color: var(--at-col); }
-  .at-lib-cn { font-weight: 600; }
-  .at-lib-ct { font-family: var(--mono); font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .at-lib-foot, .at-lib-empty { font-size: 11px; color: var(--muted); }
+  /* A tier's actions, one line each (buildActionRow): grip, number and time, the device it reaches in its colour
+     (--ar-c, the timeline's), what it does and its note, ▶ and ×. A click opens its fields below the line. */
+  .action-row.ar { display: block; padding: 0; border-left-width: 1px; }
+  .action-row.ar.open { border-color: var(--ar-c, var(--accent)); box-shadow: 0 0 0 1px var(--ar-c, var(--accent)) inset; }
+  .action-row.ar.dragging { opacity: .6; }
+  .ar-line { display: grid; grid-template-columns: 16px 24px 78px minmax(0, 132px) minmax(0, 1fr) auto; align-items: center;
+             gap: 10px; min-height: 42px; padding: 0 8px 0 6px; cursor: pointer; border-radius: 8px; }
+  .ar-line:hover { background: var(--hover); }
+  .ar-grip { color: var(--muted); font-size: 12px; letter-spacing: -2px; text-align: center; cursor: grab; user-select: none; touch-action: none; }
+  .ar-num { width: 22px; height: 22px; border-radius: 50%; background: var(--ar-c, var(--at-cx)); color: #fff; font-size: 11px;
+            font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .ar-time { font-family: var(--mono); font-size: 12px; background: var(--field); border: 1px solid var(--border); border-radius: 6px;
+             height: 26px; display: flex; align-items: center; justify-content: center; white-space: nowrap; }
+  .ar-dev { height: 22px; max-width: 100%; box-sizing: border-box; border-radius: 11px; padding: 0 9px; font-size: 11px; font-weight: 700;
+            display: inline-block; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; justify-self: start;
+            background: color-mix(in srgb, var(--ar-c, var(--at-cx)) 18%, transparent); color: var(--ar-c, var(--at-cx));
+            border: 1px solid color-mix(in srgb, var(--ar-c, var(--at-cx)) 45%, transparent); }
+  body:not(.theme-light) .ar-dev { color: color-mix(in srgb, var(--ar-c, var(--at-cx)) 62%, #fff); }
+  body.theme-light .ar-dev { color: color-mix(in srgb, var(--ar-c, var(--at-cx)) 75%, #000); }
+  .ar-what { min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
+  .ar-cmd { font-family: var(--mono); font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ar-blank .ar-cmd { font-family: inherit; color: var(--muted); font-style: italic; }
+  .ar-note { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ar-acts { display: flex; gap: 4px; }
+  .ar-acts .btn-test-action, .ar-acts .btn-remove-action { width: 28px; height: 28px; padding: 0; margin: 0; border-radius: 6px;
+            display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  .ar-edit { display: none; flex-direction: column; gap: 10px; padding: 10px 12px 12px 32px; border-top: 1px solid var(--line-2); }
+  .action-row.ar.open .ar-edit { display: flex; }
+  .ar-edit > div[id^="fields-"] { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end; }
+  .ar-edit-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .ar-delay-read { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .ar-edit-ctrls { margin-left: auto; display: flex; gap: 6px; align-items: center; }
 
   /* ─── Configuration modal — tabbed layout with visual contrast ───────
      The default .modal background (--surface = #161616) matches the page
@@ -1243,28 +1265,12 @@
   #modal .tier-card { border-left: 3px solid var(--nc-tier, #384662);
     animation: ncCardF .26s cubic-bezier(.25,.1,.25,1) both; }
   #tiers-container[data-nc-dir="back"] .tier-card { animation-name: ncCardB; }
-  /* Rows inside a tier each get their own colour by position plus a numbered tag,
-     so a sequence of similar rows reads as separate steps. Step 1 takes the
-     tier's own colour; the rest continue round the palette from there
-     (blue → purple → teal → orange → gold → pink → …, repeating every 5; MAX_ACTIONS_PER_TIER is 10),
-     set per card as --nc-r1…--nc-r5. Position-based on purpose: the colour and
-     number track the step's place in the order, so ▲ Up / ▼ Down recolour it. */
-  #tier-card-1, #tier-card-p0 { --nc-r1: #5cb0ff; --nc-r2: #c98ae8; --nc-r3: #2fc4b1; --nc-r4: #ff8f5c; --nc-r5: #e0b341; }
-  #tier-card-2, #tier-card-p1 { --nc-r1: #c98ae8; --nc-r2: #2fc4b1; --nc-r3: #ff8f5c; --nc-r4: #e0b341; --nc-r5: #ef6fa8; }
-  #tier-card-3, #tier-card-p2 { --nc-r1: #2fc4b1; --nc-r2: #ff8f5c; --nc-r3: #e0b341; --nc-r4: #ef6fa8; --nc-r5: #5cb0ff; }
-  #tier-card-4               { --nc-r1: #ff8f5c; --nc-r2: #e0b341; --nc-r3: #ef6fa8; --nc-r4: #5cb0ff; --nc-r5: #c98ae8; }
-  #modal .rows-container { counter-reset: nc-step; gap: 16px; padding-top: 6px; }
-  #modal .rows-container > .action-row { --nc-row: var(--nc-r1, #5cb0ff); position: relative; counter-increment: nc-step;
-    border-left-color: var(--nc-row);
-    background: color-mix(in srgb, var(--nc-row) 7%, #35435a); }
-  #modal .rows-container > .action-row:nth-child(5n+2) { --nc-row: var(--nc-r2, #c98ae8); }
-  #modal .rows-container > .action-row:nth-child(5n+3) { --nc-row: var(--nc-r3, #2fc4b1); }
-  #modal .rows-container > .action-row:nth-child(5n+4) { --nc-row: var(--nc-r4, #e0b341); }
-  #modal .rows-container > .action-row:nth-child(5n+5) { --nc-row: var(--nc-r5, #ef6fa8); }
-  #modal .rows-container > .action-row::before { content: '#' counter(nc-step); position: absolute; top: -9px; left: 10px;
-    padding: 1px 7px; border-radius: 8px; font-size: 10px; font-weight: 700; letter-spacing: .04em;
-    background: var(--nc-row); color: #0c1119; pointer-events: none; }
-  body.theme-light #modal .rows-container > .action-row { background: color-mix(in srgb, var(--nc-row) 8%, var(--surface-2)); }
+  /* Rows inside a tier: one line each (.ar, buildActionRow), numbered on the line in the colour of the device the
+     action reaches — the timeline's colour (--ar-c) — so a row and its dot match. A neutral panel; the open one is
+     ringed in its colour. */
+  #modal .rows-container { gap: 6px; }
+  #modal .rows-container > .action-row.ar { background: var(--surface-2); }
+  body.theme-light #modal .rows-container > .action-row.ar { background: #ffffff; }
   @keyframes ncCardF { from { opacity: 0; transform: translateX(10px); } }
   @keyframes ncCardB { from { opacity: 0; transform: translateX(-10px); } }
   #modal .modal-header .btn-ghost { transition: transform .3s, color .15s, border-color .15s; }
@@ -2716,7 +2722,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.21:12.R.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.23:08.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -3764,7 +3770,7 @@
 
 <!-- ── Button Config Modal ── -->
 <div class="modal-overlay" id="modal">
-  <div class="modal" style="background-color: #232d3e; width: 640px">
+  <div class="modal" style="background-color: #232d3e; width: min(720px, 96vw)">
     <div class="modal-header">
       <span id="modal-title" class="modal-title"></span>
       <div id="modal-mode-badges"></div>
@@ -3782,98 +3788,6 @@
       <button class="btn btn-ghost"   onclick="closeModal()">Cancel</button>
       <button class="btn btn-success" onclick="saveModalDispatch()"
               title="Apply this mapping and save the full config to the board (same as the Config window's Save). Updates the page only if not connected.">Apply</button>
-    </div>
-  </div>
-</div>
-
-<!-- ── Action timeline — one button tap's or switch position's actions in time ──────
-     ⏱ Timeline on a tier opens it (openActionTimeline): a lane per device, each action at its
-     delay after the press, the command library docked beside it. Apply writes the delays back
-     into the tier's rows. Over the button/switch editor (#modal, z 200); its step popover and the
-     library picker (#cmdlib-modal, z 220) sit over it. See the "Action timeline" JS section. -->
-<div class="modal-overlay" id="at-modal" style="z-index:205">
-  <div class="modal at-window">
-    <div class="modal-header">
-      <span class="modal-title" id="at-title">⏱ Timeline</span>
-      <div style="flex:1"></div>
-      <span id="at-count" style="font-size:12px;color:var(--muted);margin-right:10px"></span>
-      <button class="btn btn-ghost" id="at-close" type="button" style="padding:4px 10px">✕</button>
-    </div>
-    <div style="padding:12px 16px;display:flex;flex-direction:column;gap:8px">
-      <div class="wcb-send-row" style="flex-wrap:wrap;gap:8px">
-        <button class="btn btn-ghost" id="at-zoom-out" type="button" style="padding:3px 10px" title="Zoom out">−</button>
-        <button class="btn btn-ghost" id="at-zoom-in" type="button" style="padding:3px 10px" title="Zoom in. Ctrl+scroll over the timeline zooms at the pointer.">+</button>
-        <button class="btn btn-ghost" id="at-zoom-fit" type="button" style="padding:3px 10px" title="Fit everything in the view">⤢ Fit</button>
-        <span style="width:1px;align-self:stretch;background:var(--border)"></span>
-        <button class="btn btn-ghost" id="at-undo" type="button" style="padding:3px 10px" title="Undo (Ctrl+Z)" disabled>↶ Undo</button>
-        <button class="btn btn-ghost" id="at-redo" type="button" style="padding:3px 10px" title="Redo (Ctrl+Shift+Z)" disabled>↷ Redo</button>
-        <span style="width:1px;align-self:stretch;background:var(--border)"></span>
-        <button class="btn btn-ghost" id="at-preview" type="button" style="padding:3px 10px" title="Play the cursor through the timeline in the browser, lighting each action as it passes. Nothing goes to the droid.">▶ Preview</button>
-        <button class="btn btn-ghost" id="at-test" type="button" style="padding:3px 10px" title="Fire these actions on the connected NaviCore the way a press fires them (each at its delay), before applying. Does not save.">▶ Test</button>
-        <span style="width:1px;align-self:stretch;background:var(--border)"></span>
-        <button class="btn btn-ghost" id="at-add" type="button" style="padding:3px 10px" title="Add an action at the cursor">+ Action</button>
-        <button class="btn btn-ghost" id="at-lib-btn" type="button" style="padding:3px 10px" title="Show or hide the command library: click a command to add it at the cursor, or drag it onto the timeline">📚 Library</button>
-        <div id="at-multi" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
-          <span id="at-multi-count"></span> · Align:
-          <button class="btn btn-ghost" id="at-align-first" type="button" style="padding:3px 8px" title="Put the selected actions at the first one's time">First</button>
-          <button class="btn btn-ghost" id="at-align-last" type="button" style="padding:3px 8px" title="Put the selected actions at the last one's time">Last</button>
-          <button class="btn btn-ghost" id="at-align-cursor" type="button" style="padding:3px 8px" title="Put the selected actions at the cursor">Cursor</button>
-          <button class="btn btn-ghost" id="at-spread" type="button" style="padding:3px 8px" title="Keep the first and last selected actions and space the ones between equally (three or more)">Space evenly</button>
-        </div>
-        <button class="btn btn-danger" id="at-delete" type="button" style="display:none;padding:3px 10px">🗑 Delete selected</button>
-      </div>
-      <div id="at-readout" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
-      <div style="display:flex;gap:10px;align-items:flex-start">
-        <div id="at-scroll" style="flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;border:1px solid var(--border);border-radius:8px;background:var(--field)">
-          <svg id="at-svg" xmlns="http://www.w3.org/2000/svg"></svg>
-        </div>
-        <div id="at-libpanel" class="at-lib" hidden>
-          <input type="search" id="at-lib-search" placeholder="Search commands…" autocomplete="off">
-          <div id="at-lib-list" class="at-lib-list"></div>
-          <div class="at-lib-foot">Click a command to add it at the cursor, or drag it onto the timeline.</div>
-        </div>
-      </div>
-      <div id="at-warn" class="at-warn"></div>
-      <div id="at-status" style="font-size:12px;color:var(--muted);min-height:16px"></div>
-      <div style="font-size:11px;color:var(--muted)">
-        Each action sits in a lane for the device it reaches, at its <b>delay after the press</b> — every action counts
-        from the press, not from the one before it — and fires at its dot · drag a step to change its delay; it sticks
-        to the steps and cursor near it (Alt: to the ms); ←/→ nudge it 10 ms (Shift 100, Alt 1); click it to edit,
-        right-click to delete · Shift-click to select several, then <b>Align</b> or <b>Space evenly</b> · <b>📚 Library</b>:
-        click a command to add it at the cursor, or drag it in · a tap that fires with this one (not exclusive) is drawn
-        above, and a stored sequence an action runs under it · <b>Apply</b> writes the delays into the rows, in time order.
-      </div>
-      <div class="wcb-send-row" style="justify-content:flex-end;gap:8px">
-        <button class="btn btn-ghost" id="at-cancel" type="button">Cancel</button>
-        <button class="btn btn-success" id="at-apply" type="button" title="Write these actions and delays into the tier's rows (in time order). The button's own Apply saves them.">Apply</button>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ── Action timeline: one step's editor — the same fields as a tier row
-     (appendActionFields / readActionFromFid), its time in place of its delay. -->
-<div class="modal-overlay" id="at-step-modal" style="z-index:212">
-  <div class="modal" style="max-width:560px;width:92%">
-    <div class="modal-header">
-      <span class="modal-title" id="at-step-title">Action</span>
-      <button class="btn btn-ghost" id="at-step-close" type="button" style="padding:4px 10px">✕</button>
-    </div>
-    <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px">
-      <div class="wcb-send-row">
-        <label>Type:</label>
-        <select id="at-step-type" style="min-width:160px"></select>
-        <label style="margin-left:10px" title="The action's delay: when it fires after the press">At (ms after the press):</label>
-        <input type="number" id="at-step-time" min="0" max="1800000" step="10" style="width:90px">
-      </div>
-      <div class="action-row" id="at-step-fields"></div>
-      <div class="wcb-send-row">
-        <label>Note:</label><input type="text" id="at-step-note" maxlength="19" style="width:160px">
-      </div>
-      <div class="wcb-send-row" style="justify-content:flex-end">
-        <button class="btn btn-danger" id="at-step-delete" type="button" style="display:none">🗑 Delete</button>
-        <button class="btn btn-blue" id="at-step-apply" type="button">✓ Apply</button>
-      </div>
     </div>
   </div>
 </div>
@@ -13024,6 +12938,7 @@ function openModal(btn) {
 
   document.getElementById('modal-exclusive').checked = !!m.exclusive;
 
+  _atReset();   // no timeline from the last editor, and fresh device colours
   const container = document.getElementById('tiers-container');
   container.innerHTML = '';
 
@@ -13111,6 +13026,7 @@ function openModal(btn) {
   setActionTier(1);   // start on single-tap
 
   ncOpenActionModal(`.btn-zone[data-btn="${btn}"]`);
+  _atRefitSoon();
 }
 
 // Show one tap-tier's card; hide the others; highlight its tab.
@@ -13123,6 +13039,7 @@ function setActionTier(tier) {
     const card = document.getElementById(`tier-card-${t}`);
     if (card) card.style.display = (t === tier) ? '' : 'none';
   }
+  _atBind(tier);   // the timeline moves into the card that shows
 }
 
 const MAX_ACTIONS_PER_TIER = 10;   // = rc_config.h RC_ACTIONS_PER_TIER (CONFIG_SCHEMA.md §6)
@@ -13169,53 +13086,50 @@ function _ncOverLimits(cfg) {
 }
 
 // A per-tier "Action Name" input (the sequence's plain-language name; doubles as
-// the cheat-sheet caption). tierKey: 1/2/3 (button taps) or 'p0'/'p1'/'p2' (switch
+// the cheat-sheet caption). tierKey: 1/2/3/4 (button taps) or 'p0'/'p1'/'p2' (switch
 // positions). Capped at 19 chars — the firmware stores it in a FIXED RcTier.note[20]
 // buffer (19 chars + null), so the cap is a struct field, NOT a LittleFS limit. A
 // live "N/19" counter surfaces that cap. Read back on save as t<N>note / p<N>note.
-// A ▶ Test button replays this whole tier's action sequence live (see testTier).
+// Beside it: ▶ Preview runs the timeline's cursor in the browser (_atPreview) and ▶ Test
+// replays this whole tier's action sequence live (testTier), the cursor running alongside.
 const TIER_NOTE_CAP = 19;   // = RcTier.note[20] − 1 (null). Bump BOTH if the firmware field grows.
 function _buildTierNoteEl(tierKey, noteVal) {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'margin:0 0 8px';
 
-  // Header line: "Action Name" on the left; a live char-count + a ▶ Test button
-  // on the right (Test next to the name, as requested).
+  // Header line: "Action Name" on the left, the live char-count on the right.
   const head = document.createElement('div');
   head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px';
   const lbl = document.createElement('label');
   lbl.textContent = 'Action Name';
   lbl.setAttribute('for', `tier-note-${tierKey}`);
   lbl.style.cssText = 'font-size:11px;color:var(--muted)';
-  const right = document.createElement('div');
-  right.style.cssText = 'display:flex;align-items:center;gap:8px';
   const count = document.createElement('span');
   count.id = `tier-note-count-${tierKey}`;
   count.style.cssText = 'font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums';
-  const testBtn = document.createElement('button');
-  testBtn.type = 'button';
-  testBtn.className = 'btn btn-ghost';
-  testBtn.style.cssText = 'padding:3px 10px;font-size:12px;line-height:1.1';
-  testBtn.textContent = '▶ Test';
-  testBtn.title = 'Play this whole sequence live on the connected NaviCore — each action fires through the real press path, honoring its pre-fire delay, so the timing matches a real trigger.';
-  testBtn.onclick = () => testTier(tierKey, testBtn);
-  // ⏱ Timeline — this sequence on a timeline (openActionTimeline): each action at its delay, in a lane per device.
-  const tlBtn = document.createElement('button');
-  tlBtn.type = 'button';
-  tlBtn.className = 'btn btn-ghost at-open';
-  tlBtn.id = `at-open-${tierKey}`;
-  tlBtn.style.cssText = 'padding:3px 10px;font-size:12px;line-height:1.1';
-  tlBtn.textContent = '⏱ Timeline';
-  tlBtn.title = 'Open this sequence on a timeline: each action at its delay, in a lane per device. Drag to set the delays, add from the command library; Apply writes them back here.';
-  tlBtn.onclick = () => openActionTimeline(tierKey);
-  right.appendChild(count); right.appendChild(tlBtn); right.appendChild(testBtn);
-  head.appendChild(lbl); head.appendChild(right);
+  head.appendChild(lbl); head.appendChild(count);
 
+  const line = document.createElement('div');
+  line.style.cssText = 'display:flex;align-items:center;gap:8px';
   const inp = document.createElement('input');
   inp.type = 'text'; inp.id = `tier-note-${tierKey}`; inp.maxLength = TIER_NOTE_CAP;
   inp.value = noteVal || '';
   inp.placeholder = 'Name this sequence — e.g. "Happy greeting"';
-  inp.style.cssText = 'width:100%;box-sizing:border-box;font-size:12px';
+  inp.style.cssText = 'flex:1;min-width:0;box-sizing:border-box;font-size:13px;font-weight:600';
+  const mkBtn = (text, title) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn btn-ghost';
+    b.style.cssText = 'padding:5px 11px;font-size:12px;line-height:1.1;white-space:nowrap';
+    b.textContent = text; b.title = title;
+    return b;
+  };
+  const prevBtn = mkBtn('▶ Preview', 'Run the timeline\'s cursor through this sequence in the browser, lighting each action as it passes. Nothing goes to the droid.');
+  prevBtn.id = `at-preview-${tierKey}`;
+  prevBtn.classList.add('at-preview');
+  prevBtn.onclick = () => _atPreview(tierKey);
+  const testBtn = mkBtn('▶ Test', 'Play this whole sequence live on the connected NaviCore — each action fires through the real press path, honoring its pre-fire delay, so the timing matches a real trigger. The timeline\'s cursor runs alongside.');
+  testBtn.onclick = () => testTier(tierKey, testBtn);
+  line.appendChild(inp); line.appendChild(prevBtn); line.appendChild(testBtn);
 
   // Live "N/19" counter — mirrors the fixed firmware cap so the field never
   // silently refuses the 20th key without explanation. Amber once it's full.
@@ -13227,14 +13141,7 @@ function _buildTierNoteEl(tierKey, noteVal) {
   inp.addEventListener('input', updateCount);
   updateCount();
 
-  // The sequence's timing at a glance (_atStripRender): a dot per action at its delay, in its device's colour.
-  const strip = document.createElement('div');
-  strip.id = `at-strip-${tierKey}`;
-  strip.className = 'at-strip';
-  strip.title = 'When each action fires after the press — click to open the timeline';
-  strip.onclick = () => openActionTimeline(tierKey);
-
-  wrap.appendChild(head); wrap.appendChild(inp); wrap.appendChild(strip);
+  wrap.appendChild(head); wrap.appendChild(line);
   return wrap;
 }
 
@@ -13247,6 +13154,7 @@ function buildTierCard(tier, actions, note) {
 
   // Per-tier note (buttons/switches — not the single-tier peer editor).
   if (tier !== 'peer') card.appendChild(_buildTierNoteEl(tier, note));
+  // (The action timeline is moved in above the rows when this card shows — _atBind.)
 
   const rows = document.createElement('div');
   rows.id = `rows-${tier}`;
@@ -13255,8 +13163,8 @@ function buildTierCard(tier, actions, note) {
 
   const startCount = Math.max(1, actions.length);
   for (let ai = 0; ai < startCount; ai++) {
-    const a = actions[ai] || { type: 'wcb_unicast' };   // blank rows start as a (empty) command
-    rows.appendChild(buildActionRow(tier, ai, a));
+    const a = actions[ai] || { type: 'wcb_unicast' };   // blank rows start as a (empty) command, open to fill in
+    rows.appendChild(buildActionRow(tier, ai, a, { open: !actions[ai] }));
   }
 
   const addBtn = document.createElement('button');
@@ -13270,20 +13178,25 @@ function buildTierCard(tier, actions, note) {
   return card;
 }
 
-function addActionRow(tier) {
+// A new row at the end, open (the others close); `init` seeds it (the timeline's double-click: a type and a delay).
+// → the row, or null when the tier already holds what the board stores.
+function addActionRow(tier, init) {
   const rows = document.getElementById(`rows-${tier}`);
-  if (!rows) return;
+  if (!rows) return null;
   const existing = rows.querySelectorAll('.action-row').length;
-  if (existing >= ncLimits().actionsPerTier) return;
+  if (existing >= ncLimits().actionsPerTier) return null;
 
   const used = new Set([...rows.querySelectorAll('.action-row')]
                        .map(r => +r.dataset.ai));
   let ai = 0;
   while (used.has(ai)) ai++;
 
-  rows.appendChild(buildActionRow(tier, ai, { type: 'wcb_unicast' }));
+  rows.querySelectorAll('.action-row.ar.open').forEach(r => _arClose(tier, r));
+  const row = buildActionRow(tier, ai, init || { type: 'wcb_unicast' }, { open: true });
+  rows.appendChild(row);
   refreshTierState(tier);
   if (tier === 'peer') _peerEventDirty = true;   // structural edit; no input event fires
+  return row;
 }
 
 function removeActionRow(tier, ai) {
@@ -13297,6 +13210,7 @@ function removeActionRow(tier, ai) {
 // Move an action row one slot earlier/later by reordering it among its siblings.
 // collectTierActions() reads .action-row elements in DOM order, so this changes the
 // saved sequence with no data-model change. dir < 0 = up/earlier, dir > 0 = down/later.
+// Actions due at one time fire in this order; the grip on each line drags it the same way (_arStartReorder).
 function moveActionRow(tier, ai, dir) {
   const rows = document.getElementById(`rows-${tier}`);
   const row  = document.getElementById(`action-${tier}-${ai}`);
@@ -13351,7 +13265,7 @@ function refreshTierState(tier) {
     countEl.textContent = n ? String(n) : '';
     countEl.classList.toggle('empty', n === 0);
   }
-  _atStripSchedule(tier);
+  _atTierRefresh(tier);   // the lines' summaries, and the timeline when this tier is the one showing
 }
 
 // Normalize an action.type to a valid, non-empty actionTypeLabels key for the
@@ -13364,9 +13278,13 @@ function _normActionType(t) {
   return 'wcb_unicast';
 }
 
-function buildActionRow(tier, ai, action) {
+// One action of a tier: a line that says what it does — ⋮⋮ (drag to reorder), its number and time in the colour of
+// the device it reaches (the timeline's, --ar-c), that device, what it does and its note, ▶ (test it) and × (remove)
+// — over its fields, which a click on the line opens (opts.open: open now; a blank or new row is). The fields keep
+// their ids (type-/fields-/delay-/note-<tier>-<ai>), which readActionFromUI and Save read, open or not.
+function buildActionRow(tier, ai, action, opts = {}) {
   const row = document.createElement('div');
-  row.className = 'action-row';
+  row.className = 'action-row ar' + (opts.open ? ' open' : '');
   row.id = `action-${tier}-${ai}`;
   row.dataset.ai = ai;
 
@@ -13387,21 +13305,63 @@ function buildActionRow(tier, ai, action) {
   typeSelect.value = normType;   // set directly so it is valid even while detached
   row.appendChild(typeSelect);
 
-  // Type-specific fields
+  // The line.
+  const line = document.createElement('div');
+  line.className = 'ar-line';
+  line.title = 'Click to show or hide this action\'s fields';
+  line.innerHTML = '<span class="ar-grip" title="Drag to reorder — actions due at one time fire in this order">⋮⋮</span>' +
+    '<span class="ar-num"></span><span class="ar-time"></span><span class="ar-dev"></span>' +
+    '<span class="ar-what"><span class="ar-cmd"></span><span class="ar-note"></span></span>';
+  const acts = document.createElement('span');
+  acts.className = 'ar-acts';
+  // ▶ — fire THIS action live on the connected NaviCore, using its current
+  // (unsaved) values, so you can dial a command in before committing the config.
+  const testBtn = document.createElement('button');
+  testBtn.type = 'button';
+  testBtn.className = 'btn-test-action';
+  testBtn.textContent = '▶';
+  testBtn.title = 'Test-fire this action now on the connected NaviCore (live — does not save)';
+  testBtn.setAttribute('aria-label', 'Test this action');
+  testBtn.onclick = () => testActionRow(tier, ai, testBtn);
+  const rm = document.createElement('button');
+  rm.type = 'button';
+  rm.className = 'btn-remove-action';
+  rm.textContent = '×';
+  rm.title = 'Remove this action';
+  rm.setAttribute('aria-label', 'Remove this action');
+  rm.onclick = () => removeActionRow(tier, ai);
+  acts.appendChild(testBtn); acts.appendChild(rm);
+  line.appendChild(acts);
+  line.addEventListener('click', e => { if (!e.target.closest('button, .ar-grip')) _arOpen(tier, ai, null); });
+  line.querySelector('.ar-grip').addEventListener('pointerdown', ev => _arStartReorder(ev, tier, row));
+  row.appendChild(line);
+
+  // The fields, shown when the row is open.
+  const edit = document.createElement('div');
+  edit.className = 'ar-edit';
   const fieldsDiv = document.createElement('div');
   fieldsDiv.id = `fields-${tier}-${ai}`;
   fieldsDiv.style.display = 'flex'; fieldsDiv.style.gap = '6px'; fieldsDiv.style.flexWrap = 'wrap';
   fieldsDiv.style.alignItems = 'flex-end';
   appendActionFields(fieldsDiv, action);
-  row.appendChild(fieldsDiv);
+  edit.appendChild(fieldsDiv);
 
-  // Delay
+  const editRow = document.createElement('div');
+  editRow.className = 'ar-edit-row';
+  // Delay: when it fires after the press (every action counts from the press, not from the one before it).
   const delayInput = document.createElement('input');
   delayInput.type = 'number'; delayInput.id = `delay-${tier}-${ai}`;
   delayInput.min = 0; delayInput.max = ncLimits().maxDelayMs; delayInput.step = 50;   // what this board stores (30 min = RC_MAX_DELAY_MS)
   delayInput.value = action.delay || action.delayMs || 0;
-  delayInput.style.width = '70px';
-  row.appendChild(makeFieldGroup('Delay(ms)', delayInput));
+  delayInput.style.width = '90px';
+  const delayRead = document.createElement('span');
+  delayRead.className = 'ar-delay-read';
+  const paintDelay = () => { const v = +delayInput.value || 0; delayRead.textContent = v >= 1000 ? '= ' + _atFmtT(v) : ''; };
+  delayInput.addEventListener('input', paintDelay);
+  paintDelay();
+  const dg = makeFieldGroup('Delay after press (ms)', delayInput);
+  dg.firstChild.appendChild(delayRead);
+  editRow.appendChild(dg);
 
   // Note
   const noteInput = document.createElement('input');
@@ -13410,24 +13370,13 @@ function buildActionRow(tier, ai, action) {
   noteInput.placeholder = 'optional comment';
   noteInput.value = action.note || '';
   noteInput.style.width = '160px';
-  row.appendChild(makeFieldGroup('Note', noteInput));
+  editRow.appendChild(makeFieldGroup('Note', noteInput));
 
-  // Reorder (▲ ▼) + remove (×) — a right-aligned control cluster. Reordering just
-  // moves the row among its siblings; collectTierActions() reads rows in DOM order,
-  // so the saved sequence follows the visual order (no data model to touch).
+  // ▲ ▼ and Done, on the right. Reordering just moves the row among its siblings;
+  // collectTierActions() reads rows in DOM order, so the saved sequence follows the
+  // visual order (no data model to touch).
   const ctrls = document.createElement('div');
-  ctrls.style.cssText = 'margin-left:auto; display:flex; gap:6px; align-self:center';
-
-  // ▶ Test — fire THIS action live on the connected NaviCore, using its current
-  // (unsaved) values, so you can dial a command in before committing the config.
-  const testBtn = document.createElement('button');
-  testBtn.type = 'button';
-  testBtn.className = 'btn-test-action';
-  testBtn.textContent = '▶ Test';
-  testBtn.title = 'Test-fire this action now on the connected NaviCore (live — does not save)';
-  testBtn.onclick = () => testActionRow(tier, ai, testBtn);
-  ctrls.appendChild(testBtn);
-
+  ctrls.className = 'ar-edit-ctrls';
   const mkMove = (glyph, label, dir, cls, title) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -13437,20 +13386,22 @@ function buildActionRow(tier, ai, action) {
     b.onclick = () => moveActionRow(tier, ai, dir);
     return b;
   };
-  ctrls.appendChild(mkMove('▲', 'Up',   -1, 'btn-move-up',   'Move this action earlier'));
-  ctrls.appendChild(mkMove('▼', 'Down',  1, 'btn-move-down', 'Move this action later'));
+  ctrls.appendChild(mkMove('▲', 'Up',   -1, 'btn-move-up',   'Move this action earlier in the list'));
+  ctrls.appendChild(mkMove('▼', 'Down',  1, 'btn-move-down', 'Move this action later in the list'));
+  const done = document.createElement('button');
+  done.type = 'button';
+  done.className = 'btn btn-ghost ar-done';
+  done.style.cssText = 'padding:4px 12px;font-size:12px';
+  done.textContent = 'Done';
+  done.onclick = () => _arOpen(tier, ai, false);
+  ctrls.appendChild(done);
+  editRow.appendChild(ctrls);
+  edit.appendChild(editRow);
+  row.appendChild(edit);
+  if (opts.open) row.dataset.openDelay = String(delayInput.value);
 
-  const rm = document.createElement('button');
-  rm.type = 'button';
-  rm.className = 'btn-remove-action';
-  rm.style.marginLeft = '0';   // grouped in the cluster; the CSS margin-left:auto isn't wanted here
-  rm.textContent = '×';
-  rm.title = 'Remove this action';
-  rm.onclick = () => removeActionRow(tier, ai);
-  ctrls.appendChild(rm);
-
-  row.appendChild(ctrls);
-
+  // The line as it stands now; refreshTierState repaints every line of the tier once it is on the page.
+  _arPaintRow(row, ai + 1, _arIsComplete(action) ? action : null, null);
   return row;
 }
 
@@ -14967,10 +14918,9 @@ function _cmdlibSelect(boardId, cmdId) {
 }
 
 // The action-row type <select> id for the fields div we're writing back into
-// (mapping tiers use "type-<tier>-<ai>"; the timeline popover uses "tl-action-type").
+// (mapping tiers use "type-<tier>-<ai>"; the clip timeline's popover uses "tl-action-type").
 function _cmdlibRowTypeSelId(fid) {
   if (fid === 'tl-action-fields') return 'tl-action-type';
-  if (fid === 'at-step-fields')   return 'at-step-type';   // the action timeline's step popover
   return String(fid || '').replace(/^fields-/, 'type-');
 }
 
@@ -15092,16 +15042,12 @@ function _cmdlibShowComposer() {
     // Controller-local action (record/play/stop) — no wire string, no destination.
     html += `<div style="font-size:12px;color:var(--muted)">Runs on <b>this controller</b> (no destination to pick).</div>`;
   } else {
-    const where = _cmdlibFid === AT_LIB_FID ? '— it goes where a new action row would send it; click its step on the timeline to change that'
-                                            : '— pick where to send it (WCB / serial port) on the action row';
-    html += `<div><div style="font-size:11px;color:var(--muted)">Command <span style="opacity:.8">${where}</span></div>
+    html += `<div><div style="font-size:11px;color:var(--muted)">Command <span style="opacity:.8">— pick where to send it (WCB / serial port) on the action row</span></div>
       <div id="cmdlib-preview" style="font-family:monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);word-break:break-all"></div></div>`;
   }
-  // Adding to an action timeline (its docked library, _atLibPick), the button says where it lands.
-  const useLbl = _cmdlibFid === AT_LIB_FID ? `Add at ${_atFmtT(_atLibAt)} →` : 'Use command →';
   html += `<div class="wcb-send-row" style="justify-content:flex-end;gap:8px">
     <button type="button" id="cmdlib-cancel2" class="btn btn-ghost">Cancel</button>
-    <button type="button" id="cmdlib-use" class="btn btn-blue">${useLbl}</button></div>`;
+    <button type="button" id="cmdlib-use" class="btn btn-blue">Use command →</button></div>`;
   html += `</div>`;
   body.innerHTML = html;
   body.querySelectorAll('[data-pname]').forEach(el => {
@@ -15266,12 +15212,11 @@ function _cmdlibUse() {
   const fid = _cmdlibFid;
   const r = _cmdlibResolveAction(_cmdlibSel, _cmdlibValues, fid);
   if (r.error) { alert(r.error); return; }
-  if (fid === AT_LIB_FID) { closeCmdLibrary(); _atAddResolved(r.action, _atLibAt); return; }   // the action timeline's library
   _applyResolvedActionToRow(fid, r.action);
   closeCmdLibrary();
 }
 // The action a library command and its values make for the row `fid` (its fields decide a re-edit's destination; a
-// row that does not exist, as the action timeline's AT_LIB_FID, is a fresh pick) → { action } or { error }.
+// row with no command yet is a fresh pick) → { action } or { error }.
 function _cmdlibResolveAction(sel, values, fid) {
   const wire = ncEncodeCommand(sel.cmd, values);
   const board = sel.board, cmd = sel.cmd;
@@ -16740,12 +16685,12 @@ let _tierTestRunning = false;
 async function testTier(tierKey, btn) {
   const acts = collectTierActions(tierKey).filter(a => a && a.type);
   const name = (document.getElementById(`tier-note-${tierKey}`)?.value || '').trim();
-  return _testTierActions(acts, name, btn);
+  return _testTierActions(acts, name, btn, () => _atRunCursor(tierKey));   // the timeline's cursor runs alongside
 }
 // Play a tier's actions on the board the way a press fires them: every action's delay counts from the press, not
 // from the action before it (rcDispatch hands each one to rcExecuteAction, which schedules it delayMs after the
 // dispatch — NaviCore.ino scheduleAction), so two actions at 1000 ms both fire at 1 s. Actions due at the same time
-// keep their order, as the board's are. Shared by the tier's ▶ Test and the action timeline's (which tests its edits).
+// keep their order, as the board's are. onStart: the tier's timeline starts its cursor.
 async function _testTierActions(acts, name, btn, onStart) {
   if (_tierTestRunning) { appendTerminalLine('· test: a sequence test is already running', 'rx'); return; }
   if (!writer && !sharedActive) {
@@ -16768,7 +16713,7 @@ async function _testTierActions(acts, name, btn, onStart) {
   }
   _tierTestRunning = true;
   if (btn) { btn.disabled = true; btn.classList.add('fired'); }
-  if (onStart) onStart();   // the action timeline runs its cursor alongside
+  if (onStart) onStart();   // the tier's timeline runs its cursor alongside
   appendTerminalLine('▶ [test] playing ' + acts.length + ' action(s)' + (name ? ' — "' + name + '"' : ''), 'tx');
   let fired = 0, skipped = 0;
   try {
@@ -16819,10 +16764,11 @@ function collectTierActions(tier) {
 // ════════════════════════════════════════════════════════════════════════════
 //  Action timeline — a button tap's or switch position's actions in time
 // ════════════════════════════════════════════════════════════════════════════
-// ⏱ Timeline on a tier (button taps 1-4, switch positions p0-p2) opens its actions on a timeline the way the WCB
-// Wizard's Sequence Builder opens a stored sequence (WCB docs/SEQUENCE_BUILDER.md §5): a lane per device, each
-// action at its delay, the command library beside it. Apply writes the delays back into the tier's rows; nothing
-// else reads the timeline. docs/CONFIG_TOOL.md §7b has the whole of it; the firmware rules it draws:
+// A tier's actions (button taps 1-4, switch positions p0-p2) on a timeline the way the WCB Wizard's Sequence Builder
+// draws a stored sequence (WCB docs/SEQUENCE_BUILDER.md §5): a lane per device, each action at its delay. It sits in
+// the tier's card above its rows, one line per action (design E of the "Action tiles" canvas), and is drawn from the
+// rows: dragging a dot sets its row's delay, a click opens the row, a double click adds one. docs/CONFIG_TOOL.md §7b
+// has the whole of it; the firmware rules it draws:
 //   - rcDispatch hands every action of a tier to rcExecuteAction, which schedules it delayMs after the PRESS
 //     (NaviCore.ino scheduleAction), so an action's time is its delay, not a gap after the action before it, and
 //     actions at one time fire in the tier's order.
@@ -16830,11 +16776,9 @@ function collectTierActions(tier) {
 //     cumulative branch); a long press always fires alone. Those tiers are drawn above this one, read only.
 //   - A tier holds RC_ACTIONS_PER_TIER (10) actions; a delay runs to RC_MAX_DELAY_MS (30 min, AT_DELAY_MAX); the
 //     board holds PENDING_ACTION_SLOTS (32) delayed actions at once, and drops one more (logged) — it does not fire early.
-const AT_PX_MIN      = 0.0002;  // zoom floor: the whole 30 min in 360 px
 const AT_DELAY_MAX   = 1800000; // = rc_config.h RC_MAX_DELAY_MS (30 min); the board clamps a longer delay to it
 const AT_PENDING_MAX = 32;      // = NaviCore.ino PENDING_ACTION_SLOTS
-let _at = null;                 // the open timeline (null when closed)
-let _atNextId = 1;
+let _at = null;                 // the timeline of the tier that shows (null with no editor open)
 
 // ── Lanes and colour ─────────────────────────────────────────────────────────
 // Colour is the device, the same device colour as in the Wizard: its eight colours (--at-c1..8 here, seq-builder.css
@@ -17122,60 +17066,223 @@ function _atWithTiers(tierKey) {
 const _atDelayOf = a => Math.max(0, Math.round(+(a.delay || a.delayMs || 0)));
 const _atStrip = a => { const { delay, delayMs, ...core } = a; return core; };
 
-// ── Open, apply, close ───────────────────────────────────────────────────────
-function openActionTimeline(tierKey) {
-  if (typeof tierKey === 'string' && /^\d+$/.test(tierKey)) tierKey = +tierKey;
-  const rows = document.getElementById(`rows-${tierKey}`);
-  if (!rows) return;
-  const events = [];
-  let incomplete = 0;
-  rows.querySelectorAll('.action-row').forEach(r => {
-    const a = readActionFromUI(tierKey, r.dataset.ai);
-    if (!a) { incomplete++; return; }
-    events.push({ id: _atNextId++, t: Math.min(ncLimits().maxDelayMs, _atDelayOf(a)), action: _atStrip(a), over: _atDelayOf(a) > ncLimits().maxDelayMs ? _atDelayOf(a) : 0 });
+// ── The tier's lines ─────────────────────────────────────────────────────────
+// Each row's line (buildActionRow) says what its action does, in the colour of the device it reaches — the colour
+// that device has on the timeline. A row is painted from the page (readActionFromUI), or from the action it was
+// built with while it is not on the page yet. _atLoaded: this section has run (a var, so it reads undefined before);
+// the new-peer editor builds rows before it does (applyWcbNetworkUI), and its consts are not there yet.
+var _atLoaded;
+// A row's action counts once it has what Save needs: the command types need a command.
+function _arIsComplete(a) {
+  if (!a || !a.type) return false;
+  if (['wcb_unicast', 'wcb_broadcast', 'serial', 'wled', 'maestro'].includes(_normActionType(a.type))) return !!String(a.cmd || '').trim();
+  return true;
+}
+// The line's time, short: "0 s", "0.4 s", "12.25 s", past a minute "1:30" or "1:30.25".
+function _arFmtTime(ms) {
+  ms = Math.max(0, Math.round(+ms || 0));
+  if (ms < 60000) return +(ms / 1000).toFixed(3) + ' s';
+  const sec = Math.floor((ms % 60000) / 1000), frac = ms % 1000;
+  return Math.floor(ms / 60000) + ':' + String(sec).padStart(2, '0') + (frac ? '.' + String(frac).padStart(3, '0').replace(/0+$/, '') : '');
+}
+function _arPaintRow(row, n, a, slot, lane) {
+  if (!_atLoaded) return;
+  const q = sel => row.querySelector(sel);
+  if (!q('.ar-line')) return;
+  q('.ar-num').textContent = String(n);
+  q('.ar-time').textContent = _arFmtTime(a ? _atDelayOf(a) : +(row.querySelector('input[id^="delay-"]')?.value || 0));
+  row.classList.toggle('ar-blank', !a);
+  const dev = q('.ar-dev'), cmd = q('.ar-cmd');
+  if (a) {
+    const L = lane || _atLaneOf(a);
+    dev.textContent = L.name;
+    dev.title = L.name + (L.sub ? ' — ' + L.sub : '');
+    cmd.textContent = _atStepLabel(a);
+    cmd.title = _atUnHtml(String(actionSummary(a)));
+    q('.ar-note').textContent = a.note || '';
+  } else {
+    dev.textContent = '—'; dev.title = '';
+    cmd.textContent = 'no command yet';
+    cmd.title = 'Open it and pick a command. Save leaves an action with no command out.';
+    q('.ar-note').textContent = '';
+  }
+  if (slot != null && slot >= 0) row.style.setProperty('--ar-c', _atColorVar(slot)); else row.style.removeProperty('--ar-c');
+}
+// Every line of a tier, numbered in list order, coloured as the timeline colours its lanes (_atLayout: in the order
+// they first fire, those with a home first) in the colours this editor has given out (_atColors).
+function _arPaintTier(tier) {
+  const rows = document.getElementById(`rows-${tier}`);
+  if (!rows || !_atLoaded) return;
+  const items = [...rows.querySelectorAll('.action-row.ar')].map((r, i) => {
+    const a = readActionFromUI(tier, r.dataset.ai);
+    return { r, i, a, lane: a ? _atLaneOf(a) : null };
   });
-  const tierName = AT_TIER_NAMES[tierKey] || String(tierKey);
-  const who = editingSw ? `Switch ${editingSw}` : editingBtn ? `Button ${editingBtn}: ${getBtnLabel(editingBtn)}` : 'Actions';
-  const seqName = (document.getElementById(`tier-note-${tierKey}`)?.value || '').trim();
-  _at = {
-    tierKey, tierName, who, seqName, events, incomplete,
-    with: _atWithTiers(tierKey),
-    sel: new Set(), primary: null, colors: new Map(), pxPerMs: 0.35, cursorMs: 0, guideT: null,
-    history: [], future: [], dirty: false, refTried: new Set(), refPending: '', playing: null,
+  const lanes = [];
+  items.filter(x => x.a).sort((p, q) => (_atDelayOf(p.a) - _atDelayOf(q.a)) || (p.i - q.i))
+       .forEach(x => { if (!lanes.some(l => l.key === x.lane.key)) lanes.push({ key: x.lane.key, board: x.lane.board }); });
+  _atAssignColors(_atColors, lanes, null);
+  items.forEach(x => _arPaintRow(x.r, x.i + 1, x.a, x.a ? _atColors.get(x.lane.key) : null, x.lane));
+}
+// Open (true), close (false) or toggle (null) a row's fields. One is open at a time; the timeline marks it.
+function _arOpen(tier, ai, open) {
+  const row = document.getElementById(`action-${tier}-${ai}`);
+  if (!row) return;
+  const want = open == null ? !row.classList.contains('open') : !!open;
+  if (want) {
+    row.parentElement.querySelectorAll('.action-row.ar.open').forEach(r => { if (r !== row) _arClose(tier, r); });
+    if (!row.classList.contains('open')) {
+      row.classList.add('open');
+      row.dataset.openDelay = document.getElementById(`delay-${tier}-${ai}`)?.value || '0';
+    }
+  } else _arClose(tier, row);
+  refreshTierState(tier);
+}
+// Closing a row whose delay was changed puts it where it fires among the others (_arSettle); one only opened and
+// closed stays where it was, so its tier saves as it was.
+function _arClose(tier, row) {
+  if (!row.classList.contains('open')) return;
+  row.classList.remove('open');
+  const d = document.getElementById(`delay-${tier}-${row.dataset.ai}`)?.value || '0';
+  if (row.dataset.openDelay != null && d !== row.dataset.openDelay) _arSettle(tier, row);
+  delete row.dataset.openDelay;
+}
+// Put a row before the first row that fires after it: the list reads in time order where the user changed a time,
+// and actions due at one time fire in list order, so a moved one goes after those already at its time.
+function _arSettle(tier, row) {
+  const rows = row.parentElement;
+  if (!rows) return;
+  const dOf = r => +(document.getElementById(`delay-${tier}-${r.dataset.ai}`)?.value || 0);
+  const t = dOf(row);
+  const later = [...rows.querySelectorAll('.action-row.ar')].find(r => r !== row && dOf(r) > t);
+  if (later) { if (row.nextElementSibling !== later) rows.insertBefore(row, later); }
+  else if (rows.lastElementChild !== row) rows.appendChild(row);
+}
+// ⋮⋮ drags a row up or down the list: the order actions due at one time fire in.
+function _arStartReorder(ev, tier, row) {
+  ev.preventDefault(); ev.stopPropagation();
+  const rows = row.parentElement;
+  if (!rows) return;
+  row.classList.add('dragging');
+  const onMove = mv => {
+    const others = [...rows.querySelectorAll('.action-row.ar')].filter(r => r !== row);
+    const before = others.find(o => { const b = o.getBoundingClientRect(); return mv.clientY < b.top + b.height / 2; });
+    if (before) { if (row.nextElementSibling !== before) rows.insertBefore(row, before); }
+    else if (rows.lastElementChild !== row) rows.appendChild(row);
   };
-  document.getElementById('at-title').textContent = `⏱ ${who} · ${tierName}` + (seqName ? ` — “${seqName}”` : '');
-  ncShow(document.getElementById('at-modal'));
-  _atLibShow(_atLibShown());
-  _cmdlibReady.then(() => { if (_at) { _atLibRender(); _atRender(); } });
-  _atSetStatus(incomplete ? `${incomplete} incomplete row${incomplete === 1 ? ' is' : 's are'} not on the timeline (no command yet); Apply leaves ${incomplete === 1 ? 'it' : 'them'} out, as Save would.` : '');
-  _atFit();
-}
-function _atSetStatus(msg) { const el = document.getElementById('at-status'); if (el) el.textContent = msg || ''; }
-function closeActionTimeline(force) {
-  if (!_at) return;
-  if (!force && _at.dirty && !confirm('Discard the timeline\'s changes?')) return;
-  _atStopPlay();
-  _at = null;
-  ncHide(document.getElementById('at-modal'));
-}
-// Apply: the tier's rows become the timeline's actions, in time order (actions at one time in the timeline's order,
-// which is the order the board fires them), each with its time as its delay.
-function applyActionTimeline() {
-  if (!_at) return;
-  const errs = _atProblems().filter(p => p.level === 'error');
-  if (errs.length) { alert('Fix these first:\n\n' + errs.map(p => '• ' + p.msg).join('\n')); return; }
-  const tierKey = _at.tierKey;
-  const rows = document.getElementById(`rows-${tierKey}`);
-  if (!rows) { closeActionTimeline(true); return; }
-  const ordered = _at.events.map((e, i) => ({ e, i })).sort((p, q) => (p.e.t - q.e.t) || (p.i - q.i)).map(x => x.e);
-  rows.querySelectorAll('.action-row').forEach(r => r.remove());
-  ordered.forEach((e, ai) => rows.appendChild(buildActionRow(tierKey, ai, e.t ? { ...e.action, delay: e.t } : { ...e.action })));
-  refreshTierState(tierKey);
-  closeActionTimeline(true);
+  let ended = false;
+  const finish = () => {
+    if (ended) return; ended = true;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', finish);
+    row.classList.remove('dragging');
+    refreshTierState(tier);
+    if (tier === 'peer') _peerEventDirty = true;
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', finish);
 }
 
+// ── The timeline in the card that shows ──────────────────────────────────────
+// One block (#at-inline: zoom bar, lanes, hint, warnings), moved into the tap's or position's card that shows,
+// above its rows (_atBind from setActionTier / setSwitchTier); closing the editor takes it out (_atUnbind). Its
+// actions are the rows' (_atSync): a dragged dot writes its row's delay, a click on one opens its row, a double click
+// on empty space adds a row there — no copy to apply.
+let _atColors = new Map();   // the device colours this editor has given out: a device keeps its colour across its taps
+let _atInlineBlock = null;
+const AT_ZOOMS = [1000, 2000, 5000, 10000, 30000, 60000, 120000, 300000, 600000, 1800000];   // − / + step through these
+const AT_PRESETS = [[2000, '2 s'], [10000, '10 s'], [60000, '1 m'], [300000, '5 m'], [1800000, '30 m']];
+function _atInlineEl() {
+  if (_atInlineBlock) return _atInlineBlock;
+  const el = document.createElement('div');
+  el.id = 'at-inline';
+  el.className = 'at-inline';
+  el.innerHTML = `
+    <div class="at-zbar">
+      <button type="button" class="at-zb" id="at-zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
+      <button type="button" class="at-zb" id="at-zoom-in" aria-label="Zoom in" title="Zoom in. Ctrl+scroll over the timeline zooms at the pointer.">+</button>
+      <button type="button" class="at-zb" id="at-zoom-fit" title="Fit every action in the view">Fit</button>
+      <span class="at-zr" id="at-view"></span>
+      <span class="at-zsp"></span>
+      ${AT_PRESETS.map(([ms, l]) => `<button type="button" class="at-pre" data-ms="${ms}" title="Show the first ${l} after the press">${l}</button>`).join('')}
+    </div>
+    <div class="at-scroll" id="at-scroll"><svg id="at-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+    <div class="at-hint">A dot is the moment an action fires after the press — actions have no length. Drag a dot to change its
+      delay (it sticks to the dots near it; Alt: to the ms), click it to edit its action, right-click to remove it; double-click
+      empty space to add an action there. A tap that fires with this one is drawn above, a stored sequence an action runs under it.</div>
+    <div class="at-warn" id="at-warn"></div>
+    <div class="at-status" id="at-status"></div>`;
+  el.querySelector('#at-zoom-out').addEventListener('click', () => _atZoomStep(1));
+  el.querySelector('#at-zoom-in').addEventListener('click', () => _atZoomStep(-1));
+  el.querySelector('#at-zoom-fit').addEventListener('click', _atFit);
+  el.querySelectorAll('.at-pre').forEach(b => b.addEventListener('click', () => _atSetView(+b.dataset.ms, null)));
+  const sc = el.querySelector('#at-scroll');
+  sc.addEventListener('wheel', e => {
+    if (!e.ctrlKey || !_at) return;
+    e.preventDefault();
+    _atSetView(_at.viewMs * (e.deltaY < 0 ? 1 / 1.12 : 1.12), e.clientX);
+  }, { passive: false });
+  sc.addEventListener('scroll', () => { if (_at && _at.wide) _atRenderSoon(); });
+  _atInlineBlock = el;
+  return el;
+}
+// A new editor: no timeline yet, and its own colours.
+function _atReset() { _atUnbind(); _atColors = new Map(); }
+function _atBind(tierKey) {
+  if (typeof tierKey === 'string' && /^\d+$/.test(tierKey)) tierKey = +tierKey;
+  const card = document.getElementById(`tier-card-${tierKey}`);
+  const rows = document.getElementById(`rows-${tierKey}`);
+  if (!card || !rows || tierKey === 'peer' || !_atLoaded) { _atUnbind(); return; }
+  const el = _atInlineEl();
+  if (el.parentElement !== card || el.nextElementSibling !== rows) card.insertBefore(el, rows);
+  const fresh = !_at || _at.tierKey !== tierKey;
+  if (fresh) {
+    _atStopPlay();
+    _at = { tierKey, events: [], with: [], incomplete: 0, colors: _atColors, pxPerMs: 0.25, viewMs: 2000, wide: false,
+            cursorMs: 0, guideT: null, refTried: new Set(), refPending: '', playing: null, dragging: false };
+  }
+  _atSync();
+  if (fresh) _atFit(); else _atRender();
+  _cmdlibReady.then(() => { if (_at && _at.tierKey === tierKey) _atTierRefresh(tierKey); });
+}
+// The editor has opened: fit the view to the track's real width (it had none while the editor was being built).
+function _atRefitSoon() { requestAnimationFrame(() => requestAnimationFrame(() => { if (_at) _atFit(); })); }
+function _atUnbind() {
+  _atStopPlay();
+  _at = null;
+  if (_atInlineBlock && _atInlineBlock.parentElement) _atInlineBlock.remove();
+}
+// The timeline's actions are the rows': each complete row is an event at its delay (id = its row's ai).
+function _atSync() {
+  const at = _at;
+  if (!at) return;
+  const rows = document.getElementById(`rows-${at.tierKey}`);
+  const max = ncLimits().maxDelayMs;
+  at.events = []; at.incomplete = 0;
+  if (rows) rows.querySelectorAll('.action-row').forEach(r => {
+    const a = readActionFromUI(at.tierKey, r.dataset.ai);
+    if (!a) { at.incomplete++; return; }
+    const d = _atDelayOf(a);
+    at.events.push({ id: +r.dataset.ai, t: Math.min(max, d), action: _atStrip(a), over: d > max ? d : 0 });
+  });
+  at.with = _atWithTiers(at.tierKey);
+}
+// After a tier's rows change (refreshTierState): its lines, and the timeline when it is the tier showing.
+function _atTierRefresh(tier) {
+  if (!_atLoaded) return;
+  _arPaintTier(tier);
+  if (_at && String(_at.tierKey) === String(tier) && !_at.dragging) { _atSync(); _atRender(); }
+}
+let _atRenderPending = false;
+function _atRenderSoon() {
+  if (_atRenderPending) return;
+  _atRenderPending = true;
+  requestAnimationFrame(() => { _atRenderPending = false; if (_at) _atRender(); });
+}
+function _atSetStatus(msg) { const el = document.getElementById('at-status'); if (el) el.textContent = msg || ''; }
+
 // ── What it warns about ──────────────────────────────────────────────────────
-// Errors block Apply. Each names the firmware rule it comes from (the section header above).
+// Each names the firmware rule it comes from (the section header above). Save refuses what the board would cut
+// (_ncOverLimits); these say it where it is drawn.
 function _atProblems() {
   const at = _at, out = [];
   if (!at) return out;
@@ -17206,7 +17313,7 @@ function _atProblems() {
 }
 
 // ── Layout ───────────────────────────────────────────────────────────────────
-const AT_LEFT = 170, AT_RULER_H = 26, AT_ROW = 24, AT_PAD = 5, AT_MIN_H = 34, AT_REF_H = 20, AT_WITH_H = 24, AT_NEW_H = 30, AT_RIGHT = 40;
+const AT_LEFT = 140, AT_RULER_H = 26, AT_ROW = 24, AT_PAD = 5, AT_MIN_H = 34, AT_REF_H = 20, AT_WITH_H = 24, AT_NEW_H = 30, AT_RIGHT = 40;
 const AT_EV_GAP = 8, AT_EV_H = 18, AT_EV_MAXW = 180;   // box offset from its dot, box height, widest box
 // A label's width at the timeline's 10px, measured once per text (a canvas, so no layout is forced).
 const _atTextWCache = new Map();
@@ -17307,17 +17414,24 @@ function _atNiceTick(raw) {
 }
 
 // ── Draw ─────────────────────────────────────────────────────────────────────
-// A plain rebuild of the SVG on every change, as the clip editor's _tlRender does: a tier holds ten actions.
+// A plain rebuild of the SVG on every change, as the clip editor's _tlRender does: a tier holds ten actions. The
+// SVG spans the view (or the actions, when they reach further); a wide one draws its grid near what shows.
 function _atRender() {
   const at = _at;
   const svg = document.getElementById('at-svg');
-  if (!at || !svg) return;
-  for (const id of [...at.sel]) if (!at.events.some(e => e.id === id)) at.sel.delete(id);
-  if (at.primary != null && !at.sel.has(at.primary)) at.primary = at.sel.size ? [...at.sel].pop() : null;
+  const sc = document.getElementById('at-scroll');
+  if (!at || !svg || !sc) return;
+  const openRow = document.querySelector(`#rows-${at.tierKey} .action-row.ar.open`);
+  const selId = openRow ? +openRow.dataset.ai : null;
   const lay = _atLayout();
-  const viewEnd = _atViewEnd(lay);
+  const L = ncLimits();
+  const viewEnd = Math.max(_atViewEnd(lay), at.viewMs);
   const width = Math.max(AT_LEFT + viewEnd * at.pxPerMs + AT_RIGHT, AT_LEFT + lay.endPx + 10);
   const height = lay.bottom;
+  const visW = sc.clientWidth || 640;
+  at.wide = width > 3 * visW;
+  const gridFrom = at.wide ? Math.max(0, _atXToTime(sc.scrollLeft - visW)) : 0;
+  const gridTo = at.wide ? _atXToTime(sc.scrollLeft + 2 * visW) : viewEnd;
   svg.setAttribute('width', width); svg.setAttribute('height', height); svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.innerHTML = '<defs><pattern id="at-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
                   '<rect width="6" height="6" fill="var(--hover)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--line-2)" stroke-width="2"/></pattern></defs>';
@@ -17336,15 +17450,23 @@ function _atRender() {
   // Ruler and grid.
   svg.appendChild(_atSvgEl('line', { x1: AT_LEFT, y1: 0, x2: AT_LEFT, y2: height, stroke: 'var(--border)', 'stroke-width': 1 }));
   const tick = _atNiceTick(80 / at.pxPerMs);
-  for (let t = 0; t <= viewEnd; t += tick) {
+  for (let t = Math.floor(gridFrom / tick) * tick; t <= Math.min(viewEnd, gridTo); t += tick) {
     const x = _atTimeToX(t);
     svg.appendChild(_atSvgEl('line', { x1: x, y1: AT_RULER_H - 6, x2: x, y2: height, stroke: 'var(--border)', 'stroke-width': 0.5, opacity: 0.4 }));
     text({ x: x + 3, y: AT_RULER_H - 10, 'font-size': 10, fill: 'var(--muted)', 'font-family': 'var(--mono)' }, _atFmtShort(t));
   }
   text({ x: 10, y: AT_RULER_H - 10, 'font-size': 10, fill: 'var(--muted)' }, 'after the press');
+  // The longest delay this board stores, where the view reaches it.
+  const limX = _atTimeToX(L.maxDelayMs);
+  if (limX <= width) {
+    const lim = _atSvgEl('line', { x1: limX, y1: AT_RULER_H, x2: limX, y2: height, stroke: 'var(--red)', 'stroke-width': 2, opacity: 0.7, class: 'at-limit' });
+    const tt = _atSvgEl('title'); tt.textContent = `${_atFmtShort(L.maxDelayMs)} — the longest delay this board stores`; lim.appendChild(tt);
+    lim.style.pointerEvents = 'none';
+    svg.appendChild(lim);
+  }
   const addAt = (ev, kind) => {
     const r = svg.getBoundingClientRect();
-    _atOpenStep(null, _atXToTime(ev.clientX - r.left), kind ? { type: kind } : null);
+    _atAddAt(_atXToTime(ev.clientX - r.left), kind);
   };
   // The taps that fire with this one, read only.
   for (const w of lay.withRows) {
@@ -17358,12 +17480,12 @@ function _atRender() {
       svg.appendChild(c);
     }
   }
-  // Lanes: band, swatch, name, where it goes.
+  // Lanes: band, swatch, name, where it goes. A double click on a lane's empty space adds an action of its kind there.
   for (const lane of lay.lanes) {
     const col = _atColorVar(lane.slot);
-    const bg = _atSvgEl('rect', { x: AT_LEFT, y: lane.top, width: width - AT_LEFT, height: lane.h, fill: col, 'fill-opacity': 0.05 });
+    const bg = _atSvgEl('rect', { x: AT_LEFT, y: lane.top, width: width - AT_LEFT, height: lane.h, fill: col, 'fill-opacity': 0.05, class: 'at-lane-bg', 'data-lane': lane.key });
     bg.style.cursor = 'copy';
-    bg.addEventListener('click', ev => addAt(ev, lane.kind));
+    bg.addEventListener('dblclick', ev => addAt(ev, lane.kind));
     svg.appendChild(bg);
     svg.appendChild(_atSvgEl('line', { x1: 0, y1: lane.top + lane.h, x2: width, y2: lane.top + lane.h, stroke: 'var(--border)', 'stroke-width': 0.5, opacity: 0.6 }));
     svg.appendChild(_atSvgEl('rect', { x: 0, y: lane.top + 3, width: 4, height: lane.h - 6, rx: 1, fill: col, class: 'at-lane-sw' }));
@@ -17378,25 +17500,25 @@ function _atRender() {
     }
   }
   // The lane that adds an action of any kind; on an empty tier it says how.
-  const nbg = _atSvgEl('rect', { x: AT_LEFT, y: lay.newTop, width: width - AT_LEFT, height: AT_NEW_H, fill: 'var(--hover-2)' });
+  const nbg = _atSvgEl('rect', { x: AT_LEFT, y: lay.newTop, width: width - AT_LEFT, height: AT_NEW_H, fill: 'var(--hover-2)', class: 'at-new-bg' });
   nbg.style.cursor = 'copy';
-  nbg.addEventListener('click', ev => addAt(ev, null));
+  nbg.addEventListener('dblclick', ev => addAt(ev, null));
   svg.appendChild(nbg);
   text({ x: 10, y: lay.newTop + AT_NEW_H / 2 + 4, 'font-size': 11, fill: 'var(--muted)' }, lay.lanes.length ? '＋ Action' : 'Actions', 'at-lane-new');
   if (!lay.lanes.length) {
-    const h = text({ x: AT_LEFT + 10, y: lay.newTop + AT_NEW_H / 2 + 4, 'font-size': 11, fill: 'var(--muted)' }, 'Click here to add an action at that time, or click or drag one in from 📚 Library');
+    const h = text({ x: AT_LEFT + 10, y: lay.newTop + AT_NEW_H / 2 + 4, 'font-size': 11, fill: 'var(--muted)' }, 'Double-click here to add an action at that time');
     h.style.pointerEvents = 'none';
   }
-  // Steps: a dot at its time, its label in a box beside it.
+  // Steps: a dot at its time, its label in a box beside it. The open row's is marked.
   for (const lane of lay.lanes) {
     const col = _atColorVar(lane.slot);
     for (const it of lane.items) {
       const x = _atTimeToX(it.e.t);
       const cy = lane.top + AT_PAD + it.row * AT_ROW + AT_ROW / 2;
-      const isSel = at.sel.has(it.e.id);
+      const isSel = it.e.id === selId;
       const since = at.cursorMs - it.e.t;
       const flash = !!at.playing && since >= 0 && since < 180;
-      const g = _atSvgEl('g', { class: 'at-ev' + (isSel ? ' sel' : '') + (flash ? ' flash' : ''), 'data-ev': it.e.id, 'data-lane': lane.key });
+      const g = _atSvgEl('g', { class: 'at-ev' + (isSel ? ' sel' : '') + (flash ? ' flash' : ''), 'data-ev': it.e.id, 'data-lane': lane.key, 'data-t': it.e.t });
       if (!it.compact) {
         g.appendChild(_atSvgEl('rect', { x: x + AT_EV_GAP, y: cy - AT_EV_H / 2, width: it.w, height: AT_EV_H, rx: 4, fill: col, 'fill-opacity': flash ? 0.45 : 0.14, stroke: col, 'stroke-width': 1.5 }));
         if (isSel) g.appendChild(_atSvgEl('rect', { x: x + AT_EV_GAP - 2.5, y: cy - AT_EV_H / 2 - 2.5, width: it.w + 5, height: AT_EV_H + 5, rx: 6, fill: 'none', stroke: 'var(--text)', 'stroke-width': 1.5 }));
@@ -17410,10 +17532,10 @@ function _atRender() {
       const hit = _atSvgEl('rect', { x: x - 6, y: cy - 10, width: it.compact ? 12 : AT_EV_GAP + it.w + 6, height: 20, fill: 'transparent', class: 'at-ev-hit' });
       hit.style.cursor = 'grab';
       const tt = _atSvgEl('title');
-      tt.textContent = `${_atFmtT(it.e.t)} · ${_atUnHtml(actionSummary(it.e.action))}\nDrag to move (Alt: to the ms) · Shift-click to add to the selection · click to edit · right-click to delete`;
+      tt.textContent = `${_atFmtT(it.e.t)} · ${_atUnHtml(actionSummary(it.e.action))}\nDrag to change its delay (Alt: to the ms) · click to edit · right-click to remove`;
       hit.appendChild(tt);
       hit.addEventListener('pointerdown', ev => _atStartDrag(ev, it.e));
-      hit.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); _atCommit(() => { _at.events = _at.events.filter(x => x.id !== it.e.id); }); });
+      hit.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); removeActionRow(at.tierKey, it.e.id); });
       g.appendChild(hit);
       svg.appendChild(g);
     }
@@ -17432,7 +17554,7 @@ function _atRender() {
       }
     } else {
       const msg = { reading: 'reading it…', unread: _wcbSeqConnected() ? 'not read yet' : 'connect to read what it does',
-                    missing: `WCB ${r.rec.wcb} has no sequence ${r.rec.key}`, noanswer: `no answer from WCB ${r.rec.wcb} (reopen the timeline to ask again)`,
+                    missing: `WCB ${r.rec.wcb} has no sequence ${r.rec.key}`, noanswer: `no answer from WCB ${r.rec.wcb} (open this editor again to ask again)`,
                     nowhere: 'on every board that has it (refresh a sequence list to see it)' }[r.state];
       const t = _atSvgEl('text', { x: x0 + 6, y: cy + 3.5, 'font-size': 9.5, fill: 'var(--muted)', 'font-style': 'italic', class: 'at-ref-note' });
       t.textContent = msg;
@@ -17446,91 +17568,42 @@ function _atRender() {
     gl.style.pointerEvents = 'none';
     svg.appendChild(gl);
   }
-  // The cursor (the playhead): click the ruler to move it, drag its handle.
-  const ruler = _atSvgEl('rect', { x: AT_LEFT, y: 0, width: width - AT_LEFT, height: AT_RULER_H, fill: 'transparent' });
-  ruler.style.cursor = 'text';
-  ruler.addEventListener('pointerdown', ev => {
-    const r = svg.getBoundingClientRect();
-    _atStopPlay();
-    _at.cursorMs = _atSnap(_atXToTime(ev.clientX - r.left), ev.altKey, null, false).t;
-    _atRender();
-    _atDragCursor(ev);
-  });
-  svg.appendChild(ruler);
-  const cx = _atTimeToX(at.cursorMs);
-  const cline = _atSvgEl('line', { x1: cx, y1: 0, x2: cx, y2: height, stroke: 'var(--yellow)', 'stroke-width': 1.5, class: 'at-cursor' });
-  cline.style.pointerEvents = 'none';   // a click on a lane at the cursor's time still reaches the lane
-  svg.appendChild(cline);
-  const handle = _atSvgEl('rect', { x: cx - 5, y: 0, width: 10, height: AT_RULER_H, fill: 'var(--yellow)', opacity: 0.4 });
-  handle.style.cursor = 'ew-resize';
-  handle.addEventListener('pointerdown', _atDragCursor);
-  svg.appendChild(handle);
+  // The cursor (the playhead), while Preview or Test runs.
+  if (at.playing) {
+    const cx = _atTimeToX(at.cursorMs);
+    const cline = _atSvgEl('line', { x1: cx, y1: 0, x2: cx, y2: height, stroke: 'var(--yellow)', 'stroke-width': 1.5, class: 'at-cursor' });
+    cline.style.pointerEvents = 'none';
+    svg.appendChild(cline);
+  }
   _atRenderSide();
   if (lay.refs.some(r => r.state === 'unread')) _atFetchRefs();
 }
-// The toolbar's state, the readout and the warnings.
+// The zoom bar's state, the warnings and the line about rows not drawn.
 function _atRenderSide() {
   const at = _at;
-  const n = at.sel.size;
-  const multi = document.getElementById('at-multi');
-  if (multi) multi.style.display = n >= 2 ? 'flex' : 'none';
-  const cnt = document.getElementById('at-multi-count'); if (cnt) cnt.textContent = n + ' selected';
-  const sp = document.getElementById('at-spread'); if (sp) sp.disabled = n < 3;
-  const del = document.getElementById('at-delete'); if (del) del.style.display = n ? '' : 'none';
-  const un = document.getElementById('at-undo'); if (un) un.disabled = !at.history.length;
-  const re = document.getElementById('at-redo'); if (re) re.disabled = !at.future.length;
-  const count = document.getElementById('at-count');
-  if (count) count.textContent = `${at.events.length} of ${ncLimits().actionsPerTier} actions`;
-  const ro = document.getElementById('at-readout');
-  if (ro) {
-    const sel = at.events.filter(e => at.sel.has(e.id));
-    ro.textContent = `cursor ${_atFmtT(at.cursorMs)}` + (sel.length === 1 ? ` · selected: ${_atStepLabel(sel[0].action)} at ${_atFmtT(sel[0].t)}` : '');
-  }
+  const L = ncLimits();
+  const view = document.getElementById('at-view');
+  if (view) view.textContent = `view ${_arFmtTime(at.viewMs)} · max ${_arFmtTime(L.maxDelayMs)}`;
+  document.querySelectorAll('#at-inline .at-pre').forEach(b => {
+    const ms = +b.dataset.ms;
+    b.hidden = ms > L.maxDelayMs;
+    b.classList.toggle('on', Math.abs(ms - at.viewMs) < 1);
+  });
+  const zi = document.getElementById('at-zoom-in'); if (zi) zi.disabled = at.viewMs <= AT_ZOOMS[0] + 0.5;
+  const zo = document.getElementById('at-zoom-out'); if (zo) zo.disabled = at.viewMs >= L.maxDelayMs - 0.5;
   const box = document.getElementById('at-warn');
   if (box) {
     const ps = _atProblems();
     box.innerHTML = ps.map(p => `<div class="at-warn-${p.level}">${p.level === 'error' ? '✖' : p.level === 'warn' ? '⚠' : 'ℹ'} ${escH(p.msg)}</div>`).join('');
-    const apply = document.getElementById('at-apply');
-    if (apply) apply.disabled = ps.some(p => p.level === 'error');
   }
+  _atSetStatus(at.incomplete ? `${at.incomplete} action${at.incomplete === 1 ? ' has' : 's have'} no command yet: not on the timeline, and Save leaves ${at.incomplete === 1 ? 'it' : 'them'} out.` : '');
 }
 
-// ── Editing: one undo step per change ────────────────────────────────────────
-const AT_UNDO_MAX = 100;
-const _atSnapshot = () => JSON.stringify(_at.events);
-function _atPush() {
-  _at.history.push(_atSnapshot());
-  if (_at.history.length > AT_UNDO_MAX) _at.history.shift();
-  _at.future = [];
-  _at.dirty = true;
-}
-function _atCommit(fn) { _atPush(); fn(); _atRender(); }
-function _atUndo() {
-  if (!_at || !_at.history.length) return;
-  _at.future.push(_atSnapshot());
-  _at.events = JSON.parse(_at.history.pop());
-  _at.dirty = true;
-  _atRender();
-}
-function _atRedo() {
-  if (!_at || !_at.future.length) return;
-  _at.history.push(_atSnapshot());
-  _at.events = JSON.parse(_at.future.pop());
-  _at.dirty = true;
-  _atRender();
-}
-function _atSelect(id, additive) {
-  const s = _at.sel;
-  if (!additive) { s.clear(); s.add(id); _at.primary = id; }
-  else if (s.has(id)) { s.delete(id); if (_at.primary === id) _at.primary = s.size ? [...s].pop() : null; }
-  else { s.add(id); _at.primary = id; }
-}
-const _atSelected = () => _at.events.filter(e => _at.sel.has(e.id))
-  .sort((p, q) => (p.t - q.t) || (_at.events.indexOf(p) - _at.events.indexOf(q)));
-// Where a moved step lands: within AT_MAGNET_PX of another step, a step of a tap that fires with it, a sequence's
-// step or the cursor it sticks there (a dashed guide shows it); Alt places it to the ms. Never past ncLimits().maxDelayMs.
+// ── Editing ──────────────────────────────────────────────────────────────────
+// Where a moved step lands: within AT_MAGNET_PX of another step, a step of a tap that fires with it or a sequence's
+// step it sticks there (a dashed guide shows it); Alt places it to the ms. Never past ncLimits().maxDelayMs.
 const AT_MAGNET_PX = 8;
-function _atSnap(t, free, exclude, withCursor = true) {
+function _atSnap(t, free, exclude) {
   t = Math.max(0, Math.min(ncLimits().maxDelayMs, Math.round(t)));
   if (free) return { t, to: null };
   const lim = AT_MAGNET_PX / _at.pxPerMs;
@@ -17542,21 +17615,17 @@ function _atSnap(t, free, exclude, withCursor = true) {
     const rec = _atRecallOf(e.action);
     if (rec && !(exclude && exclude.has(e.id))) _atRefOf(_at, e.t, rec).steps.forEach(s => consider(s.t));
   }
-  if (withCursor) consider(_at.cursorMs);
   consider(0);
   return best ? { t: Math.round(best.c), to: Math.round(best.c) } : { t, to: null };
 }
-// Drag a step (and the selection with it, when it is selected); a click without moving edits it.
+// Drag a step: its row's delay follows, and on letting go the row moves to where it fires among the others
+// (_arSettle). A click without moving opens its row.
 function _atStartDrag(ev, e) {
   ev.preventDefault(); ev.stopPropagation();
   if (ev.button === 2) return;
-  if (ev.shiftKey) { _atSelect(e.id, true); _atRender(); return; }
-  if (!_at.sel.has(e.id)) _atSelect(e.id, false); else _at.primary = e.id;
-  const group = _at.events.filter(x => _at.sel.has(x.id));
-  const starts = new Map(group.map(x => [x.id, x.t]));
-  const exclude = new Set(starts.keys());
-  const minStart = Math.min(...starts.values()), maxStart = Math.max(...starts.values());
-  const t0 = e.t, startX = ev.clientX;
+  const tier = _at.tierKey;
+  const delayEl = document.getElementById(`delay-${tier}-${e.id}`);
+  const t0 = e.t, startX = ev.clientX, exclude = new Set([e.id]);
   let moved = false, ended = false;
   const finish = () => {
     if (ended) return; ended = true;
@@ -17564,379 +17633,148 @@ function _atStartDrag(ev, e) {
     window.removeEventListener('pointerup', finish);
     if (!_at) return;
     _at.guideT = null;
-    if (moved) _atRender();
-    else { _atSelect(e.id, false); _atRender(); _atOpenStep(e, e.t); }
+    _at.dragging = false;
+    if (moved) {
+      const row = document.getElementById(`action-${tier}-${e.id}`);
+      if (row) { _arSettle(tier, row); if (row.dataset.openDelay != null) row.dataset.openDelay = delayEl ? delayEl.value : '0'; }
+      refreshTierState(tier);
+      if (tier === 'peer') _peerEventDirty = true;
+    } else {
+      _arOpen(tier, e.id, true);
+      document.getElementById(`action-${tier}-${e.id}`)?.scrollIntoView({ block: 'nearest' });
+    }
   };
   const onMove = mv => {
     if (!_at) return finish();
     if (!moved && Math.abs(mv.clientX - startX) < 3) return;
-    if (!moved) { _atPush(); moved = true; }
+    moved = true;
+    _at.dragging = true;
     const snap = _atSnap(t0 + (mv.clientX - startX) / _at.pxPerMs, mv.altKey, exclude);
-    const d = Math.max(-minStart, Math.min(ncLimits().maxDelayMs - maxStart, snap.t - t0));
-    group.forEach(x => { x.t = starts.get(x.id) + d; x.over = 0; });
+    e.t = snap.t; e.over = 0;
+    if (delayEl) { delayEl.value = String(e.t); delayEl.dispatchEvent(new Event('input')); }
     _at.guideT = snap.to;
+    _arPaintTier(tier);
     _atRender();
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', finish);
 }
-function _atDragCursor(ev) {
-  ev.preventDefault();
-  const svg = document.getElementById('at-svg');
-  let ended = false;
-  const finish = () => { if (ended) return; ended = true; window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', finish); };
-  const onMove = mv => {
-    if (!_at) return finish();
-    const r = svg.getBoundingClientRect();
-    _at.cursorMs = _atSnap(_atXToTime(mv.clientX - r.left), mv.altKey, null, false).t;
-    _atRender();
-  };
-  window.addEventListener('pointermove', onMove);
-  window.addEventListener('pointerup', finish);
-}
-// Align: every selected step at one time, in the order they were laid out, as the Wizard's Align does: actions at
-// one time fire in the tier's order, so the aligned set goes into the list, earliest first, where its first was.
-function _atAlign(where) {
-  const sel = _atSelected();
-  if (sel.length < 2) return;
-  const T = where === 'first' ? sel[0].t : where === 'last' ? sel[sel.length - 1].t : _at.cursorMs;
-  _atCommit(() => {
-    const ids = new Set(sel.map(e => e.id));
-    sel.forEach(e => { e.t = Math.max(0, Math.min(ncLimits().maxDelayMs, Math.round(T))); e.over = 0; });
-    const out = [];
-    for (const e of _at.events) { if (!ids.has(e.id)) out.push(e); else if (e === sel[0]) out.push(...sel); }
-    _at.events = out;
-  });
-  _atSetStatus(`Aligned ${sel.length} actions at ${_atFmtT(sel[0].t)}; they fire in the order they now sit in the list.`);
-}
-// Space evenly: the first and last selected stay; the ones between go to equal gaps, in their order.
-function _atSpread() {
-  const sel = _atSelected();
-  if (sel.length < 3) return;
-  const t0 = sel[0].t, t1 = sel[sel.length - 1].t;
-  _atCommit(() => { sel.forEach((e, i) => { e.t = Math.round(t0 + (t1 - t0) * i / (sel.length - 1)); }); });
-  _atSetStatus(`Spaced ${sel.length} actions evenly between ${_atFmtT(t0)} and ${_atFmtT(t1)}.`);
-}
-// The arrow keys: 10 ms, Shift 100, Alt 1.
-function _atNudge(ms) {
-  const sel = _atSelected();
-  if (!sel.length) return;
-  const d = Math.max(-Math.min(...sel.map(e => e.t)), Math.min(ncLimits().maxDelayMs - Math.max(...sel.map(e => e.t)), ms));
-  if (!d) return;
-  _atCommit(() => sel.forEach(e => { e.t += d; e.over = 0; }));
-}
-function _atDeleteSel() {
-  if (!_at.sel.size) return;
-  _atCommit(() => { _at.events = _at.events.filter(e => !_at.sel.has(e.id)); _at.sel.clear(); _at.primary = null; });
-}
-
-// ── One step's editor (a popover over the timeline) ──────────────────────────
-// The same fields as the tier's rows (appendActionFields / readActionFromFid), with the step's time in place of its
-// delay. `template` starts a new step with a type (a click on an MP3 lane's empty space starts an MP3 action).
-let _atStepId = null;
-function _atOpenStep(existing, t, template) {
-  if (!existing && _at.events.length >= ncLimits().actionsPerTier) {
-    _atSetStatus(`This ${editingSw ? 'position' : 'tap'} already has ${ncLimits().actionsPerTier} actions, as many as the board holds. Delete one to add another.`);
-    return;
+// A double click on the timeline's empty space: a new row at that time (the lane's kind of action), open, put where
+// it fires among the others; a command one opens the command builder at once. A blank row the tier already has is
+// used instead of adding another.
+const AT_BUILDER_KINDS = new Set([null, 'serial', 'maestro', 'wled']);
+function _atAddAt(t, kind) {
+  const at = _at;
+  if (!at) return;
+  const tier = at.tierKey;
+  const rows = document.getElementById(`rows-${tier}`);
+  if (!rows) return;
+  const delay = _atSnap(t, false, null).t;
+  const init = { type: kind || 'wcb_unicast', ...(delay ? { delay } : {}) };
+  const blank = [...rows.querySelectorAll('.action-row.ar')].find(r =>
+    !readActionFromUI(tier, r.dataset.ai) && !String(document.getElementById(`fields-${tier}-${r.dataset.ai}-cmd`)?.value || '').trim()
+    && document.getElementById(`type-${tier}-${r.dataset.ai}`)?.value === 'wcb_unicast');
+  let row;
+  if (blank) {
+    rows.querySelectorAll('.action-row.ar.open').forEach(r => { if (r !== blank) _arClose(tier, r); });
+    row = buildActionRow(tier, +blank.dataset.ai, init, { open: true });
+    blank.replaceWith(row);
+  } else {
+    row = addActionRow(tier, init);
+    if (!row) {
+      _atSetStatus(`This ${editingSw ? 'position' : 'tap'} already has ${ncLimits().actionsPerTier} actions, as many as the board holds. Remove one to add another.`);
+      return;
+    }
   }
-  _atStepId = existing ? existing.id : null;
-  const typeSel = document.getElementById('at-step-type');
-  typeSel.innerHTML = '';
-  Object.entries(actionTypeLabels).forEach(([v, lbl]) => {
-    if (!v) return;
-    const o = document.createElement('option'); o.value = v; o.textContent = lbl; typeSel.appendChild(o);
-  });
-  const action = existing ? existing.action : (template && template.type ? { ...template } : { type: 'wcb_unicast' });
-  typeSel.value = _normActionType(action.type);
-  document.getElementById('at-step-title').textContent = existing ? 'Edit action' : 'New action';
-  document.getElementById('at-step-time').value = Math.max(0, Math.round(t || 0));
-  document.getElementById('at-step-time').max = ncLimits().maxDelayMs;
-  document.getElementById('at-step-note').value = action.note || '';
-  const fields = document.getElementById('at-step-fields');
-  appendActionFields(fields, action);
-  typeSel.onchange = () => appendActionFields(fields, { type: typeSel.value,
-    cmd: document.getElementById('at-step-fields-cmd')?.value || '', target: document.getElementById('at-step-fields-target')?.value,
-    port: document.getElementById('at-step-fields-port')?.value });
-  document.getElementById('at-step-delete').style.display = existing ? '' : 'none';
-  ncShow(document.getElementById('at-step-modal'));
-}
-function _atCloseStep() { ncHide(document.getElementById('at-step-modal')); _atStepId = null; }
-function _atApplyStep() {
-  const type = document.getElementById('at-step-type').value;
-  const note = (document.getElementById('at-step-note').value || '').trim();
-  const action = readActionFromFid('at-step-fields', type, note ? { note } : {});
-  if (!action) { alert('Fill in the required fields (e.g. a command) first.'); return; }
-  const raw = Math.round(+(document.getElementById('at-step-time').value || 0));
-  const maxD = ncLimits().maxDelayMs;
-  if (!(raw >= 0 && raw <= maxD)) { alert(`The time is a delay after the press: 0 to ${maxD} ms (${_atFmtT(maxD)}), what this board stores.`); return; }
-  const core = _atStrip(action);
-  _atCommit(() => {
-    const e = _atStepId != null ? _at.events.find(x => x.id === _atStepId) : null;
-    if (e) { e.t = raw; e.action = core; e.over = 0; }
-    else { const n = { id: _atNextId++, t: raw, action: core, over: 0 }; _at.events.push(n); _atSelect(n.id, false); }
-  });
-  _atCloseStep();
-}
-function _atDeleteStep() {
-  if (_atStepId != null) _atCommit(() => { _at.events = _at.events.filter(e => e.id !== _atStepId); });
-  _atCloseStep();
+  _arSettle(tier, row);
+  row.dataset.openDelay = String(delay);
+  refreshTierState(tier);
+  row.scrollIntoView({ block: 'nearest' });
+  if (AT_BUILDER_KINDS.has(kind || null)) openCmdLibrary(`fields-${tier}-${row.dataset.ai}`);
 }
 
 // ── Preview and Test ─────────────────────────────────────────────────────────
-// Preview plays the cursor in the browser and lights each action as it passes; nothing goes to the droid. ▶ Test
-// plays the timeline as it stands (not yet applied) on the droid, the way a press fires it (_testTierActions), with
-// the cursor running alongside.
-function _atPlay(onBoard) {
-  if (!_at) return;
-  if (_at.playing) { _atStopPlay(); return; }
-  const lay = _atLayout();
-  const end = Math.max(lay.lastT + 300, 1000);
-  const run = () => {
-    _at.cursorMs = 0;
-    const start = Date.now();
-    _at.playing = setInterval(() => {
-      if (!_at) return;
-      _at.cursorMs = Math.min(end, Date.now() - start);
-      _atRender();
-      if (_at.cursorMs >= end) _atStopPlay();
-    }, 30);
-    _atPlayBtns();
-  };
-  if (!onBoard) { run(); return; }
-  const acts = _at.events.map((e, i) => ({ e, i })).sort((p, q) => (p.e.t - q.e.t) || (p.i - q.i))
-    .map(({ e }) => (e.t ? { ...e.action, delay: e.t } : { ...e.action }));
-  _testTierActions(acts, _at.seqName, document.getElementById('at-test'), run);
+// ▶ Preview runs the cursor in the browser and lights each action as it passes; nothing goes to the droid. The
+// tier's ▶ Test fires its rows the way a press does (testTier → _testTierActions) with the cursor alongside.
+function _atRunCursor(tierKey) {
+  if (!_at || String(_at.tierKey) !== String(tierKey)) return;
+  _atStopPlay();
+  const end = Math.max(_atLayout().lastT + 300, 1000);
+  _at.cursorMs = 0;
+  const start = Date.now();
+  _at.playing = setInterval(() => {
+    if (!_at) return;
+    _at.cursorMs = Math.min(end, Date.now() - start);
+    _atRender();
+    if (_at.cursorMs >= end) _atStopPlay();
+  }, 30);
+  _atPlayBtns();
+  _atRender();
+}
+function _atPreview(tierKey) {
+  if (_at && _at.playing && String(_at.tierKey) === String(tierKey)) { _atStopPlay(); return; }
+  _atRunCursor(tierKey);
 }
 function _atStopPlay() {
   if (!_at || !_at.playing) return;
   clearInterval(_at.playing);
   _at.playing = null;
+  _at.cursorMs = 0;
   _atPlayBtns();
   _atRender();
 }
 function _atPlayBtns() {
-  const b = document.getElementById('at-preview');
-  if (b) b.textContent = (_at && _at.playing) ? '■ Stop' : '▶ Preview';
+  document.querySelectorAll('.at-preview').forEach(b => {
+    b.textContent = (_at && _at.playing && b.id === `at-preview-${_at.tierKey}`) ? '■ Stop' : '▶ Preview';
+  });
 }
 
 // ── Zoom ─────────────────────────────────────────────────────────────────────
-function _atZoom(factor, clientX) {
+// The view is a span of time across the track: − / + step through AT_ZOOMS, the presets jump, Ctrl+scroll eases; the
+// time under the pointer (or the middle) stays put. Never wider than the board's longest delay.
+function _atUsableW() {
+  const sc = document.getElementById('at-scroll');
+  return Math.max(120, (sc && sc.clientWidth ? sc.clientWidth : 640) - AT_LEFT - AT_RIGHT);
+}
+function _atSetView(ms, clientX) {
   if (!_at) return;
   const sc = document.getElementById('at-scroll');
   const rect = sc.getBoundingClientRect();
-  const vx = clientX == null ? rect.width / 2 : clientX - rect.left;
-  const ft = _atXToTime(sc.scrollLeft + vx);
-  _at.pxPerMs = Math.max(AT_PX_MIN, Math.min(5, _at.pxPerMs * factor));
+  const vx = clientX == null ? 0 : clientX - rect.left;
+  const ft = clientX == null ? 0 : _atXToTime(sc.scrollLeft + vx);
+  _at.viewMs = Math.max(AT_ZOOMS[0] / 2, Math.min(ncLimits().maxDelayMs, ms));
+  _at.pxPerMs = _atUsableW() / _at.viewMs;
   _atRender();
-  sc.scrollLeft = _atTimeToX(ft) - vx;
+  sc.scrollLeft = clientX == null ? 0 : _atTimeToX(ft) - vx;
+}
+function _atZoomStep(dir) {
+  if (!_at) return;
+  const v = _at.viewMs;
+  const next = dir > 0 ? AT_ZOOMS.find(z => z > v + 0.5) : [...AT_ZOOMS].reverse().find(z => z < v - 0.5);
+  _atSetView(next || (dir > 0 ? ncLimits().maxDelayMs : AT_ZOOMS[0]), null);
 }
 function _atFit() {
   if (!_at) return;
-  const sc = document.getElementById('at-scroll');
-  const usable = (sc.clientWidth || 700) - AT_LEFT - AT_RIGHT;
-  const lay = _atLayout();
-  _at.pxPerMs = Math.max(AT_PX_MIN, Math.min(5, usable / _atViewEnd(lay)));
-  _atRender();
-  sc.scrollLeft = 0;
+  _atSetView(_atViewEnd(_atLayout()), null);
 }
 
-// ── The command library, docked beside the timeline ─────────────────────────
-// The picker's groups and boards (ncCommandLibrary, NC_CMDLIB_GROUPS), each on its home colour. Clicking a command
-// adds it at the cursor, dragging it onto the timeline adds it where it is dropped; one with fields opens the
-// picker's composer first, whose button says where it lands (_cmdlibUse, the picker's row being AT_LIB_FID). Where it
-// is sent is what a new action row would get (_cmdlibResolveAction): a device's WDP label on a WCB port, its
-// configured home, else WCB 1. The step's lane shows it, and clicking the step changes it.
-const AT_LIB_FID = 'at-lib-add';
-const AT_LIB_KEY = 'nc_at_lib_open';   // the panel shown or hidden, per browser
-let _atLibAt = 0;
-const _atLibOpenSecs = new Set();
-function _atLibShown() { try { return localStorage.getItem(AT_LIB_KEY) !== '0'; } catch (e) { return true; } }
-function _atLibShow(on) {
-  try { localStorage.setItem(AT_LIB_KEY, on ? '1' : '0'); } catch (e) {}
-  const p = document.getElementById('at-libpanel'); if (p) p.hidden = !on;
-  const b = document.getElementById('at-lib-btn');
-  if (b) { b.classList.toggle('btn-blue', on); b.classList.toggle('btn-ghost', !on); }
-  if (on) _atLibRender();
-}
-function _atLibRender() {
-  const list = document.getElementById('at-lib-list');
-  if (!list || document.getElementById('at-libpanel').hidden) return;
-  const f = (document.getElementById('at-lib-search')?.value || '').trim().toLowerCase();
-  const esc = s => escH(String(s == null ? '' : s));
-  const boardHtml = (board, label) => {
-    const cmds = (board.commands || []).filter(c => c && !NC_CMDLIB_HIDDEN_CMDS.has(c.id) && (c.template || c.local || board.local) &&
-      (!f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f)));
-    if (!cmds.length) return { html: '', n: 0 };
-    const open = f || _atLibOpenSecs.has(board.id);
-    let h = `<details class="at-lib-board" data-sec="${esc(board.id)}"${open ? ' open' : ''} style="--at-col:${_atColorVar(_atBoardSlot(board.id))}">
-      <summary><span class="at-lib-sw"></span><span class="at-lib-bn">${esc(label || board.name)}</span><span class="at-lib-n">${cmds.length}</span></summary>`;
-    for (const c of cmds) {
-      h += `<div class="at-lib-cmd" draggable="true" data-board="${esc(board.id)}" data-cmd="${esc(c.id)}" title="${esc((c.description || c.name) + ' — click to add at the cursor, or drag onto the timeline')}">
-        <div class="at-lib-cn">${esc(c.shortName || c.name)}</div><div class="at-lib-ct">${esc(c.template || (c.examples && c.examples[0]) || '')}</div></div>`;
-    }
-    return { html: h + '</details>', n: cmds.length };
-  };
-  let html = '';
-  for (const entry of _cmdlibGroupEntries(ncCommandLibrary().boards || [])) {
-    if (entry.type === 'board') { html += boardHtml(entry.board).html; continue; }
-    let inner = '', n = 0, sw = '';
-    for (const b of entry.boards) {
-      const r = boardHtml(b, entry.group.sub ? entry.group.sub(b.name) : b.name);
-      if (r.html) { inner += r.html; n += r.n; sw += `<span class="at-lib-sw" style="--at-col:${_atColorVar(_atBoardSlot(b.id))}"></span>`; }
-    }
-    if (!inner) continue;
-    const gid = 'group:' + entry.group.id, open = f || _atLibOpenSecs.has(gid);
-    html += `<details class="at-lib-group" data-sec="${esc(gid)}"${open ? ' open' : ''}><summary><span class="at-lib-bn">${esc(entry.group.name)}</span>${sw}<span class="at-lib-n">${n}</span></summary>
-      <div class="at-lib-inner">${inner}</div></details>`;
-  }
-  list.innerHTML = html || '<div class="at-lib-empty">No commands match.</div>';
-  list.querySelectorAll('details[data-sec]').forEach(d => d.addEventListener('toggle', () => {
-    if (f) return;   // a search opens what matches; that is not the user's choice to keep
-    if (d.open) _atLibOpenSecs.add(d.dataset.sec); else _atLibOpenSecs.delete(d.dataset.sec);
-  }));
-  list.querySelectorAll('.at-lib-cmd').forEach(el => {
-    el.addEventListener('click', () => { if (_at) _atLibPick(el.dataset.board, el.dataset.cmd, _at.cursorMs); });
-    el.addEventListener('dragstart', e => { e.dataTransfer.setData('text/x-nc-cmd', el.dataset.board + '\n' + el.dataset.cmd); e.dataTransfer.effectAllowed = 'copy'; });
-  });
-}
-function _atLibPick(boardId, cmdId, t) {
-  if (!_at) return;
-  if (_at.events.length >= ncLimits().actionsPerTier) {
-    _atSetStatus(`This ${editingSw ? 'position' : 'tap'} already has ${ncLimits().actionsPerTier} actions, as many as the board holds. Delete one to add another.`);
-    return;
-  }
-  const board = (ncCommandLibrary().boards || []).find(b => b.id === boardId);
-  const cmd = board && (board.commands || []).find(c => c.id === cmdId);
-  if (!cmd) return;
-  _atLibAt = Math.max(0, Math.min(ncLimits().maxDelayMs, Math.round(t)));
-  if (!(cmd.params || []).length) {
-    const r = _cmdlibResolveAction({ board, cmd }, {}, AT_LIB_FID);
-    if (r.error) { alert(r.error); return; }
-    _atAddResolved(r.action, _atLibAt);
-    return;
-  }
-  _cmdlibFid = AT_LIB_FID; _cmdlibSel = null; _cmdlibValues = {};
-  const modal = document.getElementById('cmdlib-modal');
-  document.getElementById('cmdlib-close').onclick = closeCmdLibrary;
-  modal.onclick = e => { if (e.target === modal) closeCmdLibrary(); };
-  ncShow(modal);
-  _cmdlibSelect(boardId, cmdId);
-}
-function _atAddResolved(action, t) {
-  if (!_at) return;
-  const e = { id: _atNextId++, t: Math.max(0, Math.min(ncLimits().maxDelayMs, Math.round(t))), action: _atStrip(action), over: 0 };
-  _atCommit(() => { _at.events.push(e); _atSelect(e.id, false); });
-  const L = _atLaneOf(e.action);
-  _atSetStatus(`Added “${_atStepLabel(e.action)}” at ${_atFmtT(e.t)} — ${L.name}${L.sub ? ' · ' + L.sub : ''}. Click it to change where it goes.`);
-}
-
-// ── The timing strip on each tier ────────────────────────────────────────────
-// Under a tier's name: a dot per action at its delay, in the colour its device has on the timeline, re-drawn 150 ms
-// after its rows change. Clicking it opens the timeline.
-// The timers live on the function, not in a const: refreshTierState can call this before the script has run this
-// far (a const would still be in its temporal dead zone), and the render it schedules runs after.
-function _atStripSchedule(tierKey) {
-  const timers = _atStripSchedule.timers || (_atStripSchedule.timers = {});
-  clearTimeout(timers[tierKey]);
-  timers[tierKey] = setTimeout(() => _atStripRender(tierKey), 150);
-}
-function _atStripRender(tierKey) {
-  const el = document.getElementById(`at-strip-${tierKey}`);
-  if (!el) return;
-  const acts = collectTierActions(tierKey).filter(a => a && a.type);
-  el.classList.toggle('empty', !acts.length);
-  if (!acts.length) { el.innerHTML = ''; return; }
-  const items = acts.map((a, i) => ({ a, i, t: _atDelayOf(a), lane: _atLaneOf(a) })).sort((p, q) => (p.t - q.t) || (p.i - q.i));
-  const lanes = [];
-  for (const it of items) if (!lanes.some(l => l.key === it.lane.key)) lanes.push({ key: it.lane.key, board: it.lane.board });
-  const colors = new Map();
-  _atAssignColors(colors, lanes, new Set(lanes.map(l => l.key)));
-  const end = Math.max(1000, items[items.length - 1].t);
-  const W = 560, H = 26, L = 8, R = 52;   // drawn at the card's width; CSS scales it (.at-strip svg)
-  const xOf = t => L + (W - L - R) * t / end;
-  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">` +
-            `<line x1="${L}" y1="${H / 2}" x2="${W - R}" y2="${H / 2}" stroke="var(--border)" stroke-width="1"/>`;
-  const seen = {};
-  for (const it of items) {
-    const k = it.t;                     // actions at one time stack a little, so each dot shows
-    const n = seen[k] = (seen[k] || 0) + 1;
-    svg += `<circle class="at-strip-dot" cx="${xOf(it.t)}" cy="${H / 2 - (n - 1) * 5}" r="4" fill="${_atColorVar(colors.get(it.lane.key))}" stroke="var(--field)" stroke-width="1" data-t="${it.t}">` +
-           `<title>${escH(_atFmtT(it.t) + ' · ' + _atStepLabel(it.a) + ' · ' + it.lane.name)}</title></circle>`;
-  }
-  svg += `<text x="${W - R + 6}" y="${H / 2 + 3.5}" font-size="10" fill="var(--muted)" font-family="var(--mono)">${escH(end < 60000 ? (end / 1000).toFixed(end < 10000 ? 2 : 1) + ' s' : _atFmtShort(end))}</text></svg>`;
-  el.innerHTML = svg;
-}
-// Rows edited by typing (a delay, a command) redraw their tier's strip; refreshTierState covers adds, removes,
-// moves and the library's writes.
+// Rows edited by typing (a delay, a command, a note) redraw their tier's lines and timeline a moment later;
+// refreshTierState covers adds, removes, moves and the library's writes.
+let _atTypingTimer = null;
 for (const evName of ['input', 'change']) {
   document.getElementById('tiers-container').addEventListener(evName, e => {
     const card = e.target.closest && e.target.closest('.tier-card');
-    if (card && /^tier-card-/.test(card.id)) _atStripSchedule(card.id.slice('tier-card-'.length));
+    if (!card || !/^tier-card-/.test(card.id) || (_at && _at.dragging)) return;
+    const tier = card.id.slice('tier-card-'.length);
+    clearTimeout(_atTypingTimer);
+    _atTypingTimer = setTimeout(() => _atTierRefresh(/^\d+$/.test(tier) ? +tier : tier), 120);
   });
 }
-
-// ── Wiring ───────────────────────────────────────────────────────────────────
-document.getElementById('at-close').addEventListener('click', () => closeActionTimeline(false));
-document.getElementById('at-cancel').addEventListener('click', () => closeActionTimeline(false));
-document.getElementById('at-apply').addEventListener('click', applyActionTimeline);
-document.getElementById('at-zoom-in').addEventListener('click', () => _atZoom(1.4, null));
-document.getElementById('at-zoom-out').addEventListener('click', () => _atZoom(1 / 1.4, null));
-document.getElementById('at-zoom-fit').addEventListener('click', _atFit);
-document.getElementById('at-undo').addEventListener('click', _atUndo);
-document.getElementById('at-redo').addEventListener('click', _atRedo);
-document.getElementById('at-preview').addEventListener('click', () => _atPlay(false));
-document.getElementById('at-test').addEventListener('click', () => _atPlay(true));
-document.getElementById('at-add').addEventListener('click', () => { if (_at) _atOpenStep(null, _at.cursorMs, null); });
-document.getElementById('at-delete').addEventListener('click', () => { if (_at) _atDeleteSel(); });
-document.getElementById('at-lib-btn').addEventListener('click', () => _atLibShow(document.getElementById('at-libpanel').hidden));
-document.getElementById('at-lib-search').addEventListener('input', _atLibRender);
-document.getElementById('at-align-first').addEventListener('click', () => _atAlign('first'));
-document.getElementById('at-align-last').addEventListener('click', () => _atAlign('last'));
-document.getElementById('at-align-cursor').addEventListener('click', () => _atAlign('cursor'));
-document.getElementById('at-spread').addEventListener('click', _atSpread);
-document.getElementById('at-step-close').addEventListener('click', _atCloseStep);
-document.getElementById('at-step-apply').addEventListener('click', _atApplyStep);
-document.getElementById('at-step-delete').addEventListener('click', _atDeleteStep);
-document.getElementById('at-step-modal').addEventListener('click', e => { if (e.target === document.getElementById('at-step-modal')) _atCloseStep(); });
-document.getElementById('at-modal').addEventListener('click', e => { if (e.target === document.getElementById('at-modal')) closeActionTimeline(false); });
-document.getElementById('at-scroll').addEventListener('wheel', e => {
-  if (!e.ctrlKey || !_at) return;
-  e.preventDefault();
-  _atZoom(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX);
-}, { passive: false });
-// A library command dragged in lands at the time it is dropped on, whichever lane it is over: its lane is its device.
-document.getElementById('at-scroll').addEventListener('dragover', e => {
-  if (!_at || !e.dataTransfer || ![...e.dataTransfer.types].includes('text/x-nc-cmd')) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'copy';
-});
-document.getElementById('at-scroll').addEventListener('drop', e => {
-  const v = e.dataTransfer && e.dataTransfer.getData('text/x-nc-cmd');
-  if (!_at || !v) return;
-  e.preventDefault();
-  const [board, cmd] = v.split('\n');
-  const r = document.getElementById('at-svg').getBoundingClientRect();
-  _atLibPick(board, cmd, _atSnap(_atXToTime(e.clientX - r.left), e.altKey, null).t);
-});
-window.addEventListener('keydown', e => {
-  if (!_at || !document.getElementById('at-modal').classList.contains('open')) return;
-  if (document.getElementById('at-step-modal').classList.contains('open') ||
-      document.getElementById('cmdlib-modal').classList.contains('open')) return;
-  const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-  if (typing) return;
-  const mod = e.ctrlKey || e.metaKey;
-  if ((e.key === 'Delete' || e.key === 'Backspace') && _at.sel.size) { e.preventDefault(); _atDeleteSel(); }
-  else if (mod && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) { e.preventDefault(); _atUndo(); }
-  else if (mod && ((e.key === 'z' || e.key === 'Z') && e.shiftKey || e.key === 'y' || e.key === 'Y')) { e.preventDefault(); _atRedo(); }
-  else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && _at.sel.size) {
-    e.preventDefault();
-    const step = e.altKey ? 1 : e.shiftKey ? 100 : 10;
-    _atNudge(e.key === 'ArrowLeft' ? -step : step);
-  } else if (e.key === 'Escape') {
-    e.preventDefault();
-    if (_at.sel.size) { _at.sel.clear(); _at.primary = null; _atRender(); } else closeActionTimeline(false);
-  }
-});
+// Exclusive on or off changes which taps fire with this one (_atWithTiers): redraw them.
+document.getElementById('modal-exclusive').addEventListener('change', () => { if (_at) { _atSync(); _atRender(); } });
+_atLoaded = true;
+// Rows built before this section ran (the new-peer editor) get their lines now.
+document.querySelectorAll('.rows-container[id^="rows-"]').forEach(r => _arPaintTier(r.id.slice('rows-'.length)));
 
 function saveButton() {
   const key = String(currentMode * 100 + editingBtn);
@@ -17964,6 +17802,7 @@ function clearButton() {
 }
 
 function closeModal() {
+  _atUnbind();
   ncHide(document.getElementById('modal'));   // shrinks back into the control (nc-zoom)
   ncMarkSource(null);
   editingBtn  = null;
@@ -18545,6 +18384,7 @@ function openSwitchModal(swName) {
   document.getElementById('modal-mode-badges').innerHTML = '';
   document.getElementById('modal-exclusive').parentElement.parentElement.style.display = 'none';
 
+  _atReset();   // no timeline from the last editor, and fresh device colours
   const container = document.getElementById('tiers-container');
   container.innerHTML = '';
 
@@ -18570,6 +18410,7 @@ function openSwitchModal(swName) {
 
   buildSwitchTiers(sw);
   ncOpenActionModal(`.switch-zone[data-sw="${swName}"]`);
+  _atRefitSoon();
 }
 
 function buildSwitchTiers(sw) {
@@ -18616,8 +18457,8 @@ function buildSwitchTiers(sw) {
 
     const startCount = Math.max(1, acts.length);
     for (let ai = 0; ai < startCount; ai++) {
-      const a = acts[ai] || { type: 'wcb_unicast' };   // blank rows start as a (empty) command
-      rows.appendChild(buildActionRow(tierKey, ai, a));
+      const a = acts[ai] || { type: 'wcb_unicast' };   // blank rows start as a (empty) command, open to fill in
+      rows.appendChild(buildActionRow(tierKey, ai, a, { open: !acts[ai] }));
     }
 
     const addBtn = document.createElement('button');
@@ -18643,6 +18484,7 @@ function setSwitchTier(tierKey) {
     const card = document.getElementById(`tier-card-${k}`);
     if (card) card.style.display = (k === tierKey) ? '' : 'none';
   });
+  _atBind(tierKey);   // the timeline moves into the card that shows
 }
 
 function rebuildSwitchTiers() {
