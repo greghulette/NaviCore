@@ -205,7 +205,7 @@ Where to look when changing a given area:
 | Maestro panel | `renderMaestroLocations()`, `_importMaestroFile()` (Control Center XML), `_maestroChInfo()` |
 | Smoothing | `renderSmoothingPane()`, `_smoothProfiles()` |
 | Clips | `clipsRefresh()`, `_clipListFeed()`, `renderClips()`, `clipRename()`, `clipDelete()` |
-| Timeline editor | everything prefixed `_tl*` |
+| Timeline editor | everything prefixed `_tl*`; a new clip `clipNewTimeline()` / `openNewTimeline()`; its action lanes from `_tlLaneOf()` to `_tlAddResolvedAction()` |
 | Fragmentation (receive) | fragment envelope handling in `handleBoardMessage()`, `_fragProgress()` |
 | Bulk push | `_bulk*` family |
 | Flashing | `flasher.js` → `flashFirmware(port, callbacks)` |
@@ -454,7 +454,8 @@ consumer that does not know them: **`defaultPort`** — the serial port a freshl
 command goes to before label routing (`_cmdlibUse`: DroidNet's trigger goes to the first WCB's
 Serial 0, where DroidNet listens); **`caseInsensitive`** — the device takes the fixed text in
 either case, so `_ncCommandPattern` matches it so (`@AMonsterMash` and `@aMonsterMash`);
-`laneName` and `shortName` are for the Wizard's timeline only. A template with **no fixed
+`laneName` and `shortName` name a step's lane and the step itself on a timeline: the Wizard's
+sequence builder and this tool's (§7). A template with **no fixed
 text and a free-text field** (`wcb.serialText`, `{text}`) is never decoded: `ncDecodeCommand`
 takes the first match, and such a template would claim every command after it. A lone enum
 (`flthy.special.sequence`, `{special}`) matches only its codes and still decodes.
@@ -584,16 +585,75 @@ Things worth knowing before touching it:
 
 ## 7. Timeline editor
 
-Opens a recorded clip as an editable timeline: per-channel servo curves with draggable
-keyframes and Photoshop-style tangent handles, discrete action markers, zoom/fit/trim,
-RDP-based smoothing, easing insertion, undo history, and **live preview** that drives the
-real servos to the cursor position via `?MAE` writes.
+Opens a clip as an editable timeline: per-channel servo curves with draggable
+keyframes and Photoshop-style tangent handles, the clip's actions in a lane per device,
+zoom/fit/trim, RDP-based smoothing, easing insertion, undo history, and **live preview** that
+drives the real servos to the cursor position via `?MAE` writes. **＋ New clip** in the Clips
+panel opens an empty one under a new name (`clipNewTimeline`, `openNewTimeline`): a clip need
+not be recorded first. Nothing is on the droid until Save.
 
 Transport is `?REC,EDITLOAD` down (`[CLIPDL:*]` lines) and
 `EDITBEGIN,<mode>` / `EDITEV,<idx>,<json>` / `EDITEND` up, with indexed ACKs so a timeout retry
 cannot duplicate an event. `EDITBEGIN` carries the clip's own mode (`_clipModeArg`), here and in
-the clip restore, because the board saves the resident mode. It can also export a clip as
-Maestro **script source**.
+the clip restore, because the board saves the resident mode. `EDITEND,<name>` saves under the
+name it is given (`editEnd`), which is how a new clip lands. A new clip takes the current mode
+and a 10 s length to work in; saved, its length is its last event's time. It can also export a
+clip as Maestro **script source**.
+
+### Actions: a lane per device
+
+A clip's actions draw the way the WCB Wizard's Sequence Builder draws a sequence's steps (WCB
+`docs/SEQUENCE_BUILDER.md` §5), in code from `_tlLaneOf` on, below the action popover:
+
+- **A lane per device an action reaches**, named with where it goes (`_tlLaneOf`). A device
+  string the library knows (`;W<n>;S<p><text>`, `;S<p><text>`, a local serial write) goes in
+  its device's lane, "FlthyHPs Holoprojectors / WCB 2 · Serial 1", so two devices on one port
+  are two lanes; text the library does not know shares a lane by port, named from the port's
+  WDP label (`_wcbPortLabel`). A WCB verb goes in the lane of the device it drives, whichever
+  board it is sent to (`;M1…` is Maestro 1, `;C`/`;SEQ` Sequences), and the native HCR, MP3,
+  DFPlayer and WLED actions share the lane of the verb they become. Clip controls are Clips,
+  a NaviCore Maestro slot's commands "Maestro slot n". The route reader (`_tlSplitRoute`)
+  takes the WCB's `;W<n>,` and one-digit `;W<d>` forms too.
+- **A step fires at its dot**; the box to its right is only its label: the library command and
+  its values (`_tlStepLabel`, as the Wizard's `sbLabelOf`), else the action's summary without
+  the device. Labels are measured (`_tlTextW`, a canvas) and steps too close to label stack
+  into rows; past three rows they shrink to dots, named by their tooltip.
+- **Colour is the device, the same as in the Wizard.** The eight colours are seq-builder.css's
+  (`--tl-c1..8`, both themes, validated with the dataviz skill's `validate_palette.js` on this
+  timeline's surface) and `TL_BOARD_SLOT` is its `SB_BOARD_SLOT` plus NaviCore's own boards;
+  `tests/wizard/unit/seq_builder.test.js` in the WCB repo holds both equal. A lane takes its
+  board's home colour unless one on screen holds it, then the first free one (`_tlColorOf`);
+  lanes with a home pick before lanes without one, so a port no device is known on cannot take
+  Maestro's blue by coming first (the Wizard picks strictly by appearance). Colours stay with
+  their lanes while the editor is open (`_tlClip.colors`), and every lane and step is labelled.
+- **The sequence an action runs is drawn under it.** An action carrying `;C<key>` or
+  `;SEQ<key>` gets a reference row: the stored sequence's steps where they land (the action's
+  time plus each step's, `_tlSeqSteps` following the WCB's `;T`/`;t` timing), in their devices'
+  colours, its run hatched. Its body comes from the same `GET_WCB_SEQVAL` pull the library's
+  sequence field uses (`_tlFetchRefs`, one at a time, each asked once a session), from the
+  board the action goes to, or for a broadcast the first board whose pulled list has the key.
+  The view runs on past the clip's end to a sequence's last step, shaded after the end.
+- **Selecting and moving.** Drag a step to move it; it sticks to another step, a servo control
+  point, a reference step or the cursor within 8 px, with a dashed guide (`_tlSnap`); Alt places
+  it to the ms. ←/→ nudge the selection 10 ms (Shift 100, Alt 1). Shift-click selects several
+  (`_tlClip.selActs`; `_tlClip.selected` names the primary one): dragging one moves them all,
+  Delete removes them all, and with two or more **Align** puts them at the first's, the last's or
+  the cursor's time, three or more **Space evenly** keeps the ends and evens the middle. Two
+  actions never share a millisecond (`_tlFreeActionTime`), so aligned ones sit 5 ms apart in
+  their order. Each of these, a drag included, is one undo step.
+- **The command library is docked beside the timeline** (📚 Library, shown or hidden per
+  browser, `nc_tl_lib_open`): the picker's groups and boards, each on its home colour. Clicking
+  a command adds it at the cursor, dragging it onto the timeline adds it where it is dropped; a
+  command with fields opens the picker's composer first, whose button says where it lands
+  (`_tlLibPick`, the picker's row is `TL_LIB_FID`). Where it is sent is what a new action row
+  would get (`_cmdlibResolveAction`, split out of `_cmdlibUse`): a device's WDP label on a WCB
+  port, its configured home, else WCB 1. The step's lane shows it, and clicking the step edits it.
+- **The action popover** is the step's inspector (click a step; a click on a lane's empty space
+  starts one of that lane's kind). It has no Delay: a clip replays each action through
+  `rcExecuteActionNow` (`recCbDispatch`), which never applies one, so an action fires at its
+  time. A delay a recorded action carries is kept and said not to apply.
+- **Preview** with no board plays the cursor in the browser and lights each action as it
+  passes; connected, it arms Live as before.
 
 ---
 
@@ -817,6 +877,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-25 | — | **Timeline: actions in a lane per device** (§7, "Actions: a lane per device"). The single Actions row and its diamonds become the WCB Wizard's Sequence Builder layout: a lane per device in the Wizard's colours and home slots, steps that fire at their dot with their label beside it, the sequence an action runs drawn under it from `GET_WCB_SEQVAL`, Shift-click multi-select with Align and Space evenly, sticking while dragging and arrow-key nudges, the command library docked beside the timeline with drag and drop, ＋ New clip, and Preview with no board. `_cmdlibUse` split into `_cmdlibResolveAction` so the timeline routes a command as a new row would. Fixed with it: dragging an action, and deleting one from the popover, now undo; the popover's Delay field, which a clip never applies, is gone. |
 | 2026-10-23 | — | **`wcb.sequences`: a long value has time to arrive.** A sequence value over one mesh reply comes in parts (WCB_Client 1.20.0) and the RC waits for them, so a value pull's backstop is `NC_SEQVAL_TIMEOUT` (20 s); the TOOBIG note says the WCB's firmware is too old to send it, the only case left that answers it. |
 | 2026-10-22 | — | **`wcb.sequences`: a long names list has time to arrive.** A list over one mesh reply comes in pages (WCB_Client 1.19.0, about 0.8 s a page) and the RC waits for it past its 6 s, so the picker's backstop for a names pull is `NC_SEQ_NAMES_TIMEOUT` (30 s, settled sooner by the RC's own answer); at 8 s the refresh walk asked the next board while the RC was still busy, which it refused. Value pulls keep `NC_SEQ_TIMEOUT` (8 s). |
 | 2026-10-21 | — | **Access token, region, channel sync** (§9): a masked `cfg-wifi-token` with a reveal and `ncTokenProblem()` validation (only a valid token reaches `config`; disabled Via WCB, where the board does not send it); `wcb-region` (`NC_REGIONS`) with the channel input's max following it (`_ncRegionMaxCh`, 12-13 only under a 13-channel region; an out-of-region channel is flagged, not clamped); the `wcb-chansync` checkbox. §5 item 11: Via WCB, Save strips the WiFi settings as well as the `wcbNetwork` transport fields, region included (`_stripBridgedPayload`, shared with the push-budget readout), and keeps them out of the pending baseline — the firmware already dropped the WiFi ones while the ACK advanced the baseline over them. The profile CSV channel clamp is 1-13. Moved two stray 2026-08-25 rows from the §9 body into this log. |
