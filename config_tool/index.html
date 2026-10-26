@@ -534,6 +534,8 @@
   .at-pre:hover { color: var(--text); }
   .at-pre.on { border-color: var(--accent); color: var(--accent); background: rgba(43,134,255,.12); }
   .at-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--field); }
+  /* ⤢ Expand: the button / switch editor as wide as the window allows, for the timeline (_atSetExpanded). */
+  #modal.at-wide .modal { width: min(1400px, 96vw) !important; }
   #at-svg { display: block; }
   #at-svg .at-ev-hit { touch-action: none; }
   .at-hint, .at-status { font-size: 11px; color: var(--muted); }
@@ -2722,7 +2724,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.23:08.R.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.23:56.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -17203,6 +17205,7 @@ function _atInlineEl() {
       <button type="button" class="at-zb" id="at-zoom-fit" title="Fit every action in the view">Fit</button>
       <span class="at-zr" id="at-view"></span>
       <span class="at-zsp"></span>
+      <button type="button" class="at-zb" id="at-expand" title="Widen the editor to the window, for a bigger timeline (remembered in this browser)">⤢ Expand</button>
       ${AT_PRESETS.map(([ms, l]) => `<button type="button" class="at-pre" data-ms="${ms}" title="Show the first ${l} after the press">${l}</button>`).join('')}
     </div>
     <div class="at-scroll" id="at-scroll"><svg id="at-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
@@ -17214,6 +17217,7 @@ function _atInlineEl() {
   el.querySelector('#at-zoom-out').addEventListener('click', () => _atZoomStep(1));
   el.querySelector('#at-zoom-in').addEventListener('click', () => _atZoomStep(-1));
   el.querySelector('#at-zoom-fit').addEventListener('click', _atFit);
+  el.querySelector('#at-expand').addEventListener('click', () => _atSetExpanded(!_atExpanded()));
   el.querySelectorAll('.at-pre').forEach(b => b.addEventListener('click', () => _atSetView(+b.dataset.ms, null)));
   const sc = el.querySelector('#at-scroll');
   sc.addEventListener('wheel', e => {
@@ -17225,6 +17229,24 @@ function _atInlineEl() {
   _atInlineBlock = el;
   return el;
 }
+// ⤢ Expand: the editor as wide as the window (up to 1400 px) while a tier's timeline shows, per browser
+// (AT_WIDE_KEY). Bound and unbound with the timeline, so the knob editor, which shares #modal, keeps its width.
+const AT_WIDE_KEY = 'nc_at_expanded';
+function _atExpanded() { try { return localStorage.getItem(AT_WIDE_KEY) === '1'; } catch (e) { return false; } }
+function _atApplyWide(on) {
+  document.getElementById('modal').classList.toggle('at-wide', !!on);
+  const b = document.getElementById('at-expand');
+  if (b) {
+    b.textContent = on ? '⤡ Shrink' : '⤢ Expand';
+    b.title = on ? 'Back to the editor\'s usual width' : 'Widen the editor to the window, for a bigger timeline (remembered in this browser)';
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+function _atSetExpanded(on) {
+  try { localStorage.setItem(AT_WIDE_KEY, on ? '1' : '0'); } catch (e) {}
+  _atApplyWide(on);
+  if (_at) requestAnimationFrame(() => { if (_at) _atFit(); });   // the track's new width, then fit to it
+}
 // A new editor: no timeline yet, and its own colours.
 function _atReset() { _atUnbind(); _atColors = new Map(); }
 function _atBind(tierKey) {
@@ -17234,6 +17256,7 @@ function _atBind(tierKey) {
   if (!card || !rows || tierKey === 'peer' || !_atLoaded) { _atUnbind(); return; }
   const el = _atInlineEl();
   if (el.parentElement !== card || el.nextElementSibling !== rows) card.insertBefore(el, rows);
+  _atApplyWide(_atExpanded());
   const fresh = !_at || _at.tierKey !== tierKey;
   if (fresh) {
     _atStopPlay();
@@ -17249,6 +17272,7 @@ function _atRefitSoon() { requestAnimationFrame(() => requestAnimationFrame(() =
 function _atUnbind() {
   _atStopPlay();
   _at = null;
+  document.getElementById('modal')?.classList.remove('at-wide');
   if (_atInlineBlock && _atInlineBlock.parentElement) _atInlineBlock.remove();
 }
 // The timeline's actions are the rows': each complete row is an event at its delay (id = its row's ai).
