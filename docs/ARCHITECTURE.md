@@ -132,7 +132,7 @@ firmware numbering. See [ROADMAP.md §1](ROADMAP.md).
 
 | Region | Size | Contents |
 |---|---|---|
-| PSRAM heap | 8 MB | `RcConfig` (~210 KB, `ps_calloc` in `setup()`), record/replay clip buffer (24 000 events ≈ 3.1 MB) |
+| PSRAM heap | 8 MB | `RcConfig` (641 508 B, `ps_calloc` in `setup()`), record/replay clip buffer (24 000 events × 140 B ≈ 3.4 MB) |
 | Internal SRAM | 512 KB | Everything else; the fragment reassembly pool is static DRAM (~10 KB) |
 | `nvs` @ `0x9000` | 20 KB | Legacy config store (migration source), WCB learned-peer table |
 | `app0`/`app1` | 1.9 MB each | OTA slots |
@@ -406,9 +406,18 @@ the cache records it applied and the compare skips it forever. Each easing chang
 the cache first so the repeat is not a no-op against the entry it is meant to correct. It is a
 bounded retry, not a heartbeat: an idle droid puts nothing extra on the mesh.
 
-**Dispatch.** `rcDispatch(buttonId, tapCount)` → the tier's up-to-5 `RcAction`s →
-`rcExecuteAction()` (schedules if `delayMs`, else `rcExecuteActionNow()`). Delays are
-measured **from the trigger instant and run in parallel**, not cumulatively.
+**Dispatch.** `rcDispatch(buttonId, tapCount)` → the tier's up-to-10 (`RC_ACTIONS_PER_TIER`)
+`RcAction`s → `rcExecuteAction()` (schedules if `rcActionDelay(a)` is non-zero, else
+`rcExecuteActionNow()`). Delays are measured **from the trigger instant and run in parallel**,
+not cumulatively, and reach 30 min (`RC_MAX_DELAY_MS`).
+
+**Delayed actions wait in `pendingActions[PENDING_ACTION_SLOTS]` (32), shared by every button
+and switch.** A long delay holds its slot the whole time. When all 32 are taken,
+`scheduleAction()` **drops** the next one and logs
+`WARN: pendingActions full (32 slots) - dropped type … due in … ms`. It used to fire it at once
+with its delay dropped; with delays of up to 30 min that turned "park the dome in 20 minutes"
+into "now", so a step that never fires — and says so — is the smaller surprise. `checkPendingActions()`
+compares by signed difference, so the millis() wrap is safe at any delay up to 24 days.
 
 While `calibrationActive` is set (the tool's calibration wizard), all dispatch is muted **and
 `processKnobs()` returns early**. Muting dispatch alone is not enough: passthrough is not a
@@ -420,7 +429,9 @@ needs its own `calibrationActive` check.
 
 ## 10. Action model and executors
 
-An `RcAction` is `{type, target[6], cmd[96], delayMs, note[20], skipRunning, fn, chan, track}`.
+An `RcAction` is `{type, target[6], cmd[96], delayHi, delayLo, note[20], skipRunning, fn, chan, track}` —
+the delay split so the struct's layout, and so the `.ncr` clip format, did not change
+([CONFIG_SCHEMA.md §3](CONFIG_SCHEMA.md)).
 `rcExecuteActionNow()` switches on `type`:
 
 | `RcActionType` | Executor | Destination |
@@ -539,6 +550,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | Dispatch: up to 10 actions per tier, delays to 30 min (24-bit `delayHi:delayLo`), `PENDING_ACTION_SLOTS` 8 → 32, and a full queue now drops the action (logged) instead of firing it early. PSRAM row: `RcConfig` 641 508 B. |
 | 2026-10-23 | — | §13: mesh results in parts (WCB_Client 1.20.0, now the compile-time minimum). |
 | 2026-10-21 | — | §6: `WCB_Client` is constructed before the SoftAP so the region applies first (steps 11–13). §7, §13: channel sync (WCB_Client 1.19.0, now the compile-time minimum) — a move is saved and, with the SoftAP up, applied through the deferred restart; the WebSocket login. `requestDeferredRestart()` takes a reason and stamps its time as `millis()` (0 → 1), not `millis() \| 1`, which half the time lay 1 ms in the future and read as overdue on the next check, skipping the quiet window. |
 | 2026-10-14 | `76edddc` | The transmit watchdog needs WCB_Client 1.18.1 (two boards answer a probe; two answers end a stall; a relapse within 3 min goes to level 2) - a compile-time check stops an older sketchbook copy. |

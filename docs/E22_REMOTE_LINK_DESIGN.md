@@ -405,7 +405,7 @@ Measured, not estimated:
 | Resource | Capacity | Used today | Headroom |
 |---|---|---|---|
 | App partition | 1,966,080 B (`0x1e0000`, `partitions.csv`) | 1,105,888 B (`firmware/NaviCore_v0.2.0_101629QAUG26_ESP32S3.bin`) | **~860 KB (56% used)** |
-| PSRAM | 8 MB | `RcConfig` ~210 KB + 3.1 MB clip buffer | ample |
+| PSRAM | 8 MB | `RcConfig` ~630 KB + 3.4 MB clip buffer | ample |
 | Internal SRAM | 512 KB | fragment pool ~10 KB static + everything else | radio state is a few hundred bytes ×2 |
 
 RadioLib's SX126x driver is roughly 30–60 KB of flash. **Neither flash nor RAM is a

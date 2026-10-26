@@ -100,6 +100,7 @@ inline void _migrateV1Event(const RecEventV1& in, RecEvent& out) {
   out.kind = in.kind;
   if (in.kind == REC_ACTION) {
     memcpy(&out.u.act, &in.u.act, offsetof(RcActionV1, fn));   // type..note, byte-identical
+    rcActionSetDelay(out.u.act, 0);                            // v1's byte 103 was padding, now RcAction::delayHi
     out.u.act.skipRunning = false;                             // field did not exist in v1
     out.u.act.fn          = in.u.act.fn;
     out.u.act.chan        = in.u.act.chan;
@@ -259,6 +260,7 @@ inline void __attribute__((noinline)) captureAction(const RcAction& a) {
   if (!_capturing) return;
   if (a.type == RA_RECORD || a.type == RA_PLAY || a.type == RA_STOP) return;   // meta — never record the record/play/stop triggers
   RecEvent ev{}; ev.tMs = millis() - _recStart; ev.kind = REC_ACTION; ev.u.act = a;
+  rcActionSetDelay(ev.u.act, 0);   // tMs already is the moment it fired; replay never delays (RECORD_REPLAY_DESIGN §4)
   if (xQueueSend(_queue, &ev, 0) != pdTRUE) _drops++;
 }
 inline void __attribute__((noinline)) captureMaestroKf(uint8_t slot, uint8_t ch, uint16_t pos) {
@@ -656,6 +658,10 @@ inline bool loadClip(const char* name) {
                     name, (unsigned long)loaded);
   }
   f.close();
+  // A stored action's delay is meaningless (tMs is when it fired) and, in clips saved
+  // before RcAction::delayHi existed, its high byte is whatever padding the capture
+  // copied. Clear it so a download or a timeline edit never shows a phantom delay.
+  for (uint32_t i = 0; i < loaded; i++) if (_buf[i].kind == REC_ACTION) rcActionSetDelay(_buf[i].u.act, 0);
   _count = loaded;
   _mode  = h.mode;
   strlcpy(_loadedName, name, sizeof(_loadedName));

@@ -186,9 +186,19 @@ struct RcAction {
   // ";h,play,a,1,fadein,4^;t6000^;h,fadeout,a,4" (44+ chars) plus headroom
   // for 3-4 ;-separated segments. Increase carefully — every byte here is
   // multiplied by RC_NUM_MAPPINGS × RC_NUM_TAP_TIERS × RC_ACTIONS_PER_TIER
-  // = 108 × 4 × 5 = 2160.
+  // = 108 × 4 × 10 = 4320.
   char    cmd[96];
-  uint16_t delayMs;       // optional pre-fire delay (ms)
+  // Pre-fire delay (ms), measured from the trigger — 24 bits split across delayHi:delayLo.
+  // Read and write it ONLY through rcActionDelay() / rcActionSetDelay() (below the struct);
+  // the halves are named so a stray `a.delayMs` fails to compile instead of reading 16 bits.
+  // Why not a plain uint32_t: an .ncr clip is a RAW DUMP of RecEvent (which holds an
+  // RcAction), so any change to this struct's size or field offsets misreads every saved
+  // clip (navicore_record.h, RecEventV1). delayHi sits in the alignment byte that was
+  // already here between cmd[] and the 16-bit delay, so the layout — offsets and the
+  // 132-byte size — is unchanged and no clip migration is needed. 24 bits = 4.66 h;
+  // RC_MAX_DELAY_MS caps what the config accepts.
+  uint8_t  delayHi;       // delay bits 16..23
+  uint16_t delayLo;       // delay bits 0..15
   char    note[20];       // human-readable label shown in GUI (19 chars + null)
   bool    skipRunning;    // RA_MAESTRO_REMOTE: skip firing if a Maestro sequence is already running (getMovingState gate)
 
@@ -219,7 +229,21 @@ struct RcAction {
                           //   — for RA_MP3: track #, file index, or volume value.
 };
 
-#define RC_ACTIONS_PER_TIER  5   // max simultaneous actions per tap tier
+#define RC_ACTIONS_PER_TIER  10  // max actions per tap tier / switch position (tool: MAX_ACTIONS_PER_TIER)
+// Longest delay an action may carry: 30 minutes (tool: AT_DELAY_MAX). The field holds
+// 24 bits (see RcAction::delayHi); this is the policy cap rcActionSetDelay() clamps to.
+#define RC_MAX_DELAY_MS      1800000UL
+
+static inline uint32_t rcActionDelay(const RcAction& a) {
+  return ((uint32_t)a.delayHi << 16) | a.delayLo;
+}
+static inline void rcActionSetDelay(RcAction& a, uint32_t ms) {
+  if (ms > RC_MAX_DELAY_MS) ms = RC_MAX_DELAY_MS;
+  a.delayHi = (uint8_t)(ms >> 16);
+  a.delayLo = (uint16_t)(ms & 0xFFFF);
+}
+// The clip format depends on this (navicore_record.h static_asserts RecEvent's stride too).
+static_assert(sizeof(RcAction) == 132, "RcAction size changed — every saved .ncr clip would misread (see RcAction::delayHi)");
 
 struct RcTier {
   uint8_t  count;
@@ -800,7 +824,7 @@ struct RcConfig {
   // after a boot-time grace window so the initial fleet discovery doesn't spam.
   // Global — one action set for any new peer; dedup + boot suppression are
   // handled in firmware (see the peer-event drain in NaviCore.ino loop()).
-  RcTier   peerNewActions;   // up to 5 actions; count 0 = alert only, no action
+  RcTier   peerNewActions;   // up to RC_ACTIONS_PER_TIER actions; count 0 = alert only, no action
   bool     peerAlert;        // also do a passive NeoPixel flash + terminal line
   RcModeReport modeReport;   // optional: report the mode-select position to one WCB (off by default)
   RcStatsReport statsReport; // optional: push this board's mesh delivery counters to one WCB (off by default)
@@ -827,51 +851,51 @@ inline char g_meshPasswordBoot[sizeof(RcWcbNetwork::password)] = "";
 //  Construction helpers
 // ─────────────────────────────────────────────────────────────────────────────
 static inline RcAction makeWCBUnicast(const char* wcbId, const char* cmd,
-                                      uint16_t delayMs = 0, const char* note = "") {
+                                      uint32_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_WCB_UNICAST;
   cfgStrlcpy(a.target, wcbId, sizeof(a.target));
   cfgStrlcpy(a.cmd,    cmd,   sizeof(a.cmd));
   cfgStrlcpy(a.note,   note,  sizeof(a.note));
-  a.delayMs = delayMs;
+  rcActionSetDelay(a, delayMs);
   return a;
 }
 static inline RcAction makeWCBBroadcast(const char* cmd,
-                                         uint16_t delayMs = 0, const char* note = "") {
+                                         uint32_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_WCB_BROADCAST;
   cfgStrlcpy(a.cmd,  cmd,  sizeof(a.cmd));
   cfgStrlcpy(a.note, note, sizeof(a.note));
-  a.delayMs = delayMs;
+  rcActionSetDelay(a, delayMs);
   return a;
 }
 static inline RcAction makeMaestroLocal(const char* cmd,
-                                         uint16_t delayMs = 0, const char* note = "") {
+                                         uint32_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_MAESTRO_LOCAL;
   cfgStrlcpy(a.cmd,  cmd,  sizeof(a.cmd));
   cfgStrlcpy(a.note, note, sizeof(a.note));
-  a.delayMs = delayMs;
+  rcActionSetDelay(a, delayMs);
   return a;
 }
 static inline RcAction makeMaestroRemote(const char* slot, const char* cmd,
-                                          uint16_t delayMs = 0, const char* note = "") {
+                                          uint32_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_MAESTRO_REMOTE;
   cfgStrlcpy(a.target, slot, sizeof(a.target));
   cfgStrlcpy(a.cmd,    cmd,  sizeof(a.cmd));
   cfgStrlcpy(a.note,   note, sizeof(a.note));
-  a.delayMs = delayMs;
+  rcActionSetDelay(a, delayMs);
   return a;
 }
 static inline RcAction makeSerial(const char* port, const char* cmd,
-                                   uint16_t delayMs = 0, const char* note = "") {
+                                   uint32_t delayMs = 0, const char* note = "") {
   RcAction a = {};
   a.type = RA_SERIAL;
   cfgStrlcpy(a.target, port, sizeof(a.target));
   cfgStrlcpy(a.cmd,    cmd,  sizeof(a.cmd));
   cfgStrlcpy(a.note,   note, sizeof(a.note));
-  a.delayMs = delayMs;
+  rcActionSetDelay(a, delayMs);
   return a;
 }
 static inline void setTier1(RcTier& tier, RcAction a0) {
@@ -1099,19 +1123,19 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["type"]   = "wcb_unicast";
       obj["target"] = a.target;   // WCB board ID string
       obj["cmd"]    = a.cmd;
-      if (a.delayMs)     obj["delay"]       = a.delayMs;
+      if (rcActionDelay(a))     obj["delay"]       = rcActionDelay(a);
       if (a.skipRunning) obj["skipRunning"] = true;   // via-WCB Maestro verb: skip-if-running gate
       break;
     case RA_WCB_BROADCAST:
       obj["type"] = "wcb_broadcast";
       obj["cmd"]  = a.cmd;
-      if (a.delayMs)     obj["delay"]       = a.delayMs;
+      if (rcActionDelay(a))     obj["delay"]       = rcActionDelay(a);
       if (a.skipRunning) obj["skipRunning"] = true;   // via-WCB Maestro verb: skip-if-running gate
       break;
     case RA_MAESTRO_LOCAL:
       obj["type"] = "maestro_local";
       obj["cmd"]  = a.cmd;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     case RA_MAESTRO_REMOTE:
       // Unified Maestro action — target = Maestro slot ID ("1"-"8") from the
@@ -1121,14 +1145,14 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["type"]   = "maestro";
       obj["target"] = a.target;
       obj["cmd"]    = a.cmd;
-      if (a.delayMs)     obj["delay"]      = a.delayMs;
+      if (rcActionDelay(a))     obj["delay"]      = rcActionDelay(a);
       if (a.skipRunning) obj["skipRunning"] = true;
       break;
     case RA_SERIAL:
       obj["type"]  = "serial";
       obj["port"]  = a.target;    // "S3"/"S4"
       obj["cmd"]   = a.cmd;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     case RA_HCR:
       // Destination (transport / target / wcbPort) lives in rcConfig.hcrDest
@@ -1138,7 +1162,7 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["fn"]    = a.fn;
       obj["chan"]  = a.chan;
       obj["track"] = a.track;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     case RA_MP3:
       // Destination (target WCB) is GLOBAL — see RcConfig::mp3Dest. The action
@@ -1146,7 +1170,7 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["type"]  = "mp3";
       obj["fn"]    = a.fn;
       obj["track"] = a.track;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     case RA_DFPLAYER:
       // Destination is GLOBAL — see RcConfig::dfpDest. The action carries the
@@ -1156,29 +1180,29 @@ static void actionToJson(const RcAction& a, JsonObject obj) {
       obj["fn"]    = a.fn;
       obj["chan"]  = a.chan;
       obj["track"] = a.track;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     case RA_WLED:
       // Routing (per-id → local port | remote WCB) is GLOBAL — RcConfig::wledSlots.
       // The action only carries the ";L<id>,<verb>" command string.
       obj["type"] = "wled";
       obj["cmd"]  = a.cmd;
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     case RA_RECORD:
       obj["type"] = "record";
       obj["cmd"]  = a.cmd;   // clip name (library-ready; ignored by the single-clip build)
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     case RA_PLAY:
       obj["type"] = "play";
       obj["cmd"]  = a.cmd;   // clip name to play
       obj["fn"]   = a.fn;    // loop: 0=once, 1=repeat
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     case RA_STOP:
       obj["type"] = "stop";
-      if (a.delayMs) obj["delay"] = a.delayMs;
+      if (rcActionDelay(a)) obj["delay"] = rcActionDelay(a);
       break;
     // RA_SMOOTH_OVERRIDE retired (smoothing profiles superseded it) — not emitted.
     default: break;
@@ -1194,19 +1218,19 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.type = RA_WCB_UNICAST;
     cfgStrlcpy(a.target, obj["target"] | "", sizeof(a.target));
     cfgStrlcpy(a.cmd,    obj["cmd"]    | "", sizeof(a.cmd));
-    a.delayMs     = obj["delay"]       | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "wcb_broadcast") == 0) {
     a.type = RA_WCB_BROADCAST;
     cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
-    a.delayMs     = obj["delay"]       | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "maestro_local") == 0) {
     a.type = RA_MAESTRO_LOCAL;
     cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   } else if (strcmp(type, "maestro_remote") == 0 || strcmp(type, "maestro") == 0) {
     // "maestro" is the unified action emitted by the new config tool.
@@ -1216,14 +1240,14 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.type = RA_MAESTRO_REMOTE;
     cfgStrlcpy(a.target, obj["target"] | "", sizeof(a.target));
     cfgStrlcpy(a.cmd,    obj["cmd"]    | "", sizeof(a.cmd));
-    a.delayMs     = obj["delay"]      | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     a.skipRunning = obj["skipRunning"] | false;
     ok = true;
   } else if (strcmp(type, "serial") == 0) {
     a.type = RA_SERIAL;
     cfgStrlcpy(a.target, obj["port"] | "", sizeof(a.target));
     cfgStrlcpy(a.cmd,    obj["cmd"]  | "", sizeof(a.cmd));
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   } else if (strcmp(type, "hcr") == 0) {
     // HCR destination is now a global config (RcHcrDest in RcConfig).
@@ -1232,7 +1256,7 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.fn      = (uint8_t)(obj["fn"]    | 0);
     a.chan    = (int8_t) (obj["chan"]  | 0);
     a.track   = (int16_t)(obj["track"] | 0);
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   } else if (strcmp(type, "mp3") == 0) {
     // MP3 destination is a global config (RcMp3Dest). The action only carries
@@ -1240,7 +1264,7 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.type    = RA_MP3;
     a.fn      = (uint8_t)(obj["fn"]    | 0);
     a.track   = (int16_t)(obj["track"] | 0);
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   } else if (strcmp(type, "dfplayer") == 0) {
     // DFPlayer destination is a global config (RcDfpDest). The action carries the
@@ -1249,29 +1273,29 @@ static bool actionFromJson(const JsonObject& obj, RcAction& a) {
     a.fn      = (uint8_t)(obj["fn"]    | 0);
     a.chan    = (int8_t) (obj["chan"]  | 0);
     a.track   = (int16_t)(obj["track"] | 0);
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   } else if (strcmp(type, "wled") == 0) {
     // WLED routing is a global config (RcConfig::wledSlots). The action only
     // carries the ";L<id>,<verb>" command string.
     a.type = RA_WLED;
     cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   } else if (strcmp(type, "record") == 0) {
     a.type    = RA_RECORD;
     cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));   // clip name
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   } else if (strcmp(type, "play") == 0) {
     a.type    = RA_PLAY;
     cfgStrlcpy(a.cmd, obj["cmd"] | "", sizeof(a.cmd));   // clip name
     a.fn      = (uint8_t)(obj["fn"] | 0);             // loop 0/1
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   } else if (strcmp(type, "stop") == 0) {
     a.type    = RA_STOP;
-    a.delayMs = obj["delay"] | 0;
+    rcActionSetDelay(a, obj["delay"] | (uint32_t)0);
     ok = true;
   }
   // (type "smooth" / RA_SMOOTH_OVERRIDE retired — an old config's smooth action

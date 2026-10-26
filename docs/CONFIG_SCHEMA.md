@@ -14,17 +14,18 @@ Defined in [`rc_config.h`](../rc_config.h). Related: [PROTOCOLS.md](PROTOCOLS.md
 One global, allocated from PSRAM in `setup()`:
 
 ```cpp
-g_rcConfig = (RcConfig*) ps_calloc(1, sizeof(RcConfig));   // ~210 KB
+g_rcConfig = (RcConfig*) ps_calloc(1, sizeof(RcConfig));   // 641 508 B (~630 KB)
 #define rcConfig (*g_rcConfig)
 ```
 
-It is roughly 210 KB — far too large for internal SRAM, which is why `PSRAM=opi` is a hard
+It is 641 508 bytes (~630 KB) — far too large for internal SRAM, which is why `PSRAM=opi` is a hard
 build requirement and why a failed allocation halts the board with a solid red LED rather
 than crashing later.
 
 Size discipline matters: `RcAction::cmd[96]` is multiplied by
-`RC_NUM_MAPPINGS × RC_NUM_TAP_TIERS × RC_ACTIONS_PER_TIER = 108 × 4 × 5 = 2160` action slots.
-Widening a field in `RcAction` costs kilobytes per byte.
+`RC_NUM_MAPPINGS × RC_NUM_TAP_TIERS × RC_ACTIONS_PER_TIER = 108 × 4 × 10 = 4320` action slots
+(plus 10 switches × 3 positions × 10 and the new-peer tier). Widening a field in `RcAction`
+costs kilobytes per byte — and, separately, changes the `.ncr` clip format (below).
 
 Every string field is a fixed `char[]`, and a value longer than its field is cut silently at
 the field's size in bytes — but never through a UTF-8 character: every copy in `rc_config.h`
@@ -41,7 +42,8 @@ kept half a character, and the tool's next save wrote U+FFFD back.
 | `RC_NUM_LOGICAL` | 15 | User-defined logical buttons (slots 22–36) |
 | `RC_NUM_THRESHOLDS` | 36 | Total matrix-channel bands |
 | `RC_NUM_MAPPINGS` | 108 | 3 modes × 36 slots |
-| `RC_ACTIONS_PER_TIER` | 5 | Actions per tap tier |
+| `RC_ACTIONS_PER_TIER` | 10 | Actions per tap tier, switch position, and the new-peer tier |
+| `RC_MAX_DELAY_MS` | 1 800 000 | Longest action delay (30 min); `rcActionSetDelay()` clamps to it |
 | `RC_NUM_TAP_TIERS` | 4 | Tap tiers per mapping — `t1`/`t2`/`t3` taps, `t4` = long press (`RC_TAP_LONG`) |
 | `RC_NUM_SWITCHES` | 10 | SA–SJ |
 | `RC_NUM_KNOBS` | 11 | S1, S2, LS, RS, S3, J1–J4, J5, J6 |
@@ -130,7 +132,8 @@ struct RcAction {
   RcActionType type;      // see ARCHITECTURE.md §10
   char     target[6];     // WCB id "1".."20" | Maestro slot "1".."8" | port "S3".."S5"
   char     cmd[96];       // command string, or Maestro verb "setTarget,ch,pos"
-  uint16_t delayMs;       // measured from the TRIGGER, parallel — not cumulative
+  uint8_t  delayHi;       // delay bits 16..23 ┐ measured from the TRIGGER, parallel — not
+  uint16_t delayLo;       // delay bits 0..15  ┘ cumulative. Only via rcActionDelay()/rcActionSetDelay()
   char     note[20];      // GUI caption
   bool     skipRunning;   // remote Maestro: skip if a sequence is already running
   uint8_t  fn;            // HCR function / MP3 function
@@ -138,6 +141,17 @@ struct RcAction {
   int16_t  track;         // track #, volume, level, seconds…
 };
 ```
+
+**The delay is 24 bits split across `delayHi:delayLo`, and that is deliberate.** An `.ncr`
+clip is a raw dump of `RecEvent`, which holds an `RcAction`, so any change to the struct's size
+or field offsets misreads every saved clip (`navicore_record.h`, `RecEventV1` — it has happened
+once). `delayHi` occupies the alignment byte that already sat between `cmd[]` and the 16-bit
+delay, so offsets and the 132-byte size are unchanged (`static_assert` in `rc_config.h`).
+Read and write it only through `rcActionDelay()` / `rcActionSetDelay()`; the halves are named so
+a stray `a.delayMs` fails to compile. JSON carries it as one `"delay"` number in ms, read as
+`uint32_t` (a negative or non-numeric value is 0) and clamped to `RC_MAX_DELAY_MS`. A recorded
+action's delay is always 0 — `tMs` is when it fired — and loading a clip clears it, because in
+clips saved before `delayHi` existed that byte is whatever padding the capture copied.
 
 Two encodings in `chan` deliberately differ and must not be "harmonised":
 HCR **fn 18/19** (volume up/down) use `0 = ALL, 1 = V, 2 = A, 3 = B`, while
@@ -276,6 +290,9 @@ highest-risk category of edit in the repo.
 | Firmware | Config tool | Value |
 |---|---|---|
 | `RC_NUM_TAP_TIERS` / `RC_TAP_LONG` | `NUM_TAP_TIERS` / `TAP_LONG` / `TIER_KEYS` | 4 (`t1..t4`, 4 = long press) |
+| `RC_ACTIONS_PER_TIER` | `MAX_ACTIONS_PER_TIER` | 10 — a tool above the board's lets you build rows `rcConfigFromJSON` silently drops |
+| `RC_MAX_DELAY_MS` | `AT_DELAY_MAX` (also the Delay spinner's and the timeline step editor's max) | 1 800 000 ms (30 min) — the board clamps a longer delay to it |
+| `PENDING_ACTION_SLOTS` (`NaviCore.ino`) | `AT_PENDING_MAX` (the timeline's warning) | 32 delayed actions in flight; one more is dropped, logged |
 | `RC_KNOB_MAX_OUTPUTS` | `KNOB_MAX_OUTPUTS` | 10 |
 | `RC_NUM_MAESTROS` | `NUM_MAESTRO_SLOTS` | 8 |
 | `RC_NUM_WLED` | `NUM_WLED_SLOTS` | 4 |
@@ -341,6 +358,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **Longer delays, more actions.** `RC_ACTIONS_PER_TIER` 5 → 10 (also `peerNewActions`); `RcAction` delay 16 → 24 bits as `delayHi:delayLo` in the existing alignment byte (layout and 132-byte size unchanged, so `.ncr` clips need no migration), capped by the new `RC_MAX_DELAY_MS` (30 min); access only through `rcActionDelay()` / `rcActionSetDelay()`. `RcConfig` 335 928 → 641 508 B (PSRAM; the ~210 KB here was already stale). Three invariant rows (§6). |
 | 2026-10-21 | — | Added `wifiToken` (WebSocket login token, default none, live), `chanSync` (channel sync, default on, live) and `wcbNetwork.region` (default `"01"`, read at boot). `wcbNetwork.channel` and `wcbProfiles[].channel` accept 1–13; the region check is at boot (WCB_Client 1.19.0 takes 12–13 under a region that allows them). No schema version: an absent field keeps its default, as for every field. Bridged saves strip `region` and `wifiToken`; the mesh `GET_CONFIG` leaves `wifiToken` out. Four invariant rows (§6). |
 | 2026-10-07 | `2d6964d` | `peerNewActions`: the boot grace is 12 s, so a board that never left is heard again before it closes (D-NC25). |
 | 2026-10-04 | `073bfc2` | `peerNewActions` / the new-peer alert no longer fire for boards already online when the boot grace ends (HIL `ncboot.new_peer_after_boot`). |

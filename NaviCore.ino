@@ -420,7 +420,7 @@ QueueHandle_t maestroCmdQueue = nullptr;
 // =============================================================================
 SbusReader sbusRx;
 // rcConfig is heap-allocated in EXTERNAL PSRAM (ESP32-S3-WROOM-1 N16R8 = 8 MB).
-// With the 15 logical-button slots the struct is ~210 KB — it will NOT fit in
+// With the 15 logical-button slots and 10 actions per tier the struct is ~630 KB — it will NOT fit in
 // internal DRAM alongside the WCB stack + the ~96 KB SET_CONFIG JSON parse.
 //
 // NOTE: EXT_RAM_BSS_ATTR does NOT help here — the stock Arduino-ESP32 core is
@@ -516,7 +516,10 @@ struct PendingAction {
   unsigned long fireAt;
   RcAction      action;
 };
-#define PENDING_ACTION_SLOTS 8
+// Delayed actions waiting to fire, shared by every button and switch (tool: AT_PENDING_MAX).
+// 32 because delays now run to 30 min (RC_MAX_DELAY_MS): a long one holds its slot the
+// whole time. ~140 B each in internal RAM.
+#define PENDING_ACTION_SLOTS 32
 PendingAction pendingActions[PENDING_ACTION_SLOTS];
 
 // =============================================================================
@@ -1004,9 +1007,9 @@ static void maePumpRemoteEmits() {
 
 // LOCAL gate cache, same maeGateMs freshness window the REMOTE branch uses. The local
 // read is BLOCKING: maestroLocalQuery spins up to 25 ms on Serial2 when nothing answers,
-// and a tap tier fires up to RC_ACTIONS_PER_TIER gated actions back-to-back in ONE loop()
+// and a tap tier fires up to RC_ACTIONS_PER_TIER (10) gated actions back-to-back in ONE loop()
 // pass (more still on a non-exclusive multi-tap), so an uncached gate could stall loop()
-// for 125 ms+ with SBUS queued behind it. An unanswered read is not an edge case — a Micro
+// for 250 ms+ with SBUS queued behind it. An unanswered read is not an edge case — a Micro
 // 6 has no getMovingState at all, and a Maestro whose TX isn't wired back to Serial2 RX is
 // a supported install, so on those boards EVERY gated action pays the full timeout.
 // Cache it: a whole tier then costs one query at most.
@@ -2356,10 +2359,13 @@ static void scheduleAction(const RcAction& action, unsigned long delayMs) {
       return;
     }
   }
-  // Queue full — fire the action NOW (dropping its delay) rather than losing
-  // it. rcExecuteActionNow bypasses the delay check, so this can't recurse.
-  vlogf("WARN: pendingActions full (%d slots) — firing now, delay dropped\n", PENDING_ACTION_SLOTS);
-  rcExecuteActionNow(action);
+  // Queue full — DROP it, loudly. This used to fire it at once with the delay dropped,
+  // which was harmless at the old 65 s ceiling but not with delays of up to 30 minutes:
+  // a "park the dome in 20 minutes" would go off now. A step that never fires is the
+  // smaller surprise, and the warning names it. The tool warns before Apply when one
+  // press queues more than PENDING_ACTION_SLOTS (AT_PENDING_MAX).
+  vlogf("WARN: pendingActions full (%d slots) - dropped type %u '%.40s' due in %lu ms\n",
+        PENDING_ACTION_SLOTS, (unsigned)action.type, action.cmd, delayMs);
 }
 
 // A serial action goes out through the same paced transmitter as a mesh->serial forward
@@ -2498,7 +2504,8 @@ void rcExecuteAction(const RcAction& a) {
   // EXCEPT the record/play/stop controls themselves, so a mapped button can stop
   // a running clip (Play toggles / Stop) or start a recording.
   if (navirec::isReplaying() && a.type != RA_RECORD && a.type != RA_PLAY && a.type != RA_STOP) return;
-  if (a.delayMs > 0) { scheduleAction(a, a.delayMs); return; }
+  const uint32_t delayMs = rcActionDelay(a);
+  if (delayMs > 0) { scheduleAction(a, delayMs); return; }
   rcExecuteActionNow(a);
 }
 
@@ -5129,7 +5136,7 @@ void setup() {
 
   // RC Config lives in PSRAM — allocate it BEFORE any rcConfig.* access.
   // ps_calloc() pulls from the PSRAM heap (Tools → PSRAM must be "OPI PSRAM").
-  // If PSRAM is unavailable the ~210 KB struct can't fit internal RAM, so halt
+  // If PSRAM is unavailable the ~630 KB struct can't fit internal RAM, so halt
   // with a clear message instead of crashing cryptically on first access.
   g_rcConfig = (RcConfig*) ps_calloc(1, sizeof(RcConfig));
   if (!g_rcConfig) {

@@ -160,7 +160,7 @@ it is stored today; the rows are kept because the reasoning is what a future for
   them best-effort and recommend absolute `Play track` in recorded routines. *(Optional later: capture
   a `lastMp3Track` shadow and rewrite NEXT/PREV→absolute PLAY at capture — with residual drift if the
   module auto-advances on track end.)*
-- **Timestamp encodes per-action delay** (we tap post-delay) → stored events use `delayMs=0`; replay
+- **Timestamp encodes per-action delay** (we tap post-delay) → stored events carry delay 0 (`captureAction` and `loadClip` clear it with `rcActionSetDelay`); replay
   schedules purely by `tMs`. **Order preserved** (cumulative tap tiers in true fire order).
 
 ## 5. Exclusions (never captured)

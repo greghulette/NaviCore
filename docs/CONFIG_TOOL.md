@@ -616,10 +616,12 @@ timeline too. It is re-drawn 150 ms after the rows change.
 action's time is its delay, not a gap after the action before it, and actions due at one time
 fire in the tier's order. Not exclusive, a double tap fires the single tap's actions with its
 own and a triple tap both (the cumulative branch); a long press always fires alone, as does a
-switch position. A tier holds `RC_ACTIONS_PER_TIER` (5) actions, `delayMs` is 16 bits
-(`AT_DELAY_MAX`, 65535 ms; ArduinoJson wraps a larger value), and the board holds
-`PENDING_ACTION_SLOTS` (8) delayed actions at once, the next firing at once with its delay
-dropped. The tier's **▶ Test** follows the same rule (`_testTierActions`): it used to wait each
+switch position. A tier holds `RC_ACTIONS_PER_TIER` (10) actions (`MAX_ACTIONS_PER_TIER`), a
+delay runs to `RC_MAX_DELAY_MS` — 30 min (`AT_DELAY_MAX`; the board clamps a longer one to it),
+and the board holds `PENDING_ACTION_SLOTS` (32) delayed actions at once (`AT_PENDING_MAX`),
+shared by every button and switch, dropping — never firing early — one past that. Times show in
+seconds under a minute and `m:ss` past it (`_atFmtT`, `_atFmtShort`); zoom goes out to the whole
+30 min (`AT_PX_MIN`). The tier's **▶ Test** follows the same rule (`_testTierActions`): it used to wait each
 delay in turn, so two actions at 1000 ms fired at 1 s and 2 s instead of together.
 
 - **A lane per device an action reaches**, named with where it goes (`_atLaneOf`). A device
@@ -655,14 +657,14 @@ delay in turn, so two actions at 1000 ms fired at 1 s and 2 s instead of togethe
   board the action goes to, or for a broadcast the first board whose pulled list has the key.
 - **Editing.** Drag a step to change its delay; it sticks to another step, a step of a tap
   firing with it, a sequence's step, the cursor or 0 within 8 px, with a dashed guide
-  (`_atSnap`); Alt places it to the ms; it never goes under 0 or over 65535 ms. ←/→ nudge the
+  (`_atSnap`); Alt places it to the ms; it never goes under 0 or over `AT_DELAY_MAX` (30 min). ←/→ nudge the
   selection 10 ms (Shift 100, Alt 1). Shift-click selects several: dragging one moves them all,
   Delete removes them all, **Align** puts them at the first's, the last's or the cursor's time
   (at one time, the set placed in the list where its first was, in its order: the order they
   fire), and with three or more **Space evenly** keeps the ends and evens the middle. Undo and
   Redo hold one step per change. A click on a step opens its editor (`_atOpenStep`: the row's
   fields, its time in place of its delay); a click on a lane's empty space starts an action of
-  that lane's kind; the tier's fifth action is its last.
+  that lane's kind; the tier's tenth action is its last.
 - **The command library is docked beside the timeline** (📚 Library, shown or hidden per
   browser, `nc_at_lib_open`). Clicking a command adds it at the cursor, dragging it onto the
   timeline adds it where it is dropped; a command with fields opens the picker's composer
@@ -670,8 +672,8 @@ delay in turn, so two actions at 1000 ms fired at 1 s and 2 s instead of togethe
   Where it is sent is what a new action row would get (`_cmdlibResolveAction`, split out of
   `_cmdlibUse`): a device's WDP label on a WCB port, its configured home, else WCB 1. The
   step's lane shows it.
-- **Warnings** (`_atProblems`), errors blocking Apply: a delay over 65535 ms (error); a press
-  that queues more than 8 delayed actions with the taps that fire with it (warn); two timed
+- **Warnings** (`_atProblems`), errors blocking Apply: a delay over 30 min (error); a press
+  that queues more than 32 delayed actions with the taps that fire with it (warn); two timed
   sequences on one WCB overlapping, since a WCB runs one timed chain at a time and the second
   replaces the first (warn); clip controls, which ▶ Test skips (info). An incomplete row (no
   command yet) is not on the timeline, and Apply leaves it out, as Save would.
@@ -899,6 +901,8 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **Longer delays, more actions** (§7b): `MAX_ACTIONS_PER_TIER` 5 → 10, `AT_DELAY_MAX` 65535 → 1 800 000 ms (30 min; also the Delay spinner's and the step editor's max), `AT_PENDING_MAX` 8 → 32, with the firmware's pairs. The action timeline zooms out to the whole 30 min (`AT_PX_MIN`) and shows times past a minute as `m:ss`. |
+| 2026-10-26 | — | **Light theme readable**: the action modal's hard-coded dark elevation ramp (`#modal` base, header/footer, `.tier-card`, `.action-row`) gets a light counterpart under `.theme-light` — it stayed dark while its text turned dark. The terminal stays a dark console in both themes and re-declares the dark tokens so its input and chips match. Light `--faint` darkened to `#6b7585` (was 3:1 on white). |
 | 2026-10-25 | — | **Action timeline** (§7b): ⏱ Timeline on a button tap or switch position, and a timing strip under each tier's name, after the WCB Wizard's Sequence Builder: a lane per device in the Wizard's colours and home slots, each action at its delay after the press, the taps that fire with it drawn above, the sequence an action runs drawn under it, multi-select with Align and Space evenly, sticking and nudges, the command library docked beside it, warnings, Preview, and ▶ Test of the unapplied timeline. `_cmdlibUse` split into `_cmdlibResolveAction`. The tier's ▶ Test now fires each action at its delay from the start, as a press does (`_testTierActions`); it waited each delay in turn. The Delay field's spinner goes to 65535, the board's limit. The same day `c60c7f5` had put this on the clip editor; this replaces it there (the clip editor is as it was, plus undo for an action drag and a popover delete). |
 | 2026-10-23 | — | **`wcb.sequences`: a long value has time to arrive.** A sequence value over one mesh reply comes in parts (WCB_Client 1.20.0) and the RC waits for them, so a value pull's backstop is `NC_SEQVAL_TIMEOUT` (20 s); the TOOBIG note says the WCB's firmware is too old to send it, the only case left that answers it. |
 | 2026-10-22 | — | **`wcb.sequences`: a long names list has time to arrive.** A list over one mesh reply comes in pages (WCB_Client 1.19.0, about 0.8 s a page) and the RC waits for it past its 6 s, so the picker's backstop for a names pull is `NC_SEQ_NAMES_TIMEOUT` (30 s, settled sooner by the RC's own answer); at 8 s the refresh walk asked the next board while the RC was still busy, which it refused. Value pulls keep `NC_SEQ_TIMEOUT` (8 s). |

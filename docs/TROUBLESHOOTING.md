@@ -9,7 +9,7 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 
 | Symptom | Cause | Where |
 |---|---|---|
-| Solid red LED, `[FATAL] PSRAM allocation for rcConfig failed` | Built without `PSRAM=opi`. The ~210 KB `RcConfig` cannot fit internal RAM, so `setup()` halts deliberately | `setup()` |
+| Solid red LED, `[FATAL] PSRAM allocation for rcConfig failed` | Built without `PSRAM=opi`. The ~630 KB `RcConfig` cannot fit internal RAM, so `setup()` halts deliberately | `setup()` |
 | Steady orange LED | Latched fault: `wcb->begin()` failed. Check mesh credentials | `setup()`, `g_ledFaultColor` |
 | Flashing orange LED | No SBUS frames arriving. Distinguishable from the WCB fault by flashing vs. steady | `updateStatusLed()` |
 | Reboots forever after an OTA | The new image was never marked valid, so the bootloader rolls it back. `esp_ota_mark_app_valid_cancel_rollback()` is the **first statement** of `setup()` for this reason — anything that crashes ahead of it reintroduces the loop | `setup()` |
@@ -68,6 +68,7 @@ the code before acting — this page is a shortlist of known causes, not a diagn
 
 | Symptom | Cause | Where |
 |---|---|---|
+| A delayed step of a button or switch never fires; the console shows `WARN: pendingActions full (32 slots) - dropped type … due in … ms` | Every one of the 32 pending-action slots was holding a delayed step when this one was scheduled — they are shared by all buttons and switches, and a long delay (up to 30 min) holds its slot the whole time. The queue drops the overflow rather than firing it early. Shorten delays, or spread them across fewer presses; the action timeline warns when one press alone queues more than 32 | `scheduleAction()`, `PENDING_ACTION_SLOTS` |
 | One press registers as a double | A one-frame NEUTRAL dip split the press. Raise `matrixDebounceFrames` (1–4) | matrix edge machine |
 | Fast re-press of the same button is dropped | A true sub-frame tap (press+release inside one ~9–14 ms frame) is unrecoverable — an SBUS-rate limit, not logic | `processSbus()` |
 | A button fires once at power-on | `matrixArmed` starts **false** specifically so a button already in-band at boot cannot fire | matrix edge machine |
@@ -136,6 +137,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | *Dispatch*: a delayed step that never fires — the 32-slot pending queue was full (`WARN: pendingActions full`). |
 | 2026-10-21 | — | *Mesh / Via WCB*: the channel row now covers channel sync and the region (WCB_Client 1.19.0 takes 12–13 under a region that allows them; the old 1–11 limit is gone); new rows for the out-of-region boot line, the restart after a channel move with the SoftAP up, and the WebSocket login token. |
 | 2026-10-14 | `76edddc` | The transmit watchdog needs WCB_Client 1.18.1 (two boards answer a probe; two answers end a stall; a relapse within 3 min goes to level 2) - a compile-time check stops an older sketchbook copy. |
 | 2026-10-14 | `969fb1f` | Mesh: a row for the transmit wedge (WCBs list NaviCore offline while it lists them online) and the watchdog's lines. |
