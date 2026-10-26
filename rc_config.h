@@ -233,6 +233,13 @@ struct RcAction {
 // Longest delay an action may carry: 30 minutes (tool: AT_DELAY_MAX). The field holds
 // 24 bits (see RcAction::delayHi); this is the policy cap rcActionSetDelay() clamps to.
 #define RC_MAX_DELAY_MS      1800000UL
+// Delayed actions the board holds at once, shared by every button and switch (tool:
+// AT_PENDING_MAX; NaviCore.ino pendingActions[]). 32 because delays run to 30 min: a long
+// one holds its slot the whole time. A full queue drops the next one, logged.
+#define PENDING_ACTION_SLOTS 32
+// All three go out in every config as "limits" (rcConfigToJSON), so the tool holds its
+// editors to what THIS board's firmware stores. Firmware before them held 5 actions, a 16-bit
+// delay and 8 slots, and sends no "limits"; the tool assumes those then (NC_LEGACY_LIMITS).
 
 static inline uint32_t rcActionDelay(const RcAction& a) {
   return ((uint32_t)a.delayHi << 16) | a.delayLo;
@@ -1637,6 +1644,14 @@ String rcConfigToJSON(bool forMesh = false) {   // doc bumped to 64 KB to hold u
         eObj["mid"] = mid; eObj["ch"] = ch; eObj["spd"] = e.speed; eObj["acc"] = e.accel;
       }
   }
+
+  // Last: what this firmware stores, so a newer tool never writes a tier or a delay this board
+  // would cut (the tool reads them from a board's CONFIG only, never into its config;
+  // rcConfigFromJSON ignores them). Firmware before them sends none.
+  JsonObject lim = doc.createNestedObject("limits");
+  lim["actionsPerTier"] = RC_ACTIONS_PER_TIER;
+  lim["maxDelayMs"]     = RC_MAX_DELAY_MS;
+  lim["pendingSlots"]   = PENDING_ACTION_SLOTS;
 
   // Truncation guard — see the note at the top of this function. Better to
   // fail loudly than hand the tool an incomplete config it would re-save.

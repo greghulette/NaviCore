@@ -516,10 +516,8 @@ struct PendingAction {
   unsigned long fireAt;
   RcAction      action;
 };
-// Delayed actions waiting to fire, shared by every button and switch (tool: AT_PENDING_MAX).
-// 32 because delays now run to 30 min (RC_MAX_DELAY_MS): a long one holds its slot the
-// whole time. ~140 B each in internal RAM.
-#define PENDING_ACTION_SLOTS 32
+// Delayed actions waiting to fire, shared by every button and switch: PENDING_ACTION_SLOTS
+// (rc_config.h, beside the other action limits rcConfigToJSON reports). ~140 B each in internal RAM.
 PendingAction pendingActions[PENDING_ACTION_SLOTS];
 
 // =============================================================================

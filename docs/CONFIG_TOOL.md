@@ -624,6 +624,16 @@ seconds under a minute and `m:ss` past it (`_atFmtT`, `_atFmtShort`); zoom goes 
 30 min (`AT_PX_MIN`). The tier's **▶ Test** follows the same rule (`_testTierActions`): it used to wait each
 delay in turn, so two actions at 1000 ms fired at 1 s and 2 s instead of together.
 
+**Those are this tool's maxima; a connected board's own hold.** The tool is published to Pages
+ahead of any board's flash, so a board a version behind is normal. Every config a board sends ends
+with its `limits` (CONFIG_SCHEMA.md §4), which `applyConfig(data, /*fromBoard=*/true)` reads into
+`ncLimits()`; a board that sends none runs firmware from before them and stores 5 actions a tier, a
+16-bit delay (one past 65535 ms wraps) and 8 slots, with the queue overflow firing at once
+(`NC_LEGACY_LIMITS`). The rows' + Add action, the Delay spinner, the timeline's count, its steps and
+its warnings all hold to `ncLimits()`, and **Save** (`saveConfigToBoard`) refuses, naming each tier,
+a config holding more than the board stores (`_ncOverLimits`), so nothing is cut without a word.
+With no board's config yet, the tool's own maxima apply.
+
 - **A lane per device an action reaches**, named with where it goes (`_atLaneOf`). A device
   string the library knows (`;W<n>;S<p><text>`, `;S<p><text>`, a local serial write) goes in
   its device's lane, "FlthyHPs Holoprojectors / WCB 2 · Serial 1", so two devices on one port
@@ -901,6 +911,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **A board's limits hold** (§7b): the tool reads the `limits` a board's config ends with into `ncLimits()` (`applyConfig(data, fromBoard)`; 5 / 65535 / 8 when a board sends none) and holds the rows, the Delay spinner and the action timeline to them; Save refuses a config past them (`_ncOverLimits`). |
 | 2026-10-26 | — | **Longer delays, more actions** (§7b): `MAX_ACTIONS_PER_TIER` 5 → 10, `AT_DELAY_MAX` 65535 → 1 800 000 ms (30 min; also the Delay spinner's and the step editor's max), `AT_PENDING_MAX` 8 → 32, with the firmware's pairs. The action timeline zooms out to the whole 30 min (`AT_PX_MIN`) and shows times past a minute as `m:ss`. |
 | 2026-10-26 | — | **Light theme readable**: the action modal's hard-coded dark elevation ramp (`#modal` base, header/footer, `.tier-card`, `.action-row`) gets a light counterpart under `.theme-light` — it stayed dark while its text turned dark. The terminal stays a dark console in both themes and re-declares the dark tokens so its input and chips match. Light `--faint` darkened to `#6b7585` (was 3:1 on white). |
 | 2026-10-25 | — | **Action timeline** (§7b): ⏱ Timeline on a button tap or switch position, and a timing strip under each tier's name, after the WCB Wizard's Sequence Builder: a lane per device in the Wizard's colours and home slots, each action at its delay after the press, the taps that fire with it drawn above, the sequence an action runs drawn under it, multi-select with Align and Space evenly, sticking and nudges, the command library docked beside it, warnings, Preview, and ▶ Test of the unapplied timeline. `_cmdlibUse` split into `_cmdlibResolveAction`. The tier's ▶ Test now fires each action at its delay from the start, as a press does (`_testTierActions`); it waited each delay in turn. The Delay field's spinner goes to 65535, the board's limit. The same day `c60c7f5` had put this on the clip editor; this replaces it there (the clip editor is as it was, plus undo for an action drag and a popover delete). |

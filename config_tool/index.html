@@ -2716,7 +2716,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.20:40.R.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.21:12.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -10499,7 +10499,7 @@ function handleBoardMessage(line) {
     return;
   }
   if (msg.type === 'CONFIG') {
-    applyConfig(msg.data);
+    applyConfig(msg.data, /*fromBoard=*/true);
     // Mark config as loaded so saveConfigToBoard() knows it's safe to
     // SET_CONFIG without clobbering fields that came back as defaults
     // because GET_CONFIG hadn't completed yet.  See _configLoaded guard
@@ -10604,8 +10604,11 @@ function handleBoardMessage(line) {
 // ════════════════════════════════════════════════════════════════════════════
 //  Config apply / serialise
 // ════════════════════════════════════════════════════════════════════════════
-function applyConfig(data) {
+// fromBoard: `data` is a board's CONFIG (the CONFIG message), not a file or a cloud backup — only then does it say
+// what the board stores (its "limits", ncLimits).
+function applyConfig(data, fromBoard = false) {
   if (!data) return;
+  if (fromBoard) _ncBoardLimits = _ncReadLimits(data.limits);   // absent = firmware before the limits
   // Apply the transmitter model FIRST so all downstream renders (axes
   // table, switches table, threshold table, SVG visibility) see the
   // correct per-model defaults.  applyTxModel(_, false) keeps the
@@ -13123,6 +13126,47 @@ function setActionTier(tier) {
 }
 
 const MAX_ACTIONS_PER_TIER = 10;   // = rc_config.h RC_ACTIONS_PER_TIER (CONFIG_SCHEMA.md §6)
+// What the connected board's firmware stores: the "limits" in a board's CONFIG (rcConfigToJSON), read by
+// applyConfig from a board's CONFIG only, never into `config` (a file or a cloud backup leaves them alone). The tool
+// is published to Pages ahead of any board's flash, so a board a version behind is normal: firmware older than the
+// limits sends none and stores 5 actions a tier, a 16-bit delay and 8 pending slots (NC_LEGACY_LIMITS) — it would
+// drop a 6th action and wrap a longer delay without a word. The editors and Save hold to ncLimits(); with no
+// board's CONFIG yet, they take the tool's own maxima.
+const NC_LEGACY_LIMITS = Object.freeze({ actionsPerTier: 5, maxDelayMs: 65535, pendingSlots: 8, legacy: true });
+let _ncBoardLimits = null;
+function ncLimits() {
+  return _ncBoardLimits || { actionsPerTier: MAX_ACTIONS_PER_TIER, maxDelayMs: AT_DELAY_MAX, pendingSlots: AT_PENDING_MAX, legacy: false };
+}
+function _ncReadLimits(l) {
+  if (!l || typeof l !== 'object') return NC_LEGACY_LIMITS;
+  const n = (v, lo, hi, d) => { v = Math.round(+v); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d; };
+  return { actionsPerTier: n(l.actionsPerTier, 1, MAX_ACTIONS_PER_TIER, NC_LEGACY_LIMITS.actionsPerTier),
+           maxDelayMs: n(l.maxDelayMs, 0, AT_DELAY_MAX, NC_LEGACY_LIMITS.maxDelayMs),
+           pendingSlots: n(l.pendingSlots, 1, 1024, NC_LEGACY_LIMITS.pendingSlots), legacy: false };
+}
+// Where the config holds more than the board stores: one line each, for Save to refuse with.
+function _ncOverLimits(cfg) {
+  const L = ncLimits(), out = [];
+  const tier = (acts, where) => {
+    if (!Array.isArray(acts)) return;
+    if (acts.length > L.actionsPerTier) out.push(`${where}: ${acts.length} actions (this board stores ${L.actionsPerTier})`);
+    acts.forEach((a, i) => {
+      const d = +((a && (a.delay || a.delayMs)) || 0);
+      if (d > L.maxDelayMs) out.push(`${where}, action ${i + 1}: a ${d} ms delay (this board stores up to ${L.maxDelayMs} ms)`);
+    });
+  };
+  const tapNames = { t1: 'single tap', t2: 'double tap', t3: 'triple tap', t4: 'long press' };
+  for (const [key, m] of Object.entries((cfg && cfg.mappings) || {})) {
+    if (!m) continue;
+    for (const t of TIER_KEYS) tier(m[t], `Mode ${Math.floor(+key / 100)} button ${+key % 100} ${tapNames[t]}`);
+  }
+  for (const [name, sw] of Object.entries((cfg && cfg.switches) || {})) {
+    if (!sw) continue;
+    ['p0', 'p1', 'p2'].forEach((p, i) => tier(sw[p], `Switch ${name} ${['down', 'mid', 'up'][i]}`));
+  }
+  if (cfg && cfg.peerEvent) tier(cfg.peerEvent.actions, 'New-peer event');
+  return out;
+}
 
 // A per-tier "Action Name" input (the sequence's plain-language name; doubles as
 // the cheat-sheet caption). tierKey: 1/2/3 (button taps) or 'p0'/'p1'/'p2' (switch
@@ -13230,7 +13274,7 @@ function addActionRow(tier) {
   const rows = document.getElementById(`rows-${tier}`);
   if (!rows) return;
   const existing = rows.querySelectorAll('.action-row').length;
-  if (existing >= MAX_ACTIONS_PER_TIER) return;
+  if (existing >= ncLimits().actionsPerTier) return;
 
   const used = new Set([...rows.querySelectorAll('.action-row')]
                        .map(r => +r.dataset.ai));
@@ -13291,9 +13335,10 @@ function refreshTierState(tier) {
   const card = rows.parentElement;
   const addBtn = card.querySelector('.btn-add-action');
   if (addBtn) {
-    const atMax = rowEls.length >= MAX_ACTIONS_PER_TIER;
+    const cap = ncLimits().actionsPerTier;   // what this board stores
+    const atMax = rowEls.length >= cap;
     addBtn.disabled = atMax;
-    addBtn.textContent = atMax ? `Max ${MAX_ACTIONS_PER_TIER} actions` : '+ Add action';
+    addBtn.textContent = atMax ? `Max ${cap} actions` : '+ Add action';
   }
   // Tab badge = number of actions that will actually be SAVED, so it can't
   // overstate. Count only rows readActionFromUI() returns non-null for — the same
@@ -13353,7 +13398,7 @@ function buildActionRow(tier, ai, action) {
   // Delay
   const delayInput = document.createElement('input');
   delayInput.type = 'number'; delayInput.id = `delay-${tier}-${ai}`;
-  delayInput.min = 0; delayInput.max = AT_DELAY_MAX; delayInput.step = 50;   // 30 min = RC_MAX_DELAY_MS
+  delayInput.min = 0; delayInput.max = ncLimits().maxDelayMs; delayInput.step = 50;   // what this board stores (30 min = RC_MAX_DELAY_MS)
   delayInput.value = action.delay || action.delayMs || 0;
   delayInput.style.width = '70px';
   row.appendChild(makeFieldGroup('Delay(ms)', delayInput));
@@ -17087,7 +17132,7 @@ function openActionTimeline(tierKey) {
   rows.querySelectorAll('.action-row').forEach(r => {
     const a = readActionFromUI(tierKey, r.dataset.ai);
     if (!a) { incomplete++; return; }
-    events.push({ id: _atNextId++, t: Math.min(AT_DELAY_MAX, _atDelayOf(a)), action: _atStrip(a), over: _atDelayOf(a) > AT_DELAY_MAX ? _atDelayOf(a) : 0 });
+    events.push({ id: _atNextId++, t: Math.min(ncLimits().maxDelayMs, _atDelayOf(a)), action: _atStrip(a), over: _atDelayOf(a) > ncLimits().maxDelayMs ? _atDelayOf(a) : 0 });
   });
   const tierName = AT_TIER_NAMES[tierKey] || String(tierKey);
   const who = editingSw ? `Switch ${editingSw}` : editingBtn ? `Button ${editingBtn}: ${getBtnLabel(editingBtn)}` : 'Actions';
@@ -17134,11 +17179,13 @@ function applyActionTimeline() {
 function _atProblems() {
   const at = _at, out = [];
   if (!at) return out;
-  for (const e of at.events) if (e.over) out.push({ level: 'error', msg: `“${_atStepLabel(e.action)}” has a ${e.over} ms delay: the board takes at most ${AT_DELAY_MAX} ms (30 min) and would cut it to that. Move it.` });
-  if (at.events.length > MAX_ACTIONS_PER_TIER) out.push({ level: 'error', msg: `${at.events.length} actions: a ${editingSw ? 'position' : 'tap'} holds ${MAX_ACTIONS_PER_TIER}.` });
+  const L = ncLimits();   // what this board stores
+  for (const e of at.events) if (e.over) out.push({ level: 'error', msg: `“${_atStepLabel(e.action)}” has a ${e.over} ms delay: this board stores at most ${L.maxDelayMs} ms (${_atFmtT(L.maxDelayMs)}) and would ${L.legacy ? 'wrap' : 'cut'} it. Move it.` });
+  if (at.events.length > L.actionsPerTier) out.push({ level: 'error', msg: `${at.events.length} actions: a ${editingSw ? 'position' : 'tap'} on this board holds ${L.actionsPerTier}.` });
   // The press's delayed actions, this tier's and the ones that fire with it, against the board's slots.
   const delayed = at.events.filter(e => e.t > 0).length + at.with.reduce((n, w) => n + w.events.filter(e => e.t > 0).length, 0);
-  if (delayed > AT_PENDING_MAX) out.push({ level: 'warn', msg: `This press queues ${delayed} delayed actions${at.with.length ? ' with the taps that fire with it' : ''}: the board holds ${AT_PENDING_MAX} at once, shared with every other button and switch, and drops any past that — they never fire (PENDING_ACTION_SLOTS).` });
+  if (delayed > L.pendingSlots) out.push({ level: 'warn', msg: `This press queues ${delayed} delayed actions${at.with.length ? ' with the taps that fire with it' : ''}: the board holds ${L.pendingSlots} at once, shared with every other button and switch, and ` +
+    (L.legacy ? 'fires the rest at once, their delays dropped (PENDING_ACTION_SLOTS; firmware before the 32 slots).' : 'drops any past that — they never fire (PENDING_ACTION_SLOTS).') });
   // A WCB runs one timed sequence at a time: starting another replaces the first (WCB command_timer.cpp).
   const runs = [];
   for (const e of [...at.with.flatMap(w => w.events.map(x => ({ t: x.t, action: x.action }))), ...at.events]) {
@@ -17433,7 +17480,7 @@ function _atRenderSide() {
   const un = document.getElementById('at-undo'); if (un) un.disabled = !at.history.length;
   const re = document.getElementById('at-redo'); if (re) re.disabled = !at.future.length;
   const count = document.getElementById('at-count');
-  if (count) count.textContent = `${at.events.length} of ${MAX_ACTIONS_PER_TIER} actions`;
+  if (count) count.textContent = `${at.events.length} of ${ncLimits().actionsPerTier} actions`;
   const ro = document.getElementById('at-readout');
   if (ro) {
     const sel = at.events.filter(e => at.sel.has(e.id));
@@ -17481,10 +17528,10 @@ function _atSelect(id, additive) {
 const _atSelected = () => _at.events.filter(e => _at.sel.has(e.id))
   .sort((p, q) => (p.t - q.t) || (_at.events.indexOf(p) - _at.events.indexOf(q)));
 // Where a moved step lands: within AT_MAGNET_PX of another step, a step of a tap that fires with it, a sequence's
-// step or the cursor it sticks there (a dashed guide shows it); Alt places it to the ms. Never past AT_DELAY_MAX.
+// step or the cursor it sticks there (a dashed guide shows it); Alt places it to the ms. Never past ncLimits().maxDelayMs.
 const AT_MAGNET_PX = 8;
 function _atSnap(t, free, exclude, withCursor = true) {
-  t = Math.max(0, Math.min(AT_DELAY_MAX, Math.round(t)));
+  t = Math.max(0, Math.min(ncLimits().maxDelayMs, Math.round(t)));
   if (free) return { t, to: null };
   const lim = AT_MAGNET_PX / _at.pxPerMs;
   let best = null;
@@ -17525,7 +17572,7 @@ function _atStartDrag(ev, e) {
     if (!moved && Math.abs(mv.clientX - startX) < 3) return;
     if (!moved) { _atPush(); moved = true; }
     const snap = _atSnap(t0 + (mv.clientX - startX) / _at.pxPerMs, mv.altKey, exclude);
-    const d = Math.max(-minStart, Math.min(AT_DELAY_MAX - maxStart, snap.t - t0));
+    const d = Math.max(-minStart, Math.min(ncLimits().maxDelayMs - maxStart, snap.t - t0));
     group.forEach(x => { x.t = starts.get(x.id) + d; x.over = 0; });
     _at.guideT = snap.to;
     _atRender();
@@ -17555,7 +17602,7 @@ function _atAlign(where) {
   const T = where === 'first' ? sel[0].t : where === 'last' ? sel[sel.length - 1].t : _at.cursorMs;
   _atCommit(() => {
     const ids = new Set(sel.map(e => e.id));
-    sel.forEach(e => { e.t = Math.max(0, Math.min(AT_DELAY_MAX, Math.round(T))); e.over = 0; });
+    sel.forEach(e => { e.t = Math.max(0, Math.min(ncLimits().maxDelayMs, Math.round(T))); e.over = 0; });
     const out = [];
     for (const e of _at.events) { if (!ids.has(e.id)) out.push(e); else if (e === sel[0]) out.push(...sel); }
     _at.events = out;
@@ -17574,7 +17621,7 @@ function _atSpread() {
 function _atNudge(ms) {
   const sel = _atSelected();
   if (!sel.length) return;
-  const d = Math.max(-Math.min(...sel.map(e => e.t)), Math.min(AT_DELAY_MAX - Math.max(...sel.map(e => e.t)), ms));
+  const d = Math.max(-Math.min(...sel.map(e => e.t)), Math.min(ncLimits().maxDelayMs - Math.max(...sel.map(e => e.t)), ms));
   if (!d) return;
   _atCommit(() => sel.forEach(e => { e.t += d; e.over = 0; }));
 }
@@ -17588,8 +17635,8 @@ function _atDeleteSel() {
 // delay. `template` starts a new step with a type (a click on an MP3 lane's empty space starts an MP3 action).
 let _atStepId = null;
 function _atOpenStep(existing, t, template) {
-  if (!existing && _at.events.length >= MAX_ACTIONS_PER_TIER) {
-    _atSetStatus(`This ${editingSw ? 'position' : 'tap'} already has ${MAX_ACTIONS_PER_TIER} actions, as many as the board holds. Delete one to add another.`);
+  if (!existing && _at.events.length >= ncLimits().actionsPerTier) {
+    _atSetStatus(`This ${editingSw ? 'position' : 'tap'} already has ${ncLimits().actionsPerTier} actions, as many as the board holds. Delete one to add another.`);
     return;
   }
   _atStepId = existing ? existing.id : null;
@@ -17603,6 +17650,7 @@ function _atOpenStep(existing, t, template) {
   typeSel.value = _normActionType(action.type);
   document.getElementById('at-step-title').textContent = existing ? 'Edit action' : 'New action';
   document.getElementById('at-step-time').value = Math.max(0, Math.round(t || 0));
+  document.getElementById('at-step-time').max = ncLimits().maxDelayMs;
   document.getElementById('at-step-note').value = action.note || '';
   const fields = document.getElementById('at-step-fields');
   appendActionFields(fields, action);
@@ -17619,7 +17667,8 @@ function _atApplyStep() {
   const action = readActionFromFid('at-step-fields', type, note ? { note } : {});
   if (!action) { alert('Fill in the required fields (e.g. a command) first.'); return; }
   const raw = Math.round(+(document.getElementById('at-step-time').value || 0));
-  if (!(raw >= 0 && raw <= AT_DELAY_MAX)) { alert(`The time is a delay after the press: 0 to ${AT_DELAY_MAX} ms (30 minutes).`); return; }
+  const maxD = ncLimits().maxDelayMs;
+  if (!(raw >= 0 && raw <= maxD)) { alert(`The time is a delay after the press: 0 to ${maxD} ms (${_atFmtT(maxD)}), what this board stores.`); return; }
   const core = _atStrip(action);
   _atCommit(() => {
     const e = _atStepId != null ? _at.events.find(x => x.id === _atStepId) : null;
@@ -17752,14 +17801,14 @@ function _atLibRender() {
 }
 function _atLibPick(boardId, cmdId, t) {
   if (!_at) return;
-  if (_at.events.length >= MAX_ACTIONS_PER_TIER) {
-    _atSetStatus(`This ${editingSw ? 'position' : 'tap'} already has ${MAX_ACTIONS_PER_TIER} actions, as many as the board holds. Delete one to add another.`);
+  if (_at.events.length >= ncLimits().actionsPerTier) {
+    _atSetStatus(`This ${editingSw ? 'position' : 'tap'} already has ${ncLimits().actionsPerTier} actions, as many as the board holds. Delete one to add another.`);
     return;
   }
   const board = (ncCommandLibrary().boards || []).find(b => b.id === boardId);
   const cmd = board && (board.commands || []).find(c => c.id === cmdId);
   if (!cmd) return;
-  _atLibAt = Math.max(0, Math.min(AT_DELAY_MAX, Math.round(t)));
+  _atLibAt = Math.max(0, Math.min(ncLimits().maxDelayMs, Math.round(t)));
   if (!(cmd.params || []).length) {
     const r = _cmdlibResolveAction({ board, cmd }, {}, AT_LIB_FID);
     if (r.error) { alert(r.error); return; }
@@ -17775,7 +17824,7 @@ function _atLibPick(boardId, cmdId, t) {
 }
 function _atAddResolved(action, t) {
   if (!_at) return;
-  const e = { id: _atNextId++, t: Math.max(0, Math.min(AT_DELAY_MAX, Math.round(t))), action: _atStrip(action), over: 0 };
+  const e = { id: _atNextId++, t: Math.max(0, Math.min(ncLimits().maxDelayMs, Math.round(t))), action: _atStrip(action), over: 0 };
   _atCommit(() => { _at.events.push(e); _atSelect(e.id, false); });
   const L = _atLaneOf(e.action);
   _atSetStatus(`Added “${_atStepLabel(e.action)}” at ${_atFmtT(e.t)} — ${L.name}${L.sub ? ' · ' + L.sub : ''}. Click it to change where it goes.`);
@@ -19173,6 +19222,17 @@ async function saveConfigToBoard() {
     appendTerminalLine('< [config] A save is still awaiting confirmation — wait for it to finish, then Save again.', 'rx');
     showToast('A save is still in progress — wait for it to finish', 'warn');
     return;
+  }
+  // More actions, or a longer delay, than this board's firmware stores (ncLimits): it would drop or cut them without
+  // a word, so nothing is sent. Typically a board a firmware version behind the tool.
+  {
+    const over = _ncOverLimits(config);
+    if (over.length) {
+      const old = ncLimits().legacy ? '\n\nThis board runs firmware from before 10 actions a tier and 30-minute delays: update its firmware (Firmware tab), or trim these.' : '';
+      alert('Not saved — this board would drop or cut part of it:\n\n• ' + over.slice(0, 12).join('\n• ') + (over.length > 12 ? `\n• … and ${over.length - 12} more` : '') + old);
+      appendTerminalLine('< [config] Not saved: ' + over.length + ' tier(s) hold more than this board stores — ' + over[0], 'rx');
+      return;
+    }
   }
   // Defensive parse: don't let `|| 500` silently rewrite a legitimately-0
   // value or a transiently-blank field into 500 (which would fabricate a

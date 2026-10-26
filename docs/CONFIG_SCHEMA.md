@@ -44,6 +44,7 @@ kept half a character, and the tool's next save wrote U+FFFD back.
 | `RC_NUM_MAPPINGS` | 108 | 3 modes × 36 slots |
 | `RC_ACTIONS_PER_TIER` | 10 | Actions per tap tier, switch position, and the new-peer tier |
 | `RC_MAX_DELAY_MS` | 1 800 000 | Longest action delay (30 min); `rcActionSetDelay()` clamps to it |
+| `PENDING_ACTION_SLOTS` | 32 | Delayed actions in flight at once, shared by every button and switch; one more is dropped, logged |
 | `RC_NUM_TAP_TIERS` | 4 | Tap tiers per mapping — `t1`/`t2`/`t3` taps, `t4` = long press (`RC_TAP_LONG`) |
 | `RC_NUM_SWITCHES` | 10 | SA–SJ |
 | `RC_NUM_KNOBS` | 11 | S1, S2, LS, RS, S3, J1–J4, J5, J6 |
@@ -243,6 +244,16 @@ its auto-derived default.
 | struct → JSON | `rcConfigToJSON()` | 64 KB document — sized for 6 smoothing profiles |
 | JSON → struct | `rcConfigFromJSON(JsonObject)` / `(String)` | Tolerant of missing keys; absent field = leave default |
 
+**The config ends with `"limits"`**: `{"actionsPerTier": RC_ACTIONS_PER_TIER, "maxDelayMs":
+RC_MAX_DELAY_MS, "pendingSlots": PENDING_ACTION_SLOTS}`, what this firmware stores. The tool is
+published to Pages ahead of any board's flash, so a board a version behind is normal, and it would
+drop a tier's extra actions and cut (or, before the limits, wrap) a longer delay without a word.
+The tool reads `limits` from a board's CONFIG only (`applyConfig(data, fromBoard)`), never into its
+own config: the editors hold to them (`ncLimits()`), and Save refuses a config past them
+(`_ncOverLimits`). Firmware before the limits sends none; the tool then assumes 5 actions, a 16-bit
+delay and 8 slots (`NC_LEGACY_LIMITS`). `rcConfigFromJSON` ignores the key, so it may come back in a
+`SET_CONFIG` or sit in `/config.json` harmlessly.
+
 **A boolean travels as JSON `true`/`false`, never `1`/`0`.** `rcConfigFromJSON` reads a bool
 as `obj["key"] | false`, and ArduinoJson 7 returns the default for any value that is not a
 boolean: a `1` is read as `false`, with no error. The tool once sent `skipRunning: 1`, so every
@@ -290,9 +301,10 @@ highest-risk category of edit in the repo.
 | Firmware | Config tool | Value |
 |---|---|---|
 | `RC_NUM_TAP_TIERS` / `RC_TAP_LONG` | `NUM_TAP_TIERS` / `TAP_LONG` / `TIER_KEYS` | 4 (`t1..t4`, 4 = long press) |
-| `RC_ACTIONS_PER_TIER` | `MAX_ACTIONS_PER_TIER` | 10 — a tool above the board's lets you build rows `rcConfigFromJSON` silently drops |
-| `RC_MAX_DELAY_MS` | `AT_DELAY_MAX` (also the Delay spinner's and the timeline step editor's max) | 1 800 000 ms (30 min) — the board clamps a longer delay to it |
-| `PENDING_ACTION_SLOTS` (`NaviCore.ino`) | `AT_PENDING_MAX` (the timeline's warning) | 32 delayed actions in flight; one more is dropped, logged |
+| `RC_ACTIONS_PER_TIER` | `MAX_ACTIONS_PER_TIER` | 10 — the tool's maximum; it holds a connected board to that board's `limits.actionsPerTier` |
+| `RC_MAX_DELAY_MS` | `AT_DELAY_MAX` (also the Delay spinner's and the timeline step editor's max) | 1 800 000 ms (30 min) — the board clamps a longer delay to it; the tool holds a board to its `limits.maxDelayMs` |
+| `PENDING_ACTION_SLOTS` (`rc_config.h`) | `AT_PENDING_MAX` (the timeline's warning) | 32 delayed actions in flight; one more is dropped, logged; the tool warns past a board's `limits.pendingSlots` |
+| the legacy values (5, 65535, 8) | `NC_LEGACY_LIMITS` | what a board that sends no `limits` stores |
 | `RC_KNOB_MAX_OUTPUTS` | `KNOB_MAX_OUTPUTS` | 10 |
 | `RC_NUM_MAESTROS` | `NUM_MAESTRO_SLOTS` | 8 |
 | `RC_NUM_WLED` | `NUM_WLED_SLOTS` | 4 |
@@ -358,6 +370,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **The config reports its limits** (§4): `rcConfigToJSON` ends with `"limits"`, and the tool holds its editors and Save to a connected board's (`ncLimits`, `_ncOverLimits`), assuming 5 / 65535 / 8 when a board sends none. `PENDING_ACTION_SLOTS` moves to `rc_config.h` beside the other two. |
 | 2026-10-26 | — | **Longer delays, more actions.** `RC_ACTIONS_PER_TIER` 5 → 10 (also `peerNewActions`); `RcAction` delay 16 → 24 bits as `delayHi:delayLo` in the existing alignment byte (layout and 132-byte size unchanged, so `.ncr` clips need no migration), capped by the new `RC_MAX_DELAY_MS` (30 min); access only through `rcActionDelay()` / `rcActionSetDelay()`. `RcConfig` 335 928 → 641 508 B (PSRAM; the ~210 KB here was already stale). Three invariant rows (§6). |
 | 2026-10-21 | — | Added `wifiToken` (WebSocket login token, default none, live), `chanSync` (channel sync, default on, live) and `wcbNetwork.region` (default `"01"`, read at boot). `wcbNetwork.channel` and `wcbProfiles[].channel` accept 1–13; the region check is at boot (WCB_Client 1.19.0 takes 12–13 under a region that allows them). No schema version: an absent field keeps its default, as for every field. Bridged saves strip `region` and `wifiToken`; the mesh `GET_CONFIG` leaves `wifiToken` out. Four invariant rows (§6). |
 | 2026-10-07 | `2d6964d` | `peerNewActions`: the boot grace is 12 s, so a board that never left is heard again before it closes (D-NC25). |
