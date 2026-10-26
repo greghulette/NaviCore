@@ -696,7 +696,10 @@ without a word. With no board's config yet, the tool's own maxima apply.
   the board's longest delay hidden), **Fit** shows every dot and sequence step, and Ctrl+scroll
   zooms at the pointer. The readout says the view and the board's longest delay; a red line marks
   that delay where the view reaches it. The view opens fitted. A wide SVG draws its grid near what
-  shows, re-drawn as it scrolls.
+  shows, re-drawn as it scrolls. **⤢ Expand** widens the editor to the window (up to 1400 px) and
+  fits the view to the room; **⤡ Shrink** puts it back. It is remembered per browser
+  (`nc_at_expanded`, `_atSetExpanded`) and comes and goes with the timeline, so the knob editor,
+  which shares the modal, keeps its width.
 - **Warnings** (`_atProblems`), under the timeline: a delay past the board's longest (error,
   until the row's delay is changed; Save refuses it); a press that queues more delayed actions
   than the board's slots with the taps that fire with it (warn); two timed sequences on one WCB
@@ -926,6 +929,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **⤢ Expand** (§7b): a button on the timeline's zoom bar widens the button / switch editor to the window (up to 1400 px, `#modal.at-wide`) and fits the view to it; ⤡ Shrink puts it back; remembered per browser (`nc_at_expanded`). |
 | 2026-10-26 | — | **The action timeline inline, the rows one line each** (§7b, design E of the "Action tiles" canvas): the timeline sits in the tier's card above its rows (`_atBind`) instead of a ⏱ window, with a zoom bar (− / +, Fit, presets, `_atSetView`), and is drawn from the rows: a dragged dot sets its row's delay and the row goes where it fires (`_arSettle`), a click opens its row, a double click adds one (and opens the library). Each row is a line (⋮⋮, number, time, device, what, note, ▶, ×) in its device's colour that opens to its fields (`buildActionRow`, `_arPaintTier`, `_arOpen`); ▶ Preview sits beside the name with ▶ Test, which runs the cursor. Gone: the window and its Apply, the step popover, the docked library, multi-select with Align and Space evenly, nudges and undo (the editor's Cancel drops its edits), the strip, and the position-coloured `#n` row tags. The button modal is 720 px wide. |
 | 2026-10-26 | — | **A board's limits hold** (§7b): the tool reads the `limits` a board's config ends with into `ncLimits()` (`applyConfig(data, fromBoard)`; 5 / 65535 / 8 when a board sends none) and holds the rows, the Delay spinner and the action timeline to them; Save refuses a config past them (`_ncOverLimits`). |
 | 2026-10-26 | — | **Longer delays, more actions** (§7b): `MAX_ACTIONS_PER_TIER` 5 → 10, `AT_DELAY_MAX` 65535 → 1 800 000 ms (30 min; also the Delay spinner's and the step editor's max), `AT_PENDING_MAX` 8 → 32, with the firmware's pairs. The action timeline zooms out to the whole 30 min (`AT_PX_MIN`) and shows times past a minute as `m:ss`. |
