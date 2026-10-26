@@ -496,6 +496,44 @@
   .cmdlib-board[open] > summary .cmdlib-caret { transform: rotate(90deg); }
   .cmdlib-caret { display: inline-block; transition: transform .12s; }
 
+  /* Timeline action lanes: a colour per device. The WCB Wizard's eight (seq-builder.css --sb-c1..8), in its order,
+     both themes, so a device wears one colour in both tools (TL_BOARD_SLOT). Validated with the dataviz skill's
+     validate_palette.js on this timeline's own surface (--field): dark #141b26 passes every check; light #ffffff
+     passes all but contrast, where slots 3, 4 and 5 sit under 3:1 - every lane and step carries a label. */
+  :root {
+    --tl-c1: #3987e5; --tl-c2: #d95926; --tl-c3: #199e70; --tl-c4: #c98500;
+    --tl-c5: #d55181; --tl-c6: #008300; --tl-c7: #9085e9; --tl-c8: #e66767;
+    --tl-cx: #6e7d94;
+  }
+  body.theme-light {
+    --tl-c1: #2a78d6; --tl-c2: #eb6834; --tl-c3: #1baf7a; --tl-c4: #eda100;
+    --tl-c5: #e87ba4; --tl-c6: #008300; --tl-c7: #6250d6; --tl-c8: #e34948;
+    --tl-cx: #7a8494;
+  }
+  #tl-svg .tl-ev-hit { touch-action: none; }
+  /* The command library docked beside the timeline (_tlLibRender): each board on its home colour, edges only. */
+  .tl-lib { flex: 0 0 270px; display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border);
+            border-radius: 8px; background: var(--surface-2); padding: 8px; box-sizing: border-box; }
+  .tl-lib[hidden] { display: none; }
+  .tl-lib input[type=search] { width: 100%; box-sizing: border-box; }
+  .tl-lib-list { max-height: 440px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+  .tl-lib-list details > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px;
+            padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+            font-size: 12px; user-select: none; }
+  .tl-lib-list details > summary::-webkit-details-marker { display: none; }
+  .tl-lib-list details > summary::marker { content: ''; }
+  .tl-lib-board > summary { border-left: 3px solid var(--tl-col) !important; }
+  .tl-lib-bn { flex: 1; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-lib-n { font-size: 10px; color: var(--muted); }
+  .tl-lib-sw { flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--tl-col); }
+  .tl-lib-inner { padding: 4px 0 2px 8px; display: flex; flex-direction: column; gap: 4px; }
+  .tl-lib-cmd { margin: 3px 0 0 6px; padding: 4px 7px; border: 1px solid var(--border); border-left: 3px solid var(--tl-col);
+            border-radius: 6px; background: var(--card); cursor: grab; font-size: 12px; }
+  .tl-lib-cmd:hover { border-color: var(--accent); border-left-color: var(--tl-col); }
+  .tl-lib-cn { font-weight: 600; }
+  .tl-lib-ct { font-family: var(--mono); font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-lib-foot, .tl-lib-empty { font-size: 11px; color: var(--muted); }
+
   /* ─── Configuration modal — tabbed layout with visual contrast ───────
      The default .modal background (--surface = #161616) matches the page
      bg exactly and blends in. The cfg-modal variant uses a slightly
@@ -2650,7 +2688,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">23.11:10.R.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">25.17:52.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -2785,7 +2823,11 @@
       <div class="sb-section" style="margin:0">
         <div style="display:flex;align-items:center;justify-content:space-between">
           <h3 style="margin:0">Library</h3>
-          <button class="btn btn-ghost" type="button" onclick="clipsRefresh()" style="padding:3px 10px" title="Reload clip list from the board">⟳ Refresh</button>
+          <span style="display:flex;gap:6px">
+            <button class="btn btn-ghost" type="button" id="clip-new-btn" onclick="clipNewTimeline()" style="padding:3px 10px"
+                    title="Build a new clip on the timeline instead of recording one. Nothing is on the droid until you Save it.">＋ New clip</button>
+            <button class="btn btn-ghost" type="button" onclick="clipsRefresh()" style="padding:3px 10px" title="Reload clip list from the board">⟳ Refresh</button>
+          </span>
         </div>
         <div id="clips-storage" style="margin-top:8px;display:none"></div>
         <div id="clips-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
@@ -2822,6 +2864,7 @@
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <button class="btn btn-ghost" id="tl-add-maestro" type="button" style="padding:3px 10px">+ Maestro track</button>
         <button class="btn btn-ghost" id="tl-add-action" type="button" title="Add an action (WCB / HCR / MP3 / play a clip …) at the yellow cursor line" style="padding:3px 10px">+ Action</button>
+        <button class="btn btn-ghost" id="tl-lib-btn" type="button" title="Show or hide the command library beside the timeline: click a command to add it at the cursor, or drag it onto the timeline" style="padding:3px 10px">📚 Library</button>
         <button class="btn btn-ghost" id="tl-trim-start"  type="button" title="Shift everything left so the first event starts at 0 — removes empty space at the start of the clip" style="padding:3px 10px">✂ Trim start</button>
         <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)"
                title="Total clip length. Increase it to add time at the end — every servo holds its last pose out to the new length (drag those end points to animate the added section). Decrease it to trim the end.">
@@ -2861,22 +2904,42 @@
         </label>
         <span style="width:1px;align-self:stretch;background:var(--border)"></span>
         <div id="tl-easing-toolbar" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--muted)"></div>
+        <div id="tl-multi-toolbar" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
+          <span id="tl-multi-count"></span> · Align:
+          <button class="btn btn-ghost" id="tl-align-first" type="button" style="padding:3px 8px" title="Put the selected actions at the first one's time, 5 ms apart in their order">First</button>
+          <button class="btn btn-ghost" id="tl-align-last" type="button" style="padding:3px 8px" title="Put the selected actions at the last one's time, 5 ms apart in their order">Last</button>
+          <button class="btn btn-ghost" id="tl-align-cursor" type="button" style="padding:3px 8px" title="Put the selected actions at the cursor, 5 ms apart in their order">Cursor</button>
+          <button class="btn btn-ghost" id="tl-spread" type="button" style="padding:3px 8px" title="Keep the first and last selected actions, and space the ones between equally (three or more)">Space evenly</button>
+        </div>
         <button class="btn btn-danger" id="tl-delete-btn" type="button" style="display:none;padding:3px 10px">🗑 Delete selected</button>
         <div style="flex:1"></div>
         <button class="btn btn-blue" id="tl-save-btn" type="button">💾 Save</button>
       </div>
       <div id="tl-readout" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
-      <div id="tl-scroll" style="overflow-x:auto;overflow-y:hidden;border:1px solid var(--border);border-radius:8px;background:var(--field)">
-        <svg id="tl-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div style="display:flex;gap:10px;align-items:flex-start">
+        <div id="tl-scroll" style="flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;border:1px solid var(--border);border-radius:8px;background:var(--field)">
+          <svg id="tl-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+        <div id="tl-libpanel" class="tl-lib" hidden>
+          <input type="search" id="tl-lib-search" placeholder="Search commands…" autocomplete="off">
+          <div id="tl-lib-list" class="tl-lib-list"></div>
+          <div class="tl-lib-foot">Click a command to add it at the cursor, or drag it onto the timeline.</div>
+        </div>
       </div>
       <div style="font-size:11px;color:var(--muted)">
         Recorded servo tracks draw as a <b>clean line</b> — click ON the line to add a control point (it snaps to
         the curve), then drag it to reshape (nearby motion follows — see “Smooth drag”) · <b>select a control
         point to reveal its two handle arms; drag a handle to bend the curve</b> on that side (handle height =
         slope, distance = reach — Photoshop-style) · double-click-drag a dot to move just that one · right-click a
-        dot to delete it (or Delete/Backspace, or 🗑) · “All points” shows the raw captured dots · <b>+ Action</b>
-        adds an action at the yellow cursor (or click the Actions lane); drag its diamond to move it in time, click
-        to edit, right-click to delete — two actions on the same spot auto-nudge 5 ms apart · Shift-click two control points (no
+        dot to delete it (or Delete/Backspace, or 🗑) · “All points” shows the raw captured dots · <b>Actions</b> sit in a
+        lane per device they reach, in that device's colour (the same as in the WCB Wizard), and each fires at its dot ·
+        <b>📚 Library</b>: click a command to add it at the cursor, or drag it onto the timeline; <b>+ Action</b>, or a click
+        in a lane, opens the action editor there · drag a step to move it — it sticks to the steps, control points and
+        cursor near it (Alt: to the ms); ←/→ nudge it 10 ms (Shift 100, Alt 1); click to edit, right-click to delete ·
+        Shift-click steps to select several, then <b>Align</b> them (first, last, cursor) or <b>Space evenly</b> — two
+        actions never share a millisecond, so aligned ones sit 5 ms apart · an action that runs a WCB stored sequence
+        shows the sequence's steps under it, where they land · <b>▶ Preview</b> without a board plays the cursor and
+        lights each action as it passes · Shift-click two control points (no
         other control point between) for an easing pair · drag the yellow handle to scrub · red ✕ deletes a whole
         track · <b>✂ Trim start</b> removes leading empty space; <b>Length</b> sets the clip's total time — raise it to
         add time at the end (each servo holds its pose out to the new end; drag those end points to animate) · Ctrl+scroll zooms at the pointer, ⤢ Fit fits · <b>Overlay</b> stacks every track into one lane in
@@ -2911,9 +2974,9 @@
       </div>
       <div class="action-row" id="tl-action-fields"></div>
       <div class="wcb-send-row">
-        <label>Delay (ms):</label><input type="number" id="tl-action-delay" min="0" style="width:70px">
-        <label style="margin-left:10px">Note:</label><input type="text" id="tl-action-note" maxlength="19" style="width:130px">
+        <label>Note:</label><input type="text" id="tl-action-note" maxlength="19" style="width:130px">
       </div>
+      <div id="tl-action-delay-note" style="display:none;font-size:12px;color:var(--yellow)"></div>
       <div class="wcb-send-row" style="justify-content:flex-end">
         <button class="btn btn-danger" id="tl-action-delete" type="button" style="display:none">🗑 Delete</button>
         <button class="btn btn-blue" id="tl-action-apply" type="button">✓ Apply</button>
@@ -7063,7 +7126,8 @@ function _renderClipStorage(info) {
 }
 
 function renderClips(clips) {
-  _updateClipNameOptions((clips || []).map(c => String(c.name || '')));   // feed the action-picker dropdown
+  _clipLastNames = (clips || []).map(c => String(c.name || ''));          // what a new clip's name is checked against
+  _updateClipNameOptions(_clipLastNames);                                 // feed the action-picker dropdown
   const list = document.getElementById('clips-list');
   if (!list) return;
   if (!clips.length) { clipsStatus('No saved clips. Record one above, then Refresh.'); return; }
@@ -7917,6 +7981,8 @@ function _tlId() { return _tlNextId++; }
 function openTimelineEditor(name) {
   ncShow(document.getElementById('tl-modal'));
   document.getElementById('tl-title').textContent = '📈 Timeline — ' + name;
+  _tlLibShow(_tlLibShown());
+  _cmdlibReady.then(() => _tlLibRender());   // the docked library, once the vendored boards are in
   _tlSetStatus('Loading…');
   _tlClip = null;
   _tlStopPlay(); _tlLive = false; _tlLiveLast = {}; _tlUpdateLiveBtns();   // fresh session starts disarmed
@@ -7995,6 +8061,9 @@ function _tlBuildModelFromEvents(name, header, events, partial = 0) {
     maestro: {}, hcr: {}, actions: [],
     selected: null, selectedPair: null, cursorMs: 0,
     pxPerMs: 0, dirty: false, uploading: false, partial,
+    // Session-only, never uploaded: the selected actions, each lane's colour, the sticking guide, and which
+    // sequence bodies this session has asked for (the action-lane section below _tlDeleteActionEditor).
+    selActs: new Set(), colors: new Map(), guideT: null, refTried: new Set(), refPending: '',
   };
   events.forEach(ev => {
     const t = +ev.t || 0;
@@ -8150,6 +8219,10 @@ async function _tlSave() {
       throw new Error('board rejected save' + (m ? ' — ' + m[1] : '') + ' (check the terminal for details)');
     }
 
+    if (clip.isNew) {   // it is on the droid now (openNewTimeline)
+      clip.isNew = false;
+      if (_tlClip === clip) document.getElementById('tl-title').textContent = '📈 Timeline — ' + clip.name;
+    }
     _tlSetStatus(clip.dirty
       ? `Saved ✓ (${events.length} events) — you have newer edits, Save again`
       : `Saved ✓ (${events.length} events)`);
@@ -8171,7 +8244,7 @@ async function _tlSave() {
 // and less error-prone than incremental patching, and clip sizes here are
 // hand-edited routines (tens to a few hundred keyframes), not the raw dense
 // captures — cheap enough to redraw wholesale on every interaction.
-const TL_LEFT = 150, TL_RULER_H = 26, TL_ROW_H = 40, TL_ACTION_ROW_H = 50, TL_RIGHT_PAD = 30;
+const TL_LEFT = 150, TL_RULER_H = 26, TL_ROW_H = 40, TL_RIGHT_PAD = 30;
 const SVGNS = 'http://www.w3.org/2000/svg';
 
 function _tlSvgEl(tag, attrs) {
@@ -8277,18 +8350,27 @@ function _tlRender() {
   const clip = _tlClip;
   const svg = document.getElementById('tl-svg');
   if (!clip || !svg) return;
+  // A selected keyframe, or nothing selected, means no action is (see _tlSelectAction).
+  if (!clip.selected || clip.selected.kind !== 'action') clip.selActs.clear();
+  else if (!clip.selActs.has(clip.selected.id)) { clip.selActs.clear(); clip.selActs.add(clip.selected.id); }
+  for (const id of [...clip.selActs]) if (!clip.actions.some(x => x.id === id)) clip.selActs.delete(id);
   const tracks = _tlTrackList();
-  const width  = TL_LEFT + Math.max(1, clip.durationMs) * clip.pxPerMs + TL_RIGHT_PAD;
-  const height = TL_RULER_H + ((_tlOverlay && tracks.length) ? TL_OVERLAY_H : tracks.length * TL_ROW_H) + TL_ACTION_ROW_H;
+  const act = _tlActLayout(TL_RULER_H + ((_tlOverlay && tracks.length) ? TL_OVERLAY_H : tracks.length * TL_ROW_H));
+  // Drawn to the clip's end, or further when a sequence it runs goes on after it (shaded past the end, below).
+  const viewEnd = Math.max(1, clip.durationMs, act.refEnd);
+  const width  = Math.max(TL_LEFT + viewEnd * clip.pxPerMs + TL_RIGHT_PAD, TL_LEFT + act.endPx + 8);
+  const height = act.bottom;
   svg.setAttribute('width', width);
   svg.setAttribute('height', height);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.innerHTML = '';
+  // Cleared, with the hatch a sequence's run draws in (_tlDrawActSteps).
+  svg.innerHTML = '<defs><pattern id="tl-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">' +
+                  '<rect width="6" height="6" fill="var(--hover)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--line-2)" stroke-width="2"/></pattern></defs>';
 
   svg.appendChild(_tlSvgEl('line', { x1: TL_LEFT, y1: 0, x2: TL_LEFT, y2: height, stroke: 'var(--border)', 'stroke-width': 1 }));
 
   const tickMs = _tlNiceTick(80 / clip.pxPerMs);
-  for (let t = 0; t <= clip.durationMs + tickMs; t += tickMs) {
+  for (let t = 0; t <= viewEnd + tickMs; t += tickMs) {
     const x = _tlTimeToX(t);
     svg.appendChild(_tlSvgEl('line', { x1: x, y1: TL_RULER_H - 6, x2: x, y2: height, stroke: 'var(--border)', 'stroke-width': 0.5, opacity: 0.4 }));
     const label = _tlSvgEl('text', { x: x + 3, y: TL_RULER_H - 10, 'font-size': 10, fill: 'var(--muted)', 'font-family': 'var(--mono)' });
@@ -8297,7 +8379,6 @@ function _tlRender() {
   }
 
   const overlay = _tlOverlay && tracks.length > 0;
-  const laneArea = overlay ? TL_OVERLAY_H : tracks.length * TL_ROW_H;
 
   // Overlay mode shares ONE µs scale across all maestro tracks so equal servo
   // positions sit at equal heights (HCR keeps its own 0–99 scale).
@@ -8458,20 +8539,19 @@ function _tlRender() {
   });
   }
 
-  // Actions-lane label + background (click a blank spot to add an action here).
+  // The action lanes (one per device) and the lane that adds one — click a blank spot to add an action there.
   // Emitted in the BACKGROUND layer, before the interactive foreground below.
-  const actionsTop = TL_RULER_H + laneArea;
-  {
-    const aLbl = _tlSvgEl('text', { x: 8, y: actionsTop + TL_ACTION_ROW_H / 2 + 4, 'font-size': 11, fill: 'var(--text)' });
-    aLbl.textContent = 'Actions';
-    svg.appendChild(aLbl);
-    const aBg = _tlSvgEl('rect', { x: TL_LEFT, y: actionsTop, width: width - TL_LEFT, height: TL_ACTION_ROW_H, fill: 'var(--hover-2)' });
-    aBg.style.cursor = 'copy';
-    aBg.addEventListener('click', ev => {
-      const rect = svg.getBoundingClientRect();
-      _tlOpenActionEditor(null, _tlXToTime(ev.clientX - rect.left));
-    });
-    svg.appendChild(aBg);
+  _tlDrawActLanesBg(svg, act, width);
+  if (viewEnd > clip.durationMs) {   // a sequence the clip runs carries on after the clip's last event
+    const ex = _tlTimeToX(clip.durationMs);
+    const shade = _tlSvgEl('rect', { x: ex, y: TL_RULER_H, width: width - ex, height: height - TL_RULER_H, fill: 'var(--bg)', opacity: 0.45, class: 'tl-after-end' });
+    shade.style.pointerEvents = 'none';
+    svg.appendChild(shade);
+    svg.appendChild(_tlSvgEl('line', { x1: ex, y1: 0, x2: ex, y2: height, stroke: 'var(--muted)', 'stroke-width': 1, 'stroke-dasharray': '2 3' }));
+    const el = _tlSvgEl('text', { x: ex + 4, y: TL_RULER_H + 11, 'font-size': 9, fill: 'var(--muted)' });
+    el.textContent = 'clip ends';
+    el.style.pointerEvents = 'none';
+    svg.appendChild(el);
   }
 
   // ── PASS 2: interactive foreground (curve lines, dots + hit targets, tangent
@@ -8499,18 +8579,7 @@ function _tlRender() {
     });
   }
 
-  clip.actions.forEach(a => {
-    const x = _tlTimeToX(a.t), y = actionsTop + TL_ACTION_ROW_H / 2;
-    const isSel = clip.selected && clip.selected.kind === 'action' && clip.selected.id === a.id;
-    const d = _tlSvgEl('path', {
-      d: `M ${x} ${y - 7} L ${x + 7} ${y} L ${x} ${y + 7} L ${x - 7} ${y} Z`,
-      fill: isSel ? 'var(--red)' : 'var(--accent)', stroke: '#fff', 'stroke-width': 1,
-    });
-    d.style.cursor = 'grab';
-    d.addEventListener('pointerdown', ev => _tlStartDragAction(ev, a));
-    d.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); _tlDeleteAction(a); });
-    svg.appendChild(d);
-  });
+  _tlDrawActSteps(svg, act, height);
 
   // Ruler strip — click anywhere on it to jump the cursor there (and pose the
   // servos, if Live is armed); the yellow handle drags it.
@@ -8534,6 +8603,7 @@ function _tlRender() {
 
   _tlUpdateReadout();
   _tlUpdateToolbar();
+  if (act.refs.some(r => r.state === 'unread')) _tlFetchRefs();   // a sequence this clip runs, not read yet
 }
 
 // ── Interactions ─────────────────────────────────────────────────────────────
@@ -8603,7 +8673,11 @@ function _tlDeleteKeyframe(track, kf) {
 function _tlDeleteAction(a) {
   _tlPushHistory();
   _tlClip.actions = _tlClip.actions.filter(x => x.id !== a.id);
-  if (_tlClip.selected && _tlClip.selected.id === a.id) _tlClip.selected = null;
+  _tlClip.selActs.delete(a.id);
+  if (_tlClip.selected && _tlClip.selected.id === a.id) {
+    const left = [..._tlClip.selActs];
+    _tlClip.selected = left.length ? { kind: 'action', id: left[left.length - 1] } : null;
+  }
   _tlClip.dirty = true;
   _tlRender();
 }
@@ -8876,12 +8950,22 @@ function _tlToggleShiftSelect(track, kf) {
   ].sort((a, b) => a.idx - b.idx);
 }
 
-// Action diamonds: drag horizontally to reposition in time, or click (no drag)
-// to open the editor.  A small pixel threshold keeps a slightly-shaky click from
-// registering as a drag, so "click to edit" stays reliable.
+// Action steps: drag horizontally to reposition in time, or click (no drag) to
+// open the editor. A small pixel threshold keeps a slightly-shaky click from
+// registering as a drag, so "click to edit" stays reliable. Shift-click adds the
+// step to the selection (or takes it out); dragging a selected step moves the
+// whole selection. The step sticks to what is near (_tlSnap), Alt places it to
+// the ms. One drag is one undo step, pushed on its first move.
 function _tlStartDragAction(ev, a) {
   ev.preventDefault(); ev.stopPropagation();
-  _tlClip.selected = { kind: 'action', id: a.id };
+  if (ev.button === 2) return;                    // the right-click deletes (contextmenu)
+  if (ev.shiftKey) { _tlSelectAction(a.id, true); _tlRender(); return; }
+  if (!_tlClip.selActs.has(a.id)) _tlSelectAction(a.id, false);
+  else _tlClip.selected = { kind: 'action', id: a.id };
+  const group = _tlClip.actions.filter(x => _tlClip.selActs.has(x.id));
+  const starts = new Map(group.map(x => [x.id, x.t]));
+  const exclude = new Set(starts.keys());
+  const minStart = Math.min(...starts.values());
   const t0 = a.t, startX = ev.clientX;
   let moved = false, ended = false;
   const finish = () => {
@@ -8889,16 +8973,19 @@ function _tlStartDragAction(ev, a) {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     if (!_tlClip) return;                         // editor closed mid-drag
+    _tlClip.guideT = null;
     if (moved) { _tlClip.actions.sort((x, y) => x.t - y.t); _tlRender(); }
-    else _tlOpenActionEditor(a, t0);              // no drag → treat as a click, open the editor
+    else { _tlSelectAction(a.id, false); _tlRender(); _tlOpenActionEditor(a, t0); }   // no drag → a click: edit it
   };
   const onMove = mv => {
     if (!_tlClip) return finish();
     if (!moved && Math.abs(mv.clientX - startX) < 3) return;   // small jitter is still a click
     try {
-      moved = true;
-      const rect = document.getElementById('tl-svg').getBoundingClientRect();
-      a.t = _tlDragTime(_tlXToTime(mv.clientX - rect.left));   // grows durationMs past the end — see _tlDragTime
+      if (!moved) { _tlPushHistory(); moved = true; }
+      const snap = _tlSnap(t0 + (mv.clientX - startX) / _tlClip.pxPerMs, mv.altKey, exclude);
+      const d = Math.max(-minStart, snap.t - t0);
+      group.forEach(x => { x.t = _tlDragTime(starts.get(x.id) + d); });   // grows durationMs past the end — see _tlDragTime
+      _tlClip.guideT = snap.to;
       _tlClip.dirty = true;
       _tlRender();
     } catch (e) { console.error('timeline action drag error', e); finish(); }
@@ -9000,7 +9087,9 @@ function _tlToggleLive() { _tlSetLive(!_tlLive); }
 function _tlPlayPreview() {
   if (!_tlClip) return;
   if (_tlLivePlaying) { _tlStopPlay(); return; }
-  if (!_tlLive) { _tlSetLive(true); if (!_tlLive) return; }   // playing implies Live; bail if arming failed (not connected)
+  // Connected, playing implies Live (the servos follow the cursor); bail if arming failed. Not connected, the cursor
+  // plays in the browser alone and each action lights as it passes (_tlDrawActSteps) — nothing goes to the droid.
+  if (!_tlLive && (writer || sharedActive)) { _tlSetLive(true); if (!_tlLive) return; }
   _tlLivePlaying = true;
   _tlUpdateLiveBtns();
   const dur = Math.max(1, _tlClip.durationMs);
@@ -9028,7 +9117,8 @@ function _tlDeleteSelected() {
   if (!sel) return;
   _tlPushHistory();
   if (sel.kind === 'action') {
-    _tlClip.actions = _tlClip.actions.filter(a => a.id !== sel.id);
+    const gone = _tlClip.selActs.size ? _tlClip.selActs : new Set([sel.id]);   // every selected action, one undo step
+    _tlClip.actions = _tlClip.actions.filter(a => !gone.has(a.id));
   } else {
     const map = sel.kind === 'maestro' ? _tlClip.maestro : _tlClip.hcr;
     map[sel.key] = (map[sel.key] || []).filter(k => k.id !== sel.id);
@@ -9066,7 +9156,7 @@ function _tlFit() {
   const scroller = document.getElementById('tl-scroll');
   const usable = scroller.clientWidth - TL_LEFT - TL_RIGHT_PAD;
   if (usable <= 0) return;   // container not laid out yet — don't apply a degenerate zoom
-  _tlClip.pxPerMs = Math.max(0.004, Math.min(4, usable / Math.max(1, _tlClip.durationMs)));
+  _tlClip.pxPerMs = Math.max(0.004, Math.min(4, usable / Math.max(1, _tlClip.durationMs, ..._tlRefTimes())));
   _tlRender();
   scroller.scrollLeft = 0;
 }
@@ -9209,6 +9299,16 @@ function _tlUpdateToolbar() {
   // so it doesn't fight the user mid-type).
   const lenEl = document.getElementById('tl-length');
   if (lenEl && _tlClip && document.activeElement !== lenEl) lenEl.value = ((_tlClip.durationMs || 0) / 1000).toFixed(1);
+  // Two or more actions selected: Align and (three or more) Space evenly.
+  const multi = document.getElementById('tl-multi-toolbar');
+  if (multi && _tlClip) {
+    const n = _tlClip.selActs.size;
+    multi.style.display = n >= 2 ? 'flex' : 'none';
+    const cnt = document.getElementById('tl-multi-count');
+    if (cnt) cnt.textContent = n + ' selected';
+    const sp = document.getElementById('tl-spread');
+    if (sp) sp.disabled = n < 3;
+  }
   if (!bar || !delBtn) return;
   delBtn.style.display = _tlClip.selected ? '' : 'none';
   if (_tlClip.selectedPair && _tlClip.selectedPair.length === 2) {
@@ -9540,7 +9640,8 @@ function _tlFreeActionTime(t, ignoreId) {
   while (_tlClip && _tlClip.actions.some(a => a.id !== ignoreId && a.t === tt)) tt += 5;
   return tt;
 }
-function _tlOpenActionEditor(existing, defaultT) {
+// `template` starts a new action with a type (a click on an MP3 lane's empty space starts an MP3 action).
+function _tlOpenActionEditor(existing, defaultT, template) {
   _tlEditingActionId = existing ? existing.id : null;
   ncShow(document.getElementById('tl-action-modal'));
   document.getElementById('tl-action-title').textContent = existing ? 'Edit action' : 'New action';
@@ -9551,12 +9652,18 @@ function _tlOpenActionEditor(existing, defaultT) {
     const o = document.createElement('option'); o.value = v; o.textContent = lbl;
     typeSel.appendChild(o);
   });
-  const action = existing ? existing.action : { type: typeSel.options[0].value };
+  const action = existing ? existing.action : (template && template.type ? { ...template } : { type: typeSel.options[0].value });
   typeSel.value = _normActionType(action.type);   // legacy/unknown types → a valid option
   // For a NEW action, pre-fill the time with the next FREE slot at/after the
   // requested spot, so the field shows where it will actually land.
   document.getElementById('tl-action-time').value = existing ? existing.t : _tlFreeActionTime(defaultT);
-  document.getElementById('tl-action-delay').value = action.delay || 0;
+  // No Delay field here: a clip replays each action through rcExecuteActionNow (recCbDispatch), which never applies
+  // one, so an action fires at its time. One a recorded action carries is kept as it is, and said so.
+  const dn = document.getElementById('tl-action-delay-note');
+  if (dn) {
+    dn.style.display = action.delay ? '' : 'none';
+    dn.textContent = action.delay ? `This action carries a ${action.delay} ms delay, which a clip does not apply: it fires at its time. Move it to fire later.` : '';
+  }
   document.getElementById('tl-action-note').value = action.note || '';
   const fields = document.getElementById('tl-action-fields');
   appendActionFields(fields, action);
@@ -9587,7 +9694,8 @@ function _tlCloseActionEditor() {
 
 function _tlApplyActionEditor() {
   const type  = document.getElementById('tl-action-type').value;
-  const delay = +(document.getElementById('tl-action-delay').value || 0);
+  const editing = _tlEditingActionId ? _tlClip.actions.find(a => a.id === _tlEditingActionId) : null;
+  const delay = (editing && +editing.action.delay) || 0;   // kept, never edited here (_tlOpenActionEditor says why)
   const note  = (document.getElementById('tl-action-note').value || '').trim();
   const extras = { ...(delay ? { delay } : {}), ...(note ? { note } : {}) };
   const action = readActionFromFid('tl-action-fields', type, extras);
@@ -9600,7 +9708,9 @@ function _tlApplyActionEditor() {
     const entry = _tlClip.actions.find(a => a.id === _tlEditingActionId);
     if (entry) { entry.t = t; entry.action = action; }
   } else {
-    _tlClip.actions.push({ id: _tlId(), t, action });
+    const x = { id: _tlId(), t, action };
+    _tlClip.actions.push(x);
+    _tlSelectAction(x.id, false);
   }
   _tlClip.actions.sort((a, b) => a.t - b.t);
   _tlClip.dirty = true;
@@ -9610,11 +9720,718 @@ function _tlApplyActionEditor() {
 
 function _tlDeleteActionEditor() {
   if (_tlEditingActionId) {
+    _tlPushHistory();
     _tlClip.actions = _tlClip.actions.filter(a => a.id !== _tlEditingActionId);
     _tlClip.dirty = true;
   }
   _tlCloseActionEditor();
   _tlRender();
+}
+
+// ── Action lanes — one per device, in the device's colour ────────────────────
+// A clip's actions draw the way the WCB Wizard's Sequence Builder draws a sequence's steps (WCB
+// docs/SEQUENCE_BUILDER.md §5): a lane per DEVICE an action reaches, named with where it goes. An action fires at its
+// dot; the box to the right of the dot is only its label. Steps too close to label at the current zoom stack into
+// rows, and past three rows they shrink to dots, named by their tooltip.
+//
+// Colour is the device, and it is the same device colour in both tools: the eight colours are the Wizard's
+// (--tl-c1..8 here, seq-builder.css --sb-c1..8 there, both themes) and TL_BOARD_SLOT is its SB_BOARD_SLOT plus
+// NaviCore's own boards. The WCB repo's tests/wizard/unit/seq_builder.test.js holds them equal. A lane takes its board's
+// home colour unless a lane already on the timeline holds it, then the first free one, so no two lanes share a colour;
+// a ninth is grey, and every lane and step is labelled, so identity never rests on colour alone. Lanes take colours in
+// order of first appearance in time and keep them while the editor is open (_tlClip.colors).
+const TL_SLOTS = 8;
+const TL_BOARD_SLOT = {
+  'wcb-maestro': 0, 'wcb-mp3': 1, 'wcb-sequences': 2, 'wcb-wled': 3, 'wcb-hcr': 4, 'wcb-dfplayer': 5,
+  'wcb-actions': 6, 'wcb-native': 6,
+  'hcr-native': 4, 'chirp': 1, 'flthy-hps': 7, 'psi-pro': 3, 'rseries-logic': 6, 'ia-magic-panel': 2,
+  'pd-magic-panel': 5, 'r2uppityspinner-alt': 0, 'roam-a-dome': 1, 'maestro': 0, 'maestro-native': 0,
+  'astropixels-plus': 2, 'astropixels-sound': 1, 'astropixels-psi': 3, 'astropixels-logics': 6,
+  'astropixels-holo': 7, 'astropixels-servo': 0,
+  // NaviCore's own boards: its Maestro slots wear the Maestro colour, its clip controls DFPlayer's (rarely together).
+  'nc-maestro': 0, 'nc-maestro-wcb': 0, 'navicore': 5,
+};
+// A board's home slot: from the table, else the same slot every time for the same id (custom and new boards).
+function _tlBoardSlot(id) {
+  if (id == null) return -1;
+  if (TL_BOARD_SLOT[id] != null) return TL_BOARD_SLOT[id];
+  let h = 2166136261;
+  for (const c of String(id)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  return (h >>> 0) % TL_SLOTS;
+}
+// present: the lanes on screen now. With every slot taken, one held by a lane that is gone is reused.
+function _tlColorOf(map, key, present, home = -1) {
+  if (map.has(key) && map.get(key) >= 0) return map.get(key);
+  const used = new Set(map.values());
+  let slot = -1;
+  if (home >= 0) {
+    const holder = [...map].find(([, s]) => s === home);
+    if (!holder) slot = home;
+    else if (present && !present.has(holder[0])) { map.delete(holder[0]); used.delete(home); slot = home; }
+  }
+  for (let i = 0; slot < 0 && i < TL_SLOTS; i++) if (!used.has(i)) slot = i;
+  if (slot < 0 && present) {
+    for (const [k, s] of map) if (s >= 0 && !present.has(k)) { slot = s; map.delete(k); break; }
+  }
+  map.set(key, slot);
+  return slot;
+}
+const _tlColorVar = slot => (slot >= 0 ? `var(--tl-c${slot + 1})` : 'var(--tl-cx)');
+const _tlShortName = name => String(name || '').replace(/^WCB\s*·\s*/i, '').replace(/\s*\([^)]*\)\s*/g, ' ').trim();
+const _tlFmtT = ms => ((+ms || 0) / 1000).toFixed(3) + ' s';
+
+// Library decode, cached per text: every render asks for every action's, and the library holds ~400 templates.
+const _tlDecCache = new Map();
+let _tlDecGen = -1;
+function _tlDecode(s) {
+  s = String(s || '').trim();
+  if (!s) return null;
+  if (_tlDecGen !== _cmdlibGeneration) { _tlDecCache.clear(); _tlDecGen = _cmdlibGeneration; }
+  if (!_tlDecCache.has(s)) _tlDecCache.set(s, ncDecodeCommand(s));
+  return _tlDecCache.get(s);
+}
+
+// Where a WCB action's command goes. NaviCore writes a device string as `;W<n>;S<p><text>` broadcast (board n puts it
+// out its port p, _cmdlibUse) or `;S<p><text>` unicast; the WCB's own `;W<n>,<cmd>` and one-digit `;W<d><cmd>`
+// (processWCBMessage) are read too. `;S<p>` drops one comma after the port digit (WCB processSerialMessage). Anything
+// else is a WCB verb, which the board it reaches routes by device. → { wcb (0 = every board), port (null = none), body }.
+function _tlSplitRoute(a) {
+  let cmd = String((a && a.cmd) || '');
+  let wcb = (a && a.type === 'wcb_unicast') ? (parseInt(a.target, 10) || 0) : 0;
+  const mw = /^;W(\d{1,2}),/i.exec(cmd) || /^;W(\d{1,2})(?=;)/i.exec(cmd) || /^;W(\d)/i.exec(cmd);
+  if (mw) { wcb = +mw[1]; cmd = cmd.slice(mw[0].length); }
+  const ms = /^;S(\d)/i.exec(cmd);
+  if (ms) {
+    let body = cmd.slice(ms[0].length);
+    if (body.startsWith(',')) body = body.slice(1);
+    return { wcb, port: +ms[1], body };
+  }
+  return { wcb, port: null, body: cmd };
+}
+
+// The device a command string is, when it is a device's own string from the library (not a WCB verb, not serial
+// text): what gives it a lane of its own, so two devices on one port are two lanes. A command may name its own lane
+// (laneName: DroidNet's @A trigger is "Maestro via DroidNet", not its board's name).
+function _tlDeviceOf(body) {
+  const d = _tlDecode(body);
+  if (!d || d.cmd.id === 'wcb.serialText' || _cmdlibDestMode(d.board, d.cmd) !== 'device') return null;
+  return d.cmd.laneName ? { id: d.board.id + ':' + d.cmd.id, name: d.cmd.laneName, board: d.board.id }
+                        : { id: d.board.id, name: _tlShortName(d.board.name) || d.board.id, board: d.board.id };
+}
+
+// A WCB verb's lane: the device the verb drives, wherever the board that gets it routes it.
+function _tlVerbLane(body, sub) {
+  const lane = (key, name, order, board = null) => ({ key, name, sub, order, board, kind: null });
+  if (body[0] === '?') return lane('F', 'Board settings', 85);
+  if (body[0] !== ';' || body.length < 2) return null;
+  const v = body[1].toUpperCase();
+  if (v === 'M') {
+    const id = /\d/.test(body[2] || '') ? body[2] : '';
+    return lane('M' + id, id === '0' ? 'All Maestros' : id === '9' ? "The board's own Maestros" : 'Maestro ' + (id || '?'), 10, 'wcb-maestro');
+  }
+  if (v === 'A') return lane('A', 'MP3 Trigger', 20, 'wcb-mp3');
+  if (v === 'D') return lane('D', 'DFPlayer', 21, 'wcb-dfplayer');
+  if (v === 'H') return lane('H', 'HCR Vocalizer', 22, 'wcb-hcr');
+  if (v === 'L') {
+    const id = (/^\d+/.exec(body.slice(2)) || [''])[0];
+    return lane('L' + id, id ? 'WLED ' + id : 'WLED', 30, 'wcb-wled');
+  }
+  if (v === 'C' || /^;seq/i.test(body)) return lane('C', 'Sequences', 5, 'wcb-sequences');
+  if (v === 'V') return lane('V', 'Variables', 40, 'wcb-actions');
+  if (v === 'P') return lane('P' + (body[2] || ''), 'PWM · S' + (body[2] || '?'), 45, 'wcb-actions');
+  return lane('X', 'Other WCB commands', 95);
+}
+
+// The lane an action draws in → { key, name, sub, order, board (its colour's home), kind (the popover type a click on
+// the lane's empty space starts with, or null) }. The native HCR / MP3 / DFPlayer / WLED types share the lane of the
+// WCB verb they become (;H / ;A / ;D / ;L): one device, one lane.
+function _tlLaneOf(a) {
+  const type = (a.type === 'maestro_local' || a.type === 'maestro_remote') ? 'maestro' : a.type;
+  const lane = (key, name, sub, order, board = null, kind = null) => ({ key, name, sub: sub || '', order, board, kind });
+  const alias = n => (typeof wcbAliases !== 'undefined' && wcbAliases && wcbAliases[n - 1]) ? ' · ' + wcbAliases[n - 1] : '';
+  switch (type) {
+    case 'record': case 'play': case 'stop':
+      return lane('clips', 'Clips', 'this controller', 2, 'navicore', 'play');
+    case 'maestro': {
+      const s = a.type === 'maestro_local' ? 1 : (parseInt(a.target, 10) || 1);
+      return lane('nm' + s, 'Maestro slot ' + s, 'this controller', 12 + s / 100, 'nc-maestro', 'maestro');
+    }
+    case 'hcr':      return lane('H', 'HCR Vocalizer', '', 22, 'wcb-hcr', 'hcr');
+    case 'mp3':      return lane('A', 'MP3 Trigger', '', 20, 'wcb-mp3', 'mp3');
+    case 'dfplayer': return lane('D', 'DFPlayer', '', 21, 'wcb-dfplayer', 'dfplayer');
+    case 'wled': {
+      const id = (/^;L(\d+)/i.exec(a.cmd || '') || [, ''])[1];
+      return lane('L' + id, id ? 'WLED ' + id : 'WLED', '', 30, 'wcb-wled', 'wled');
+    }
+    case 'serial': {
+      const p = a.port || 'S3';
+      const dev = _tlDeviceOf(a.cmd);
+      if (dev) return lane('D:' + dev.id + ':' + p, dev.name, 'this controller · ' + _serialPortLabel(p), 60, dev.board, 'serial');
+      return lane('S:' + p, _serialPortLabel(p), 'this controller', 60.5, null, 'serial');
+    }
+    case 'wcb_unicast': case 'wcb_broadcast': {
+      const r = _tlSplitRoute(a);
+      const onWcb = r.wcb ? 'WCB ' + r.wcb + alias(r.wcb) : 'every WCB';
+      if (r.port != null) {
+        const pn = r.port === 0 ? 'Serial 0 (USB)' : 'Serial ' + r.port;
+        const pk = 'W' + r.wcb + 'S' + r.port;
+        const dev = _tlDeviceOf(r.body);
+        if (dev) return lane('D:' + dev.id + ':' + pk, dev.name, onWcb + ' · ' + pn, 50 + r.wcb / 100 + r.port / 1000, dev.board);
+        return lane('S:' + pk, r.wcb ? _wcbPortLabel(r.wcb, r.port) : pn, onWcb, 50.5 + r.wcb / 100 + r.port / 1000);
+      }
+      const vl = _tlVerbLane(r.body, r.wcb ? 'via WCB ' + r.wcb : 'all boards');
+      if (vl) return vl;
+      const dev = _tlDeviceOf(r.body);   // a mesh client's own text (a board with deliver:"wcb")
+      if (dev) return lane('D:' + dev.id + ':W' + r.wcb, dev.name, onWcb, 55, dev.board);
+      return lane('T:' + r.wcb, 'Text to ' + onWcb, '', 80);
+    }
+  }
+  return lane('X', 'Other actions', '', 95);
+}
+
+// The library command an action holds, when it holds one → { board, cmd, values }.
+function _tlDecodeAction(a) {
+  if (a.type === 'wcb_unicast' || a.type === 'wcb_broadcast') return _tlDecode(_tlSplitRoute(a).body);
+  if (a.type === 'serial' || a.type === 'wled' || a.type === 'maestro') return _tlDecode(a.cmd);
+  return null;
+}
+// What a step is called on the timeline. Its lane already says which device, so the label says what it does: the
+// library command and its values (as the Wizard's sbLabelOf does), else the action's summary without the device.
+function _tlStepLabel(a) {
+  const d = _tlDecodeAction(a);
+  if (d) {
+    const vals = [];
+    for (const p of d.cmd.params || []) {
+      if (p.name === 'maestroId' || p.name === 'wledId') continue;
+      const v = d.values[p.name];
+      if (v == null || v === '') continue;
+      if (p.enum) {
+        const en = _cmdlibEnum(p.enum);
+        const hit = en && (en.values || []).find(x => String(x.code) === String(v));
+        vals.push(hit ? hit.label : v);
+      } else if (p.unit === 'servoPulse') vals.push(Math.round(+v / 4) + ' µs');
+      else vals.push(String(v).length > 18 ? String(v).slice(0, 17) + '…' : String(v));
+    }
+    return (d.cmd.shortName || d.cmd.name) + (vals.length ? ' · ' + vals.join(' · ') : '');
+  }
+  if (a.type === 'wcb_unicast' || a.type === 'wcb_broadcast') return _tlSplitRoute(a).body || '(empty)';
+  if (a.type === 'serial') return a.cmd || '(empty)';
+  const s = String(actionSummary(a)).replace(/<span[\s\S]*$/, '').replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').trim();
+  return s.replace(/^(MP3|DFPlayer|HCR)\s+/, '').replace(/^Maestro \S+:\s*/, '').replace(/^WLED:\s*/, '') || s;
+}
+function _tlStepTitle(x) {
+  const a = x.action;
+  const s = String(actionSummary(a)).replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  return `${_tlFmtT(x.t)} · ${s}` + (a.delay ? ` · its ${a.delay} ms delay does not apply in a clip` : '') +
+         '\nDrag to move (Alt: to the ms) · Shift-click to add to the selection · click to edit · right-click to delete';
+}
+
+// ── A sequence an action runs, drawn under it ────────────────────────────────
+// An action that runs a WCB stored sequence (;C<key> / ;SEQ<key>) gets a reference row beneath its lane: the
+// sequence's steps where they will land (the action's time plus each step's), in their devices' colours, with a hatched
+// bar for how long it runs. Read only, and its steps are something a moved action sticks to. The body comes from the
+// same GET_WCB_SEQVAL pull the command library's sequence field uses (_wcbSeqValRequest, one at a time), from the board
+// the action is sent to, or for a broadcast the first board whose pulled list holds the key.
+function _tlRecallOf(a) {
+  if (!a || (a.type !== 'wcb_unicast' && a.type !== 'wcb_broadcast')) return null;
+  const r = _tlSplitRoute(a);
+  if (r.port != null) return null;
+  const m = /^;(?:SEQ|C)(.+)$/i.exec(String(r.body).trim());
+  if (!m) return null;
+  const key = m[1].trim();
+  return { key, wcb: r.wcb || (_wcbSeqBoardsWithKey(key)[0] || 0) };
+}
+// A stored sequence's steps in time, as the WCB runs one (command_timer.cpp parseCommandGroups): a ;T<ms> or ;t<ms>
+// token starts a new group <ms> after the one before (each capped at 30 minutes, consecutive ones adding up),
+// ;t<ms>,<cmd> is a delay then a command, an IF gates the command after it (drawn at its time, as the Wizard draws
+// one), and *** comments are no steps. The delimiter is '^' (_seqValueToLines says why).
+function _tlSeqSteps(value) {
+  const out = [];
+  let t = 0;
+  for (let part of String(value || '').split('^')) {
+    part = part.trim();
+    const c = part.indexOf('***');
+    if (c >= 0) part = part.slice(0, c).trim();
+    if (!part || /^IF,/i.test(part)) continue;
+    const d = /^;t(\d+)(?:,([\s\S]*))?$/i.exec(part);
+    if (d) {
+      t += Math.min(+d[1], 1800000);
+      if (d[2] && d[2].trim()) out.push({ t, cmd: d[2].trim() });
+      continue;
+    }
+    out.push({ t, cmd: part });
+  }
+  return out;
+}
+// Pull the body of every sequence the clip runs that is not in hand yet, one at a time. Each is asked once per
+// editing session (refTried), so a board that does not answer is not asked again on every redraw.
+let _tlRefBusy = false;
+async function _tlFetchRefs() {
+  if (_tlRefBusy || !_tlClip || !_wcbSeqConnected()) return;
+  _tlRefBusy = true;
+  try {
+    for (;;) {
+      const clip = _tlClip;
+      if (!clip) break;
+      const r = clip.actions.map(x => _tlRecallOf(x.action))
+        .find(r => r && r.wcb && !_wcbSeqVal[r.wcb + '/' + r.key] && !clip.refTried.has(r.wcb + '/' + r.key));
+      if (!r) break;
+      clip.refTried.add(r.wcb + '/' + r.key);
+      const t0 = Date.now();
+      while (_wcbSeqValPending && (Date.now() - t0) < NC_SEQ_TIMEOUT) await new Promise(res => setTimeout(res, 120));
+      clip.refPending = r.wcb + '/' + r.key;
+      if (_tlClip === clip) _tlRender();
+      await _wcbSeqValRequest(r.wcb, r.key);
+      clip.refPending = '';
+      if (_tlClip === clip) _tlRender();
+    }
+  } finally { _tlRefBusy = false; }
+}
+// One reference row's content → { state: 'ready' | 'missing' | 'reading' | 'unread' | 'noanswer' | 'nowhere', steps,
+// span }. 'noanswer': asked this session and nothing came back (reopening the clip asks again).
+function _tlRefOf(clip, x, rec) {
+  if (!rec.wcb) return { state: 'nowhere', steps: [], span: 0 };
+  const id = rec.wcb + '/' + rec.key;
+  const v = _wcbSeqVal[id];
+  if (!v) return { state: clip.refPending === id ? 'reading' : clip.refTried.has(id) ? 'noanswer' : 'unread', steps: [], span: 0 };
+  if (+v.status !== 0) return { state: 'missing', steps: [], span: 0 };
+  const steps = _tlSeqSteps(v.value).map(s => ({ t: x.t + s.t, cmd: s.cmd, lane: _tlLaneOf({ type: 'wcb_unicast', target: String(rec.wcb), cmd: s.cmd }) }));
+  return { state: 'ready', steps, span: steps.reduce((m, s) => Math.max(m, s.t - x.t), 0) };
+}
+
+// ── Lay the action lanes out ─────────────────────────────────────────────────
+const TL_ACT_ROW = 24, TL_ACT_PAD = 5, TL_ACT_MIN_H = 34, TL_REF_ROW_H = 20, TL_ACT_NEW_H = 30;
+const TL_EV_GAP = 8, TL_EV_H = 18, TL_EV_MAXW = 180;   // box offset from its dot, box height, widest box
+// A step label's width in px at the timeline's 10px, measured once per text (a canvas, so no layout is forced).
+const _tlTextWCache = new Map();
+let _tlTextCtx = null;
+function _tlTextW(s) {
+  if (_tlTextWCache.has(s)) return _tlTextWCache.get(s);
+  if (!_tlTextCtx) {
+    _tlTextCtx = document.createElement('canvas').getContext('2d');
+    if (_tlTextCtx) _tlTextCtx.font = '10px ' + getComputedStyle(document.body).fontFamily;
+  }
+  const w = _tlTextCtx ? Math.ceil(_tlTextCtx.measureText(s).width) : Math.ceil(s.length * 6.2);
+  _tlTextWCache.set(s, w);
+  return w;
+}
+// The label cut to fit `w` px of box, with an ellipsis when cut.
+function _tlFitLabel(s, w) {
+  const room = w - 12;
+  if (_tlTextW(s) <= room) return s;
+  let lo = 0, hi = s.length;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (_tlTextW(s.slice(0, m) + '…') <= room) lo = m; else hi = m - 1; }
+  return s.slice(0, Math.max(1, lo)) + '…';
+}
+function _tlStack(items) {
+  const place = compact => {
+    const ends = [];
+    for (const it of items) {
+      const x = it.x.t * _tlClip.pxPerMs;
+      const w = compact ? 10 : Math.min(TL_EV_MAXW, 12 + _tlTextW(it.label));
+      let r = ends.findIndex(end => end + (compact ? 3 : 6) <= x);
+      if (r < 0) { r = ends.length; ends.push(0); }
+      ends[r] = x + (compact ? 5 : TL_EV_GAP + w);
+      Object.assign(it, { row: r, w, compact });
+    }
+    return Math.max(1, ends.length);
+  };
+  const rows = place(false);
+  return rows > 3 ? place(true) : rows;
+}
+function _tlActLayout(top) {
+  const clip = _tlClip;
+  const byKey = new Map();
+  for (const x of clip.actions.slice().sort((p, q) => p.t - q.t)) {
+    const L = _tlLaneOf(x.action);
+    let lane = byKey.get(L.key);
+    if (!lane) { lane = { ...L, subs: [], items: [] }; byKey.set(L.key, lane); }
+    if (L.sub && !lane.subs.includes(L.sub)) lane.subs.push(L.sub);
+    lane.items.push({ x, label: _tlStepLabel(x.action) });
+  }
+  const refs = [];
+  for (const lane of byKey.values()) for (const it of lane.items) {
+    const rec = _tlRecallOf(it.x.action);
+    if (rec) refs.push({ lane, x: it.x, rec, ...(_tlRefOf(clip, it.x, rec)) });
+  }
+  // Colours: this clip's lanes first, in order of first appearance, then the devices only its references reach. A
+  // lane whose board has a home colour picks before one with none (a port no device is known on), so a lane like
+  // that cannot take Maestro's blue just by coming first; the Wizard picks strictly by appearance.
+  const present = new Set(byKey.keys());
+  refs.forEach(r => r.steps.forEach(s => present.add(s.lane.key)));
+  const pick = (key, board) => _tlColorOf(clip.colors, key, present, _tlBoardSlot(board));
+  for (const lane of byKey.values()) if (_tlBoardSlot(lane.board) >= 0) lane.slot = pick(lane.key, lane.board);
+  for (const lane of byKey.values()) if (lane.slot == null) lane.slot = pick(lane.key, lane.board);
+  refs.forEach(r => r.steps.forEach(s => { if (_tlBoardSlot(s.lane.board) >= 0) s.slot = pick(s.lane.key, s.lane.board); }));
+  refs.forEach(r => r.steps.forEach(s => { if (s.slot == null) s.slot = pick(s.lane.key, s.lane.board); }));
+  const lanes = [...byKey.values()].sort((p, q) => (p.order - q.order) || p.name.localeCompare(q.name));
+  let y = top;
+  for (const lane of lanes) {
+    lane.sub = lane.subs.join(', ');
+    lane.rows = _tlStack(lane.items);
+    lane.top = y;
+    lane.h = Math.max(TL_ACT_MIN_H, lane.rows * TL_ACT_ROW + 2 * TL_ACT_PAD);
+    y += lane.h;
+    lane.refs = refs.filter(r => r.lane === lane);
+    lane.refs.forEach(r => { r.top = y; y += TL_REF_ROW_H; });
+  }
+  const refEnd = refs.reduce((m, r) => Math.max(m, ...r.steps.map(s => s.t)), 0);
+  // How far right the step boxes reach (px from time 0): a label near the end must not be cut off.
+  const endPx = lanes.reduce((m, l) => Math.max(m, ...l.items.map(it => it.x.t * clip.pxPerMs + (it.compact ? 5 : TL_EV_GAP + it.w))), 0);
+  return { lanes, refs, refEnd, endPx, newTop: y, bottom: y + TL_ACT_NEW_H };
+}
+// Every reference step's time, for sticking to (_tlSnap).
+function _tlRefTimes() {
+  const out = [];
+  if (!_tlClip) return out;
+  for (const x of _tlClip.actions) {
+    const rec = _tlRecallOf(x.action);
+    if (rec) _tlRefOf(_tlClip, x, rec).steps.forEach(s => out.push(s.t));
+  }
+  return out;
+}
+
+// Draw the lanes' backgrounds and gutter labels (pass 1, behind everything interactive).
+function _tlDrawActLanesBg(svg, act, width) {
+  const fit = (el, maxW, full) => {
+    if (el.getComputedTextLength() <= maxW) return;
+    let s = full;
+    while (s.length > 1 && el.getComputedTextLength() > maxW) { s = s.slice(0, -1); el.firstChild.textContent = s + '…'; }
+  };
+  const addAt = (ev, kind) => {
+    const rect = svg.getBoundingClientRect();
+    _tlOpenActionEditor(null, _tlXToTime(ev.clientX - rect.left), kind ? { type: kind } : null);
+  };
+  for (const lane of act.lanes) {
+    const col = _tlColorVar(lane.slot);
+    const bg = _tlSvgEl('rect', { x: TL_LEFT, y: lane.top, width: width - TL_LEFT, height: lane.h, fill: col, 'fill-opacity': 0.05 });
+    bg.style.cursor = 'copy';
+    bg.addEventListener('click', ev => addAt(ev, lane.kind));
+    svg.appendChild(bg);
+    svg.appendChild(_tlSvgEl('line', { x1: 0, y1: lane.top + lane.h, x2: width, y2: lane.top + lane.h, stroke: 'var(--border)', 'stroke-width': 0.5, opacity: 0.6 }));
+    svg.appendChild(_tlSvgEl('rect', { x: 0, y: lane.top + 3, width: 4, height: lane.h - 6, rx: 1, fill: col }));
+    const nm = _tlSvgEl('text', { x: 10, y: lane.top + (lane.sub ? 14 : lane.h / 2 + 4), 'font-size': 11, fill: 'var(--text)', class: 'tl-lane-name', 'data-lane': lane.key });
+    nm.textContent = lane.name;
+    const tt = _tlSvgEl('title'); tt.textContent = lane.name + (lane.sub ? ' — ' + lane.sub : '');
+    nm.appendChild(tt);
+    svg.appendChild(nm);
+    fit(nm, TL_LEFT - 14, lane.name);
+    if (lane.sub) {
+      const sb = _tlSvgEl('text', { x: 10, y: lane.top + 27, 'font-size': 9, fill: 'var(--muted)', class: 'tl-lane-sub' });
+      sb.textContent = lane.sub;
+      svg.appendChild(sb);
+      fit(sb, TL_LEFT - 14, lane.sub);
+    }
+    for (const r of lane.refs) {
+      const t = _tlSvgEl('text', { x: 14, y: r.top + 13, 'font-size': 9.5, fill: 'var(--muted)', 'font-style': 'italic', class: 'tl-ref-name' });
+      const full = `↳ ${r.rec.key}` + (r.rec.wcb ? ` · WCB ${r.rec.wcb}` : '');
+      t.textContent = full;
+      const rt = _tlSvgEl('title'); rt.textContent = `Stored sequence ${r.rec.key}` + (r.rec.wcb ? ` on WCB ${r.rec.wcb}` : '') + ', drawn where this clip runs it (read only)';
+      t.appendChild(rt);
+      svg.appendChild(t);
+      fit(t, TL_LEFT - 18, full);
+    }
+  }
+  // The last lane adds an action of any kind; on an empty clip it says how.
+  const bg = _tlSvgEl('rect', { x: TL_LEFT, y: act.newTop, width: width - TL_LEFT, height: TL_ACT_NEW_H, fill: 'var(--hover-2)' });
+  bg.style.cursor = 'copy';
+  bg.addEventListener('click', ev => addAt(ev, null));
+  svg.appendChild(bg);
+  const lbl = _tlSvgEl('text', { x: 10, y: act.newTop + TL_ACT_NEW_H / 2 + 4, 'font-size': 11, fill: 'var(--muted)', class: 'tl-lane-new' });
+  lbl.textContent = act.lanes.length ? '＋ Action' : 'Actions';
+  svg.appendChild(lbl);
+  if (!act.lanes.length) {
+    const hint = _tlSvgEl('text', { x: TL_LEFT + 10, y: act.newTop + TL_ACT_NEW_H / 2 + 4, 'font-size': 11, fill: 'var(--muted)' });
+    hint.textContent = 'Click here to add an action at that time, or click or drag one in from 📚 Library';
+    hint.style.pointerEvents = 'none';
+    svg.appendChild(hint);
+  }
+}
+
+// Draw the steps, the reference rows and the sticking guide (pass 2, on top).
+function _tlDrawActSteps(svg, act, height) {
+  const clip = _tlClip;
+  const sel = _tlSelActs();
+  for (const lane of act.lanes) {
+    const col = _tlColorVar(lane.slot);
+    for (const it of lane.items) {
+      const x = _tlTimeToX(it.x.t);
+      const cy = lane.top + TL_ACT_PAD + it.row * TL_ACT_ROW + TL_ACT_ROW / 2;
+      const isSel = sel.has(it.x.id);
+      const since = clip.cursorMs - it.x.t;
+      const flash = _tlLivePlaying && since >= 0 && since < 180;
+      const g = _tlSvgEl('g', { class: 'tl-ev' + (isSel ? ' sel' : '') + (flash ? ' flash' : ''), 'data-act': it.x.id, 'data-lane': lane.key });
+      if (!it.compact) {
+        g.appendChild(_tlSvgEl('rect', { x: x + TL_EV_GAP, y: cy - TL_EV_H / 2, width: it.w, height: TL_EV_H, rx: 4,
+          fill: col, 'fill-opacity': flash ? 0.45 : 0.14, stroke: col, 'stroke-width': 1.5 }));
+        if (isSel) g.appendChild(_tlSvgEl('rect', { x: x + TL_EV_GAP - 2.5, y: cy - TL_EV_H / 2 - 2.5, width: it.w + 5, height: TL_EV_H + 5, rx: 6,
+          fill: 'none', stroke: 'var(--text)', 'stroke-width': 1.5, class: 'tl-ev-ring' }));
+        const tx = _tlSvgEl('text', { x: x + TL_EV_GAP + 6, y: cy + 3.5, 'font-size': 10, fill: 'var(--text)', class: 'tl-ev-label' });
+        tx.textContent = _tlFitLabel(it.label, it.w);
+        g.appendChild(tx);
+      } else if (isSel) {
+        g.appendChild(_tlSvgEl('circle', { cx: x, cy, r: 7.5, fill: 'none', stroke: 'var(--text)', 'stroke-width': 1.5, class: 'tl-ev-ring' }));
+      }
+      g.appendChild(_tlSvgEl('circle', { cx: x, cy, r: it.compact ? 4 : 4.5, fill: col, stroke: 'var(--field)', 'stroke-width': 1.5, class: 'tl-ev-dot' }));
+      const hit = _tlSvgEl('rect', { x: x - 6, y: cy - 10, width: it.compact ? 12 : TL_EV_GAP + it.w + 6, height: 20, fill: 'transparent', class: 'tl-ev-hit' });
+      hit.style.cursor = 'grab';
+      const t = _tlSvgEl('title'); t.textContent = _tlStepTitle(it.x); hit.appendChild(t);
+      hit.addEventListener('pointerdown', ev => _tlStartDragAction(ev, it.x));
+      hit.addEventListener('contextmenu', ev => { ev.preventDefault(); ev.stopPropagation(); _tlDeleteAction(it.x); });
+      g.appendChild(hit);
+      svg.appendChild(g);
+    }
+  }
+  for (const r of act.refs) {
+    const x0 = _tlTimeToX(r.x.t), cy = r.top + TL_REF_ROW_H / 2;
+    const g = _tlSvgEl('g', { class: 'tl-ref', 'data-act': r.x.id, 'data-state': r.state });
+    if (r.state === 'ready') {
+      if (r.span > 0) g.appendChild(_tlSvgEl('rect', { x: x0, y: cy - 5, width: Math.max(1, r.span * clip.pxPerMs), height: 10, rx: 2,
+        fill: 'url(#tl-hatch)', stroke: 'var(--line-2)', 'stroke-width': 0.75, class: 'tl-ref-span' }));
+      for (const s of r.steps) {
+        const d = _tlSvgEl('circle', { cx: _tlTimeToX(s.t), cy, r: 3.5, fill: _tlColorVar(s.slot), stroke: 'var(--field)', 'stroke-width': 1, class: 'tl-ref-step', 'data-t': s.t });
+        const tt = _tlSvgEl('title'); tt.textContent = `+${_tlFmtT(s.t - r.x.t)} (${_tlFmtT(s.t)} in the clip) · ${s.cmd} · ${s.lane.name}`;
+        d.appendChild(tt);
+        g.appendChild(d);
+      }
+    } else {
+      const msg = { reading: 'reading it…', unread: _wcbSeqConnected() ? 'not read yet' : 'connect to read what it does',
+                    missing: `WCB ${r.rec.wcb} has no sequence ${r.rec.key}`, noanswer: `no answer from WCB ${r.rec.wcb} (reopen the clip to ask again)`,
+                    nowhere: 'on every board that has it (refresh a sequence list to see it)' }[r.state];
+      const t = _tlSvgEl('text', { x: x0 + 6, y: cy + 3.5, 'font-size': 9.5, fill: 'var(--muted)', 'font-style': 'italic', class: 'tl-ref-note' });
+      t.textContent = msg;
+      g.appendChild(t);
+    }
+    svg.appendChild(g);
+  }
+  if (clip.guideT != null) {
+    const gx = _tlTimeToX(clip.guideT);
+    svg.appendChild(_tlSvgEl('line', { x1: gx, y1: TL_RULER_H, x2: gx, y2: height, stroke: 'var(--accent-bright)', 'stroke-width': 1, 'stroke-dasharray': '4 3', class: 'tl-guide' }));
+  }
+}
+
+// ── Selecting, moving, aligning ──────────────────────────────────────────────
+// _tlClip.selActs holds the selected actions' ids. _tlClip.selected names the PRIMARY one ({kind:'action', id}), so
+// Delete, 🗑 and the popover work as they always have; a selected keyframe empties the set (_tlRender keeps that true).
+function _tlSelActs() { return (_tlClip && _tlClip.selActs) || new Set(); }
+function _tlSelectAction(id, additive) {
+  const s = _tlClip.selActs;
+  if (!additive) { s.clear(); s.add(id); _tlClip.selected = { kind: 'action', id }; }
+  else if (s.has(id)) {
+    s.delete(id);
+    if (_tlClip.selected && _tlClip.selected.id === id) {
+      const left = [...s];
+      _tlClip.selected = left.length ? { kind: 'action', id: left[left.length - 1] } : null;
+    }
+  } else { s.add(id); _tlClip.selected = { kind: 'action', id }; }
+  _tlClip.selectedPair = null;
+}
+function _tlSelectedActions() {
+  const s = _tlSelActs();
+  return _tlClip.actions.filter(x => s.has(x.id))
+    .sort((p, q) => (p.t - q.t) || (_tlClip.actions.indexOf(p) - _tlClip.actions.indexOf(q)));
+}
+// Where a moved action lands: within TL_MAGNET_PX of another action, a servo control point, a reference step or the
+// cursor it sticks there (a dashed guide shows it); Alt places it to the ms.
+const TL_MAGNET_PX = 8;
+function _tlSnap(t, free, exclude) {
+  t = Math.max(0, Math.round(t));
+  if (free) return { t, to: null };
+  const lim = TL_MAGNET_PX / _tlClip.pxPerMs;
+  let best = null;
+  const consider = c => { const d = Math.abs(c - t); if (d <= lim && (!best || d < best.d)) best = { c, d }; };
+  _tlClip.actions.forEach(x => { if (!exclude || !exclude.has(x.id)) consider(x.t); });
+  Object.values(_tlClip.maestro).forEach(arr => arr.forEach(k => { if (k.cp) consider(k.t); }));
+  _tlRefTimes().forEach(consider);
+  consider(_tlClip.cursorMs);
+  return best ? { t: Math.round(best.c), to: Math.round(best.c) } : { t, to: null };
+}
+// Place `group` (in order) from time `at`: each takes the first free time at or after it, 5 ms past an action already
+// there (_tlFreeActionTime's rule), counting only the group members already placed.
+function _tlPlaceFrom(group, at) {
+  const ids = new Set(group.map(x => x.id)), placed = new Set();
+  for (const x of group) {
+    let tt = Math.max(0, Math.round(at));
+    while (_tlClip.actions.some(y => y.id !== x.id && (!ids.has(y.id) || placed.has(y.id)) && y.t === tt)) tt += 5;
+    x.t = _tlDragTime(tt);
+    placed.add(x.id);
+  }
+}
+function _tlAlignSel(where) {
+  const g = _tlSelectedActions();
+  if (g.length < 2) return;
+  _tlPushHistory();
+  if (where === 'last') {
+    // The last stays; the others end at it, each 5 ms before the next, or from 0 if that runs out of room.
+    const T = g[g.length - 1].t, start = T - 5 * (g.length - 1);
+    if (start >= 0 && !_tlClip.actions.some(y => !_tlSelActs().has(y.id) && y.t >= start && y.t <= T)) {
+      g.forEach((x, i) => { x.t = _tlDragTime(start + 5 * i); });
+    } else _tlPlaceFrom(g, Math.max(0, start));
+  } else _tlPlaceFrom(g, where === 'first' ? g[0].t : _tlClip.cursorMs);
+  _tlClip.actions.sort((p, q) => p.t - q.t);
+  _tlClip.dirty = true;
+  _tlSetStatus(`Aligned ${g.length} actions at ${_tlFmtT(g[0].t)}, 5 ms apart in their order (two actions never share a millisecond).`);
+  _tlRender();
+}
+// Space evenly: the first and last selected stay, the ones between go to equal gaps in their current order.
+function _tlSpreadSel() {
+  const g = _tlSelectedActions();
+  if (g.length < 3) return;
+  const t0 = g[0].t, t1 = g[g.length - 1].t;
+  if (t1 - t0 < 5 * (g.length - 1)) { _tlSetStatus('Those actions are too close together to space evenly — spread the first and last apart first.'); return; }
+  _tlPushHistory();
+  g.forEach((x, i) => { if (i > 0 && i < g.length - 1) x.t = Math.round(t0 + (t1 - t0) * i / (g.length - 1)); });
+  for (let i = 1; i < g.length - 1; i++) _tlPlaceFrom([g[i]], g[i].t);
+  _tlClip.actions.sort((p, q) => p.t - q.t);
+  _tlClip.dirty = true;
+  _tlSetStatus(`Spaced ${g.length} actions evenly between ${_tlFmtT(t0)} and ${_tlFmtT(t1)}.`);
+  _tlRender();
+}
+// The arrow keys: 10 ms, Shift 100, Alt 1. One undo step per press.
+function _tlNudgeSel(ms) {
+  const g = _tlSelectedActions();
+  if (!g.length) return;
+  const d = Math.max(-Math.min(...g.map(x => x.t)), ms);
+  if (!d) return;
+  _tlPushHistory();
+  g.forEach(x => { x.t = _tlDragTime(x.t + d); });
+  _tlClip.actions.sort((p, q) => p.t - q.t);
+  _tlClip.dirty = true;
+  _tlSetStatus(g.length === 1 ? `At ${_tlFmtT(g[0].t)}.` : `Moved ${g.length} actions ${d > 0 ? 'later' : 'earlier'} by ${Math.abs(d)} ms.`);
+  _tlRender();
+}
+
+// ── The command library, docked beside the timeline ─────────────────────────
+// The same library and groups the action editor's 📚 picker shows (ncCommandLibrary, NC_CMDLIB_GROUPS), each board on
+// its home colour. Clicking a command adds it at the cursor, dragging it onto the timeline adds it where it is dropped:
+// a command with fields first opens the picker's composer, whose button then adds it. Where it is sent is decided as
+// the picker decides for a new action row (_cmdlibResolveAction: a device's label on a WCB port, its configured home,
+// else WCB 1), and the step's lane says where that was; clicking the step changes it.
+const TL_LIB_FID = 'tl-lib-add';     // the picker's "row" while it is adding to the timeline (_cmdlibUse)
+const TL_LIB_KEY = 'nc_tl_lib_open'; // the panel shown or hidden, per browser
+let _tlLibAt = 0;                    // where the picker's command lands
+const _tlLibOpenSecs = new Set();    // library sections the user opened, kept across redraws
+function _tlLibShown() {
+  try { return localStorage.getItem(TL_LIB_KEY) !== '0'; } catch (e) { return true; }
+}
+function _tlLibShow(on) {
+  try { localStorage.setItem(TL_LIB_KEY, on ? '1' : '0'); } catch (e) {}
+  const p = document.getElementById('tl-libpanel');
+  if (p) p.hidden = !on;
+  const b = document.getElementById('tl-lib-btn');
+  if (b) { b.classList.toggle('btn-blue', on); b.classList.toggle('btn-ghost', !on); }
+  if (on) _tlLibRender();
+}
+function _tlLibRender() {
+  const list = document.getElementById('tl-lib-list');
+  if (!list || document.getElementById('tl-libpanel').hidden) return;
+  const f = (document.getElementById('tl-lib-search')?.value || '').trim().toLowerCase();
+  const esc = s => escH(String(s == null ? '' : s));
+  const boardHtml = (board, label) => {
+    const cmds = (board.commands || []).filter(c => c && !NC_CMDLIB_HIDDEN_CMDS.has(c.id) && (c.template || c.local || board.local) &&
+      (!f || (c.name + ' ' + (c.category || '') + ' ' + (c.template || '') + ' ' + board.name).toLowerCase().includes(f)));
+    if (!cmds.length) return { html: '', n: 0 };
+    const col = _tlColorVar(_tlBoardSlot(board.id));
+    const open = f || _tlLibOpenSecs.has(board.id);
+    let h = `<details class="tl-lib-board" data-sec="${esc(board.id)}"${open ? ' open' : ''} style="--tl-col:${col}">
+      <summary><span class="tl-lib-sw"></span><span class="tl-lib-bn">${esc(label || board.name)}</span><span class="tl-lib-n">${cmds.length}</span></summary>`;
+    for (const c of cmds) {
+      h += `<div class="tl-lib-cmd" draggable="true" data-board="${esc(board.id)}" data-cmd="${esc(c.id)}" title="${esc((c.description || c.name) + ' — click to add at the cursor, or drag onto the timeline')}">
+        <div class="tl-lib-cn">${esc(c.shortName || c.name)}</div><div class="tl-lib-ct">${esc(c.template || (c.examples && c.examples[0]) || '')}</div></div>`;
+    }
+    return { html: h + '</details>', n: cmds.length };
+  };
+  let html = '';
+  for (const entry of _cmdlibGroupEntries(ncCommandLibrary().boards || [])) {
+    if (entry.type === 'board') { html += boardHtml(entry.board).html; continue; }
+    let inner = '', n = 0, sw = '';
+    for (const b of entry.boards) {
+      const r = boardHtml(b, entry.group.sub ? entry.group.sub(b.name) : b.name);
+      if (r.html) { inner += r.html; n += r.n; sw += `<span class="tl-lib-sw" style="--tl-col:${_tlColorVar(_tlBoardSlot(b.id))}"></span>`; }
+    }
+    if (!inner) continue;
+    const gid = 'group:' + entry.group.id, open = f || _tlLibOpenSecs.has(gid);
+    html += `<details class="tl-lib-group" data-sec="${esc(gid)}"${open ? ' open' : ''}><summary><span class="tl-lib-bn">${esc(entry.group.name)}</span>${sw}<span class="tl-lib-n">${n}</span></summary>
+      <div class="tl-lib-inner">${inner}</div></details>`;
+  }
+  list.innerHTML = html || `<div class="tl-lib-empty">No commands match.</div>`;
+  list.querySelectorAll('details[data-sec]').forEach(d => d.addEventListener('toggle', () => {
+    if (f) return;   // a search opens what matches; that is not the user's choice to keep
+    if (d.open) _tlLibOpenSecs.add(d.dataset.sec); else _tlLibOpenSecs.delete(d.dataset.sec);
+  }));
+  list.querySelectorAll('.tl-lib-cmd').forEach(el => {
+    el.addEventListener('click', () => { if (_tlClip) _tlLibPick(el.dataset.board, el.dataset.cmd, _tlClip.cursorMs); });
+    el.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/x-nc-cmd', el.dataset.board + '\n' + el.dataset.cmd);
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+  });
+}
+// Add a library command at `t`: straight in when it has no fields, else through the picker's composer.
+function _tlLibPick(boardId, cmdId, t) {
+  if (!_tlClip) return;
+  const board = (ncCommandLibrary().boards || []).find(b => b.id === boardId);
+  const cmd = board && (board.commands || []).find(c => c.id === cmdId);
+  if (!cmd) return;
+  _tlLibAt = _tlFreeActionTime(t);   // where it will land, so the composer's button can say so
+  if (!(cmd.params || []).length) {
+    const r = _cmdlibResolveAction({ board, cmd }, {}, TL_LIB_FID);
+    if (r.error) { alert(r.error); return; }
+    _tlAddResolvedAction(r.action, _tlLibAt);
+    return;
+  }
+  _cmdlibFid = TL_LIB_FID; _cmdlibSel = null; _cmdlibValues = {};
+  const modal = document.getElementById('cmdlib-modal');
+  document.getElementById('cmdlib-close').onclick = closeCmdLibrary;
+  modal.onclick = e => { if (e.target === modal) closeCmdLibrary(); };
+  ncShow(modal);
+  _cmdlibSelect(boardId, cmdId);
+}
+function _tlAddResolvedAction(action, t) {
+  if (!_tlClip) return;
+  _tlPushHistory();
+  const x = { id: _tlId(), t: _tlDragTime(_tlFreeActionTime(t)), action };
+  _tlClip.actions.push(x);
+  _tlClip.actions.sort((p, q) => p.t - q.t);
+  _tlClip.dirty = true;
+  _tlSelectAction(x.id, false);
+  _tlRender();
+  const L = _tlLaneOf(action);
+  _tlSetStatus(`Added “${_tlStepLabel(action)}” at ${_tlFmtT(x.t)} — ${L.name}${L.sub ? ' · ' + L.sub : ''}. Click it to change where it goes.`);
+  _tlFetchRefs();
+}
+
+// ── A new clip, built on the timeline ────────────────────────────────────────
+// A clip need not be recorded first: this opens an empty timeline under a new name, and Save uploads it with the same
+// EDITBEGIN / EDITEV / EDITEND a recorded clip's edit uses (editEnd saves under whatever name it is given). Nothing is
+// on the droid until then. Names follow the board's rule (_clipPath: letters, digits, _ and -, up to 32).
+const TL_NEW_CLIP_MS = 10000;
+let _clipLastNames = null;   // the names the Clips list last showed (null: not listed this session)
+function clipNewTimeline() {
+  const raw = prompt('Name for the new clip (letters, digits, _ and -, up to 32):', '');
+  if (raw === null) return;
+  const name = String(raw).trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
+  if (!name) { alert('A clip name needs at least one letter, digit, _ or -.'); return; }
+  if (_clipLastNames && _clipLastNames.includes(name)) {
+    if (confirm(`The droid already has a clip named "${name}". Open it in the timeline instead?`)) openTimelineEditor(name);
+    return;
+  }
+  openNewTimeline(name);
+}
+function openNewTimeline(name) {
+  ncShow(document.getElementById('tl-modal'));
+  document.getElementById('tl-title').textContent = '📈 Timeline — ' + name + ' (new)';
+  _tlLibShow(_tlLibShown());
+  _cmdlibReady.then(() => _tlLibRender());
+  _tlStopPlay(); _tlLive = false; _tlLiveLast = {}; _tlUpdateLiveBtns();
+  _tlDownload = null;
+  const svg = document.getElementById('tl-svg');
+  if (svg) svg.innerHTML = '';
+  _tlBuildModelFromEvents(name, { durationMs: TL_NEW_CLIP_MS, mode: (currentMode >= 1 && currentMode <= 3) ? currentMode : 1 }, [], 0);
+  _tlClip.isNew = true;
+  _tlSetStatus('New clip — add actions from the library, or + Maestro track for servo moves, then Save. Nothing is on the droid until you do.');
 }
 
 // ── Wiring ───────────────────────────────────────────────────────────────────
@@ -9651,6 +10468,26 @@ document.getElementById('tl-trim-start').addEventListener('click', _tlTrimStart)
 document.getElementById('tl-length').addEventListener('change', e => _tlSetLength(e.target.value));
 document.getElementById('tl-live-btn').addEventListener('click', _tlToggleLive);
 document.getElementById('tl-play-btn').addEventListener('click', _tlPlayPreview);
+document.getElementById('tl-lib-btn').addEventListener('click', () => _tlLibShow(document.getElementById('tl-libpanel').hidden));
+document.getElementById('tl-lib-search').addEventListener('input', _tlLibRender);
+document.getElementById('tl-align-first').addEventListener('click', () => _tlAlignSel('first'));
+document.getElementById('tl-align-last').addEventListener('click', () => _tlAlignSel('last'));
+document.getElementById('tl-align-cursor').addEventListener('click', () => _tlAlignSel('cursor'));
+document.getElementById('tl-spread').addEventListener('click', _tlSpreadSel);
+// A library command dragged in lands at the time it is dropped on, whichever lane it is over: its lane is its device.
+document.getElementById('tl-scroll').addEventListener('dragover', e => {
+  if (!_tlClip || !e.dataTransfer || ![...e.dataTransfer.types].includes('text/x-nc-cmd')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+document.getElementById('tl-scroll').addEventListener('drop', e => {
+  const v = e.dataTransfer && e.dataTransfer.getData('text/x-nc-cmd');
+  if (!_tlClip || !v) return;
+  e.preventDefault();
+  const [board, cmd] = v.split('\n');
+  const rect = document.getElementById('tl-svg').getBoundingClientRect();
+  _tlLibPick(board, cmd, _tlXToTime(e.clientX - rect.left));
+});
 // Ctrl+scroll over the timeline → zoom at the pointer (finer step than the
 // buttons). preventDefault stops the browser's own ctrl-wheel page zoom.
 document.getElementById('tl-scroll').addEventListener('wheel', e => {
@@ -9666,6 +10503,9 @@ document.getElementById('tl-action-modal').addEventListener('click', e => {
 });
 window.addEventListener('keydown', e => {
   if (!_tlClip || !document.getElementById('tl-modal').classList.contains('open')) return;
+  // The action popover and the library picker sit over the timeline: their keys are their own.
+  if (document.getElementById('tl-action-modal').classList.contains('open') ||
+      document.getElementById('cmdlib-modal').classList.contains('open')) return;
   const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
   if ((e.key === 'Delete' || e.key === 'Backspace') && _tlClip.selected && !typing) {
     e.preventDefault();
@@ -9673,6 +10513,15 @@ window.addEventListener('keydown', e => {
   } else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey && !typing) {
     e.preventDefault();
     _tlUndo();
+  } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && _tlClip.selActs.size && !typing) {
+    // Nudge the selected actions: 10 ms, Shift 100, Alt 1.
+    e.preventDefault();
+    const step = e.altKey ? 1 : e.shiftKey ? 100 : 10;
+    _tlNudgeSel(e.key === 'ArrowLeft' ? -step : step);
+  } else if (e.key === 'Escape' && _tlClip.selected && !typing) {
+    e.preventDefault();
+    _tlClip.selected = null; _tlClip.selectedPair = null;
+    _tlRender();
   }
 });
 
@@ -14868,12 +15717,16 @@ function _cmdlibShowComposer() {
     // Controller-local action (record/play/stop) — no wire string, no destination.
     html += `<div style="font-size:12px;color:var(--muted)">Runs on <b>this controller</b> (no destination to pick).</div>`;
   } else {
-    html += `<div><div style="font-size:11px;color:var(--muted)">Command <span style="opacity:.8">— pick where to send it (WCB / serial port) on the action row</span></div>
+    const where = _cmdlibFid === TL_LIB_FID ? '— it goes where a new action row would send it; click its step on the timeline to change that'
+                                            : '— pick where to send it (WCB / serial port) on the action row';
+    html += `<div><div style="font-size:11px;color:var(--muted)">Command <span style="opacity:.8">${where}</span></div>
       <div id="cmdlib-preview" style="font-family:monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card);word-break:break-all"></div></div>`;
   }
+  // Adding to the timeline (the docked library, _tlLibPick), the button says where it lands.
+  const useLbl = _cmdlibFid === TL_LIB_FID ? `Add at ${_tlFmtT(_tlLibAt)} →` : 'Use command →';
   html += `<div class="wcb-send-row" style="justify-content:flex-end;gap:8px">
     <button type="button" id="cmdlib-cancel2" class="btn btn-ghost">Cancel</button>
-    <button type="button" id="cmdlib-use" class="btn btn-blue">Use command →</button></div>`;
+    <button type="button" id="cmdlib-use" class="btn btn-blue">${useLbl}</button></div>`;
   html += `</div>`;
   body.innerHTML = html;
   body.querySelectorAll('[data-pname]').forEach(el => {
@@ -15035,8 +15888,18 @@ function _cmdlibUpdatePreview() {
 // (or the row's current target). Maestro/WLED keep their own destination control.
 function _cmdlibUse() {
   if (!_cmdlibSel || !_cmdlibFid) return;
-  const wire = ncEncodeCommand(_cmdlibSel.cmd, _cmdlibValues);
-  const board = _cmdlibSel.board, cmd = _cmdlibSel.cmd, fid = _cmdlibFid;
+  const fid = _cmdlibFid;
+  const r = _cmdlibResolveAction(_cmdlibSel, _cmdlibValues, fid);
+  if (r.error) { alert(r.error); return; }
+  if (fid === TL_LIB_FID) { closeCmdLibrary(); _tlAddResolvedAction(r.action, _tlLibAt); return; }   // the timeline's library
+  _applyResolvedActionToRow(fid, r.action);
+  closeCmdLibrary();
+}
+// The action a library command and its values make for the row `fid` (its fields decide a re-edit's destination; a
+// row that does not exist, as the timeline's TL_LIB_FID, is a fresh pick) → { action } or { error } (the reason).
+function _cmdlibResolveAction(sel, values, fid) {
+  const wire = ncEncodeCommand(sel.cmd, values);
+  const board = sel.board, cmd = sel.cmd;
   const mode = _cmdlibDestMode(board, cmd);
   // A catalog entry that declares a custom `encoder` and carries NO `template`
   // (e.g. rseries-logic's "Logic Effect", encoder "rseries-le") encodes to an
@@ -15047,9 +15910,8 @@ function _cmdlibUse() {
   // declares `local` instead (navicore.json's nc.stop) and is handled below, so
   // gate on "not local AND empty wire" rather than on a missing template.
   if (mode !== 'local' && !String(wire).trim()) {
-    alert('That command cannot be built here yet — the library entry uses a custom encoder this tool does not implement, so it produces an empty command.\n\n' +
-          'Pick a different command, or type the raw device string into the row by hand.');
-    return;
+    return { error: 'That command cannot be built here yet — the library entry uses a custom encoder this tool does not implement, so it produces an empty command.\n\n' +
+                    'Pick a different command, or type the raw device string into the row by hand.' };
   }
   let action;
   // On a re-edit (📚 Change of a row that already holds a command) the row already
@@ -15066,8 +15928,8 @@ function _cmdlibUse() {
     const lk = _cmdlibLocalKind(board, cmd);
     // Match the record/play editor's read-back sanitize so the composer/row/saved
     // value all agree (device clip names: [A-Za-z0-9_-], max 32 chars).
-    const clip = (_cmdlibValues.clip || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
-    const loopOn = !!(_cmdlibValues.loop && _cmdlibValues.loop !== '0' && _cmdlibValues.loop !== 'false');
+    const clip = (values.clip || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
+    const loopOn = !!(values.loop && values.loop !== '0' && values.loop !== 'false');
     if (lk === 'record')    action = { type: 'record', cmd: clip };
     else if (lk === 'play') action = { type: 'play', cmd: clip, ...(loopOn ? { fn: 1 } : {}) };
     else                    action = { type: 'stop' };
@@ -15125,12 +15987,10 @@ function _cmdlibUse() {
   // routing prefix added above. Refuse rather than let the firmware's strlcpy
   // truncate it silently.
   if (action && typeof action.cmd === 'string' && action.cmd.length > RC_ACTION_CMD_MAX) {
-    alert(`That command is ${action.cmd.length} characters — the board stores only ${RC_ACTION_CMD_MAX} ` +
-          `(routing prefix included) and drops the rest without an error.\n\nShorten the values and try again.`);
-    return;
+    return { error: `That command is ${action.cmd.length} characters — the board stores only ${RC_ACTION_CMD_MAX} ` +
+                    `(routing prefix included) and drops the rest without an error.\n\nShorten the values and try again.` };
   }
-  _applyResolvedActionToRow(fid, action);
-  closeCmdLibrary();
+  return { action };
 }
 
 // Switch a row's type <select> to match a resolved action, re-render its fields
