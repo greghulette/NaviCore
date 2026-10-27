@@ -2724,7 +2724,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.07:29.R.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.18:57.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -13180,7 +13180,7 @@ function buildTierCard(tier, actions, note) {
   return card;
 }
 
-// A new row at the end, open (the others close); `init` seeds it (the timeline's double-click: a type and a delay).
+// A new row at the end, open (the others close); `init` seeds it (a click on the timeline: a type and a delay).
 // → the row, or null when the tier already holds what the board stores.
 function addActionRow(tier, init) {
   const rows = document.getElementById(`rows-${tier}`);
@@ -14646,7 +14646,9 @@ async function openCmdLibrary(fid) {
   _cmdlibFid = fid; _cmdlibSel = null; _cmdlibValues = {};
   const modal = document.getElementById('cmdlib-modal');
   document.getElementById('cmdlib-close').onclick = closeCmdLibrary;
-  modal.onclick = e => { if (e.target === modal) closeCmdLibrary(); };
+  // The backdrop closes it on a single click only: the second click of a double click that opened it (the action
+  // timeline adds on a click) lands here and must not close it again.
+  modal.onclick = e => { if (e.target === modal && e.detail <= 1) closeCmdLibrary(); };
   ncShow(modal);
   _cmdlibOpenView(fid);
   await _cmdlibReady;
@@ -16796,7 +16798,7 @@ function collectTierActions(tier) {
 // A tier's actions (button taps 1-4, switch positions p0-p2) on a timeline the way the WCB Wizard's Sequence Builder
 // draws a stored sequence (WCB docs/SEQUENCE_BUILDER.md §5): a lane per device, each action at its delay. It sits in
 // the tier's card above its rows, one line per action (design E of the "Action tiles" canvas), and is drawn from the
-// rows: dragging a dot sets its row's delay, a click opens the row, a double click adds one. docs/CONFIG_TOOL.md §7b
+// rows: dragging a dot sets its row's delay, a click on it opens the row, a click on empty space adds one. docs/CONFIG_TOOL.md §7b
 // has the whole of it; the firmware rules it draws:
 //   - rcDispatch hands every action of a tier to rcExecuteAction, which schedules it delayMs after the PRESS
 //     (NaviCore.ino scheduleAction), so an action's time is its delay, not a gap after the action before it, and
@@ -17214,8 +17216,8 @@ function _arStartReorder(ev, tier, row) {
 // ── The timeline in the card that shows ──────────────────────────────────────
 // One block (#at-inline: zoom bar, lanes, hint, warnings), moved into the tap's or position's card that shows,
 // above its rows (_atBind from setActionTier / setSwitchTier); closing the editor takes it out (_atUnbind). Its
-// actions are the rows' (_atSync): a dragged dot writes its row's delay, a click on one opens its row, a double click
-// on empty space adds a row there — no copy to apply.
+// actions are the rows' (_atSync): a dragged dot writes its row's delay, a click on one opens its row, a click on
+// empty space adds a row there — no copy to apply.
 let _atColors = new Map();   // the device colours this editor has given out: a device keeps its colour across its taps
 let _atInlineBlock = null;
 const AT_ZOOMS = [1000, 2000, 5000, 10000, 30000, 60000, 120000, 300000, 600000, 1800000];   // − / + step through these
@@ -17237,8 +17239,8 @@ function _atInlineEl() {
     </div>
     <div class="at-scroll" id="at-scroll"><svg id="at-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
     <div class="at-hint">A dot is the moment an action fires after the press — actions have no length. Drag a dot to change its
-      delay (it sticks to the dots near it; Alt: to the ms), click it to edit its action, right-click to remove it; double-click
-      empty space to add an action there. A tap that fires with this one is drawn above, a stored sequence an action runs under it.</div>
+      delay (it sticks to the dots near it; Alt: to the ms), click it to edit its action, right-click to remove it; click empty
+      space to add an action there. A tap that fires with this one is drawn above, a stored sequence an action runs under it.</div>
     <div class="at-warn" id="at-warn"></div>
     <div class="at-status" id="at-status"></div>`;
   el.querySelector('#at-zoom-out').addEventListener('click', () => _atZoomStep(1));
@@ -17515,7 +17517,10 @@ function _atRender() {
     lim.style.pointerEvents = 'none';
     svg.appendChild(lim);
   }
+  // A click on empty space adds an action there; the second click of a double click, and the click that ends a
+  // dot's drag, do not.
   const addAt = (ev, kind) => {
+    if (ev.detail > 1 || (at.dragEndAt && Date.now() - at.dragEndAt < 300)) return;
     const r = svg.getBoundingClientRect();
     _atAddAt(_atXToTime(ev.clientX - r.left), kind);
   };
@@ -17531,12 +17536,12 @@ function _atRender() {
       svg.appendChild(c);
     }
   }
-  // Lanes: band, swatch, name, where it goes. A double click on a lane's empty space adds an action of its kind there.
+  // Lanes: band, swatch, name, where it goes. A click on a lane's empty space adds an action of its kind there.
   for (const lane of lay.lanes) {
     const col = _atColorVar(lane.slot);
     const bg = _atSvgEl('rect', { x: AT_LEFT, y: lane.top, width: width - AT_LEFT, height: lane.h, fill: col, 'fill-opacity': 0.05, class: 'at-lane-bg', 'data-lane': lane.key });
     bg.style.cursor = 'copy';
-    bg.addEventListener('dblclick', ev => addAt(ev, lane.kind));
+    bg.addEventListener('click', ev => addAt(ev, lane.kind));
     svg.appendChild(bg);
     svg.appendChild(_atSvgEl('line', { x1: 0, y1: lane.top + lane.h, x2: width, y2: lane.top + lane.h, stroke: 'var(--border)', 'stroke-width': 0.5, opacity: 0.6 }));
     svg.appendChild(_atSvgEl('rect', { x: 0, y: lane.top + 3, width: 4, height: lane.h - 6, rx: 1, fill: col, class: 'at-lane-sw' }));
@@ -17553,11 +17558,11 @@ function _atRender() {
   // The lane that adds an action of any kind; on an empty tier it says how.
   const nbg = _atSvgEl('rect', { x: AT_LEFT, y: lay.newTop, width: width - AT_LEFT, height: AT_NEW_H, fill: 'var(--hover-2)', class: 'at-new-bg' });
   nbg.style.cursor = 'copy';
-  nbg.addEventListener('dblclick', ev => addAt(ev, null));
+  nbg.addEventListener('click', ev => addAt(ev, null));
   svg.appendChild(nbg);
   text({ x: 10, y: lay.newTop + AT_NEW_H / 2 + 4, 'font-size': 11, fill: 'var(--muted)' }, lay.lanes.length ? '＋ Action' : 'Actions', 'at-lane-new');
   if (!lay.lanes.length) {
-    const h = text({ x: AT_LEFT + 10, y: lay.newTop + AT_NEW_H / 2 + 4, 'font-size': 11, fill: 'var(--muted)' }, 'Double-click here to add an action at that time');
+    const h = text({ x: AT_LEFT + 10, y: lay.newTop + AT_NEW_H / 2 + 4, 'font-size': 11, fill: 'var(--muted)' }, 'Click here to add an action at that time');
     h.style.pointerEvents = 'none';
   }
   // Steps: a dot at its time, its label in a box beside it. The open row's is marked.
@@ -17686,6 +17691,7 @@ function _atStartDrag(ev, e) {
     _at.guideT = null;
     _at.dragging = false;
     if (moved) {
+      _at.dragEndAt = Date.now();
       const row = document.getElementById(`action-${tier}-${e.id}`);
       if (row) { _arSettle(tier, row); if (row.dataset.openDelay != null) row.dataset.openDelay = delayEl ? delayEl.value : '0'; }
       refreshTierState(tier);
@@ -17710,7 +17716,7 @@ function _atStartDrag(ev, e) {
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', finish);
 }
-// A double click on the timeline's empty space: a new row at that time (the lane's kind of action), open, put where
+// A click on the timeline's empty space: a new row at that time (the lane's kind of action), open, put where
 // it fires among the others; a command one opens the command builder at once. A blank row the tier already has is
 // used instead of adding another.
 const AT_BUILDER_KINDS = new Set([null, 'serial', 'maestro', 'wled']);
