@@ -630,7 +630,7 @@ ahead of any board's flash, so a board a version behind is normal. Every config 
 with its `limits` (CONFIG_SCHEMA.md §4), which `applyConfig(data, /*fromBoard=*/true)` reads into
 `ncLimits()`; a board that sends none runs firmware from before them and stores 5 actions a tier, a
 16-bit delay (one past 65535 ms wraps) and 8 slots, with the queue overflow firing at once
-(`NC_LEGACY_LIMITS`). The rows' + Add action, the Delay spinner, the timeline's double click, its
+(`NC_LEGACY_LIMITS`). The rows' + Add action, the Delay spinner, a click on the timeline, its
 zoom and its warnings all hold to `ncLimits()`, and **Save** (`saveConfigToBoard`) refuses, naming
 each tier, a config holding more than the board stores (`_ncOverLimits`), so nothing is cut
 without a word. With no board's config yet, the tool's own maxima apply.
@@ -684,8 +684,8 @@ without a word. With no board's config yet, the tool's own maxima apply.
 - **Editing on the timeline.** Drag a dot to change its row's delay; it sticks to another dot,
   a step of a tap firing with it, a sequence's step or 0 within 8 px, with a dashed guide
   (`_atSnap`); Alt places it to the ms; it never goes under 0 or past the board's longest delay
-  (`_atStartDrag`). A click on a dot opens its row; a right-click removes it. A **double click**
-  on empty space adds an action there (`_atAddAt`): of the lane's kind on a lane (an MP3 action
+  (`_atStartDrag`). A click on a dot opens its row; a right-click removes it. A **click** on
+  empty space adds an action there (`_atAddAt`): of the lane's kind on a lane (an MP3 action
   on the MP3 lane), any kind on the "＋ Action" row; it opens, and a command one opens the command
   library at once, routed as a new action row would be (`_cmdlibResolveAction`: a device's WDP
   label on a WCB port, its configured home, else WCB 1). A blank row the tier already has is used
@@ -939,6 +939,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **A click on the timeline adds an action** (§7b), as its + pointer says; it took a double click. The second click of a double click adds nothing more, and does not close the command library the first opened (the library's backdrop closes it on a single click only); the click that ends a dot's drag adds nothing. |
 | 2026-10-26 | — | **A typed routing prefix is the destination** (§9): `;W<n>;S<p>` / `;W<n>,` / `;W<n>;` at the front of a wire command moves into the row's WCB and Serial dropdowns when the field is left or on a paste (`adoptRoute`); a chain stays as typed. |
 | 2026-10-26 | — | **⤢ Expand** (§7b): a button on the timeline's zoom bar widens the button / switch editor to the window (up to 1400 px, `#modal.at-wide`) and fits the view to it; ⤡ Shrink puts it back; remembered per browser (`nc_at_expanded`). |
 | 2026-10-26 | — | **The action timeline inline, the rows one line each** (§7b, design E of the "Action tiles" canvas): the timeline sits in the tier's card above its rows (`_atBind`) instead of a ⏱ window, with a zoom bar (− / +, Fit, presets, `_atSetView`), and is drawn from the rows: a dragged dot sets its row's delay and the row goes where it fires (`_arSettle`), a click opens its row, a double click adds one (and opens the library). Each row is a line (⋮⋮, number, time, device, what, note, ▶, ×) in its device's colour that opens to its fields (`buildActionRow`, `_arPaintTier`, `_arOpen`); ▶ Preview sits beside the name with ▶ Test, which runs the cursor. Gone: the window and its Apply, the step popover, the docked library, multi-select with Align and Space evenly, nudges and undo (the editor's Cancel drops its edits), the strip, and the position-coloured `#n` row tags. The button modal is 720 px wide. |
