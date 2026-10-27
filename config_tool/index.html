@@ -555,8 +555,12 @@
   .ar-grip { color: var(--muted); font-size: 12px; letter-spacing: -2px; text-align: center; cursor: grab; user-select: none; touch-action: none; }
   .ar-num { width: 22px; height: 22px; border-radius: 50%; background: var(--ar-c, var(--at-cx)); color: #fff; font-size: 11px;
             font-weight: 700; display: flex; align-items: center; justify-content: center; }
-  .ar-time { font-family: var(--mono); font-size: 12px; background: var(--field); border: 1px solid var(--border); border-radius: 6px;
-             height: 26px; display: flex; align-items: center; justify-content: center; white-space: nowrap; }
+  .ar-line input.ar-time { font-family: var(--mono); font-size: 12px; background: var(--field); color: var(--text);
+             border: 1px solid var(--border); border-radius: 6px; height: 26px; width: 100%; box-sizing: border-box;
+             padding: 0 4px; text-align: center; cursor: text; }
+  .ar-line input.ar-time:hover { border-color: var(--line-2); }
+  .ar-line input.ar-time:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(43,134,255,.18); }
+  .ar-line input.ar-time.bad { border-color: var(--red); }
   .ar-dev { height: 22px; max-width: 100%; box-sizing: border-box; border-radius: 11px; padding: 0 9px; font-size: 11px; font-weight: 700;
             display: inline-block; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; justify-self: start;
             background: color-mix(in srgb, var(--ar-c, var(--at-cx)) 18%, transparent); color: var(--ar-c, var(--at-cx));
@@ -2724,7 +2728,7 @@
         <img src="../Images/r2logo.png" alt="R2 logo"
              style="width:72px;height:72px;object-fit:contain;opacity:0.9">
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:0.3px">
-          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.18:57.R.OCT.2026</span>
+          NaviCore Config Tool &nbsp;·&nbsp; <span id="footer-dtg">26.19:58.R.OCT.2026</span>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap">
@@ -13312,7 +13316,7 @@ function buildActionRow(tier, ai, action, opts = {}) {
   line.className = 'ar-line';
   line.title = 'Click to show or hide this action\'s fields';
   line.innerHTML = '<span class="ar-grip" title="Drag to reorder — actions due at one time fire in this order">⋮⋮</span>' +
-    '<span class="ar-num"></span><span class="ar-time"></span><span class="ar-dev"></span>' +
+    '<span class="ar-num"></span><input type="text" class="ar-time" spellcheck="false" autocomplete="off"><span class="ar-dev"></span>' +
     '<span class="ar-what"><span class="ar-cmd"></span><span class="ar-note"></span></span>';
   const acts = document.createElement('span');
   acts.className = 'ar-acts';
@@ -13334,8 +13338,9 @@ function buildActionRow(tier, ai, action, opts = {}) {
   rm.onclick = () => removeActionRow(tier, ai);
   acts.appendChild(testBtn); acts.appendChild(rm);
   line.appendChild(acts);
-  line.addEventListener('click', e => { if (!e.target.closest('button, .ar-grip')) _arOpen(tier, ai, null); });
+  line.addEventListener('click', e => { if (!e.target.closest('button, .ar-grip, input')) _arOpen(tier, ai, null); });
   line.querySelector('.ar-grip').addEventListener('pointerdown', ev => _arStartReorder(ev, tier, row));
+  _arWireTime(line.querySelector('.ar-time'), tier, ai);
   row.appendChild(line);
 
   // The fields, shown when the row is open.
@@ -17116,12 +17121,65 @@ function _arFmtTime(ms) {
   const sec = Math.floor((ms % 60000) / 1000), frac = ms % 1000;
   return Math.floor(ms / 60000) + ':' + String(sec).padStart(2, '0') + (frac ? '.' + String(frac).padStart(3, '0').replace(/0+$/, '') : '');
 }
+// The line's time typed in: plain ms ("1500"), or with a unit — "1.5s", "250ms", "2m", "1:30" (m:ss) — and a bare
+// decimal is seconds ("1.5"). → ms, or null when it is not a time.
+function _arParseTime(str) {
+  const v = String(str || '').trim().toLowerCase().replace(/\s+/g, '');
+  let m;
+  if ((m = /^(\d+):(\d{1,2}(?:\.\d+)?)$/.exec(v))) return Math.round(+m[1] * 60000 + +m[2] * 1000);
+  if ((m = /^(\d+(?:\.\d+)?)ms$/.exec(v))) return Math.round(+m[1]);
+  if ((m = /^(\d+(?:\.\d+)?)(?:s|sec|secs)$/.exec(v))) return Math.round(+m[1] * 1000);
+  if ((m = /^(\d+(?:\.\d+)?)(?:m|min|mins)$/.exec(v))) return Math.round(+m[1] * 60000);
+  if (/^\d+$/.test(v)) return +v;
+  if (/^\d*\.\d+$/.test(v)) return Math.round(+v * 1000);
+  return null;
+}
+// The time on a line is its delay to type in (it does not open the row): the ms while it is being typed, its short
+// form otherwise. Enter or leaving it sets the row's delay (to the board's longest at most) and puts the row where it
+// fires (_arSettle); Escape puts it back; ↑ / ↓ step it 100 ms (Shift 1 s).
+function _arWireTime(el, tier, ai) {
+  const delayEl = () => document.getElementById(`delay-${tier}-${ai}`);
+  const ms = () => +(delayEl()?.value || 0);
+  let cancel = false;
+  el.title = 'When it fires after the press — click to type it: ms (1500) or with a unit (1.5s, 2m, 1:30); ↑ / ↓ step 100 ms';
+  el.addEventListener('focus', () => { cancel = false; el.classList.remove('bad'); el.value = String(ms()); el.select(); });
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel = true; el.blur(); }
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      const cur = _arParseTime(el.value);
+      const step = (e.shiftKey ? 1000 : 100) * (e.key === 'ArrowUp' ? 1 : -1);
+      el.value = String(Math.max(0, Math.min(ncLimits().maxDelayMs, (cur == null ? ms() : cur) + step)));
+    }
+  });
+  el.addEventListener('blur', () => {
+    const t = cancel ? null : _arParseTime(el.value);
+    if (!cancel && t == null && el.value.trim() !== '') {   // not a time: flash it, keep the delay
+      el.classList.add('bad');
+      setTimeout(() => el.classList.remove('bad'), 900);
+    }
+    const d = delayEl();
+    if (t != null && d) {
+      const v = String(Math.max(0, Math.min(ncLimits().maxDelayMs, t)));
+      if (v !== d.value) {
+        d.value = v;
+        d.dispatchEvent(new Event('input', { bubbles: true }));
+        const row = document.getElementById(`action-${tier}-${ai}`);
+        if (row) { _arSettle(tier, row); if (row.dataset.openDelay != null) row.dataset.openDelay = v; }
+        if (tier === 'peer') _peerEventDirty = true;
+      }
+    }
+    refreshTierState(tier);   // repaints the line (its short form) and the timeline
+  });
+}
 function _arPaintRow(row, n, a, slot, lane) {
   if (!_atLoaded) return;
   const q = sel => row.querySelector(sel);
   if (!q('.ar-line')) return;
   q('.ar-num').textContent = String(n);
-  q('.ar-time').textContent = _arFmtTime(a ? _atDelayOf(a) : +(row.querySelector('input[id^="delay-"]')?.value || 0));
+  const tEl = q('.ar-time');
+  if (document.activeElement !== tEl) tEl.value = _arFmtTime(a ? _atDelayOf(a) : +(row.querySelector('input[id^="delay-"]')?.value || 0));
   row.classList.toggle('ar-blank', !a);
   const dev = q('.ar-dev'), cmd = q('.ar-cmd');
   if (a) {
