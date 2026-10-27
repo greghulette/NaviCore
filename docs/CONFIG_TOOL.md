@@ -638,7 +638,10 @@ without a word. With no board's config yet, the tool's own maxima apply.
 - **The rows are one line each** (`buildActionRow`): ⋮⋮ (drag to reorder, `_arStartReorder`), the
   number and the time in the colour of the device the action reaches (`--ar-c`, the timeline's),
   that device, what it does and its note (`_arPaintTier`, the timeline's lane and label), ▶ (test
-  it) and × (remove). A click on the line opens its fields below it — the same fields as before,
+  it) and × (remove). The time is a field: click it and type the delay — ms (`1500`) or with a unit
+  (`1.5s`, `2m`, `1:30`; a bare decimal is seconds), ↑ / ↓ step 100 ms (Shift 1 s), Enter or leaving
+  it sets it and the row goes where it fires, Escape keeps it (`_arWireTime`, `_arParseTime`); it does
+  not open the row. A click elsewhere on the line opens its fields below it — the same fields as before,
   with the delay ("Delay after press") and the note, ▲ / ▼ and Done; one row is open at a time,
   and its dot is ringed. Rows loaded from a config start folded; a new or blank row starts open.
   The fields keep their ids (`type-` / `fields-` / `delay-` / `note-<tier>-<ai>`), which
@@ -939,6 +942,7 @@ as the code. Page body stays present-tense; history lives here.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-26 | — | **The time on an action's line is typed into** (§7b): click it and type the delay (ms, or with a unit: 1.5s, 2m, 1:30), ↑ / ↓ to step; Enter or leaving it sets the row's delay and the row goes where it fires; Escape keeps it. It no longer opens the row. |
 | 2026-10-26 | — | **A click on the timeline adds an action** (§7b), as its + pointer says; it took a double click. The second click of a double click adds nothing more, and does not close the command library the first opened (the library's backdrop closes it on a single click only); the click that ends a dot's drag adds nothing. |
 | 2026-10-26 | — | **A typed routing prefix is the destination** (§9): `;W<n>;S<p>` / `;W<n>,` / `;W<n>;` at the front of a wire command moves into the row's WCB and Serial dropdowns when the field is left or on a paste (`adoptRoute`); a chain stays as typed. |
 | 2026-10-26 | — | **⤢ Expand** (§7b): a button on the timeline's zoom bar widens the button / switch editor to the window (up to 1400 px, `#modal.at-wide`) and fits the view to it; ⤡ Shrink puts it back; remembered per browser (`nc_at_expanded`). |
